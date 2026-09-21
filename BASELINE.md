@@ -203,9 +203,10 @@ Checked: `risk-exceptions`.
 
 ## 8. What is deliberately not required yet
 
-- **Signed commits and tags.** Worth requiring once a signing key exists on
-  the maintainer's machine; none does today, so a rule would only block the
-  maintainer.
+- **Signed commits and tags.** The laptop signs with a registered SSH key
+  and its commits and tags verify. The rule is not on yet because the cloud
+  sessions and the other machines still commit unsigned, and a rule would
+  block them; it goes on when they sign too (roadmap item 10).
 - **harden-runner in `block` mode for `security.yml`.** The Snyk job's hosts
   are unmeasured until a token exists; one audit-mode run with it, then the
   default list gains them and callers switch.

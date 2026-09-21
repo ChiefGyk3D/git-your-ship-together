@@ -54,9 +54,15 @@ Status as of 2026-09-21.
    is most of them. One input per job in the shared workflows.
 9. **harden-runner `block` mode for `security.yml`** once the Snyk hosts are
    measured (one audit-mode run with the token in).
-10. **Signed commits and tags**, once a signing key exists on the maintainer's
-    machine; then "require signed commits" in branch protection and
-    BASELINE.md §8 moves it into the required set.
+10. **Signed commits and tags.** The laptop signs with its SSH key now
+    (`gpg.format ssh`, commits and tags), the key is registered on GitHub as
+    a signing key, and v1.2.0 and the commits since verify as valid. What is
+    left is the branch rule, which waits until every place that commits is
+    signing: the other machines, and the cloud sessions, which commit
+    unsigned today. Then BASELINE.md §7 moves it into the required set.
+    Next step of the same experiment: move the signing and authentication
+    keys onto hardware, YubiKeys and Immurok, with subkeys per device so a
+    lost token revokes one key, not the identity.
 11. **A weekly audit run in CI.** `audit_baseline.py` on a schedule here, with
     a fine-grained read-only token held in its own Doppler project and
     identity, never the shared `ci` config, so drift in any repository's
