@@ -1,0 +1,20 @@
+# This repository's own Dependabot pull requests, merged through the reusable
+# workflow it ships. The local `./` reference runs the version on the pull
+# request's own branch, so a change to the auto-merge logic is exercised here
+# by the next Dependabot bump before any caller pins it.
+name: Dependabot auto-merge
+
+on: pull_request
+
+permissions:
+  contents: read
+
+jobs:
+  auto-merge:
+    # `$/.github/workflows/...` is the form zizmor asks for; actionlint still
+    # rejects it, and the workflow-lint job runs both, so the `./` form stays
+    # until actionlint parses `$/` (see security-self.yml).
+    uses: ./.github/workflows/dependabot-auto-merge.yml # zizmor: ignore[self-repository]
+    permissions:
+      contents: write  # enable auto-merge on the pull request
+      pull-requests: write  # read its Dependabot metadata

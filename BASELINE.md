@@ -25,7 +25,7 @@ refuses it regardless).
 
 Checked: `collaborators` lists nobody but the owner with push permission.
 
-## 2. The default branch
+## 2. The default branch, and the tags
 
 **Protected, with one required check.** A pull request is required, stale
 approvals are dismissed on new pushes, force pushes and deletion are off, and
@@ -51,6 +51,37 @@ gh api -X PUT repos/OWNER/REPO/branches/main/protection --input - <<'JSON'
  "required_pull_request_reviews": {"required_approving_review_count": 0, "dismiss_stale_reviews": true},
  "restrictions": null, "required_linear_history": false,
  "allow_force_pushes": false, "allow_deletions": false, "required_conversation_resolution": false}
+JSON
+```
+
+**Auto-merge is allowed.** A Dependabot bump has already cleared three
+gates by the time it is mergeable: the seven-day cooldown in
+`dependabot.yml`, `ci / CI green`, and the required pull request. The click
+that follows adds nothing, so `dependabot-auto-merge.yml` queues the merge
+and GitHub performs it when the checks pass. Without this setting the
+workflow's `gh pr merge --auto` fails and the bumps pile up.
+
+Checked: `auto-merge-enabled`.
+
+**Version tags are immutable.** A ruleset on `refs/tags/v*` forbids deleting,
+moving and force-pushing a tag. Callers pin commit SHAs, so a moved tag
+changes nothing about what runs, but Dependabot follows tags and zizmor
+compares a pin against the tag its comment names: a tag moved onto another
+commit is the one way a pin and its comment can come to disagree with no
+commit anywhere to show for it. A version cut by mistake is superseded by the
+next number, not deleted and reused; that is what this rule makes the only
+option. Lifting it for a genuine mistake is a deliberate edit to the ruleset.
+
+Checked: `tag-ruleset`.
+
+Set with:
+
+```bash
+gh api -X PATCH repos/OWNER/REPO -F allow_auto_merge=true
+gh api -X POST repos/OWNER/REPO/rulesets --input - <<'JSON'
+{"name": "Version tags are immutable", "target": "tag", "enforcement": "active",
+ "conditions": {"ref_name": {"include": ["refs/tags/v*"], "exclude": []}},
+ "rules": [{"type": "deletion"}, {"type": "non_fast_forward"}, {"type": "update"}]}
 JSON
 ```
 
@@ -115,6 +146,12 @@ documentation, corrected by any `domain not allowed` line. Every job starts from
 
 **Commands reach the shell as environment variables**, never by template
 expansion into `run:`.
+
+**Dependabot bumps merge themselves up to a size.** Every repository calls
+`dependabot-auto-merge.yml` from a `pull_request` workflow. Its default
+`max-update-type: minor` leaves a major bump, and any pull request whose
+update type Dependabot did not report, open for a person. The job checks
+nothing out, so the write it holds never runs beside proposed code.
 
 Checked: `workflows-pinned`, `uses-shared-workflows`, `dependabot-config`. The
 harden-runner, permissions and injection rules are properties of the shared
@@ -206,7 +243,7 @@ Checked: `risk-exceptions`.
 - **Signed commits and tags.** The laptop signs with a registered SSH key
   and its commits and tags verify. The rule is not on yet because the cloud
   sessions and the other machines still commit unsigned, and a rule would
-  block them; it goes on when they sign too (roadmap item 10).
+  block them; it goes on when they sign too (roadmap item 5).
 
 ## Adding a repository
 

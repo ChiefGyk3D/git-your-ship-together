@@ -265,6 +265,45 @@ def workflow_findings(name: str, text: str) -> list[str]:
     return findings
 
 
+def check_auto_merge(repo: str, repo_body: dict) -> Result:
+    """Auto-merge has to be allowed by the repository before a workflow can queue one.
+
+    Without it `gh pr merge --auto` fails, and the Dependabot bumps that the
+    cooldown and the gate have already cleared sit waiting for a click.
+    """
+    if "allow_auto_merge" not in repo_body:
+        return Result(repo, "auto-merge-enabled", UNKNOWN, "token cannot read allow_auto_merge")
+    on = bool(repo_body.get("allow_auto_merge"))
+    return Result(repo, "auto-merge-enabled", PASS if on else FAIL, "enabled" if on else "disabled")
+
+
+# Deleting or moving a v* tag is the one way a caller's pin and its version
+# comment can come to disagree without a commit anywhere.
+TAG_RULES = {"deletion", "non_fast_forward", "update"}
+
+
+def check_tag_ruleset(repo: str, fetch: Fetcher) -> Result:
+    code, body = fetch(f"/repos/{repo}/rulesets")
+    if code != 200 or not isinstance(body, list):
+        return Result(repo, "tag-ruleset", UNKNOWN, unreadable(code, body))
+    for summary in body:
+        if summary.get("target") != "tag" or summary.get("enforcement") != "active":
+            continue
+        code, full = fetch(f"/repos/{repo}/rulesets/{summary.get('id')}")
+        if code != 200 or not isinstance(full, dict):
+            return Result(repo, "tag-ruleset", UNKNOWN, unreadable(code, full))
+        include = ((full.get("conditions") or {}).get("ref_name") or {}).get("include") or []
+        if "refs/tags/v*" not in include:
+            continue
+        have = {rule.get("type") for rule in full.get("rules") or []}
+        missing = TAG_RULES - have
+        if missing:
+            return Result(repo, "tag-ruleset", FAIL, f"refs/tags/v* ruleset is missing: {', '.join(sorted(missing))}")
+        return Result(repo, "tag-ruleset", PASS, "v* tags cannot be deleted, moved or force-pushed")
+    return Result(repo, "tag-ruleset", FAIL, "no active ruleset protects refs/tags/v*")
+
+
+
 def check_workflows(repo: str, fetch: Fetcher) -> tuple[list[Result], bool, set[str]]:
     """The workflow checks, whether any workflow reads DOPPLER_IDENTITY_ID, and the advisories ignored.
 
@@ -409,6 +448,8 @@ def audit_repo(repo: str, fetch: Fetcher, register: list[dict] | None = None) ->
     results.append(check_workflow_token(repo, fetch))
     results.append(check_fork_pr_approval(repo, fetch))
     results.append(check_actions_allowlist(repo, fetch))
+    results.append(check_auto_merge(repo, body))
+    results.append(check_tag_ruleset(repo, fetch))
     workflow_results, reads_doppler, exceptions = check_workflows(repo, fetch)
     results += workflow_results
     results.append(check_risk_exceptions(repo, exceptions, register if register is not None else load_register()))

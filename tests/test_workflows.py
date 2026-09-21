@@ -26,7 +26,22 @@ README = REPO / "README.md"
 
 WORKFLOW_FILES = sorted(WORKFLOWS.glob("*.yml"))
 ACTION_FILES = sorted(ACTIONS.glob("*/action.yml"))
-REUSABLE = [p for p in WORKFLOW_FILES if p.name in ("python-ci.yml", "python-docker-release.yml", "security.yml")]
+# Every workflow a caller may `uses:`. Most rules below apply to all of them.
+REUSABLE = [
+    p
+    for p in WORKFLOW_FILES
+    if p.name
+    in (
+        "python-ci.yml",
+        "python-docker-release.yml",
+        "security.yml",
+        "dependabot-auto-merge.yml",
+    )
+]
+# The subset that fetches CI secrets. The Doppler rules are about those steps,
+# so a callable workflow that needs no secret is not held to them; it is held
+# to everything else, and it must not grow a fetch without joining this list.
+DOPPLER = [p for p in REUSABLE if p.name != "dependabot-auto-merge.yml"]
 OWN = [p for p in WORKFLOW_FILES if p not in REUSABLE]
 
 SELF = "ChiefGyk3D/git-your-ship-together/"
@@ -62,8 +77,19 @@ def all_steps(path: Path):
 
 
 def test_there_is_something_to_check():
-    assert len(REUSABLE) == 3, "expected the three reusable workflows"
+    assert len(REUSABLE) == 4, "expected the four callable workflows"
+    assert len(DOPPLER) == 3, "expected three of them to fetch CI secrets"
     assert ACTION_FILES, "no composite actions found"
+
+
+def test_only_the_doppler_workflows_fetch_secrets():
+    """The split above is a claim about the files; this is the claim checked."""
+    for path in REUSABLE:
+        fetches = "dopplerhq/secrets-fetch-action@" in path.read_text()
+        assert fetches == (path in DOPPLER), (
+            f"{path.name} fetches from Doppler: {fetches}, but DOPPLER says {path in DOPPLER}. "
+            "A callable workflow that fetches CI secrets belongs in DOPPLER."
+        )
 
 
 # --- supply chain -----------------------------------------------------------
@@ -141,6 +167,13 @@ ALLOWED_WRITES = {
     ("security.yml", "scorecard", "security-events"),
     # dependency-review's summary comment on the pull request.
     ("security.yml", "dependency-review", "pull-requests"),
+    # Auto-merge: enabling it on a Dependabot pull request is a write to the
+    # pull request and to the branch it will merge. The job checks nothing
+    # out, so none of the proposed code runs beside the grant.
+    ("dependabot-auto-merge.yml", "auto-merge", "contents"),
+    ("dependabot-auto-merge.yml", "auto-merge", "pull-requests"),
+    ("dependabot-auto-merge-self.yml", "auto-merge", "contents"),
+    ("dependabot-auto-merge-self.yml", "auto-merge", "pull-requests"),
     # This repository dogfoods security.yml on itself.
     ("security-self.yml", "security", "security-events"),
     ("security-self.yml", "security", "pull-requests"),
@@ -238,7 +271,7 @@ def test_the_inlined_doppler_script_matches_the_composite_action():
     """Four copies, one source. The composite action is the source; a copy that drifts is a bug."""
     composite = doppler_script(ACTIONS / "doppler-secrets" / "action.yml")
     assert len(composite) == 1
-    copies = {path.name: doppler_script(path) for path in REUSABLE}
+    copies = {path.name: doppler_script(path) for path in DOPPLER}
     assert copies == {
         "python-ci.yml": [composite[0]],
         "python-docker-release.yml": [composite[0]],
@@ -246,7 +279,7 @@ def test_the_inlined_doppler_script_matches_the_composite_action():
     }, "an inlined Doppler script differs from .github/actions/doppler-secrets/action.yml"
 
 
-@pytest.mark.parametrize("path", REUSABLE, ids=lambda p: p.name)
+@pytest.mark.parametrize("path", DOPPLER, ids=lambda p: p.name)
 def test_doppler_fetch_steps_are_gated_on_the_decision(path):
     """Both fetch steps key off the decide step; an ungated fetch would run with an empty token."""
     doc = load(path)
@@ -276,7 +309,7 @@ GATE_ENV = {
 }
 
 
-@pytest.mark.parametrize("path", REUSABLE, ids=lambda p: p.name)
+@pytest.mark.parametrize("path", DOPPLER, ids=lambda p: p.name)
 def test_every_decide_step_feeds_the_ref_gate(path):
     """The script refuses untrusted refs only if it is told what the ref is."""
     decides = [s for _, s in all_steps(path) if str(s.get("name", "")).startswith("Decide how to authenticate")]
@@ -287,7 +320,7 @@ def test_every_decide_step_feeds_the_ref_gate(path):
             assert env.get(key) == value, f"{path.name}: decide step env {key} is {env.get(key)!r}, expected {value!r}"
 
 
-@pytest.mark.parametrize("path", REUSABLE, ids=lambda p: p.name)
+@pytest.mark.parametrize("path", DOPPLER, ids=lambda p: p.name)
 def test_trusted_refs_only_defaults_on(path):
     inputs = triggers(load(path))["workflow_call"]["inputs"]
     spec = inputs.get("doppler-trusted-refs-only")

@@ -55,6 +55,7 @@ def good_answers() -> dict[str, tuple[int, dict | list]]:
             200,
             {
                 "default_branch": "main",
+                "allow_auto_merge": True,
                 "security_and_analysis": {
                     "secret_scanning": {"status": "enabled"},
                     "secret_scanning_push_protection": {"status": "enabled"},
@@ -101,6 +102,16 @@ def good_answers() -> dict[str, tuple[int, dict | list]]:
             200,
             encoded("version: 2\nupdates:\n  - package-ecosystem: pip\n    cooldown:\n      default-days: 7\n"),
         ),
+        f"{r}/rulesets": (200, [{"id": 7, "target": "tag", "enforcement": "active"}]),
+        f"{r}/rulesets/7": (
+            200,
+            {
+                "target": "tag",
+                "enforcement": "active",
+                "conditions": {"ref_name": {"include": ["refs/tags/v*"], "exclude": []}},
+                "rules": [{"type": "deletion"}, {"type": "non_fast_forward"}, {"type": "update"}],
+            },
+        ),
         f"{r}/actions/variables/DOPPLER_IDENTITY_ID": (
             200,
             {"name": "DOPPLER_IDENTITY_ID", "value": "0f1e2d3c-4b5a-6978-8a9b-0c1d2e3f4a5b"},
@@ -142,7 +153,55 @@ def test_a_compliant_repository_passes_every_check():
         "risk-exceptions",
         "dependabot-config",
         "doppler-identity",
+        "auto-merge-enabled",
+        "tag-ruleset",
     }
+
+
+def test_auto_merge_disabled_fails():
+    answers = good_answers()
+    body = dict(answers[f"/repos/{REPO_NAME}"][1])
+    body["allow_auto_merge"] = False
+    answers[f"/repos/{REPO_NAME}"] = (200, body)
+    status, detail = by_check(audit.audit_repo(REPO_NAME, fetcher(answers)))["auto-merge-enabled"]
+    assert status == audit.FAIL and "disabled" in detail
+
+
+def test_no_tag_ruleset_fails():
+    answers = good_answers()
+    answers[f"/repos/{REPO_NAME}/rulesets"] = (200, [])
+    status, detail = by_check(audit.audit_repo(REPO_NAME, fetcher(answers)))["tag-ruleset"]
+    assert status == audit.FAIL and "refs/tags/v*" in detail
+
+
+def test_a_tag_ruleset_that_still_allows_moving_a_tag_fails():
+    """Deletion alone is not the hazard; a tag moved onto another commit is."""
+    answers = good_answers()
+    answers[f"/repos/{REPO_NAME}/rulesets/7"] = (
+        200,
+        {
+            "target": "tag",
+            "enforcement": "active",
+            "conditions": {"ref_name": {"include": ["refs/tags/v*"], "exclude": []}},
+            "rules": [{"type": "deletion"}],
+        },
+    )
+    status, detail = by_check(audit.audit_repo(REPO_NAME, fetcher(answers)))["tag-ruleset"]
+    assert status == audit.FAIL and "update" in detail and "non_fast_forward" in detail
+
+
+def test_a_disabled_tag_ruleset_does_not_count():
+    answers = good_answers()
+    answers[f"/repos/{REPO_NAME}/rulesets"] = (200, [{"id": 7, "target": "tag", "enforcement": "disabled"}])
+    status, _ = by_check(audit.audit_repo(REPO_NAME, fetcher(answers)))["tag-ruleset"]
+    assert status == audit.FAIL
+
+
+def test_a_refused_ruleset_listing_is_unknown_not_pass():
+    answers = good_answers()
+    answers[f"/repos/{REPO_NAME}/rulesets"] = (403, {"message": "Resource not accessible by integration"})
+    status, _ = by_check(audit.audit_repo(REPO_NAME, fetcher(answers)))["tag-ruleset"]
+    assert status == audit.UNKNOWN
 
 
 def test_a_second_writer_fails_and_is_named():
@@ -433,7 +492,15 @@ def test_the_audit_reads_exceptions_out_of_the_security_workflow():
     assert status == audit.FAIL and "GHSA-8mgp-746c-j5xp" in detail
 
 
-def test_the_shipped_register_covers_the_shipped_exceptions():
-    """The real file parses, and what it says is what the audit reads."""
+def test_the_shipped_register_parses_as_the_audit_reads_it():
+    """The real file parses, and every entry carries the fields the audit looks at.
+
+    This deliberately names no advisory: an entry is closed the day its fix
+    ships, and a test pinned to one would fail for the good outcome.
+    """
     register = audit.load_register()
-    assert any(e["id"] == "GHSA-8mgp-746c-j5xp" for e in register)
+    assert isinstance(register, list)
+    for entry in register:
+        assert entry.get("id"), f"an entry has no id: {entry}"
+        assert entry.get("repos"), f"{entry.get('id')}: no repos"
+        assert entry.get("review_by"), f"{entry.get('id')}: no review_by"
