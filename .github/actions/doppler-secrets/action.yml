@@ -1,0 +1,111 @@
+# Fetch CI secrets from Doppler and expose them as (masked) environment
+# variables for the rest of the job.
+#
+# Doppler is the single source of truth for secrets in these repositories: the
+# daemons already read from it at runtime, and this action extends that to CI so
+# that nothing has to be duplicated into GitHub's encrypted secrets store.
+#
+# Two ways in, tried in this order:
+#
+#   1. OIDC (preferred). GitHub mints a short-lived JWT for the job, Doppler
+#      exchanges it for a session token scoped to one Service Account Identity.
+#      Nothing long-lived is stored anywhere. Needs `id-token: write` on the
+#      calling job and an `identity-id`.
+#   2. Service Token (fallback). A read-only Doppler Service Token for one
+#      config, held as the one GitHub secret `DOPPLER_TOKEN`. Doppler is still
+#      the rotation point, but this path keeps one static credential in GitHub.
+#
+# If neither is configured the action prints a notice and exports nothing, so
+# a pipeline works before Doppler is wired up. Pass `required: "true"` where a
+# missing secret must fail the job instead.
+#
+# Every value is exported with `inject-env-vars`, so the Doppler config named
+# here must hold ONLY what CI needs (a `ci` config), never the runtime set.
+
+name: Doppler CI secrets
+description: Fetch a Doppler config as masked environment variables via OIDC or a Service Token.
+
+inputs:
+  project:
+    description: Doppler project slug.
+    required: false
+    default: ""
+  config:
+    description: Doppler config slug (for example `ci`).
+    required: false
+    default: ""
+  identity-id:
+    description: Service Account Identity UUID for OIDC authentication. Not a secret; a repository variable is the right home for it.
+    required: false
+    default: ""
+  token:
+    description: Doppler Service Token, used only when `identity-id` is empty.
+    required: false
+    default: ""
+  required:
+    description: Fail when no authentication method is configured.
+    required: false
+    default: "false"
+
+outputs:
+  mode:
+    description: Which path was taken - `oidc`, `token`, or `none`.
+    value: ${{ steps.mode.outputs.mode }}
+
+runs:
+  using: composite
+  steps:
+    - name: Decide how to authenticate
+      id: mode
+      shell: bash
+      env:
+        IDENTITY_ID: ${{ inputs.identity-id }}
+        TOKEN: ${{ inputs.token }}
+        PROJECT: ${{ inputs.project }}
+        CONFIG: ${{ inputs.config }}
+        REQUIRED: ${{ inputs.required }}
+        IS_FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+      run: |
+        set -euo pipefail
+        mode=none
+        if [ "$IS_FORK" = "true" ]; then
+          # A fork's pull request has no id-token and must never receive a
+          # secret. Silent skip is correct here, whatever `required` says.
+          echo "::notice title=Doppler::pull request from a fork - no secrets are fetched"
+        elif [ -n "$IDENTITY_ID" ]; then
+          mode=oidc
+        elif [ -n "$TOKEN" ]; then
+          mode=token
+        fi
+        if [ "$mode" != "none" ] && { [ -z "$PROJECT" ] || [ -z "$CONFIG" ]; }; then
+          echo "::error title=Doppler::project and config are required when authenticating"
+          exit 1
+        fi
+        if [ "$mode" = "none" ] && [ "$IS_FORK" != "true" ]; then
+          if [ "$REQUIRED" = "true" ]; then
+            echo "::error title=Doppler::no identity-id and no DOPPLER_TOKEN; this job needs one (see README, 'Doppler setup')"
+            exit 1
+          fi
+          echo "::notice title=Doppler::not configured (no identity-id, no DOPPLER_TOKEN) - continuing without CI secrets"
+        fi
+        echo "mode=$mode" >> "$GITHUB_OUTPUT"
+        echo "Doppler auth mode: $mode"
+
+    - name: Fetch secrets via OIDC (Service Account Identity)
+      if: steps.mode.outputs.mode == 'oidc'
+      uses: dopplerhq/secrets-fetch-action@451892f16195f9ac360e1a5bcbf0b5fd0e957534 # v2.0.0
+      with:
+        auth-method: oidc
+        doppler-identity-id: ${{ inputs.identity-id }}
+        doppler-project: ${{ inputs.project }}
+        doppler-config: ${{ inputs.config }}
+        inject-env-vars: true
+
+    - name: Fetch secrets via Service Token
+      if: steps.mode.outputs.mode == 'token'
+      uses: dopplerhq/secrets-fetch-action@451892f16195f9ac360e1a5bcbf0b5fd0e957534 # v2.0.0
+      with:
+        doppler-token: ${{ inputs.token }}
+        doppler-project: ${{ inputs.project }}
+        doppler-config: ${{ inputs.config }}
+        inject-env-vars: true

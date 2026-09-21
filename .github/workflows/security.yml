@@ -1,0 +1,271 @@
+# Reusable security checks for a Python repository.
+#
+#   codeql             SAST; findings land in the Security tab.
+#   gitleaks           Secret scan over the full history, on top of what Doppler
+#                      already prevents by keeping secrets out of the tree.
+#   pip-audit          Known vulnerabilities in the pinned dependencies.
+#   dependency-review  On pull requests: what a dependency change brings in.
+#   snyk               Optional; SNYK_TOKEN comes from the Doppler config.
+#
+# Call it with:
+#
+#   on:
+#     push: { branches: [main] }
+#     pull_request:
+#     schedule: [{ cron: '0 6 * * 1' }]
+#   jobs:
+#     security:
+#       uses: ChiefGyk3D/git-your-ship-together/.github/workflows/security.yml@main
+#       permissions:
+#         contents: read
+#         security-events: write
+#         pull-requests: write     # dependency-review's PR summary comment
+#         id-token: write          # Doppler OIDC, when snyk is enabled
+#       secrets: inherit
+#
+# gitleaks-action needs no licence for a personal account. A repository under
+# an organisation needs GITLEAKS_LICENSE, which is read from the Doppler
+# config when one is given.
+
+name: Security (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      codeql:
+        description: Run CodeQL.
+        type: boolean
+        default: true
+      codeql-languages:
+        description: CodeQL languages, comma-separated.
+        type: string
+        default: python
+      codeql-queries:
+        description: CodeQL query suite.
+        type: string
+        default: security-extended
+      codeql-config:
+        description: Inline CodeQL configuration (YAML), for example paths-ignore.
+        type: string
+        default: ""
+      gitleaks:
+        description: Run gitleaks over the full history.
+        type: boolean
+        default: true
+      pip-audit-requirements:
+        description: Requirements file audited by pip-audit; empty skips the job.
+        type: string
+        default: requirements.txt
+      pip-audit-continue-on-error:
+        description: Report advisories without failing the job. A migration aid, not a resting state.
+        type: boolean
+        default: false
+      dependency-review:
+        description: Run dependency-review on pull requests.
+        type: boolean
+        default: true
+      dependency-review-severity:
+        description: Fail the review at this severity or above.
+        type: string
+        default: moderate
+      snyk:
+        description: Run Snyk Code and Snyk Open Source. Needs SNYK_TOKEN in the Doppler config.
+        type: boolean
+        default: false
+      python-version:
+        description: Python for pip-audit and Snyk.
+        type: string
+        default: "3.13"
+      doppler-project:
+        description: Doppler project slug.
+        type: string
+        default: ""
+      doppler-config:
+        description: Doppler config slug holding CI secrets.
+        type: string
+        default: ""
+      doppler-identity-id:
+        description: Doppler Service Account Identity UUID for OIDC.
+        type: string
+        default: ""
+      timeout-minutes:
+        description: Per-job timeout.
+        type: number
+        default: 30
+    secrets:
+      DOPPLER_TOKEN:
+        description: Doppler Service Token fallback when OIDC is not configured.
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  codeql:
+    name: CodeQL
+    if: inputs.codeql
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: github/codeql-action/init@c23de5a82f64bb08c6d9f28844551440ca298e76 # v4.38.1
+        with:
+          languages: ${{ inputs.codeql-languages }}
+          queries: ${{ inputs.codeql-queries }}
+          config: ${{ inputs.codeql-config }}
+
+      - uses: github/codeql-action/analyze@c23de5a82f64bb08c6d9f28844551440ca298e76 # v4.38.1
+
+  gitleaks:
+    name: Secret scan (gitleaks)
+    if: inputs.gitleaks
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Fetch CI secrets from Doppler
+        if: inputs.doppler-project != ''
+        uses: ChiefGyk3D/git-your-ship-together/.github/actions/doppler-secrets@main
+        with:
+          project: ${{ inputs.doppler-project }}
+          config: ${{ inputs.doppler-config }}
+          identity-id: ${{ inputs.doppler-identity-id }}
+          token: ${{ secrets.DOPPLER_TOKEN }}
+
+      - uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_LICENSE: ${{ env.GITLEAKS_LICENSE }}
+          GITLEAKS_ENABLE_COMMENTS: "false"
+
+  pip-audit:
+    name: Dependency audit (pip-audit)
+    if: inputs.pip-audit-requirements != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - name: Install pip-audit
+        run: pip install pip-audit
+
+      # Scoped to the declared dependencies on purpose. Auditing the whole
+      # environment reports advisories against the runner's own pip and
+      # setuptools, which nobody here ships or controls, and a recurring red
+      # that everyone learns to ignore is worse than no check.
+      - name: Audit pinned dependencies
+        continue-on-error: ${{ inputs.pip-audit-continue-on-error }}
+        env:
+          REQUIREMENTS: ${{ inputs.pip-audit-requirements }}
+        run: pip-audit --requirement "$REQUIREMENTS" --strict
+
+  dependency-review:
+    name: Dependency review
+    if: inputs.dependency-review && github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: ${{ inputs.dependency-review-severity }}
+          comment-summary-in-pr: on-failure
+
+  snyk:
+    name: Snyk
+    if: inputs.snyk
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+      security-events: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Fetch CI secrets from Doppler
+        uses: ChiefGyk3D/git-your-ship-together/.github/actions/doppler-secrets@main
+        with:
+          project: ${{ inputs.doppler-project }}
+          config: ${{ inputs.doppler-config }}
+          identity-id: ${{ inputs.doppler-identity-id }}
+          token: ${{ secrets.DOPPLER_TOKEN }}
+
+      # No token means no scan, said out loud in the run's annotations rather
+      # than as a red job on every pull request before Doppler is wired up.
+      - name: Check for SNYK_TOKEN
+        id: token
+        run: |
+          if [ -z "${SNYK_TOKEN:-}" ]; then
+            echo "::warning title=Snyk::snyk is enabled but SNYK_TOKEN is not in the Doppler config - scan skipped"
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        if: steps.token.outputs.present == 'true'
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - name: Install dependencies for Snyk Open Source
+        if: steps.token.outputs.present == 'true'
+        env:
+          REQUIREMENTS: ${{ inputs.pip-audit-requirements }}
+        run: |
+          python -m pip install --upgrade pip
+          if [ -n "$REQUIREMENTS" ]; then pip install -r "$REQUIREMENTS"; fi
+
+      - uses: snyk/actions/setup@9adf32b1121593767fc3c057af55b55db032dc04 # v1.0.0
+        if: steps.token.outputs.present == 'true'
+
+      - name: Snyk Code (SAST)
+        if: steps.token.outputs.present == 'true'
+        run: snyk code test --sarif-file-output=snyk-code.sarif || true
+
+      - name: Snyk Open Source (SCA)
+        if: steps.token.outputs.present == 'true'
+        run: snyk test --all-projects --severity-threshold=high --sarif-file-output=snyk-opensource.sarif || true
+
+      - name: Upload Snyk Code results
+        if: hashFiles('snyk-code.sarif') != ''
+        uses: github/codeql-action/upload-sarif@c23de5a82f64bb08c6d9f28844551440ca298e76 # v4.38.1
+        with:
+          sarif_file: snyk-code.sarif
+          category: snyk-code
+
+      - name: Upload Snyk Open Source results
+        if: hashFiles('snyk-opensource.sarif') != ''
+        uses: github/codeql-action/upload-sarif@c23de5a82f64bb08c6d9f28844551440ca298e76 # v4.38.1
+        with:
+          sarif_file: snyk-opensource.sarif
+          category: snyk-opensource

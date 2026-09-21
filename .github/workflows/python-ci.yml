@@ -1,0 +1,274 @@
+# Reusable CI for a Python project: lint, a test matrix, an optional CLI smoke
+# test, and a single-arch container build that is run before it is trusted.
+#
+# Call it from a repository with:
+#
+#   jobs:
+#     ci:
+#       uses: ChiefGyk3D/git-your-ship-together/.github/workflows/python-ci.yml@main
+#       permissions:
+#         contents: read
+#         id-token: write        # only if Doppler OIDC is used (Codecov token)
+#       secrets: inherit
+#       with:
+#         python-versions: '["3.11", "3.12", "3.13"]'
+#         test-command: pytest --cov=my_pkg --cov-report=xml
+#
+# Every input has a default that matches the most common shape across the
+# ChiefGyk3D repositories; a caller overrides only what differs. The `ci-green`
+# job at the end is the one to name in branch protection: it fails when any job
+# it needs failed, so a job added here can never merge unchecked.
+#
+# Secrets come from Doppler (see .github/actions/doppler-secrets). This workflow
+# needs at most one: CODECOV_TOKEN, and only when `codecov: true`.
+
+name: Python CI (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      python-versions:
+        description: JSON array of Python versions for the test matrix.
+        type: string
+        default: '["3.11", "3.12", "3.13"]'
+      coverage-python-version:
+        description: The matrix leg that uploads the coverage report.
+        type: string
+        default: "3.13"
+      install-command:
+        description: Shell run before tests on every matrix leg.
+        type: string
+        default: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      test-command:
+        description: Shell that runs the test suite.
+        type: string
+        default: pytest
+      coverage-file:
+        description: Coverage report path uploaded as an artifact when present.
+        type: string
+        default: coverage.xml
+      codecov:
+        description: Upload the coverage report to Codecov. Needs CODECOV_TOKEN in the Doppler config.
+        type: boolean
+        default: false
+      lint-python-version:
+        description: Python used for the lint job.
+        type: string
+        default: "3.13"
+      lint-install-command:
+        description: Shell that installs the linters.
+        type: string
+        default: pip install ruff
+      lint-command:
+        description: Shell that lints. A non-zero exit fails the job unless `lint-continue-on-error` is set.
+        type: string
+        default: ruff check .
+      lint-continue-on-error:
+        description: Report lint failures without failing CI. A migration aid, not a resting state.
+        type: boolean
+        default: false
+      smoke-command:
+        description: Shell run after `install-command` on `coverage-python-version`; empty skips the job.
+        type: string
+        default: ""
+      smoke-install-command:
+        description: Shell that installs the project for the smoke test.
+        type: string
+        default: pip install .
+      docker-build:
+        description: Build the container image (single platform, never pushed).
+        type: boolean
+        default: true
+      dockerfile:
+        description: Path to the Dockerfile.
+        type: string
+        default: Dockerfile
+      docker-context:
+        description: Build context.
+        type: string
+        default: "."
+      docker-test-command:
+        description: Shell run against the built image; `$IMAGE` names it. Empty skips the check.
+        type: string
+        default: ""
+      doppler-project:
+        description: Doppler project slug.
+        type: string
+        default: ""
+      doppler-config:
+        description: Doppler config slug holding CI secrets.
+        type: string
+        default: ""
+      doppler-identity-id:
+        description: Doppler Service Account Identity UUID for OIDC.
+        type: string
+        default: ""
+      timeout-minutes:
+        description: Per-job timeout.
+        type: number
+        default: 30
+    secrets:
+      DOPPLER_TOKEN:
+        description: Doppler Service Token fallback when OIDC is not configured.
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ inputs.lint-python-version }}
+          cache: pip
+
+      - name: Install linters
+        run: ${{ inputs.lint-install-command }}
+
+      - name: Lint
+        continue-on-error: ${{ inputs.lint-continue-on-error }}
+        run: ${{ inputs.lint-command }}
+
+  test:
+    name: Test (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ${{ fromJSON(inputs.python-versions) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        run: ${{ inputs.install-command }}
+
+      - name: Run tests
+        run: ${{ inputs.test-command }}
+
+      - name: Upload coverage report
+        if: matrix.python-version == inputs.coverage-python-version && hashFiles(inputs.coverage-file) != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage
+          path: ${{ inputs.coverage-file }}
+          retention-days: 7
+
+      - name: Fetch CI secrets from Doppler
+        if: inputs.codecov && matrix.python-version == inputs.coverage-python-version
+        uses: ChiefGyk3D/git-your-ship-together/.github/actions/doppler-secrets@main
+        with:
+          project: ${{ inputs.doppler-project }}
+          config: ${{ inputs.doppler-config }}
+          identity-id: ${{ inputs.doppler-identity-id }}
+          token: ${{ secrets.DOPPLER_TOKEN }}
+
+      - name: Upload coverage to Codecov
+        if: inputs.codecov && matrix.python-version == inputs.coverage-python-version && env.CODECOV_TOKEN != ''
+        uses: codecov/codecov-action@2320916714171c258d01dbd81040d64d798c6f8e # v7.1.1
+        with:
+          files: ${{ inputs.coverage-file }}
+          fail_ci_if_error: false
+          token: ${{ env.CODECOV_TOKEN }}
+
+  smoke:
+    name: Smoke test
+    if: inputs.smoke-command != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ inputs.coverage-python-version }}
+          cache: pip
+
+      - name: Install the project
+        run: ${{ inputs.smoke-install-command }}
+
+      - name: Smoke test
+        run: ${{ inputs.smoke-command }}
+
+  docker:
+    name: Container build
+    if: inputs.docker-build
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Build image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ${{ inputs.docker-context }}
+          file: ${{ inputs.dockerfile }}
+          push: false
+          load: true
+          tags: ci-image:local
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Check the image
+        if: inputs.docker-test-command != ''
+        env:
+          IMAGE: ci-image:local
+        run: ${{ inputs.docker-test-command }}
+
+  # The one job branch protection should require. `always()` so it runs when
+  # a needed job was skipped; the shell then decides what counts as green.
+  ci-green:
+    name: CI green
+    if: always()
+    needs: [lint, test, smoke, docker]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Every job passed or was deliberately skipped
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          echo "$RESULTS"
+          bad=$(echo "$RESULTS" | python3 -c '
+          import json, sys
+          needs = json.load(sys.stdin)
+          print(" ".join(k for k, v in needs.items() if v["result"] not in ("success", "skipped")))
+          ')
+          if [ -n "$bad" ]; then
+            echo "::error::failed jobs: $bad"
+            exit 1
+          fi
