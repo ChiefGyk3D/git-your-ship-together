@@ -25,6 +25,7 @@ Status as of 2026-09-21.
 | Scan and test tools out of Boon-Tube-Daemon's runtime requirements, which took nltk out of the image and closed the only risk-register entry | `Boon-Tube-Daemon` deps PR, register now empty |
 | The composition rule (item 2): one caller job per language, and the audit derives the required `<job> / CI green` set from the caller's workflow files and fails on any gate missing | `scripts/audit_baseline.py`, `BASELINE.md` §2 |
 | `security.yml` with neutral defaults (item 4): the dependency audit takes an `audit-command` for any ecosystem beside its pip-audit default, and CodeQL's default languages include `actions` | `security.yml`, `security-self.yml` runs both audit paths |
+| `python-package-release.yml` (item 5): build, check, tag-against-version, smoke from the wheel, PyPI Trusted Publishing with PEP 740 attestations, GitHub release with SHA256SUMS and provenance; no secret in it | `.github/workflows/python-package-release.yml`, run on the fixture |
 | `bash-ci.yml` (item 3): shellcheck and shfmt at pinned versions and hashes, a test command, a configuration lint for yamllint and ansible-lint (item 11), the `CI green` gate, no token in any job; run on this repository in block mode | `.github/workflows/bash-ci.yml`, `fixture/scripts/` |
 
 ## Next, cheap
@@ -140,11 +141,9 @@ each should say how.
 4. **A dependency audit that is not pip-shaped, and neutral defaults.**
    Done; see the table above. The pip-audit defaults stayed, so nothing
    changed for the nine beyond CodeQL now reading their workflow files too.
-5. **`python-package-release.yml`.** Build sdist and wheel, `twine check`,
-   refuse a tag that disagrees with the packaged version, install the wheel
-   and run a caller's smoke command, publish to PyPI through Trusted
-   Publishing with PEP 740 attestations, and attach the distribution to the
-   GitHub release. Four repositories carry a copy of this by hand today.
+5. **`python-package-release.yml`.** Done; see the table above. The four
+   hand-written copies (typo-sniper, hypeman, hammunition-hill,
+   mother-ticker) are retired as item 6 adopts each repository.
 6. **A bootstrap that adopts a repository.** `scripts/new-repo.sh
    <owner/name> [language...]` reads the repository as it is: which
    languages it holds, what its existing workflows run, whether it has a

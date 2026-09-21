@@ -136,6 +136,29 @@ jobs:
       workflow-lint: false
       egress-policy: block
 
+  # The fixture package through python-package-release.yml at this ref:
+  # build, check, smoke-test from the wheel, never publish. The writes are
+  # what the two publishing jobs declare; publish is false so both are
+  # skipped, and neither checks anything out. Block mode with the default
+  # list, so the build's hosts are measured here.
+  fixture-package:
+    name: fixture package
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    uses: ./.github/workflows/python-package-release.yml # zizmor: ignore[self-repository]
+    permissions:
+      contents: write  # the github-release job declares it for the publishing path it never takes here
+      id-token: write  # likewise: PyPI Trusted Publishing and provenance, only when publish is true
+      attestations: write  # likewise: the SLSA provenance record
+    with:
+      publish: false
+      package-directory: fixture
+      verify-command: test "$VERSION" = "0.1.0"
+      smoke-command: |
+        fixture-app --version
+        python -m fixture_app ci
+      release-notes-command: printf 'fixture %s\n' "$VERSION"
+      egress-policy: block
+
   # The fixture image through python-docker-release.yml at this ref: build,
   # check and scan, never publish. The writes are what the release job
   # declares for the publishing path; the called job holds them on a pull
@@ -162,7 +185,7 @@ jobs:
   ci-green:
     name: CI green
     if: always()
-    needs: [actionlint, zizmor, test, fixture-ci, fixture-bash, fixture-release]
+    needs: [actionlint, zizmor, test, fixture-ci, fixture-bash, fixture-package, fixture-release]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}

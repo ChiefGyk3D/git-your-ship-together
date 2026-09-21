@@ -48,13 +48,14 @@ Read in this order. Each one is short.
 
 ## What is in the repository
 
-Five reusable workflows and one composite action:
+Six reusable workflows and one composite action:
 
 | File | What it does |
 |---|---|
 | `.github/workflows/python-ci.yml` | Lint, workflow lint, test matrix, coverage upload, optional CLI smoke test, single-arch container build with a check, one `CI green` gate job |
 | `.github/workflows/bash-ci.yml` | shellcheck and shfmt over every tracked script, an optional test command, an optional configuration lint (yamllint, ansible-lint), workflow lint, the same `CI green` gate. Holds no token |
 | `.github/workflows/python-docker-release.yml` | Build, test, Trivy-scan, then publish multi-arch to GHCR (and Docker Hub), sign with cosign, attach a syft SBOM, record SLSA provenance |
+| `.github/workflows/python-package-release.yml` | Build the sdist and wheel, `twine check`, refuse a tag that disagrees with the packaged version, smoke-test from the wheel, then publish to PyPI (Trusted Publishing, PEP 740 attestations) and to the GitHub release with SHA256SUMS and build provenance. No secret anywhere |
 | `.github/workflows/security.yml` | CodeQL (the `actions` language included by default), gitleaks, a dependency audit (pip-audit, and any other tool by command), dependency review on pull requests, optional Snyk, optional OpenSSF Scorecard |
 | `.github/workflows/dependabot-auto-merge.yml` | Queues a Dependabot bump to merge itself once the required checks pass, up to a size you choose |
 | `.github/actions/doppler-secrets` | Fetches a Doppler config as masked environment variables, over OIDC or a Service Token. The workflows inline a copy of it (see the design rules); this is the source |
@@ -64,7 +65,7 @@ project before any caller pins them:
 
 | File | What it does |
 |---|---|
-| `.github/workflows/ci.yml` | actionlint, zizmor, the pytest contract, then `python-ci.yml`, `bash-ci.yml` and `python-docker-release.yml` called at the pull request's own ref against `fixture/` (bash-ci over the whole repository, in block mode), and a `CI green` gate that needs all of it |
+| `.github/workflows/ci.yml` | actionlint, zizmor, the pytest contract, then `python-ci.yml`, `bash-ci.yml`, `python-package-release.yml` and `python-docker-release.yml` called at the pull request's own ref against `fixture/` (bash-ci over the whole repository; bash-ci and the package build in block mode), and a `CI green` gate that needs all of it |
 | `.github/workflows/security-self.yml` | `security.yml` called the same way, on push, pull request and a Monday schedule |
 | `.github/workflows/dependabot-auto-merge-self.yml` | `dependabot-auto-merge.yml` called the same way, so this repository's own bumps exercise it |
 | `.github/dependabot.yml` | Weekly action and pip bumps with a seven-day cooldown, actions grouped into one pull request |
@@ -390,6 +391,78 @@ Inputs of `python-docker-release.yml`:
 
 Outputs: `digest` and `image` (`ghcr.io/...@sha256:...`) of the published
 index, empty when not pushed.
+
+### Python package release
+
+For a project that ships to PyPI, or attaches its wheel to a GitHub release,
+or both. Four repositories wrote this by hand before it existed here.
+
+```yaml
+name: Release
+on:
+  push: { tags: ['v*'] }
+  pull_request:          # builds and checks; never publishes
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/python-package-release.yml@<sha> # vX.Y.Z
+    permissions:
+      contents: write      # the GitHub release and its assets
+      id-token: write      # PyPI Trusted Publishing, and build provenance
+      attestations: write  # the provenance record
+    with:
+      publish: ${{ startsWith(github.ref, 'refs/tags/v') }}
+      verify-command: grep -q "^## \[$VERSION\]" CHANGELOG.md
+      smoke-command: my-cli --version
+      release-notes-command: python scripts/changelog_section.py "$VERSION"
+      egress-policy: block
+```
+
+The build job does everything that runs the caller's code, with
+`contents: read`: build, `twine check --strict`, read the version off the
+sdist's own name (so a static `version =`, a dynamic attribute and a VCS
+plugin all answer alike), refuse a tag that disagrees with it, run
+`verify-command`, install the wheel into a fresh venv and run
+`smoke-command`, write the release notes. The two publishing jobs check
+nothing out: `publish-pypi` hands `dist/` to PyPI over the job's OIDC
+identity from the `pypi` environment, and `github-release` records build
+provenance for every file and attaches them with a `SHA256SUMS` to the
+release for the tag, creating it from the notes when it does not exist and
+uploading to it when it does (a caller that triggers on `release: published`).
+Nothing needs a secret.
+
+PyPI setup, once per project: on the project's *Publishing* page add a
+Trusted Publisher naming this owner, the calling repository, the caller's
+workflow file name (not this one's) and the environment `pypi`. That is the
+whole credential.
+
+Inputs of `python-package-release.yml`:
+
+| Input | Default | Meaning |
+|---|---|---|
+| `python-version` | `3.13` | Python for the build, the checks and the smoke test |
+| `package-directory` | `.` | Where `pyproject.toml` lives |
+| `build-install-command` | upgrade pip, install `build` and `twine` | Installs the build tooling |
+| `build-command` | `python -m build` | Writes the sdist and wheel to `dist/` |
+| `tag-prefix` | `v` | What precedes the version in a tag: `v1.2.3` is version `1.2.3` |
+| `verify-command` | empty | Run with `$VERSION` set, to refuse a release whose tree disagrees with it: a CHANGELOG section, a `__version__` |
+| `smoke-command` | empty (skips the check) | Run with the built wheel installed in a fresh venv on `PATH`, e.g. `my-cli --version` |
+| `release-notes-command` | empty (GitHub generates them) | Prints the release notes to stdout with `$VERSION` set |
+| `publish` | `false` | Publish. A pull request never publishes whatever this says |
+| `pypi` | `true` | Publish to PyPI |
+| `pypi-environment` | `pypi` | The GitHub environment the PyPI job runs in, which the Trusted Publisher names |
+| `github-release` | `true` | Attach the files, `SHA256SUMS` and provenance to the GitHub release |
+| `release-title` | empty (the tag) | Title of a release this workflow creates |
+| `attest` | `true` | Record SLSA build provenance for every file |
+| `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `audit`, the measured list, empty | harden-runner, as in `python-ci.yml`. The build's hosts were measured in block mode here; the publishing hosts are PyPI's and Sigstore's documented ones |
+| `timeout-minutes` | `20` | Per-job timeout |
+
+The workflow outputs `version`, the version the sdist was built as, for a
+caller job that needs it.
 
 ### Security
 

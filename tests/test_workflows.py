@@ -35,6 +35,7 @@ REUSABLE = [
         "python-ci.yml",
         "bash-ci.yml",
         "python-docker-release.yml",
+        "python-package-release.yml",
         "security.yml",
         "dependabot-auto-merge.yml",
     )
@@ -42,7 +43,9 @@ REUSABLE = [
 # The subset that fetches CI secrets. The Doppler rules are about those steps,
 # so a callable workflow that needs no secret is not held to them; it is held
 # to everything else, and it must not grow a fetch without joining this list.
-DOPPLER = [p for p in REUSABLE if p.name not in ("dependabot-auto-merge.yml", "bash-ci.yml")]
+DOPPLER = [
+    p for p in REUSABLE if p.name not in ("dependabot-auto-merge.yml", "bash-ci.yml", "python-package-release.yml")
+]
 # The language CI workflows: each ends in the `CI green` gate branch protection requires.
 LANGUAGE_CI = [p for p in REUSABLE if p.name.endswith("-ci.yml")]
 OWN = [p for p in WORKFLOW_FILES if p not in REUSABLE]
@@ -80,7 +83,7 @@ def all_steps(path: Path):
 
 
 def test_there_is_something_to_check():
-    assert len(REUSABLE) == 5, "expected the five callable workflows"
+    assert len(REUSABLE) == 6, "expected the six callable workflows"
     assert len(DOPPLER) == 3, "expected three of them to fetch CI secrets"
     assert [p.name for p in LANGUAGE_CI] == ["bash-ci.yml", "python-ci.yml"]
     assert ACTION_FILES, "no composite actions found"
@@ -166,6 +169,14 @@ ALLOWED_WRITES = {
     ("python-docker-release.yml", "release", "attestations"),
     # SARIF uploads to the Security tab.
     ("python-docker-release.yml", "release", "security-events"),
+    # The package release: PyPI trusts the job's OIDC identity, and the
+    # GitHub release is created and its assets uploaded with the job's own
+    # token, with provenance recorded for every file. Neither job checks
+    # anything out; both are skipped unless publish is true off a pull request.
+    ("python-package-release.yml", "publish-pypi", "id-token"),
+    ("python-package-release.yml", "github-release", "contents"),
+    ("python-package-release.yml", "github-release", "id-token"),
+    ("python-package-release.yml", "github-release", "attestations"),
     ("security.yml", "codeql", "security-events"),
     ("security.yml", "snyk", "security-events"),
     ("security.yml", "scorecard", "security-events"),
@@ -190,6 +201,11 @@ ALLOWED_WRITES = {
     ("ci.yml", "fixture-release", "packages"),
     ("ci.yml", "fixture-release", "attestations"),
     ("ci.yml", "fixture-release", "security-events"),
+    # And python-package-release.yml on the fixture: the grants its two
+    # publishing jobs declare, which publish: false skips.
+    ("ci.yml", "fixture-package", "contents"),
+    ("ci.yml", "fixture-package", "id-token"),
+    ("ci.yml", "fixture-package", "attestations"),
 }
 
 
@@ -473,6 +489,27 @@ def test_security_defaults_are_neutral_where_they_can_be():
     assert audit["permissions"] == {"contents": "read"}, "the audit runs a caller's command; it holds nothing"
     names = [s.get("name") for s in steps_of(audit)]
     assert names.index("Audit pinned dependencies (pip-audit)") < names.index("Audit dependencies (audit-command)")
+
+
+def test_the_package_release_publishes_only_when_told_and_never_beside_the_tree():
+    """Every caller command runs in the read-only build job; the two writes run only pinned actions and gh."""
+    doc = load(WORKFLOWS / "python-package-release.yml")
+    build = jobs(doc)["build"]
+    assert build["permissions"] == {"contents": "read"}
+    for job_name in ("publish-pypi", "github-release"):
+        job = jobs(doc)[job_name]
+        cond = str(job["if"])
+        assert "inputs.publish" in cond and "github.event_name != 'pull_request'" in cond, f"{job_name} is not gated"
+        assert not any(str(s.get("uses", "")).startswith("actions/checkout@") for s in steps_of(job)), (
+            f"{job_name} checks the tree out beside a write"
+        )
+    assert triggers(doc)["workflow_call"]["inputs"]["publish"]["default"] is False
+    assert "secrets" not in triggers(doc)["workflow_call"], "nothing here needs a secret"
+
+
+def test_the_fixture_package_never_publishes():
+    doc = load(WORKFLOWS / "ci.yml")
+    assert jobs(doc)["fixture-package"]["with"]["publish"] is False
 
 
 def test_release_signs_attests_and_records_provenance_only_after_a_push():
