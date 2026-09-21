@@ -338,6 +338,31 @@ plan. On a Developer plan, use path 2 and skip step 3.
    `SNYK_TOKEN` from the repository's GitHub secrets once a run has gone green
    through Doppler. `GITHUB_TOKEN` is not a stored secret and stays.
 
+## Repository settings that no YAML can set
+
+For each calling repository, once its first run is green:
+
+1. **Branch protection on `main`**: require the `CI green` status check
+   (python-ci's gate job), require a pull request, and dismiss stale
+   approvals on new pushes. A job added to python-ci is covered
+   automatically because the gate `needs` every other job.
+2. **Secret scanning and push protection** (Settings → Code security): both
+   on. Push protection refuses a commit that carries a known credential
+   shape before gitleaks ever sees it.
+3. **Private vulnerability reporting**: on, so `SECURITY.md`'s link works.
+4. **Dependabot security updates**: on. The version updates come from the
+   repository's `dependabot.yml`; this switch adds the advisory-driven ones.
+5. **Repository variable `DOPPLER_IDENTITY_ID`**: see Doppler setup above.
+6. **Delete the GitHub secrets** the old workflows used once the Doppler path
+   has produced one green run: `DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN`,
+   `CODECOV_TOKEN`, `SNYK_TOKEN`.
+
+And in this repository: tag releases from `main` (`git tag -a vX.Y.Z <sha>`,
+`git push origin vX.Y.Z`). Callers' Dependabot follows the tags; zizmor's
+`ref-version-mismatch` audit fails a caller whose `# vX.Y.Z` comment names a
+tag that does not exist, which is the intended check that a pin and its
+comment agree.
+
 ## Developing
 
 ```sh
