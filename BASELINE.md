@@ -243,7 +243,7 @@ Checked: `risk-exceptions`.
 - **Signed commits and tags.** The laptop signs with a registered SSH key
   and its commits and tags verify. The rule is not on yet because the cloud
   sessions and the other machines still commit unsigned, and a rule would
-  block them; it goes on when they sign too (roadmap item 10).
+  block them; it goes on when they sign too (roadmap item 14).
 
 ## Adding a repository
 

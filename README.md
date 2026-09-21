@@ -615,7 +615,7 @@ repository, once its first run is green:
 
 Signed commits are not required yet. The laptop signs with a registered SSH
 key and its commits and tags verify; the rule goes on when every place that
-commits is signing (roadmap item 10).
+commits is signing (roadmap item 14).
 
 ## Releasing a version of this repository
 
