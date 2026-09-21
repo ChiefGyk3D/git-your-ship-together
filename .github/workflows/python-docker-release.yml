@@ -257,7 +257,7 @@ jobs:
 
       - name: Scan the image with Trivy
         if: inputs.trivy
-        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: release-candidate:local
           format: sarif
@@ -268,7 +268,7 @@ jobs:
 
       - name: Upload Trivy results to the Security tab
         if: inputs.trivy && always() && hashFiles('trivy-results.sarif') != ''
-        uses: github/codeql-action/upload-sarif@c23de5a82f64bb08c6d9f28844551440ca298e76 # v4.38.1
+        uses: github/codeql-action/upload-sarif@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4.38.1
         with:
           sarif_file: trivy-results.sarif
           category: trivy-image
@@ -311,7 +311,7 @@ jobs:
 
       - name: Generate the SBOM with syft
         if: inputs.push && inputs.sbom
-        uses: anchore/sbom-action@006b7ce8314066bdf1765b4500370d40fa6917a3 # v0.24.2
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
         with:
           image: ${{ steps.names.outputs.ghcr }}@${{ steps.push.outputs.digest }}
           registry-username: ${{ github.actor }}
