@@ -34,6 +34,7 @@ REUSABLE = [
     in (
         "python-ci.yml",
         "bash-ci.yml",
+        "container-release.yml",
         "python-docker-release.yml",
         "python-package-release.yml",
         "security.yml",
@@ -43,8 +44,12 @@ REUSABLE = [
 # The subset that fetches CI secrets. The Doppler rules are about those steps,
 # so a callable workflow that needs no secret is not held to them; it is held
 # to everything else, and it must not grow a fetch without joining this list.
+# python-docker-release.yml forwards to container-release.yml and fetches nothing itself.
 DOPPLER = [
-    p for p in REUSABLE if p.name not in ("dependabot-auto-merge.yml", "bash-ci.yml", "python-package-release.yml")
+    p
+    for p in REUSABLE
+    if p.name
+    not in ("dependabot-auto-merge.yml", "bash-ci.yml", "python-package-release.yml", "python-docker-release.yml")
 ]
 # The language CI workflows: each ends in the `CI green` gate branch protection requires.
 LANGUAGE_CI = [p for p in REUSABLE if p.name.endswith("-ci.yml")]
@@ -83,7 +88,7 @@ def all_steps(path: Path):
 
 
 def test_there_is_something_to_check():
-    assert len(REUSABLE) == 6, "expected the six callable workflows"
+    assert len(REUSABLE) == 7, "expected the seven callable workflows"
     assert len(DOPPLER) == 3, "expected three of them to fetch CI secrets"
     assert [p.name for p in LANGUAGE_CI] == ["bash-ci.yml", "python-ci.yml"]
     assert ACTION_FILES, "no composite actions found"
@@ -160,15 +165,19 @@ ALLOWED_WRITES = {
     # (release), Snyk and the gitleaks licence (security) come from Doppler
     # over OIDC; Scorecard publishes its result with the same OIDC identity.
     ("python-ci.yml", "coverage", "id-token"),
-    ("python-docker-release.yml", "release", "id-token"),
+    ("container-release.yml", "release", "id-token"),
+    ("python-docker-release.yml", "release", "id-token"),  # forwarded to container-release.yml
     ("security.yml", "gitleaks", "id-token"),
     ("security.yml", "snyk", "id-token"),
     ("security.yml", "scorecard", "id-token"),
     # Publishing the image, its signature, SBOM attestation and provenance.
-    ("python-docker-release.yml", "release", "packages"),
-    ("python-docker-release.yml", "release", "attestations"),
+    ("container-release.yml", "release", "packages"),
+    ("container-release.yml", "release", "attestations"),
+    ("python-docker-release.yml", "release", "packages"),  # forwarded
+    ("python-docker-release.yml", "release", "attestations"),  # forwarded
     # SARIF uploads to the Security tab.
-    ("python-docker-release.yml", "release", "security-events"),
+    ("container-release.yml", "release", "security-events"),
+    ("python-docker-release.yml", "release", "security-events"),  # forwarded
     # The package release: PyPI trusts the job's OIDC identity, and the
     # GitHub release is created and its assets uploaded with the job's own
     # token, with provenance recorded for every file. Neither job checks
@@ -294,7 +303,7 @@ def test_the_inlined_doppler_script_matches_the_composite_action():
     copies = {path.name: doppler_script(path) for path in DOPPLER}
     assert copies == {
         "python-ci.yml": [composite[0]],
-        "python-docker-release.yml": [composite[0]],
+        "container-release.yml": [composite[0]],
         "security.yml": [composite[0]] * 2,
     }, "an inlined Doppler script differs from .github/actions/doppler-secrets/action.yml"
 
@@ -361,7 +370,8 @@ PR_ID_TOKEN_EXCEPTIONS = {
     # Dockerfile's RUN steps and the docker-test-command execute inside
     # containers that do not carry the runner's OIDC request token, and the
     # Doppler step refuses pull requests.
-    ("python-docker-release.yml", "release"),
+    ("container-release.yml", "release"),
+    ("python-docker-release.yml", "release"),  # the thin caller of the above
 }
 
 
@@ -513,7 +523,7 @@ def test_the_fixture_package_never_publishes():
 
 
 def test_release_signs_attests_and_records_provenance_only_after_a_push():
-    doc = load(WORKFLOWS / "python-docker-release.yml")
+    doc = load(WORKFLOWS / "container-release.yml")
     steps = {s.get("name"): s for s in steps_of(jobs(doc)["release"])}
     gated = (
         "Sign the image (keyless)",
@@ -532,7 +542,7 @@ def test_release_signs_attests_and_records_provenance_only_after_a_push():
 
 def test_a_publishing_build_never_reads_the_actions_cache():
     """The cache is writable from any pull request; a poisoned layer in a signed release is unrecoverable."""
-    doc = load(WORKFLOWS / "python-docker-release.yml")
+    doc = load(WORKFLOWS / "container-release.yml")
     steps = {s.get("name"): s for s in steps_of(jobs(doc)["release"])}
     push = steps["Build and push the multi-arch image"]["with"]
     assert "cache-from" not in push and "cache-to" not in push
@@ -579,15 +589,45 @@ def test_the_default_allow_list_is_one_line_of_sorted_host_ports(path):
 # --- dogfooding ------------------------------------------------------------
 
 
+def local_uses(job: dict) -> str | None:
+    uses = str(job.get("uses", ""))
+    return uses.removeprefix("./.github/workflows/").split(" ")[0] if uses.startswith("./.github/workflows/") else None
+
+
 def dogfood_callers():
-    """(own workflow, job, reusable workflow it calls at this ref)."""
+    """(own workflow, job, reusable workflow it calls at this ref).
+
+    A reusable workflow that itself forwards to another through a `./`
+    reference (python-docker-release.yml to container-release.yml) exercises
+    that one too, at the same commit, so it is listed with the same caller.
+    """
     found = []
     for path in OWN:
         for job_name, job in jobs(load(path)).items():
-            uses = str(job.get("uses", ""))
-            if uses.startswith("./.github/workflows/"):
-                found.append((path.name, job_name, uses.removeprefix("./.github/workflows/").split(" ")[0]))
+            target = local_uses(job)
+            if not target:
+                continue
+            found.append((path.name, job_name, target))
+            for nested in jobs(load(WORKFLOWS / target)).values():
+                if local_uses(nested):
+                    found.append((path.name, job_name, local_uses(nested)))
     return found
+
+
+def test_the_old_release_name_forwards_everything_to_container_release():
+    """A caller pinned to python-docker-release.yml must see no difference: same inputs, defaults, secret, outputs."""
+    thin = triggers(load(WORKFLOWS / "python-docker-release.yml"))["workflow_call"]
+    real = triggers(load(WORKFLOWS / "container-release.yml"))["workflow_call"]
+    assert thin["inputs"] == real["inputs"], "an input, default or description differs between the two names"
+    assert thin["secrets"] == real["secrets"]
+    assert set(thin["outputs"]) == set(real["outputs"])
+    job = jobs(load(WORKFLOWS / "python-docker-release.yml"))["release"]
+    assert local_uses(job) == "container-release.yml"
+    assert set(job["with"]) == set(real["inputs"]), "every input is forwarded"
+    for name, value in job["with"].items():
+        assert value == f"${{{{ inputs.{name} }}}}", f"{name} is not forwarded as-is"
+    assert job["secrets"] == {"DOPPLER_TOKEN": "${{ secrets.DOPPLER_TOKEN }}"}
+    assert job["permissions"] == jobs(load(WORKFLOWS / "container-release.yml"))["release"]["permissions"]
 
 
 def test_every_reusable_workflow_is_run_from_this_repository_at_the_pull_requests_ref():

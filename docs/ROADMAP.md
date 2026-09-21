@@ -25,6 +25,7 @@ Status as of 2026-09-21.
 | Scan and test tools out of Boon-Tube-Daemon's runtime requirements, which took nltk out of the image and closed the only risk-register entry | `Boon-Tube-Daemon` deps PR, register now empty |
 | The composition rule (item 2): one caller job per language, and the audit derives the required `<job> / CI green` set from the caller's workflow files and fails on any gate missing | `scripts/audit_baseline.py`, `BASELINE.md` §2 |
 | `security.yml` with neutral defaults (item 4): the dependency audit takes an `audit-command` for any ecosystem beside its pip-audit default, and CodeQL's default languages include `actions` | `security.yml`, `security-self.yml` runs both audit paths |
+| `container-release.yml` (item 7): the release workflow under its honest name; `python-docker-release.yml` stays as a thin caller forwarding every input through a `./` reference, held identical by a test | `.github/workflows/container-release.yml`, `python-docker-release.yml` |
 | `python-package-release.yml` (item 5): build, check, tag-against-version, smoke from the wheel, PyPI Trusted Publishing with PEP 740 attestations, GitHub release with SHA256SUMS and provenance; no secret in it | `.github/workflows/python-package-release.yml`, run on the fixture |
 | `bash-ci.yml` (item 3): shellcheck and shfmt at pinned versions and hashes, a test command, a configuration lint for yamllint and ansible-lint (item 11), the `CI green` gate, no token in any job; run on this repository in block mode | `.github/workflows/bash-ci.yml`, `fixture/scripts/` |
 
@@ -157,17 +158,13 @@ each should say how.
    Doppler token, which the script should not hold by default. mother-ticker
    is the first repository it adopts, because it exercises three languages
    at once. A blank repository is the same script with nothing to read.
-7. **`container-release.yml`.** The release workflow is already language
-   agnostic; only its name says otherwise, which is what stops it being used
-   for a Go or Rust daemon without explaining the name every time. Add it
-   under the honest name and keep `python-docker-release.yml` as a thin
-   caller that forwards to it through a local `./` reference, so existing
-   pins keep working until callers move. The fixture cannot verify this: its
-   own call is local, so it never exercises a `./` reference inside a
-   workflow that another repository called at a pinned commit. Verification
-   is a branch in one caller pinned to the pull request's SHA, and the thin
-   caller has to forward `DOPPLER_TOKEN` explicitly, because secrets do not
-   cascade.
+7. **`container-release.yml`.** Done; see the table above. The thin caller
+   forwards `DOPPLER_TOKEN` by name, because secrets do not cascade, and the
+   fixture reaches `container-release.yml` through it, so the nested `./`
+   reference is exercised on every pull request here. The cross-repository
+   case, a caller in another repository pinned to a commit of the thin
+   file, was verified from a netpulse branch before this merged; the
+   pull request records the run.
 8. **`artifact-release.yml`.** For anything that is a file rather than an
    image: a `.deb`, a firmware binary, a bundle, a wheel. Build it with a
    caller's command, sign the blob with cosign, record build provenance,
