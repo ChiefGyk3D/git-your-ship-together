@@ -37,6 +37,7 @@ REUSABLE = [
         "container-release.yml",
         "python-docker-release.yml",
         "python-package-release.yml",
+        "artifact-release.yml",
         "security.yml",
         "dependabot-auto-merge.yml",
     )
@@ -49,7 +50,13 @@ DOPPLER = [
     p
     for p in REUSABLE
     if p.name
-    not in ("dependabot-auto-merge.yml", "bash-ci.yml", "python-package-release.yml", "python-docker-release.yml")
+    not in (
+        "dependabot-auto-merge.yml",
+        "bash-ci.yml",
+        "python-package-release.yml",
+        "artifact-release.yml",
+        "python-docker-release.yml",
+    )
 ]
 # The language CI workflows: each ends in the `CI green` gate branch protection requires.
 LANGUAGE_CI = [p for p in REUSABLE if p.name.endswith("-ci.yml")]
@@ -88,7 +95,7 @@ def all_steps(path: Path):
 
 
 def test_there_is_something_to_check():
-    assert len(REUSABLE) == 7, "expected the seven callable workflows"
+    assert len(REUSABLE) == 8, "expected the eight callable workflows"
     assert len(DOPPLER) == 3, "expected three of them to fetch CI secrets"
     assert [p.name for p in LANGUAGE_CI] == ["bash-ci.yml", "python-ci.yml"]
     assert ACTION_FILES, "no composite actions found"
@@ -186,6 +193,12 @@ ALLOWED_WRITES = {
     ("python-package-release.yml", "github-release", "contents"),
     ("python-package-release.yml", "github-release", "id-token"),
     ("python-package-release.yml", "github-release", "attestations"),
+    # The artifact release: the same three writes, for files rather than a
+    # wheel, in a job that checks nothing out and is skipped unless publish
+    # is true off a pull request.
+    ("artifact-release.yml", "publish", "contents"),
+    ("artifact-release.yml", "publish", "id-token"),
+    ("artifact-release.yml", "publish", "attestations"),
     ("security.yml", "codeql", "security-events"),
     ("security.yml", "snyk", "security-events"),
     ("security.yml", "scorecard", "security-events"),
@@ -215,6 +228,10 @@ ALLOWED_WRITES = {
     ("ci.yml", "fixture-package", "contents"),
     ("ci.yml", "fixture-package", "id-token"),
     ("ci.yml", "fixture-package", "attestations"),
+    # And artifact-release.yml on a tarball of the fixture's scripts, likewise.
+    ("ci.yml", "fixture-artifact", "contents"),
+    ("ci.yml", "fixture-artifact", "id-token"),
+    ("ci.yml", "fixture-artifact", "attestations"),
 }
 
 
@@ -515,6 +532,31 @@ def test_the_package_release_publishes_only_when_told_and_never_beside_the_tree(
         )
     assert triggers(doc)["workflow_call"]["inputs"]["publish"]["default"] is False
     assert "secrets" not in triggers(doc)["workflow_call"], "nothing here needs a secret"
+
+
+def test_the_artifact_release_publishes_only_when_told_and_never_beside_the_tree():
+    """Same rule as the package release: caller commands in the read-only build job, the write beside no checkout."""
+    doc = load(WORKFLOWS / "artifact-release.yml")
+    assert jobs(doc)["build"]["permissions"] == {"contents": "read"}
+    publish = jobs(doc)["publish"]
+    cond = str(publish["if"])
+    assert "inputs.publish" in cond and "github.event_name != 'pull_request'" in cond
+    assert not any(str(s.get("uses", "")).startswith("actions/checkout@") for s in steps_of(publish))
+    names = [s.get("name") for s in steps_of(publish)]
+    order = [
+        "Checksums",
+        "Record build provenance",
+        "Sign every file (keyless)",
+        "Create the release, or upload to the one that exists",
+    ]
+    assert [n for n in names if n in order] == order, "sums, then provenance, then signatures, then the upload"
+    assert triggers(doc)["workflow_call"]["inputs"]["publish"]["default"] is False
+    assert "secrets" not in triggers(doc)["workflow_call"], "nothing here needs a secret"
+
+
+def test_the_fixture_artifact_never_publishes():
+    doc = load(WORKFLOWS / "ci.yml")
+    assert jobs(doc)["fixture-artifact"]["with"]["publish"] is False
 
 
 def test_the_fixture_package_never_publishes():

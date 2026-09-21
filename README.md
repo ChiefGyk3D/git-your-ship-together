@@ -48,7 +48,7 @@ Read in this order. Each one is short.
 
 ## What is in the repository
 
-Seven reusable workflows and one composite action:
+Eight reusable workflows and one composite action:
 
 | File | What it does |
 |---|---|
@@ -57,6 +57,7 @@ Seven reusable workflows and one composite action:
 | `.github/workflows/container-release.yml` | Build, test, Trivy-scan, then publish multi-arch to GHCR (and Docker Hub), sign with cosign, attach a syft SBOM, record SLSA provenance. Builds whatever the Dockerfile builds |
 | `.github/workflows/python-docker-release.yml` | The old name of the above: a thin caller that forwards every input, the secret and the outputs through a `./` reference at its own commit, so an existing pin keeps working. New callers use `container-release.yml` |
 | `.github/workflows/python-package-release.yml` | Build the sdist and wheel, `twine check`, refuse a tag that disagrees with the packaged version, smoke-test from the wheel, then publish to PyPI (Trusted Publishing, PEP 740 attestations) and to the GitHub release with SHA256SUMS and build provenance. No secret anywhere |
+| `.github/workflows/artifact-release.yml` | For a file rather than an image (a `.deb`, a firmware binary, a bundle): build it with a command, then publish it to the GitHub release with SHA256SUMS, a keyless cosign signature bundle per file and build provenance. No secret anywhere |
 | `.github/workflows/security.yml` | CodeQL (the `actions` language included by default), gitleaks, a dependency audit (pip-audit, and any other tool by command), dependency review on pull requests, optional Snyk, optional OpenSSF Scorecard |
 | `.github/workflows/dependabot-auto-merge.yml` | Queues a Dependabot bump to merge itself once the required checks pass, up to a size you choose |
 | `.github/actions/doppler-secrets` | Fetches a Doppler config as masked environment variables, over OIDC or a Service Token. The workflows inline a copy of it (see the design rules); this is the source |
@@ -66,7 +67,7 @@ project before any caller pins them:
 
 | File | What it does |
 |---|---|
-| `.github/workflows/ci.yml` | actionlint, zizmor, the pytest contract, then `python-ci.yml`, `bash-ci.yml`, `python-package-release.yml` and `python-docker-release.yml` called at the pull request's own ref against `fixture/` (bash-ci over the whole repository; bash-ci and the package build in block mode), and a `CI green` gate that needs all of it |
+| `.github/workflows/ci.yml` | actionlint, zizmor, the pytest contract, then `python-ci.yml`, `bash-ci.yml`, `python-package-release.yml`, `artifact-release.yml` and `python-docker-release.yml` called at the pull request's own ref against `fixture/` (bash-ci over the whole repository; bash-ci and the package build in block mode), and a `CI green` gate that needs all of it |
 | `.github/workflows/security-self.yml` | `security.yml` called the same way, on push, pull request and a Monday schedule |
 | `.github/workflows/dependabot-auto-merge-self.yml` | `dependabot-auto-merge.yml` called the same way, so this repository's own bumps exercise it |
 | `.github/dependabot.yml` | Weekly action and pip bumps with a seven-day cooldown, actions grouped into one pull request |
@@ -473,6 +474,70 @@ Inputs of `python-package-release.yml`:
 
 The workflow outputs `version`, the version the sdist was built as, for a
 caller job that needs it.
+
+### Artifact release
+
+For anything that is a file rather than an image: hammunition-hill's `.deb`,
+Skid-Finder's firmware, mother-ticker's offline bundle. The same
+supply-chain story as the container release, for a file.
+
+```yaml
+name: Release
+on:
+  push: { tags: ['v*'] }
+  pull_request:          # builds and checks; never publishes
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  artifacts:
+    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/artifact-release.yml@<sha> # vX.Y.Z
+    permissions:
+      contents: write      # the GitHub release and its assets
+      id-token: write      # keyless signing and build provenance
+      attestations: write  # the provenance record
+    with:
+      publish: ${{ startsWith(github.ref, 'refs/tags/v') }}
+      build-install-command: sudo apt-get install -y dpkg-dev
+      build-command: ./packaging/debian/build.sh dist
+      artifacts: dist/*.deb
+      verify-command: dpkg-deb --info dist/*.deb | grep -q "Version: $VERSION"
+      egress-policy: block
+      extra-allowed-endpoints: azure.archive.ubuntu.com:80
+```
+
+The build job holds `contents: read` and runs everything the caller wrote:
+`build-command` with `$VERSION` set (the tag with its prefix removed, or
+`0.0.0+<sha>` off a tag), `verify-command`, the collection of every file
+matching `artifacts`, and `release-notes-command`. The publish job checks
+nothing out. It writes a `SHA256SUMS`, records build provenance for every
+file, signs every file with cosign (keyless, a `<file>.sigstore.json` bundle
+beside it), and attaches all of it to the release for the tag, creating it
+from the notes or uploading to it when it exists. Verify a download with
+`cosign verify-blob --bundle <file>.sigstore.json <file>` against this
+repository's identity, or `gh attestation verify <file> --owner ChiefGyk3D`.
+
+Inputs of `artifact-release.yml`:
+
+| Input | Default | Meaning |
+|---|---|---|
+| `build-install-command` | empty | Run before the build, e.g. `sudo apt-get install -y dpkg-dev` |
+| `build-command` | empty (the job fails) | Produces the files, with `$VERSION` set |
+| `artifacts` | `dist/*` | Space-separated globs naming what to publish |
+| `tag-prefix` | `v` | What precedes the version in a tag |
+| `verify-command` | empty | Run after the build with `$VERSION` set, to refuse a release whose files disagree with it |
+| `release-notes-command` | empty (GitHub generates them) | Prints the release notes to stdout with `$VERSION` set |
+| `publish` | `false` | Publish. A pull request never publishes whatever this says |
+| `github-release` | `true` | Attach the files, sums, signatures and provenance to the GitHub release |
+| `release-title` | empty (the tag) | Title of a release this workflow creates |
+| `sign` | `true` | cosign keyless signature bundle per file |
+| `attest` | `true` | SLSA build provenance per file |
+| `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `audit`, GitHub and Sigstore, empty | harden-runner, as in `python-ci.yml`. The build's hosts depend on the build command and go in `extra-allowed-endpoints` |
+| `timeout-minutes` | `30` | Per-job timeout |
+
+The workflow outputs `version`.
 
 ### Security
 

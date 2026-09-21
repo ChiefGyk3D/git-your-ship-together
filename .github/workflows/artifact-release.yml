@@ -1,0 +1,309 @@
+# Reusable release for anything that is a file rather than an image: a .deb,
+# a firmware binary, a bundle, a tarball. Build it with the caller's command,
+# then publish the same files to the GitHub release for the tag with a
+# SHA256SUMS, a keyless cosign signature bundle per file and SLSA build
+# provenance. The same supply-chain story the container release tells, for
+# the three repositories that shipped a file by hand.
+#
+#   1. Build: the version is the tag with its prefix removed (or 0.0.0+<sha>
+#      off a tag), the caller's build command runs with $VERSION set, the
+#      caller's verify command may refuse the result, and every file
+#      matching `artifacts` is collected. All of it with contents: read.
+#   2. When `publish` is true and the event is not a pull request: SHA256SUMS
+#      over the files, build provenance recorded for each, each signed with
+#      cosign (keyless, the job's OIDC identity, a Sigstore bundle beside it),
+#      and all of it attached to the release, created from the notes when it
+#      does not exist and uploaded to when it does. The job checks nothing
+#      out.
+#
+# Call it with:
+#
+#   jobs:
+#     artifacts:
+#       uses: ChiefGyk3D/git-your-ship-together/.github/workflows/artifact-release.yml@<sha> # vX.Y.Z
+#       permissions:
+#         contents: write
+#         id-token: write
+#         attestations: write
+#       with:
+#         publish: ${{ startsWith(github.ref, 'refs/tags/v') }}
+#         build-command: ./packaging/debian/build.sh dist
+#         artifacts: dist/*.deb
+#
+# Verify a published file with:
+#
+#   cosign verify-blob --bundle <file>.sigstore.json <file> \
+#     --certificate-identity-regexp '^https://github.com/ChiefGyk3D/git-your-ship-together/' \
+#     --certificate-oidc-issuer https://token.actions.githubusercontent.com
+#   gh attestation verify <file> --owner ChiefGyk3D
+#
+# Nothing here needs a secret. Commands a caller supplies reach the shell
+# through an environment variable, never by template expansion into the
+# script, and run only in the read-only build job.
+
+name: Artifact release (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      build-install-command:
+        description: Shell run before the build, e.g. `sudo apt-get install -y dpkg-dev`; empty installs nothing.
+        type: string
+        default: ""
+      build-command:
+        description: Shell that produces the files, run with `$VERSION` set. Required; the job fails without one.
+        type: string
+        default: ""
+      artifacts:
+        description: Space-separated globs naming the files to publish, relative to the repository root.
+        type: string
+        default: dist/*
+      tag-prefix:
+        description: What precedes the version in a release tag; `v` makes v1.2.3 the tag for version 1.2.3.
+        type: string
+        default: v
+      verify-command:
+        description: Shell run after the build with `$VERSION` set, to refuse a release whose tree or files disagree with it; empty runs nothing.
+        type: string
+        default: ""
+      release-notes-command:
+        description: Shell that prints the GitHub release notes to stdout with `$VERSION` set; empty lets GitHub generate them from the commits.
+        type: string
+        default: ""
+      publish:
+        description: Publish to the GitHub release. False builds, checks and stops; a pull request never publishes whatever this says.
+        type: boolean
+        default: false
+      github-release:
+        description: Attach the files, SHA256SUMS, signatures and provenance to the GitHub release for the tag.
+        type: boolean
+        default: true
+      release-title:
+        description: Title of a GitHub release this workflow creates; empty uses the tag.
+        type: string
+        default: ""
+      sign:
+        description: Sign every file with cosign, keyless, and publish the Sigstore bundle beside it.
+        type: boolean
+        default: true
+      attest:
+        description: Record SLSA build provenance for every file through GitHub's attestation API.
+        type: boolean
+        default: true
+      egress-policy:
+        description: harden-runner egress policy for every job - `audit` logs outbound connections, `block` allows only `allowed-endpoints`.
+        type: string
+        default: audit
+      allowed-endpoints:
+        description: harden-runner allow-list for `block`, space-separated host:port entries. The build's hosts depend on the caller's build command and go in `extra-allowed-endpoints`; the default is GitHub and Sigstore. Wildcards are not supported and a newline-separated list matches nothing.
+        type: string
+        default: "api.github.com:443 fulcio.sigstore.dev:443 github.com:443 objects.githubusercontent.com:443 rekor.sigstore.dev:443 release-assets.githubusercontent.com:443 timestamp.sigstore.dev:443 tuf-repo-cdn.sigstore.dev:443 uploads.github.com:443"
+      extra-allowed-endpoints:
+        description: Appended to `allowed-endpoints`, for the hosts the build command reaches. Same format.
+        type: string
+        default: ""
+      timeout-minutes:
+        description: Per-job timeout.
+        type: number
+        default: 30
+    outputs:
+      version:
+        description: The version the files were built as.
+        value: ${{ jobs.build.outputs.version }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build${{ inputs.verify-command != '' && ', verify' || '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read  # every caller command runs here, beside nothing
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: ${{ inputs.egress-policy }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          # The agent may only stop reporting to StepSecurity in block mode.
+          disable-telemetry: ${{ inputs.egress-policy == 'block' }}
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The tag names the version; off a tag the build is identifiable by
+      # its commit and cannot be mistaken for a release.
+      - name: Decide the version
+        id: version
+        env:
+          TAG: ${{ github.ref_name }}
+          IS_TAG: ${{ startsWith(github.ref, 'refs/tags/') }}
+          PREFIX: ${{ inputs.tag-prefix }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$IS_TAG" = "true" ]; then
+            version="${TAG#"$PREFIX"}"
+          else
+            version="0.0.0+${SHA:0:7}"
+          fi
+          echo "version=$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Install the build dependencies
+        if: inputs.build-install-command != ''
+        env:
+          COMMAND: ${{ inputs.build-install-command }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: bash -eo pipefail -c "$COMMAND"
+
+      - name: Build
+        env:
+          COMMAND: ${{ inputs.build-command }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -z "$COMMAND" ]; then
+            echo "::error::build-command is empty; nothing to build"
+            exit 1
+          fi
+          bash -eo pipefail -c "$COMMAND"
+
+      - name: Verify the result
+        if: inputs.verify-command != ''
+        env:
+          COMMAND: ${{ inputs.verify-command }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: bash -eo pipefail -c "$COMMAND"
+
+      - name: Collect the files
+        env:
+          ARTIFACTS: ${{ inputs.artifacts }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/artifacts"
+          read -r -a globs <<< "$ARTIFACTS"
+          count=0
+          for glob in "${globs[@]}"; do
+            for f in $glob; do
+              [ -f "$f" ] || continue
+              cp -v "$f" "$RUNNER_TEMP/artifacts/"
+              count=$((count + 1))
+            done
+          done
+          if [ "$count" -eq 0 ]; then
+            echo "::error::no file matched artifacts: $ARTIFACTS"
+            exit 1
+          fi
+          ls -l "$RUNNER_TEMP/artifacts"
+
+      - name: Write the release notes
+        env:
+          COMMAND: ${{ inputs.release-notes-command }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -n "$COMMAND" ]; then
+            bash -eo pipefail -c "$COMMAND" > "$RUNNER_TEMP/release-notes.md"
+            echo "release notes: $(wc -l < "$RUNNER_TEMP/release-notes.md") line(s)"
+          else
+            : > "$RUNNER_TEMP/release-notes.md"
+            echo "release notes: generated by GitHub"
+          fi
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: artifacts
+          path: ${{ runner.temp }}/artifacts/
+          if-no-files-found: error
+          retention-days: 7
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-notes
+          path: ${{ runner.temp }}/release-notes.md
+          retention-days: 7
+
+  # No checkout: the writes run beside the files the build handed over and
+  # nothing else. Provenance first, then signatures, then the upload, so a
+  # file on the release always has both.
+  publish:
+    name: Publish to the GitHub release
+    needs: build
+    if: inputs.publish && inputs.github-release && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: write  # create the release, upload its assets
+      id-token: write  # keyless signing and provenance use the job's identity
+      attestations: write  # the SLSA provenance record
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: ${{ inputs.egress-policy }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          # The agent may only stop reporting to StepSecurity in block mode.
+          disable-telemetry: ${{ inputs.egress-policy == 'block' }}
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: artifacts
+          path: artifacts/
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-notes
+          path: notes/
+
+      - name: Checksums
+        run: |
+          set -euo pipefail
+          cd artifacts
+          sha256sum ./* > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Record build provenance
+        if: inputs.attest
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: artifacts/*
+
+      - name: Install cosign
+        if: inputs.sign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Sign every file (keyless)
+        if: inputs.sign
+        run: |
+          set -euo pipefail
+          cd artifacts
+          for f in *; do
+            case "$f" in *.sigstore.json) continue ;; esac
+            cosign sign-blob --yes --bundle "$f.sigstore.json" "$f"
+          done
+          ls -l
+
+      - name: Create the release, or upload to the one that exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          TITLE: ${{ inputs.release-title }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            echo "release $TAG exists; uploading"
+            gh release upload "$TAG" artifacts/* --clobber
+          else
+            args=(--title "${TITLE:-$TAG}" --verify-tag)
+            if [ -s notes/release-notes.md ]; then
+              args+=(--notes-file notes/release-notes.md)
+            else
+              args+=(--generate-notes)
+            fi
+            gh release create "$TAG" artifacts/* "${args[@]}"
+          fi

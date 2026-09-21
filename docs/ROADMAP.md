@@ -25,6 +25,7 @@ Status as of 2026-09-21.
 | Scan and test tools out of Boon-Tube-Daemon's runtime requirements, which took nltk out of the image and closed the only risk-register entry | `Boon-Tube-Daemon` deps PR, register now empty |
 | The composition rule (item 2): one caller job per language, and the audit derives the required `<job> / CI green` set from the caller's workflow files and fails on any gate missing | `scripts/audit_baseline.py`, `BASELINE.md` §2 |
 | `security.yml` with neutral defaults (item 4): the dependency audit takes an `audit-command` for any ecosystem beside its pip-audit default, and CodeQL's default languages include `actions` | `security.yml`, `security-self.yml` runs both audit paths |
+| `artifact-release.yml` (item 8): a caller's build command, then SHA256SUMS, build provenance, a keyless cosign bundle per file and the GitHub release, from a job that checks nothing out | `.github/workflows/artifact-release.yml`, run on a tarball of the fixture |
 | `container-release.yml` (item 7): the release workflow under its honest name; `python-docker-release.yml` stays as a thin caller forwarding every input through a `./` reference, held identical by a test | `.github/workflows/container-release.yml`, `python-docker-release.yml` |
 | `python-package-release.yml` (item 5): build, check, tag-against-version, smoke from the wheel, PyPI Trusted Publishing with PEP 740 attestations, GitHub release with SHA256SUMS and provenance; no secret in it | `.github/workflows/python-package-release.yml`, run on the fixture |
 | `bash-ci.yml` (item 3): shellcheck and shfmt at pinned versions and hashes, a test command, a configuration lint for yamllint and ansible-lint (item 11), the `CI green` gate, no token in any job; run on this repository in block mode | `.github/workflows/bash-ci.yml`, `fixture/scripts/` |
@@ -165,12 +166,9 @@ each should say how.
    case, a caller in another repository pinned to a commit of the thin
    file, was verified from a netpulse branch before this merged; the
    pull request records the run.
-8. **`artifact-release.yml`.** For anything that is a file rather than an
-   image: a `.deb`, a firmware binary, a bundle, a wheel. Build it with a
-   caller's command, sign the blob with cosign, record build provenance,
-   and attach it with its checksums and signature to the release. This is
-   the same supply-chain story the container release tells, for the three
-   repositories that already ship a file by hand.
+8. **`artifact-release.yml`.** Done; see the table above. hammunition-hill's
+   `.deb`, Skid-Finder's firmware and mother-ticker's bundle move onto it
+   as item 6 adopts each.
 9. **`tofu-ci.yml`.** On a pull request: `fmt -check`, `validate`, tflint and
    a config scan (Trivy), which is everything that runs without a cloud
    credential. `plan` runs on push to the default branch with a read-only
