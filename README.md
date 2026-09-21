@@ -105,7 +105,7 @@ Inputs of `python-ci.yml`:
 | `install-command` | upgrade pip, `pip install -r requirements.txt` | Run before tests on every leg |
 | `test-command` | `pytest` | The test suite |
 | `coverage-file` | `coverage.xml` | Uploaded as an artifact when present |
-| `codecov` | `false` | Also upload to Codecov; needs `CODECOV_TOKEN` in the Doppler config |
+| `codecov` | `false` | Also upload to Codecov over GitHub OIDC; no token, the repository just has to be enabled in the Codecov GitHub App |
 | `lint-python-version` | `3.13` | Python for the lint job |
 | `lint-install-command` | `pip install ruff` | Installs the linters |
 | `lint-command` | `ruff check .` | The lint step |
@@ -299,7 +299,7 @@ is the same thing as a composite action) try, in order:
    still rotates it, but it is one static credential in GitHub per repository.
    Use it only where OIDC is not available.
 3. **Nothing**, with a notice, so a pipeline runs before Doppler is wired up.
-   Steps that need a secret then skip (Docker Hub publish, Codecov) or fail
+   Steps that need a secret then skip (Docker Hub publish) or fail
    with a message naming the missing name (Snyk).
 
 A fetch happens only on a **trusted ref**: a push to the default branch, a
@@ -327,12 +327,30 @@ plan. On a Developer plan, use path 2 and skip step 3.
    | Name | Used by |
    |---|---|
    | `DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN` | release, when `dockerhub: true` |
-   | `CODECOV_TOKEN` | CI, when `codecov: true` |
    | `SNYK_TOKEN` | security, when `snyk: true` |
    | `GITLEAKS_LICENSE` | security, organisation accounts only |
 
    Every value in the config is exported into the job's environment (masked),
-   which is why the runtime secrets do not belong here.
+   which is why the runtime secrets do not belong here. Codecov is not in the
+   table: the upload authenticates with the coverage job's own GitHub OIDC
+   token (`use_oidc: true`), so nothing is stored for it. Enable the
+   repository at https://app.codecov.io under the Codecov GitHub App and set
+   `codecov: true`.
+
+   None of these providers issues a per-repository credential, so each value
+   is typed once and fanned out. `scripts/doppler-ci-set.sh` prompts for one
+   value with echo off and sets it in the `ci` config of every project named:
+
+   ```sh
+   scripts/doppler-ci-set.sh SNYK_TOKEN stream-daemon boon-tube-daemon solarstorm-scout
+   scripts/doppler-ci-set.sh DOCKERHUB_USERNAME stream-daemon star-daemon
+   scripts/doppler-ci-set.sh DOCKERHUB_TOKEN stream-daemon star-daemon
+   ```
+
+   Snyk: the personal API token from Account settings (service accounts are
+   Enterprise only). Docker Hub: a personal access token with `repo:write`;
+   tokens are account-wide, not per repository. Rotation is the same command
+   again.
 
 2. **Service Account.** Workplace → Team → Service Accounts → create one per
    repository (e.g. `gha-typo-sniper`), grant it *Viewer* on that project's
@@ -360,7 +378,8 @@ plan. On a Developer plan, use path 2 and skip step 3.
 
 5. **Delete** `DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN`, `CODECOV_TOKEN` and
    `SNYK_TOKEN` from the repository's GitHub secrets once a run has gone green
-   through Doppler. `GITHUB_TOKEN` is not a stored secret and stays.
+   through Doppler (`CODECOV_TOKEN` is simply no longer read). `GITHUB_TOKEN`
+   is not a stored secret and stays.
 
 ## Repository settings that no YAML can set
 

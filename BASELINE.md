@@ -50,7 +50,8 @@ JSON
 
 **Doppler is the only store.** CI reads one `ci` config per project, holding
 only the names the pipelines use (`DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN`,
-`CODECOV_TOKEN`, `SNYK_TOKEN`, optionally `GITLEAKS_LICENSE`) and never a
+`SNYK_TOKEN`, optionally `GITLEAKS_LICENSE`; Codecov authenticates with the
+job's own OIDC token and stores nothing) and never a
 runtime credential. Every value in that config is exported into the job, so a
 runtime token placed there would be a CI secret.
 

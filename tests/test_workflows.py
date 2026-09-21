@@ -123,9 +123,9 @@ def test_every_workflow_declares_read_only_top_level_permissions(path):
 # decision, not a side effect of adding a step.
 ALLOWED_WRITES = {
     # Codecov (python-ci's coverage job, never the job that runs the caller's
-    # tests), Docker Hub credentials (release), Snyk and the gitleaks licence
-    # (security) come from Doppler over OIDC; Scorecard publishes its result
-    # with the same OIDC identity.
+    # tests) verifies the job's OIDC token directly; Docker Hub credentials
+    # (release), Snyk and the gitleaks licence (security) come from Doppler
+    # over OIDC; Scorecard publishes its result with the same OIDC identity.
     ("python-ci.yml", "coverage", "id-token"),
     ("python-docker-release.yml", "release", "id-token"),
     ("security.yml", "gitleaks", "id-token"),

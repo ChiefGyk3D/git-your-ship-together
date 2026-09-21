@@ -9,7 +9,7 @@
 #       uses: ChiefGyk3D/git-your-ship-together/.github/workflows/python-ci.yml@<sha> # vX.Y.Z
 #       permissions:
 #         contents: read
-#         id-token: write        # Doppler OIDC (Codecov token)
+#         id-token: write        # OIDC: the Codecov upload and the Doppler fetch
 #       secrets:
 #         DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}   # optional fallback
 #       with:
@@ -57,7 +57,7 @@ on:
         type: string
         default: coverage.xml
       codecov:
-        description: Upload the coverage report to Codecov. Needs CODECOV_TOKEN in the Doppler config.
+        description: Upload the coverage report to Codecov over GitHub OIDC; no Codecov token is stored anywhere. The repository must be enabled in the Codecov GitHub App.
         type: boolean
         default: false
       lint-python-version:
@@ -262,7 +262,7 @@ jobs:
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read
-      id-token: write  # Doppler OIDC for the Codecov token
+      id-token: write  # OIDC: the Codecov upload verifies it; the Doppler fetch uses it
     steps:
       - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
         with:
@@ -359,13 +359,16 @@ jobs:
           inject-env-vars: true
       # ---------------------------------------------------------------------
 
+      # Codecov verifies this job's GitHub OIDC token, so a public repository
+      # needs no Codecov token at all and nothing from Doppler reaches this
+      # step. The Doppler steps above stay so a caller's `ci` config is still
+      # exported here for anything else it may hold.
       - name: Upload coverage to Codecov
-        if: env.CODECOV_TOKEN != ''
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           files: ${{ inputs.coverage-file }}
           fail_ci_if_error: false
-          token: ${{ env.CODECOV_TOKEN }}
+          use_oidc: true
 
   smoke:
     name: Smoke test
