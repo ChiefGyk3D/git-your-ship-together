@@ -255,7 +255,8 @@ Checked: `risk-exceptions`.
 
 ## Adding a repository
 
-Add it to `baseline/repos.txt`, call the shared workflows as the README
-shows, one CI job per language the repository contains, require every one
-of their gates, and run the audit until it is clean. A repository that is not in the
+`scripts/new-repo.sh OWNER/NAME` does all of it: the caller files with one
+CI job per language, the pull request, every setting above, the line in
+`baseline/repos.txt`. The Doppler identity is the one step it prints for a
+person. Then run the audit until it is clean. A repository that is not in the
 list is not covered by the baseline.

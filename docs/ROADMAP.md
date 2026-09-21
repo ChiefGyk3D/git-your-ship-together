@@ -23,6 +23,7 @@ Status as of 2026-09-21.
 | Dependabot patch and minor bumps merge themselves once the gate is green | `dependabot-auto-merge.yml`, `auto-merge-enabled` check |
 | GitHub Releases with notes for every tag of this repository | the Releases page |
 | Scan and test tools out of Boon-Tube-Daemon's runtime requirements, which took nltk out of the image and closed the only risk-register entry | `Boon-Tube-Daemon` deps PR, register now empty |
+| `scripts/new-repo.sh` (item 6): adopts a repository from what it holds, or starts one; `--dry-run` for the tests, which run it over three synthetic trees and a real one was read before writing it | `scripts/new-repo.sh`, `tests/test_new_repo.py` |
 | The composition rule (item 2): one caller job per language, and the audit derives the required `<job> / CI green` set from the caller's workflow files and fails on any gate missing | `scripts/audit_baseline.py`, `BASELINE.md` §2 |
 | `security.yml` with neutral defaults (item 4): the dependency audit takes an `audit-command` for any ecosystem beside its pip-audit default, and CodeQL's default languages include `actions` | `security.yml`, `security-self.yml` runs both audit paths |
 | `container-release.yml` (item 7): the release workflow under its honest name; `python-docker-release.yml` stays as a thin caller forwarding every input through a `./` reference, held identical by a test | `.github/workflows/container-release.yml`, `python-docker-release.yml` |
@@ -145,19 +146,14 @@ each should say how.
 5. **`python-package-release.yml`.** Done; see the table above. The four
    hand-written copies (typo-sniper, hypeman, hammunition-hill,
    mother-ticker) are retired as item 6 adopts each repository.
-6. **A bootstrap that adopts a repository.** `scripts/new-repo.sh
-   <owner/name> [language...]` reads the repository as it is: which
-   languages it holds, what its existing workflows run, whether it has a
-   Dockerfile. It writes the caller workflows and `dependabot.yml` from
-   templates for those languages, carrying the commands it found, commits
-   them on a branch and pushes over SSH, applies every BASELINE setting
-   through the API, and appends to `baseline/repos.txt`, leaving `python
-   scripts/audit_baseline.py` to confirm. The Doppler service account and
-   identity are created in the dashboard, so the script prints those two
-   steps and waits for the UUID; automating them would need a workplace-admin
-   Doppler token, which the script should not hold by default. mother-ticker
-   is the first repository it adopts, because it exercises three languages
-   at once. A blank repository is the same script with nothing to read.
+6. **A bootstrap that adopts a repository.** Done; see the table above.
+   It reads the tree rather than the old workflows' YAML: tool configuration
+   and lock files say what to run more reliably than a hand-written job
+   does, and a PyPI publish step in an old workflow is the one thing read
+   from them, because it proves a Trusted Publisher exists. A shell test
+   runner is written into the file as a comment naming what was seen, never
+   guessed. mother-ticker's dry run was read before this was written; its
+   adoption, and the others', is the next step, one pull request each.
 7. **`container-release.yml`.** Done; see the table above. The thin caller
    forwards `DOPPLER_TOKEN` by name, because secrets do not cascade, and the
    fixture reaches `container-release.yml` through it, so the nested `./`
