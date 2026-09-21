@@ -48,15 +48,17 @@ JSON
 
 ## 3. Secrets never live in GitHub
 
-**Doppler is the only store.** CI reads one `ci` config per project, holding
+**Doppler is the only store.** CI reads the `ci` config of the `ci` project,
+shared by every repository and separate from every runtime project. It holds
 only the names the pipelines use (`DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN`,
 `SNYK_TOKEN`, optionally `GITLEAKS_LICENSE`; Codecov authenticates with the
-job's own OIDC token and stores nothing) and never a
-runtime credential. Every value in that config is exported into the job, so a
-runtime token placed there would be a CI secret.
+job's own OIDC token and stores nothing) and never a runtime credential.
+Every value in that config is exported into every CI job, so a runtime token
+placed there would be a CI secret in every repository.
 
 **The identity is scoped.** One Doppler Service Account per repository, Viewer
-on that project's `ci` config and nothing else; one OIDC identity on it. The
+on the `ci` project's `ci` environment and nothing else; one OIDC identity on
+it, so Doppler's log says which repository fetched. The
 identity's subject must not match a pull request's token (`repo:OWNER/REPO:pull_request`).
 Use `repo:OWNER/REPO:ref:refs/heads/main` (and the tag form,
 `repo:OWNER/REPO:ref:refs/tags/*`, where Doppler accepts more than one subject

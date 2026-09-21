@@ -315,13 +315,14 @@ Everything a repository must meet beyond these workflows - who can push,
 branch protection, Actions settings, scanning - is in [BASELINE.md](BASELINE.md),
 with `scripts/audit_baseline.py` to check every repository against it.
 
-### One-time, per repository
+### Once, for the workplace
 
 Service Account Identities need a Doppler workplace on the Team or Enterprise
-plan. On a Developer plan, use path 2 and skip step 3.
+plan. On a Developer plan, use path 2 and skip the identity step below.
 
-1. **Config.** In the project the daemon already uses at runtime (or a new
-   `ci` project), add an environment `ci` with config `ci`. Put in it only what
+1. **Config.** One Doppler project, `ci`, with an environment `ci` and config
+   `ci`, separate from every runtime project. Every caller reads that one
+   config (`doppler-project: ci`, `doppler-config: ci`). Put in it only what
    the pipelines read:
 
    | Name | Used by |
@@ -330,31 +331,40 @@ plan. On a Developer plan, use path 2 and skip step 3.
    | `SNYK_TOKEN` | security, when `snyk: true` |
    | `GITLEAKS_LICENSE` | security, organisation accounts only |
 
-   Every value in the config is exported into the job's environment (masked),
-   which is why the runtime secrets do not belong here. Codecov is not in the
+   Every value in the config is exported into every CI job's environment
+   (masked), which is why the runtime secrets do not belong here, and why
+   the runtime projects hold no CI credential. Codecov is not in the
    table: the upload authenticates with the coverage job's own GitHub OIDC
    token (`use_oidc: true`), so nothing is stored for it. Enable the
    repository at https://app.codecov.io under the Codecov GitHub App and set
    `codecov: true`.
 
-   None of these providers issues a per-repository credential, so each value
-   is typed once and fanned out. `scripts/doppler-ci-set.sh` prompts for one
-   value with echo off and sets it in the `ci` config of every project named:
+   None of these providers issues a per-repository credential, which is why
+   one config serves every repository. `scripts/doppler-ci-set.sh` prompts
+   for one value with echo off and sets it there:
 
    ```sh
-   scripts/doppler-ci-set.sh SNYK_TOKEN stream-daemon boon-tube-daemon solarstorm-scout
-   scripts/doppler-ci-set.sh DOCKERHUB_USERNAME stream-daemon star-daemon
-   scripts/doppler-ci-set.sh DOCKERHUB_TOKEN stream-daemon star-daemon
+   scripts/doppler-ci-set.sh SNYK_TOKEN
+   scripts/doppler-ci-set.sh DOCKERHUB_USERNAME
+   scripts/doppler-ci-set.sh DOCKERHUB_TOKEN
    ```
 
    Snyk: the personal API token from Account settings (service accounts are
    Enterprise only). Docker Hub: a personal access token with `repo:write`;
    tokens are account-wide, not per repository. Rotation is the same command
-   again.
+   again, once.
+
+   The trade is stated plainly: every CI job of every repository holds every
+   CI credential while it runs, including a Docker Hub token in a repository
+   that never publishes there. The credentials are account-wide at their
+   providers, so one copy is one place to rotate; who fetched is still in
+   Doppler's log per repository, through the identities below.
+
+### Per repository
 
 2. **Service Account.** Workplace → Team → Service Accounts → create one per
-   repository (e.g. `gha-typo-sniper`), grant it *Viewer* on that project's
-   `ci` config and nothing else.
+   repository (e.g. `gha-typo-sniper`), grant it *Viewer* on the `ci`
+   project's `ci` environment and nothing else.
 
 3. **Identity.** On the service account, add an Identity of type OIDC:
    - Issuer: `https://token.actions.githubusercontent.com`

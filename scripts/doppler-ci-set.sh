@@ -1,19 +1,24 @@
 #!/usr/bin/env bash
-# Put one CI credential into the `ci` config of several Doppler projects.
-# The value is typed once with echo off; it never appears on a command line,
-# in shell history, or in this script's output.
+# Put one CI credential into the shared `ci` config. The value is typed once
+# with echo off; it never appears on a command line, in shell history, or in
+# this script's output.
 #
-#   scripts/doppler-ci-set.sh SNYK_TOKEN stream-daemon boon-tube-daemon
+#   scripts/doppler-ci-set.sh SNYK_TOKEN
 #
-# Set DOPPLER_CI_CONFIG to target a config other than `ci`.
+# Extra arguments name other projects to set the same value in (the default
+# is the `ci` project alone). Set DOPPLER_CI_CONFIG to target a config other
+# than `ci`.
 set -euo pipefail
 
-if [ $# -lt 2 ]; then
-  echo "usage: $0 NAME PROJECT [PROJECT...]" >&2
+if [ $# -lt 1 ]; then
+  echo "usage: $0 NAME [PROJECT...]" >&2
   exit 2
 fi
 name=$1
 shift
+if [ $# -eq 0 ]; then
+  set -- ci
+fi
 case $name in
   [A-Z_][A-Z0-9_]*) ;;
   *) echo "not a secret name: $name" >&2; exit 2 ;;
