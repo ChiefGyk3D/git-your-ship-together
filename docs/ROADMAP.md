@@ -52,8 +52,9 @@ Status as of 2026-09-21.
    Then `trivy-exit-code: "1"` once the images are clean.
 8. **`disable-sudo: true` in harden-runner** on jobs that never need it, which
    is most of them. One input per job in the shared workflows.
-9. **harden-runner `block` mode for `security.yml`** once the Snyk hosts are
-   measured (one audit-mode run with the token in).
+9. **harden-runner `block` mode for `security.yml`.** In the default list
+   from v1.2.1 with Snyk's documented hosts; callers switch with
+   `egress-policy: block` on security.yml as they did for CI and release.
 10. **Signed commits and tags.** The laptop signs with its SSH key now
     (`gpg.format ssh`, commits and tags), the key is registered on GitHub as
     a signing key, and v1.2.0 and the commits since verify as valid. What is
