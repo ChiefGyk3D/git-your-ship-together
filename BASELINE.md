@@ -27,10 +27,18 @@ Checked: `collaborators` lists nobody but the owner with push permission.
 
 ## 2. The default branch, and the tags
 
-**Protected, with one required check.** A pull request is required, stale
-approvals are dismissed on new pushes, force pushes and deletion are off, and
-the required status check is `ci / CI green`. That job needs every other job in
-`python-ci.yml`, so a job added later is covered without editing the rule.
+**Protected, with one required check per language.** A pull request is
+required, stale approvals are dismissed on new pushes, force pushes and
+deletion are off, and the required status checks are the `CI green` gates of
+every shared CI workflow the repository calls: `ci / CI green` for a job
+named `ci` that uses `python-ci.yml`, `shell / CI green` for a job named
+`shell` that uses `bash-ci.yml`, and so on, one caller job per language. Each
+gate needs every other job in its workflow, so a job added later is covered
+without editing the rule. The audit reads the caller's workflow files, derives
+the set from every job whose `uses:` names a shared `*-ci.yml`, and fails on
+any gate branch protection does not require. A repository that calls no
+shared CI workflow is held to `ci / CI green`, so the expected name is still
+stated.
 
 **No approval count.** GitHub does not let an author approve their own pull
 request, and these repositories have one person with write access, so a count
@@ -247,6 +255,7 @@ Checked: `risk-exceptions`.
 
 ## Adding a repository
 
-Add it to `baseline/repos.txt`, call the three shared workflows as the README
-shows, and run the audit until it is clean. A repository that is not in the
+Add it to `baseline/repos.txt`, call the shared workflows as the README
+shows, one CI job per language the repository contains, require every one
+of their gates, and run the audit until it is clean. A repository that is not in the
 list is not covered by the baseline.

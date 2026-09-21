@@ -186,7 +186,10 @@ jobs:
 
 Point branch protection at the **CI green** job (`ci / CI green` as a caller
 reports it). It needs every other job and fails if any of them failed, so a
-job added here can never merge unchecked.
+job added here can never merge unchecked. A repository with more than one
+language calls one shared CI workflow per language from one job each, and
+requires each job's gate: `ci / CI green` and `shell / CI green`, say. The
+audit derives that set from the caller's workflow files.
 
 The `test` job runs the caller's own code and holds no OIDC token. Coverage is
 uploaded to Codecov by a separate `coverage` job that downloads the report
@@ -582,8 +585,10 @@ command for each, and `python scripts/audit_baseline.py` reports every
 repository in `baseline/repos.txt` against it. In short, for each calling
 repository, once its first run is green:
 
-1. **Branch protection on the default branch**: require the `ci / CI green`
-   status check, require a pull request with an approval count of zero, and
+1. **Branch protection on the default branch**: require the `CI green` gate
+   of every shared CI workflow the repository calls (`ci / CI green`, plus
+   `shell / CI green` where a `shell:` job calls `bash-ci.yml`, and so on),
+   require a pull request with an approval count of zero, and
    dismiss stale approvals on new pushes. A count of one on a single-maintainer
    repository never produces a review, because GitHub does not let an author
    approve their own pull request; it only blocks the merge until the owner
@@ -742,9 +747,9 @@ workflow therefore runs against a real project here before any caller pins
 it, and `CI green` needs those runs. `fixture/README.md` says how to
 regenerate its hash-pinned `requirements.txt`.
 
-Adding a repository: add it to `baseline/repos.txt`, call the three workflows
-as shown above, set the settings in BASELINE.md, and run the audit until it
-is clean. A repository not in the list is not covered.
+Adding a repository: add it to `baseline/repos.txt`, call the workflows as
+shown above with one CI job per language, set the settings in BASELINE.md,
+and run the audit until it is clean. A repository not in the list is not covered.
 
 ## Licence
 
