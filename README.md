@@ -13,8 +13,17 @@ only what is specific to that project. Secrets live in Doppler, fetched over
 OIDC; there is not one GitHub Actions secret in any of the ten repositories.
 
 It is also written to be read. If you want to see what a hardened CI setup
-for a small Python shop looks like end to end, with the reasoning and the
-mistakes left in, start below.
+looks like end to end, with the reasoning and the mistakes left in, start
+below.
+
+The Python workflows are what exists today because that is what these nine
+projects are. Most of the repository is not language-specific: the baseline
+and its audit, the Doppler design, the auto-merge workflow, the pinning,
+permission and egress rules and the tests that enforce them apply to any
+repository. The container release builds whatever the Dockerfile builds.
+[docs/ROADMAP.md](docs/ROADMAP.md) has the plan for the rest, one CI workflow
+per language behind the same `CI green` gate, so branch protection is one
+rule everywhere.
 
 ## Start here
 
@@ -606,7 +615,7 @@ repository, once its first run is green:
 
 Signed commits are not required yet. The laptop signs with a registered SSH
 key and its commits and tags verify; the rule goes on when every place that
-commits is signing (roadmap item 5).
+commits is signing (roadmap item 10).
 
 ## Releasing a version of this repository
 

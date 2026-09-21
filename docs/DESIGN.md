@@ -215,7 +215,7 @@ would only block them. It goes on when they sign too. BASELINE.md carries the
 same item with the reasoning, and it is the place that changes when it is
 adopted. Trivy reports rather than gates, until the images are clean enough
 that a finding is news; and the audit runs from a laptop, not on a schedule,
-which is roadmap item 6.
+which is roadmap item 11.
 
 ## Using this for your own repositories
 
