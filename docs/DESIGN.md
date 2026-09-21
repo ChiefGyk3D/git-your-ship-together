@@ -108,14 +108,18 @@ already had a home with an audit log.
 
 The CI design keeps the runtime and CI worlds apart on purpose:
 
-- Each project gets a `ci` environment with a `ci` config that holds only what
-  the pipelines read: Docker Hub credentials where an image is published there,
-  a Snyk token where Snyk is on, and nothing else. Every value in that config
-  is exported into the job, so a runtime token placed there would become a CI
-  secret. That is the reason it is a separate config and not `prd`.
+- One Doppler project, `ci`, with one config, `ci`, holds every credential
+  the pipelines read: the Docker Hub username and token, the Snyk token, and
+  nothing else. Every value in that config is exported into every CI job, so
+  a runtime token placed there would become a CI secret in nine repositories.
+  That is the reason it is its own project and not a config beside `prd`.
+  The credentials are account-wide at their providers anyway, so one copy is
+  one place to rotate, at the cost that a repository which never publishes
+  to Docker Hub still holds the Docker Hub token while its jobs run.
 - Each repository gets its own Doppler Service Account, Viewer on that one
-  `ci` config and nothing else, with an empty workplace role. A token minted
-  for it can read one config and cannot list, write or see any other project.
+  config and nothing else, with an empty workplace role. A token minted for
+  it can read that config and cannot list, write or see any other project,
+  and Doppler's log names which repository fetched.
 - Each Service Account carries one OIDC identity. GitHub mints a JWT for the
   job, the job posts it to Doppler, and Doppler returns a short-lived token for
   that Service Account. The identity checks the token's issuer, its audience
@@ -154,7 +158,7 @@ token was one more thing to store for no reason, and it is gone.
 | OpenSSF Scorecard | An outside opinion of the repository's practices | Runs on the default branch only, publishes with the job's OIDC identity. |
 | Trivy | Image vulnerability scan before push | Scans the locally built image for CRITICAL and HIGH findings and uploads them to the Security tab. By default findings are reported, not blocking; a caller sets `trivy-exit-code: 1` to make them fail the release. |
 | docker buildx and QEMU | Multi-arch image build | The daemons run on both amd64 and arm64 hosts. |
-| GHCR, and Docker Hub | Registries | GHCR authenticates with the job's own `GITHUB_TOKEN`, so it needs nothing stored. Docker Hub is kept only for the projects that already publish there and is the reason those `ci` configs hold a credential at all. |
+| GHCR, and Docker Hub | Registries | GHCR authenticates with the job's own `GITHUB_TOKEN`, so it needs nothing stored. Docker Hub is kept only for the projects that already publish there and is the reason the `ci` config holds a registry credential at all. |
 | cosign (sigstore) | Image signature, keyless | The signature is bound to the job's OIDC identity and logged in Rekor. No signing key to store, lose or rotate. |
 | syft | SBOM | Generated from the built image and attached as a cosign attestation, so the SBOM is bound to the same identity as the signature. |
 | GitHub attestations | SLSA build provenance | GitHub's own record of which workflow, at which commit, produced the image. |
