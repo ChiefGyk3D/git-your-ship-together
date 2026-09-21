@@ -208,6 +208,35 @@ def check_fork_pr_approval(repo: str, fetch: Fetcher) -> Result:
     return Result(repo, "fork-pr-approval", FAIL, f"approval_policy is {policy!r}, want 'all_external_contributors'")
 
 
+def check_actions_allowlist(repo: str, fetch: Fetcher) -> Result:
+    """Only GitHub-owned actions and a named list of third-party ones may run.
+
+    A pull request that adds an action outside the list fails at workflow
+    start, whatever its pin says. Marketplace "verified creator" is not a
+    list, so it stays off.
+    """
+    code, body = fetch(f"/repos/{repo}/actions/permissions")
+    if code != 200 or not isinstance(body, dict):
+        return Result(repo, "actions-allowlist", UNKNOWN, unreadable(code, body))
+    allowed = body.get("allowed_actions")
+    if allowed != "selected":
+        return Result(repo, "actions-allowlist", FAIL, f"allowed_actions is {allowed!r}, want 'selected'")
+    code, body = fetch(f"/repos/{repo}/actions/permissions/selected-actions")
+    if code != 200 or not isinstance(body, dict):
+        return Result(repo, "actions-allowlist", UNKNOWN, unreadable(code, body))
+    patterns = body.get("patterns_allowed") or []
+    problems = []
+    if body.get("github_owned_allowed") is not True:
+        problems.append("GitHub-owned actions are not allowed")
+    if body.get("verified_allowed") is not False:
+        problems.append("Marketplace verified creators are allowed wholesale")
+    if not patterns:
+        problems.append("no third-party pattern is listed")
+    if problems:
+        return Result(repo, "actions-allowlist", FAIL, "; ".join(problems))
+    return Result(repo, "actions-allowlist", PASS, f"GitHub-owned plus {len(patterns)} named third-party pattern(s)")
+
+
 def workflow_findings(name: str, text: str) -> list[str]:
     """What BASELINE.md forbids in a caller's workflow file."""
     findings = []
@@ -312,6 +341,7 @@ def audit_repo(repo: str, fetch: Fetcher) -> list[Result]:
     results.append(check_private_vulnerability_reporting(repo, fetch))
     results.append(check_workflow_token(repo, fetch))
     results.append(check_fork_pr_approval(repo, fetch))
+    results.append(check_actions_allowlist(repo, fetch))
     workflow_results, reads_doppler = check_workflows(repo, fetch)
     results += workflow_results
     results.append(check_dependabot(repo, fetch))

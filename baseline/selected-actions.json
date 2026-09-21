@@ -1,0 +1,27 @@
+{
+  "github_owned_allowed": true,
+  "verified_allowed": false,
+  "patterns_allowed": [
+    "ChiefGyk3D/*",
+    "step-security/harden-runner@*",
+    "dopplerhq/secrets-fetch-action@*",
+    "docker/build-push-action@*",
+    "docker/setup-buildx-action@*",
+    "docker/setup-qemu-action@*",
+    "docker/login-action@*",
+    "docker/metadata-action@*",
+    "codecov/codecov-action@*",
+    "zizmorcore/zizmor-action@*",
+    "raven-actions/actionlint@*",
+    "gitleaks/gitleaks-action@*",
+    "ossf/scorecard-action@*",
+    "snyk/actions@*",
+    "aquasecurity/trivy-action@*",
+    "anchore/sbom-action@*",
+    "sigstore/cosign-installer@*",
+    "pypa/gh-action-pypi-publish@*",
+    "snyk/actions/setup@*",
+    "github/codeql-action@*",
+    "github/codeql-action/*"
+  ]
+}

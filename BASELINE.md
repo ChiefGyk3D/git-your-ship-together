@@ -118,7 +118,21 @@ first-time contributor's (Settings → Actions → General → Fork pull request
 workflows). A fork's run holds no secret either way; this keeps a stranger's
 code from consuming runner minutes or probing the workflows unattended.
 
-Checked: `workflow-token-read-only`, `fork-pr-approval`.
+**Only GitHub-owned actions and a named list of third-party ones may run**
+(Settings → Actions → General → Actions permissions → "Allow OWNER, and
+select non-OWNER, actions and reusable workflows"). The pins in the workflow
+files say which commit of an action runs; this setting says which actions may
+run at all, so a pull request that adds one outside the list fails at workflow
+start whatever its pin says. Marketplace "verified creator" is not a list and
+stays off. An action used from a subdirectory of its repository (Snyk's
+`snyk/actions/setup`, CodeQL's `github/codeql-action/init`) needs the
+subdirectory form of the pattern as well as the repository form; the
+repository form alone left a security run in `startup_failure` with no
+annotation to say why.
+
+Checked: `workflow-token-read-only`, `fork-pr-approval`, `actions-allowlist`
+(allowed_actions is `selected`, GitHub-owned on, verified creators off, at
+least one pattern).
 
 Set with:
 
@@ -127,7 +141,15 @@ gh api -X PUT repos/OWNER/REPO/actions/permissions/workflow \
   -f default_workflow_permissions=read -F can_approve_pull_request_reviews=false
 gh api -X PUT repos/OWNER/REPO/actions/permissions/fork-pr-contributor-approval \
   -f approval_policy=all_external_contributors
+gh api -X PUT repos/OWNER/REPO/actions/permissions -F enabled=true -f allowed_actions=selected
+gh api -X PUT repos/OWNER/REPO/actions/permissions/selected-actions \
+  --input baseline/selected-actions.json
 ```
+
+`baseline/selected-actions.json` is the list: every third-party action the
+three shared workflows use, plus `OWNER/*` so the shared workflows themselves
+resolve. A new third-party action in this repository is a change to that file
+and a PUT to every calling repository, which is the point.
 
 ## 6. Scanning
 
@@ -157,9 +179,6 @@ gh api -X PUT repos/OWNER/REPO/automated-security-fixes
 - **harden-runner in `block` mode.** Each repository's allow-list has to be
   measured from a few audit-mode runs first; `egress-policy: block` and
   `allowed-endpoints` are the inputs when it is.
-- **A pinned allow-list of actions** in repository settings. Everything used is
-  already SHA-pinned, so the list would duplicate the pins for the cost of a
-  settings change on every new action.
 
 ## Adding a repository
 
