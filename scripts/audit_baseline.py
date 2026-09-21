@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import datetime as dt
 import json
 import os
 import re
@@ -40,6 +41,9 @@ REUSABLE_PREFIX = "ChiefGyk3D/git-your-ship-together/"
 SHA = re.compile(r"^[0-9a-f]{40}$")
 USES = re.compile(r"^\s*(?:-\s*)?uses:\s*(?P<action>[^@\s]+)@(?P<ref>\S+)(?P<rest>.*)$")
 VERSION_COMMENT = re.compile(r"^\s*#\s*v\d+\.\d+(\.\d+)?\s*$")
+IGNORE_VULN = re.compile(r"--ignore-vuln[\s=]+([A-Za-z0-9-]+)")
+ALLOW_GHSAS = re.compile(r"^\s*dependency-review-allow-ghsas:\s*(.+?)\s*$", re.M)
+REGISTER = Path(__file__).resolve().parent.parent / "baseline" / "risk-register.yaml"
 
 PASS, FAIL, UNKNOWN = "PASS", "FAIL", "UNKNOWN"
 
@@ -259,8 +263,8 @@ def workflow_findings(name: str, text: str) -> list[str]:
     return findings
 
 
-def check_workflows(repo: str, fetch: Fetcher) -> tuple[list[Result], bool]:
-    """The workflow checks, and whether any workflow reads DOPPLER_IDENTITY_ID.
+def check_workflows(repo: str, fetch: Fetcher) -> tuple[list[Result], bool, set[str]]:
+    """The workflow checks, whether any workflow reads DOPPLER_IDENTITY_ID, and the advisories ignored.
 
     The second value decides whether the identity variable is required: a
     repository whose workflows never pass `doppler-identity-id` (this shared
@@ -274,6 +278,7 @@ def check_workflows(repo: str, fetch: Fetcher) -> tuple[list[Result], bool]:
     findings: list[str] = []
     callers = 0
     reads_doppler = False
+    exceptions: set[str] = set()
     for entry in listing:
         name = entry.get("name", "")
         if not name.endswith((".yml", ".yaml")):
@@ -286,6 +291,7 @@ def check_workflows(repo: str, fetch: Fetcher) -> tuple[list[Result], bool]:
             callers += 1
         if "DOPPLER_IDENTITY_ID" in text:
             reads_doppler = True
+        exceptions |= exceptions_in(text)
         findings.extend(workflow_findings(name, text))
     results = []
     if findings:
@@ -300,7 +306,63 @@ def check_workflows(repo: str, fetch: Fetcher) -> tuple[list[Result], bool]:
         results.append(Result(repo, "uses-shared-workflows", PASS, "this is the shared repository"))
     else:
         results.append(Result(repo, "uses-shared-workflows", FAIL, "no workflow calls git-your-ship-together"))
-    return results, reads_doppler
+    return results, reads_doppler, exceptions
+
+
+def exceptions_in(text: str) -> set[str]:
+    """Every advisory ID a workflow tells a scanner to ignore.
+
+    Two shapes: `--ignore-vuln ID` inside pip-audit-extra-args, and the
+    comma-separated `dependency-review-allow-ghsas:` input. Comment lines are
+    skipped so that a reason written beside the line is not read as a second
+    exception.
+    """
+    live = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
+    found = set(IGNORE_VULN.findall(live))
+    for match in ALLOW_GHSAS.finditer(live):
+        value = match.group(1).strip().strip("'\"")
+        found |= {part.strip() for part in value.split(",") if part.strip()}
+    return found
+
+
+def load_register(path: Path = REGISTER) -> list[dict]:
+    """The risk register's entries. PyYAML is a dev dependency; say so if it is missing."""
+    try:
+        import yaml
+    except ImportError:
+        sys.exit("reading the risk register needs PyYAML: pip install -r requirements-dev.txt")
+    data = yaml.safe_load(path.read_text()) or {}
+    return list(data.get("entries") or [])
+
+
+def check_risk_exceptions(
+    repo: str, exceptions: set[str], register: list[dict], today: dt.date | None = None
+) -> Result:
+    """Every advisory a repository ignores is in the register, for that repository, and not expired."""
+    today = today or dt.date.today()
+    if not exceptions:
+        return Result(repo, "risk-exceptions", PASS, "no advisory is ignored")
+    problems = []
+    for advisory in sorted(exceptions):
+        entries = [
+            e for e in register if advisory in {e.get("id"), *(e.get("aliases") or [])}
+        ]
+        if not entries:
+            problems.append(f"{advisory} is ignored but not in baseline/risk-register.yaml")
+            continue
+        entry = entries[0]
+        repos = [str(r).lower() for r in (entry.get("repos") or [])]
+        if repo.lower() not in repos:
+            problems.append(f"{advisory} is registered, but not for {repo}")
+            continue
+        review_by = entry.get("review_by")
+        if not isinstance(review_by, dt.date):
+            problems.append(f"{advisory}: review_by is not a date")
+        elif review_by < today:
+            problems.append(f"{advisory}: review_by {review_by} has passed; renew or remove the exception")
+    if problems:
+        return Result(repo, "risk-exceptions", FAIL, "; ".join(problems))
+    return Result(repo, "risk-exceptions", PASS, f"{len(exceptions)} registered exception(s), none expired")
 
 
 def check_dependabot(repo: str, fetch: Fetcher) -> Result:
@@ -329,7 +391,7 @@ def check_doppler_variable(repo: str, fetch: Fetcher, reads_doppler: bool) -> Re
     return Result(repo, "doppler-identity", FAIL, "DOPPLER_IDENTITY_ID is set but is not a UUID")
 
 
-def audit_repo(repo: str, fetch: Fetcher) -> list[Result]:
+def audit_repo(repo: str, fetch: Fetcher, register: list[dict] | None = None) -> list[Result]:
     owner = repo.split("/", 1)[0]
     code, body = fetch(f"/repos/{repo}")
     if code != 200 or not isinstance(body, dict):
@@ -342,8 +404,9 @@ def audit_repo(repo: str, fetch: Fetcher) -> list[Result]:
     results.append(check_workflow_token(repo, fetch))
     results.append(check_fork_pr_approval(repo, fetch))
     results.append(check_actions_allowlist(repo, fetch))
-    workflow_results, reads_doppler = check_workflows(repo, fetch)
+    workflow_results, reads_doppler, exceptions = check_workflows(repo, fetch)
     results += workflow_results
+    results.append(check_risk_exceptions(repo, exceptions, register if register is not None else load_register()))
     results.append(check_dependabot(repo, fetch))
     results.append(check_doppler_variable(repo, fetch, reads_doppler))
     return results
@@ -389,9 +452,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     repos = args.repos or read_repo_list(Path(args.list))
     fetch = github_fetcher(find_token())
+    register = load_register()
     results: list[Result] = []
     for repo in repos:
-        results.extend(audit_repo(repo, fetch))
+        results.extend(audit_repo(repo, fetch, register))
     print(render(results))
     fails = sum(r.status == FAIL for r in results)
     unknowns = sum(r.status == UNKNOWN for r in results)
