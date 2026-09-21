@@ -1,0 +1,373 @@
+# Reusable CI for shell scripts: shellcheck, shfmt, an optional test command,
+# an optional configuration lint (yamllint, ansible-lint, whatever the
+# repository keeps beside its scripts), and a lint of the caller's own
+# workflow files.
+#
+# Call it from a repository with:
+#
+#   jobs:
+#     shell:
+#       uses: ChiefGyk3D/git-your-ship-together/.github/workflows/bash-ci.yml@<sha> # vX.Y.Z
+#       permissions:
+#         contents: read
+#       with:
+#         test-command: ./tests/run.sh
+#
+# A repository that is only shell names the job `ci`; a repository that also
+# calls `python-ci.yml` from `ci:` names this one `shell:`, and branch
+# protection requires both gates (BASELINE.md §2). The `ci-green` job at the
+# end is the one to name: it fails when any job it needs failed, so a job
+# added here can never merge unchecked.
+#
+# The scripts are found, not listed: every tracked file under `paths` whose
+# name ends in .sh or .bash, or whose first line is a sh or bash shebang.
+# shellcheck and shfmt are downloaded at a pinned version and checked against
+# a pinned SHA-256, so what lints today is what lints next year and no
+# third-party action has to join the allow-list for it.
+#
+# Commands a caller supplies (`test-command`, ...) reach the shell through an
+# environment variable, never by template expansion into the script, so a
+# value can only ever be data. Nothing here fetches a secret: no job holds a
+# token beyond the read-only default.
+
+name: Bash CI (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      paths:
+        description: Space-separated git pathspecs to search for scripts; `:!dir` excludes one.
+        type: string
+        default: "."
+      shellcheck-version:
+        description: shellcheck release to download (koalaman/shellcheck), without the `v`.
+        type: string
+        default: "0.11.0"
+      shellcheck-sha256:
+        description: SHA-256 of the shellcheck linux.x86_64 tarball for that version.
+        type: string
+        default: "8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198"
+      shellcheck-severity:
+        description: Lowest severity that fails the job - `error`, `warning`, `info` or `style`.
+        type: string
+        default: warning
+      shellcheck-args:
+        description: Extra shellcheck arguments, e.g. `-x` to follow sourced files or `-e SC2034`.
+        type: string
+        default: "-x"
+      shellcheck-continue-on-error:
+        description: Report shellcheck findings without failing the job. A migration aid, not a resting state.
+        type: boolean
+        default: false
+      shfmt:
+        description: Run shfmt and fail on a formatting diff.
+        type: boolean
+        default: true
+      shfmt-version:
+        description: shfmt release to download (mvdan/sh), without the `v`.
+        type: string
+        default: "3.14.1"
+      shfmt-sha256:
+        description: SHA-256 of the shfmt linux_amd64 binary for that version.
+        type: string
+        default: "76e77641faa025814b77f153b29796b8e6fa2fca03e0c76a691608b86c7ea7bf"
+      shfmt-args:
+        description: shfmt style arguments. The default is what most of the calling repositories already write; Skid-Finder and Hammunition pass `-i 2 -ci`.
+        type: string
+        default: "-i 4 -ci"
+      shfmt-continue-on-error:
+        description: Report a formatting diff without failing the job. A migration aid, not a resting state.
+        type: boolean
+        default: false
+      test-install-command:
+        description: Shell run before the tests, e.g. `sudo apt-get install -y bats`; empty installs nothing.
+        type: string
+        default: ""
+      test-command:
+        description: The shell test suite, e.g. `bats tests/` or `./tests/run.sh`; empty skips the job.
+        type: string
+        default: ""
+      config-lint-install-command:
+        description: Installs the configuration linters for `config-lint-command`, with Python available.
+        type: string
+        default: "pip install yamllint"
+      config-lint-command:
+        description: Lints the configuration kept beside the scripts, e.g. `yamllint .` or `ansible-lint`; empty skips the job.
+        type: string
+        default: ""
+      config-lint-python-version:
+        description: Python for the configuration lint job.
+        type: string
+        default: "3.13"
+      workflow-lint:
+        description: Run actionlint and zizmor over the caller's own workflow files. Turn off on one caller job when another already runs it.
+        type: boolean
+        default: true
+      zizmor-persona:
+        description: zizmor strictness - `regular`, `pedantic` or `auditor`.
+        type: string
+        default: regular
+      egress-policy:
+        description: harden-runner egress policy for every job - `audit` logs outbound connections, `block` allows only `allowed-endpoints`.
+        type: string
+        default: audit
+      allowed-endpoints:
+        description: harden-runner allow-list for `block`, space-separated host:port entries. The default is every endpoint this workflow's jobs reach; the runner's own infrastructure needs no entry. Wildcards are not supported and a newline-separated list matches nothing.
+        type: string
+        default: "api.github.com:443 files.pythonhosted.org:443 github.com:443 objects.githubusercontent.com:443 pypi.org:443 release-assets.githubusercontent.com:443"
+      extra-allowed-endpoints:
+        description: Appended to `allowed-endpoints`, for hosts only this repository reaches, such as an apt repository its test install needs. Same format.
+        type: string
+        default: ""
+      timeout-minutes:
+        description: Per-job timeout.
+        type: number
+        default: 15
+
+permissions:
+  contents: read
+
+jobs:
+  shellcheck:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: ${{ inputs.egress-policy }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          # The agent may only stop reporting to StepSecurity in block mode.
+          disable-telemetry: ${{ inputs.egress-policy == 'block' }}
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install shellcheck at the pinned version
+        env:
+          VERSION: ${{ inputs.shellcheck-version }}
+          SHA256: ${{ inputs.shellcheck-sha256 }}
+        run: |
+          set -euo pipefail
+          url="https://github.com/koalaman/shellcheck/releases/download/v${VERSION}/shellcheck-v${VERSION}.linux.x86_64.tar.xz"
+          curl -sSfL -o /tmp/shellcheck.tar.xz "$url"
+          echo "${SHA256}  /tmp/shellcheck.tar.xz" | sha256sum -c -
+          tar -xJf /tmp/shellcheck.tar.xz -C /tmp "shellcheck-v${VERSION}/shellcheck"
+          install -m 0755 "/tmp/shellcheck-v${VERSION}/shellcheck" /usr/local/bin/shellcheck
+          shellcheck --version
+
+      - name: Find the scripts
+        id: find
+        env:
+          PATHS: ${{ inputs.paths }}
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2086  # PATHS is a list of pathspecs on purpose
+          git ls-files -z -- $PATHS \
+            | while IFS= read -r -d '' f; do
+                case "$f" in *.sh | *.bash) echo "$f"; continue ;; esac
+                if [ -f "$f" ] && head -c 200 "$f" | head -n 1 | grep -Eq '^#!.*\b(ba)?sh\b'; then echo "$f"; fi
+              done | sort -u > /tmp/scripts.txt
+          count=$(wc -l < /tmp/scripts.txt)
+          echo "$count script(s):"; cat /tmp/scripts.txt
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+
+      - name: shellcheck
+        if: steps.find.outputs.count != '0'
+        continue-on-error: ${{ inputs.shellcheck-continue-on-error }}
+        env:
+          SEVERITY: ${{ inputs.shellcheck-severity }}
+          ARGS: ${{ inputs.shellcheck-args }}
+        run: |
+          set -euo pipefail
+          read -r -a args <<< "$ARGS"
+          mapfile -t files < /tmp/scripts.txt
+          shellcheck --severity "$SEVERITY" --format gcc "${args[@]}" "${files[@]}"
+
+  shfmt:
+    name: shfmt
+    if: inputs.shfmt
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: ${{ inputs.egress-policy }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          # The agent may only stop reporting to StepSecurity in block mode.
+          disable-telemetry: ${{ inputs.egress-policy == 'block' }}
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install shfmt at the pinned version
+        env:
+          VERSION: ${{ inputs.shfmt-version }}
+          SHA256: ${{ inputs.shfmt-sha256 }}
+        run: |
+          set -euo pipefail
+          curl -sSfL -o /tmp/shfmt "https://github.com/mvdan/sh/releases/download/v${VERSION}/shfmt_v${VERSION}_linux_amd64"
+          echo "${SHA256}  /tmp/shfmt" | sha256sum -c -
+          install -m 0755 /tmp/shfmt /usr/local/bin/shfmt
+          shfmt --version
+
+      - name: Find the scripts
+        id: find
+        env:
+          PATHS: ${{ inputs.paths }}
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2086  # PATHS is a list of pathspecs on purpose
+          git ls-files -z -- $PATHS \
+            | while IFS= read -r -d '' f; do
+                case "$f" in *.sh | *.bash) echo "$f"; continue ;; esac
+                if [ -f "$f" ] && head -c 200 "$f" | head -n 1 | grep -Eq '^#!.*\b(ba)?sh\b'; then echo "$f"; fi
+              done | sort -u > /tmp/scripts.txt
+          count=$(wc -l < /tmp/scripts.txt)
+          echo "$count script(s):"; cat /tmp/scripts.txt
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+
+      - name: shfmt --diff
+        if: steps.find.outputs.count != '0'
+        continue-on-error: ${{ inputs.shfmt-continue-on-error }}
+        env:
+          ARGS: ${{ inputs.shfmt-args }}
+        run: |
+          set -euo pipefail
+          read -r -a args <<< "$ARGS"
+          mapfile -t files < /tmp/scripts.txt
+          shfmt "${args[@]}" -d "${files[@]}"
+
+  test:
+    name: Test
+    if: inputs.test-command != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read  # this job runs the caller's own code; it holds nothing else
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: ${{ inputs.egress-policy }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          # The agent may only stop reporting to StepSecurity in block mode.
+          disable-telemetry: ${{ inputs.egress-policy == 'block' }}
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install test dependencies
+        if: inputs.test-install-command != ''
+        env:
+          COMMAND: ${{ inputs.test-install-command }}
+        run: bash -eo pipefail -c "$COMMAND"
+
+      - name: Run tests
+        env:
+          COMMAND: ${{ inputs.test-command }}
+        run: bash -eo pipefail -c "$COMMAND"
+
+  config-lint:
+    name: Config lint
+    if: inputs.config-lint-command != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: ${{ inputs.egress-policy }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          # The agent may only stop reporting to StepSecurity in block mode.
+          disable-telemetry: ${{ inputs.egress-policy == 'block' }}
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ inputs.config-lint-python-version }}
+
+      - name: Install the configuration linters
+        env:
+          COMMAND: ${{ inputs.config-lint-install-command }}
+        run: bash -eo pipefail -c "$COMMAND"
+
+      - name: Lint the configuration
+        env:
+          COMMAND: ${{ inputs.config-lint-command }}
+        run: bash -eo pipefail -c "$COMMAND"
+
+  workflow-lint:
+    name: Workflow lint (actionlint, zizmor)
+    if: inputs.workflow-lint
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: ${{ inputs.egress-policy }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          # The agent may only stop reporting to StepSecurity in block mode.
+          disable-telemetry: ${{ inputs.egress-policy == 'block' }}
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: raven-actions/actionlint@3d39aea434753780c3b3d4a1a31c854b4dbf49d7 # v2.2.0
+        with:
+          version: 1.7.11
+          fail-on-error: true
+
+      - uses: zizmorcore/zizmor-action@cc914d7f3750a2d13d75c7f184a1060aa0e9d482 # v0.6.4
+        with:
+          version: 1.30.1
+          persona: ${{ inputs.zizmor-persona }}
+          # Findings go to the log and fail the job; the Security tab would
+          # need security-events: write from every caller for a lint.
+          advanced-security: false
+
+  # The one job branch protection should require. `always()` so it runs when
+  # a needed job was skipped; the shell then decides what counts as green.
+  ci-green:
+    name: CI green
+    if: always()
+    needs: [shellcheck, shfmt, test, config-lint, workflow-lint]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: ${{ inputs.egress-policy }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          # The agent may only stop reporting to StepSecurity in block mode.
+          disable-telemetry: ${{ inputs.egress-policy == 'block' }}
+
+      - name: Every job passed or was deliberately skipped
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          echo "$RESULTS"
+          bad=$(echo "$RESULTS" | python3 -c '
+          import json, sys
+          needs = json.load(sys.stdin)
+          print(" ".join(k for k, v in needs.items() if v["result"] not in ("success", "skipped")))
+          ')
+          if [ -n "$bad" ]; then
+            echo "::error::failed jobs: $bad"
+            exit 1
+          fi

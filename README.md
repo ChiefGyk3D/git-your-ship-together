@@ -48,11 +48,12 @@ Read in this order. Each one is short.
 
 ## What is in the repository
 
-Three reusable workflows and one composite action:
+Five reusable workflows and one composite action:
 
 | File | What it does |
 |---|---|
 | `.github/workflows/python-ci.yml` | Lint, workflow lint, test matrix, coverage upload, optional CLI smoke test, single-arch container build with a check, one `CI green` gate job |
+| `.github/workflows/bash-ci.yml` | shellcheck and shfmt over every tracked script, an optional test command, an optional configuration lint (yamllint, ansible-lint), workflow lint, the same `CI green` gate. Holds no token |
 | `.github/workflows/python-docker-release.yml` | Build, test, Trivy-scan, then publish multi-arch to GHCR (and Docker Hub), sign with cosign, attach a syft SBOM, record SLSA provenance |
 | `.github/workflows/security.yml` | CodeQL, gitleaks, pip-audit, dependency review on pull requests, optional Snyk, optional OpenSSF Scorecard |
 | `.github/workflows/dependabot-auto-merge.yml` | Queues a Dependabot bump to merge itself once the required checks pass, up to a size you choose |
@@ -63,11 +64,11 @@ project before any caller pins them:
 
 | File | What it does |
 |---|---|
-| `.github/workflows/ci.yml` | actionlint, zizmor, the pytest contract, then `python-ci.yml` and `python-docker-release.yml` called at the pull request's own ref against `fixture/`, and a `CI green` gate that needs all of it |
+| `.github/workflows/ci.yml` | actionlint, zizmor, the pytest contract, then `python-ci.yml`, `bash-ci.yml` and `python-docker-release.yml` called at the pull request's own ref against `fixture/` (bash-ci over the whole repository, in block mode), and a `CI green` gate that needs all of it |
 | `.github/workflows/security-self.yml` | `security.yml` called the same way, on push, pull request and a Monday schedule |
 | `.github/workflows/dependabot-auto-merge-self.yml` | `dependabot-auto-merge.yml` called the same way, so this repository's own bumps exercise it |
 | `.github/dependabot.yml` | Weekly action and pip bumps with a seven-day cooldown, actions grouped into one pull request |
-| `fixture/` | A package with a console script, one test, a non-root Dockerfile and a hash-pinned `requirements.txt`: one of everything a job needs. `fixture/README.md` says how to regenerate the lock |
+| `fixture/` | A package with a console script, one test, a non-root Dockerfile, a hash-pinned `requirements.txt`, and one shell script with its own test: one of everything a job needs. `fixture/README.md` says how to regenerate the lock |
 | `tests/` | The contract, as pytest, one file per thing it holds still. See [Developing](#developing) |
 | `pyproject.toml`, `requirements-dev.txt` | ruff and pytest configuration, and the three pinned tools the tests need |
 
@@ -230,6 +231,63 @@ Every command input (`lint-command`, `test-command`, `smoke-command`,
 `docker-test-command`, the install commands) reaches the shell as an
 environment variable run by `bash -eo pipefail -c`, never by template
 expansion into the script. Multi-line values work as written.
+
+### Bash CI
+
+For the shell in a repository, which in practice is every repository: the
+nine Python callers hold 47 scripts between them. A repository that is
+mostly shell names the job `ci`; one that also calls `python-ci.yml` from
+`ci:` names this one `shell:` and requires both gates, as
+[BASELINE.md](BASELINE.md) §2 says.
+
+```yaml
+jobs:
+  shell:
+    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/bash-ci.yml@<sha> # vX.Y.Z
+    permissions:
+      contents: read
+    with:
+      shfmt-args: -i 2 -ci
+      test-command: ./tests/run.sh
+      config-lint-install-command: pip install yamllint ansible-lint
+      config-lint-command: |
+        yamllint .
+        cd ansible && ansible-lint
+      workflow-lint: false   # python-ci already lints the workflow files
+      egress-policy: block
+```
+
+The scripts are found, not listed: every tracked file under `paths` whose
+name ends in `.sh` or `.bash`, or whose first line is a `sh` or `bash`
+shebang. shellcheck and shfmt are downloaded at a pinned version and checked
+against a pinned SHA-256 before they run, so no third-party action joins the
+allow-list for them and what lints today is what lints next year. Nothing in
+this workflow fetches a secret; no job holds more than `contents: read`.
+
+Inputs of `bash-ci.yml`:
+
+| Input | Default | Meaning |
+|---|---|---|
+| `paths` | `.` | Space-separated git pathspecs searched for scripts; `:!archive` excludes a directory |
+| `shellcheck-version`, `shellcheck-sha256` | `0.11.0` and its tarball's hash | The shellcheck release downloaded from koalaman/shellcheck |
+| `shellcheck-severity` | `warning` | Lowest severity that fails: `error`, `warning`, `info`, `style` |
+| `shellcheck-args` | `-x` | Extra arguments; `-x` follows `source`d files |
+| `shellcheck-continue-on-error` | `false` | Report findings without failing. A migration aid for a repository that runs at `error` today |
+| `shfmt` | `true` | Run shfmt and fail on a formatting diff |
+| `shfmt-version`, `shfmt-sha256` | `3.14.1` and its binary's hash | The shfmt release downloaded from mvdan/sh |
+| `shfmt-args` | `-i 4 -ci` | Style flags. Four-space indent is what seven of nine callers write; Skid-Finder and Hammunition pass `-i 2 -ci` |
+| `shfmt-continue-on-error` | `false` | Report a diff without failing. A migration aid |
+| `test-install-command` | empty | Run before the tests, e.g. `sudo apt-get install -y bats` |
+| `test-command` | empty (skips the job) | The shell test suite: `bats tests/`, `./tests/run.sh`, whatever the repository has |
+| `config-lint-install-command` | `pip install yamllint` | Installs the configuration linters, with Python available |
+| `config-lint-command` | empty (skips the job) | Lints the configuration kept beside the scripts: yamllint, ansible-lint |
+| `config-lint-python-version` | `3.13` | Python for that job |
+| `workflow-lint` | `true` | actionlint and zizmor over the caller's own `.github/workflows`; turn off on one job when another caller job already runs it |
+| `zizmor-persona` | `regular` | zizmor strictness: `regular`, `pedantic`, `auditor` |
+| `egress-policy` | `audit` | harden-runner on every job; see [Egress](#egress) |
+| `allowed-endpoints` | the measured list | harden-runner allow-list for `block`, space-separated `host:port` |
+| `extra-allowed-endpoints` | empty | Appended to the list, for hosts only this repository reaches |
+| `timeout-minutes` | `15` | Per-job timeout |
 
 ### Container release
 
@@ -555,10 +613,13 @@ plan. On a Developer plan, use path 2 and skip the identity step below.
 
 Every job starts with harden-runner. In `audit` mode it logs each outbound
 connection; in `block` mode it refuses any host not on `allowed-endpoints`.
-The three workflows carry a measured list as that input's default: every
-host their jobs reached across the calling repositories in a day of
+The three Python workflows carry a measured list as that input's default:
+every host their jobs reached across the calling repositories in a day of
 audit-mode runs, with the runner's own infrastructure left out because the
-agent allows it on its own. A caller turns blocking on with one line:
+agent allows it on its own. `bash-ci.yml`'s list was measured the other way
+round: this repository runs it on itself in `block` mode with the default
+list, so a host the list lacks fails here, named in the log, before any
+caller meets it. A caller turns blocking on with one line:
 
 ```yaml
 with:
