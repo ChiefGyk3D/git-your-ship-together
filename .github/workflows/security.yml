@@ -256,15 +256,17 @@ jobs:
         if: steps.token.outputs.present == 'true'
         run: snyk test --all-projects --severity-threshold=high --sarif-file-output=snyk-opensource.sarif || true
 
+      # Gated on the token as well as the file: a repository that committed an
+      # old scan report would otherwise upload it as if it were fresh.
       - name: Upload Snyk Code results
-        if: hashFiles('snyk-code.sarif') != ''
+        if: steps.token.outputs.present == 'true' && hashFiles('snyk-code.sarif') != ''
         uses: github/codeql-action/upload-sarif@c23de5a82f64bb08c6d9f28844551440ca298e76 # v4.38.1
         with:
           sarif_file: snyk-code.sarif
           category: snyk-code
 
       - name: Upload Snyk Open Source results
-        if: hashFiles('snyk-opensource.sarif') != ''
+        if: steps.token.outputs.present == 'true' && hashFiles('snyk-opensource.sarif') != ''
         uses: github/codeql-action/upload-sarif@c23de5a82f64bb08c6d9f28844551440ca298e76 # v4.38.1
         with:
           sarif_file: snyk-opensource.sarif
