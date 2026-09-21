@@ -36,8 +36,9 @@ Design rules, applied throughout:
 - **Every job has a timeout**, and every checkout sets
   `persist-credentials: false`.
 - **Every job starts with harden-runner.** `audit` by default, which logs
-  every outbound connection in the job summary; switch a caller to `block`
-  with an `allowed-endpoints` list once the audit shows what a job needs.
+  every outbound connection; `egress-policy: block` on the caller turns on
+  the measured allow-list each workflow carries as its default. See
+  [Egress](#egress).
 - **The workflows never reference this repository by branch.** A reusable
   workflow cannot name the commit it runs from, so the Doppler steps are
   inlined rather than referenced as `@main`; a test holds the four copies
@@ -123,7 +124,8 @@ Inputs of `python-ci.yml`:
 | `workflow-lint` | `true` | actionlint and zizmor over the caller's own `.github/workflows` |
 | `zizmor-persona` | `regular` | zizmor strictness: `regular`, `pedantic`, `auditor` |
 | `egress-policy` | `audit` | harden-runner on every job: `audit` logs outbound connections, `block` allows only `allowed-endpoints` |
-| `allowed-endpoints` | empty | harden-runner allow-list, `host:port` per line, for `block` |
+| `allowed-endpoints` | the measured list | harden-runner allow-list for `block`, space-separated `host:port`; see [Egress](#egress) |
+| `extra-allowed-endpoints` | empty | Appended to the list, for hosts only this repository reaches |
 | `doppler-project`, `doppler-config`, `doppler-identity-id` | empty | See [Doppler setup](#doppler-setup) |
 | `doppler-trusted-refs-only` | `true` | Fetch CI secrets only on the default branch, a tag or a schedule; never on a pull request. See [Doppler setup](#doppler-setup) |
 | `timeout-minutes` | `30` | Per-job timeout |
@@ -220,7 +222,7 @@ Inputs of `python-docker-release.yml`:
 | `trivy` | `true` | Scan the image, upload SARIF |
 | `trivy-severity` | `CRITICAL,HIGH` | Severities reported |
 | `trivy-exit-code` | `"0"` | `"1"` makes findings fail the job |
-| `egress-policy`, `allowed-endpoints` | `audit`, empty | harden-runner, as in `python-ci.yml` |
+| `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `audit`, the measured list, empty | harden-runner, as in `python-ci.yml` |
 | `doppler-project`, `doppler-config`, `doppler-identity-id` | empty | See [Doppler setup](#doppler-setup) |
 | `doppler-trusted-refs-only` | `true` | Fetch CI secrets only on the default branch, a tag or a schedule; never on a pull request. See [Doppler setup](#doppler-setup) |
 | `timeout-minutes` | `60` | Job timeout; native builds on arm64 under QEMU are slow |
@@ -280,7 +282,7 @@ Inputs of `security.yml`:
 | `snyk` | `false` | Snyk Code and Snyk Open Source; needs `SNYK_TOKEN` in the Doppler config |
 | `scorecard` | `false` | OpenSSF Scorecard, published; runs only on the default branch (push or schedule) |
 | `python-version` | `3.13` | Python for pip-audit and Snyk |
-| `egress-policy`, `allowed-endpoints` | `audit`, empty | harden-runner, as in `python-ci.yml` |
+| `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `audit`, the measured list, empty | harden-runner, as in `python-ci.yml` |
 | `doppler-project`, `doppler-config`, `doppler-identity-id` | empty | See [Doppler setup](#doppler-setup) |
 | `doppler-trusted-refs-only` | `true` | Fetch CI secrets only on the default branch, a tag or a schedule; never on a pull request. See [Doppler setup](#doppler-setup) |
 | `timeout-minutes` | `30` | Per-job timeout |
@@ -394,6 +396,33 @@ plan. On a Developer plan, use path 2 and skip the identity step below.
    `SNYK_TOKEN` from the repository's GitHub secrets once a run has gone green
    through Doppler (`CODECOV_TOKEN` is simply no longer read). `GITHUB_TOKEN`
    is not a stored secret and stays.
+
+## Egress
+
+Every job starts with harden-runner. In `audit` mode it logs each outbound
+connection; in `block` mode it refuses any host not on `allowed-endpoints`.
+The three workflows carry a measured list as that input's default: every
+host their jobs reached across the calling repositories in a day of
+audit-mode runs, with the runner's own infrastructure left out because the
+agent allows it on its own. A caller turns blocking on with one line:
+
+```yaml
+with:
+  egress-policy: block
+```
+
+A host only one repository reaches, such as an apt repository or an
+installer its Dockerfile pulls, goes in `extra-allowed-endpoints` on that
+caller, not in the shared default. Two things the agent does not say out
+loud, learned the hard way: the list is space-separated, so a YAML literal
+block (`|`) keeps the newlines and the agent then matches nothing and blocks
+everything; and wildcards such as `*.example.com` are not supported and
+invalidate the list. `blocked` connections show in the job log as `domain
+not allowed: <host>`, which is also how a new dependency announces itself.
+
+The Snyk job's hosts are not in `security.yml`'s default yet: no Snyk token
+had been configured when the lists were measured. Measure one run in audit
+mode after the token is in, then add them.
 
 ## Repository settings that no YAML can set
 

@@ -422,3 +422,20 @@ def test_readme_names_every_workflow_and_the_composite():
     for path in REUSABLE:
         assert f".github/workflows/{path.name}@" in text, f"README.md does not show how to call {path.name}"
     assert ".github/actions/doppler-secrets" in text
+
+
+@pytest.mark.parametrize("path", REUSABLE, ids=lambda p: p.name)
+def test_the_default_allow_list_is_one_line_of_sorted_host_ports(path):
+    """harden-runner reads allowed-endpoints as space-separated host:port entries.
+
+    A newline in the default would make the agent match nothing; a wildcard
+    invalidates the list. Sorted so a diff shows one added host, not a reorder.
+    """
+    inputs = triggers(load(path))["workflow_call"]["inputs"]
+    default = inputs["allowed-endpoints"]["default"]
+    assert "\n" not in default, f"{path.name}: allowed-endpoints default contains a newline"
+    entries = default.split(" ")
+    assert entries == sorted(entries), f"{path.name}: allowed-endpoints default is not sorted"
+    for entry in entries:
+        assert re.fullmatch(r"[a-z0-9.-]+:\d+", entry), f"{path.name}: {entry!r} is not host:port"
+    assert inputs["extra-allowed-endpoints"]["default"] == ""
