@@ -439,9 +439,11 @@ everything; and wildcards such as `*.example.com` are not supported and
 invalidate the list. `blocked` connections show in the job log as `domain
 not allowed: <host>`, which is also how a new dependency announces itself.
 
-The Snyk job's hosts are not in `security.yml`'s default yet: no Snyk token
-had been configured when the lists were measured. Measure one run in audit
-mode after the token is in, then add them.
+The Snyk job's hosts (`api`, `app`, `deeproxy`, `downloads` and `static`
+under `snyk.io`) are in `security.yml`'s default from Snyk's own list, not
+from a measurement: the first run with a token logged its connections by
+IP only. A `domain not allowed` line in a Snyk job is the measurement that
+corrects it.
 
 ## Repository settings that no YAML can set
 

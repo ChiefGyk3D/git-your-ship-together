@@ -108,8 +108,8 @@ appears.
 **Every job runs under harden-runner in `block` mode** for the CI and release
 workflows, with the measured allow-list the shared workflows carry as their
 default and `extra-allowed-endpoints` for a host only that repository
-reaches. The security workflow stays in audit mode until the Snyk job has
-been measured with a token in place. Every job starts from
+reaches; the security workflow's list carries the Snyk hosts from Snyk's
+documentation, corrected by any `domain not allowed` line. Every job starts from
 `contents: read`, and widens per job with a reason recorded in
 `tests/test_workflows.py`'s `ALLOWED_WRITES`.
 
@@ -207,9 +207,6 @@ Checked: `risk-exceptions`.
   and its commits and tags verify. The rule is not on yet because the cloud
   sessions and the other machines still commit unsigned, and a rule would
   block them; it goes on when they sign too (roadmap item 10).
-- **harden-runner in `block` mode for `security.yml`.** The Snyk job's hosts
-  are unmeasured until a token exists; one audit-mode run with it, then the
-  default list gains them and callers switch.
 
 ## Adding a repository
 

@@ -98,7 +98,7 @@ on:
       allowed-endpoints:
         description: harden-runner allow-list for `block`, space-separated host:port entries. The default is every endpoint this workflow's jobs reached in audit mode across the calling repositories; the runner's own infrastructure needs no entry. Wildcards are not supported and a newline-separated list matches nothing.
         type: string
-        default: "api.deps.dev:443 api.doppler.com:443 api.github.com:443 api.osv.dev:443 api.scorecard.dev:443 api.securityscorecards.dev:443 codeload.github.com:443 files.pythonhosted.org:443 fulcio.sigstore.dev:443 github.com:443 oss-fuzz-build-logs.storage.googleapis.com:443 pypi.org:443 rekor.sigstore.dev:443 release-assets.githubusercontent.com:443 tuf-repo-cdn.sigstore.dev:443 uploads.github.com:443 www.bestpractices.dev:443"
+        default: "api.deps.dev:443 api.doppler.com:443 api.github.com:443 api.osv.dev:443 api.scorecard.dev:443 api.securityscorecards.dev:443 api.snyk.io:443 app.snyk.io:443 codeload.github.com:443 deeproxy.snyk.io:443 downloads.snyk.io:443 files.pythonhosted.org:443 fulcio.sigstore.dev:443 github.com:443 oss-fuzz-build-logs.storage.googleapis.com:443 pypi.org:443 rekor.sigstore.dev:443 release-assets.githubusercontent.com:443 static.snyk.io:443 tuf-repo-cdn.sigstore.dev:443 uploads.github.com:443 www.bestpractices.dev:443"
       extra-allowed-endpoints:
         description: Appended to `allowed-endpoints`, for hosts only this repository reaches, such as an apt repository its Dockerfile adds. Same format.
         type: string
@@ -477,16 +477,21 @@ jobs:
           if snyk code test --sarif-file-output=snyk-code.sarif; then rc=0; else rc=$?; fi
           case "$rc" in
             0|1) ;;
-            *) echo "::error title=Snyk::snyk code test did not run (exit $rc); an expired or revoked SNYK_TOKEN exits 2"; exit "$rc" ;;
+            *) echo "::error title=Snyk::snyk code test did not run (exit $rc): an expired or revoked SNYK_TOKEN, or a project it could not read"; exit "$rc" ;;
           esac
 
       - name: Snyk Open Source (SCA)
         if: steps.token.outputs.present == 'true'
         run: |
-          if snyk test --all-projects --severity-threshold=high --sarif-file-output=snyk-opensource.sarif; then rc=0; else rc=$?; fi
+          # --skip-unresolved: Snyk's pip resolver matches requirement names to
+          # installed packages and cannot match a requirement with extras
+          # (`name[a,b]>=1`), so it exited 2 on the first real run with
+          # "Missing required packages". The packages are installed and every
+          # other line is still scanned; the one it cannot match is skipped.
+          if snyk test --all-projects --skip-unresolved=true --severity-threshold=high --sarif-file-output=snyk-opensource.sarif; then rc=0; else rc=$?; fi
           case "$rc" in
             0|1) ;;
-            *) echo "::error title=Snyk::snyk test did not run (exit $rc); an expired or revoked SNYK_TOKEN exits 2"; exit "$rc" ;;
+            *) echo "::error title=Snyk::snyk test did not run (exit $rc): an expired or revoked SNYK_TOKEN, or a project it could not read"; exit "$rc" ;;
           esac
 
       # Gated on the token as well as the file: a repository that committed an
