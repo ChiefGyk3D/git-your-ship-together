@@ -186,6 +186,15 @@ and ref shape and checks the mode it returns. `tests/test_audit_baseline.py`
 feeds `scripts/audit_baseline.py` a passing repository and a broken one per
 criterion, so the audit that checks the nine repositories is itself checked.
 
+The structural tests say what a workflow looks like; `fixture/` is what runs
+it. This repository's own CI calls `python-ci.yml` and
+`python-docker-release.yml` against that project at the pull request's ref,
+and `security-self.yml` does the same for `security.yml`, so a change is
+exercised on a real project before any caller pins it, and a test holds that
+every reusable workflow is called this way. `tests/test_risk_register.py`
+keeps `baseline/risk-register.yaml` honest: every entry complete, every date
+a date, no review more than 90 days out, no entry expired.
+
 ## What it does not do yet
 
 Signed commits and tags are not required, because no signing key exists on the
