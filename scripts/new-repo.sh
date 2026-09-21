@@ -314,8 +314,8 @@ PY
 detect_bash() {
   # The indent the scripts already write: two or four spaces, by majority.
   local two four
-  two=$(tracked | grep -E '\.(sh|bash)$' | while IFS= read -r f; do [ -f "$path/$f" ] && grep -cE '^  [^ ]' "$path/$f" || true; done | paste -sd+ | bc 2>/dev/null || echo 0)
-  four=$(tracked | grep -E '\.(sh|bash)$' | while IFS= read -r f; do [ -f "$path/$f" ] && grep -cE '^    [^ ]' "$path/$f" || true; done | paste -sd+ | bc 2>/dev/null || echo 0)
+  two=$(tracked | grep -E '\.(sh|bash)$' | while IFS= read -r f; do [ -f "$path/$f" ] && grep -cE '^  [^ ]' "$path/$f" || true; done | awk '{ s += $1 } END { print s + 0 }')
+  four=$(tracked | grep -E '\.(sh|bash)$' | while IFS= read -r f; do [ -f "$path/$f" ] && grep -cE '^    [^ ]' "$path/$f" || true; done | awk '{ s += $1 } END { print s + 0 }')
   if [ "${two:-0}" -gt "${four:-0}" ]; then shfmt_indent=2; fi
   # A test runner is named, not guessed; say what was seen.
   local runners
