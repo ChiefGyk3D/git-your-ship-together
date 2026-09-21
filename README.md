@@ -90,6 +90,12 @@ jobs:
 Point branch protection at the **CI green** job. It needs every other job and
 fails if any of them failed, so a job added here can never merge unchecked.
 
+The `test` job runs the caller's own code and holds no OIDC token. Coverage is
+uploaded to Codecov by a separate `coverage` job that downloads the report
+artifact and never runs on a pull request, so nothing the test suite or its
+dependencies can execute ever runs beside a secret. Coverage therefore
+appears on Codecov per push to the default branch, not per pull request.
+
 Inputs of `python-ci.yml`:
 
 | Input | Default | Meaning |
@@ -115,6 +121,7 @@ Inputs of `python-ci.yml`:
 | `egress-policy` | `audit` | harden-runner on every job: `audit` logs outbound connections, `block` allows only `allowed-endpoints` |
 | `allowed-endpoints` | empty | harden-runner allow-list, `host:port` per line, for `block` |
 | `doppler-project`, `doppler-config`, `doppler-identity-id` | empty | See [Doppler setup](#doppler-setup) |
+| `doppler-trusted-refs-only` | `true` | Fetch CI secrets only on the default branch, a tag or a schedule; never on a pull request. See [Doppler setup](#doppler-setup) |
 | `timeout-minutes` | `30` | Per-job timeout |
 
 Every command input (`lint-command`, `test-command`, `smoke-command`,
@@ -211,6 +218,7 @@ Inputs of `python-docker-release.yml`:
 | `trivy-exit-code` | `"0"` | `"1"` makes findings fail the job |
 | `egress-policy`, `allowed-endpoints` | `audit`, empty | harden-runner, as in `python-ci.yml` |
 | `doppler-project`, `doppler-config`, `doppler-identity-id` | empty | See [Doppler setup](#doppler-setup) |
+| `doppler-trusted-refs-only` | `true` | Fetch CI secrets only on the default branch, a tag or a schedule; never on a pull request. See [Doppler setup](#doppler-setup) |
 | `timeout-minutes` | `60` | Job timeout; native builds on arm64 under QEMU are slow |
 
 A publishing build never reads the GitHub Actions cache. Anyone who can open
@@ -270,6 +278,7 @@ Inputs of `security.yml`:
 | `python-version` | `3.13` | Python for pip-audit and Snyk |
 | `egress-policy`, `allowed-endpoints` | `audit`, empty | harden-runner, as in `python-ci.yml` |
 | `doppler-project`, `doppler-config`, `doppler-identity-id` | empty | See [Doppler setup](#doppler-setup) |
+| `doppler-trusted-refs-only` | `true` | Fetch CI secrets only on the default branch, a tag or a schedule; never on a pull request. See [Doppler setup](#doppler-setup) |
 | `timeout-minutes` | `30` | Per-job timeout |
 
 ## Doppler setup
@@ -293,8 +302,18 @@ is the same thing as a composite action) try, in order:
    Steps that need a secret then skip (Docker Hub publish, Codecov) or fail
    with a message naming the missing name (Snyk).
 
-A pull request from a fork never fetches anything, whichever path is
-configured.
+A fetch happens only on a **trusted ref**: a push to the default branch, a
+tag, or a schedule. A pull request from anywhere and a push to any other branch
+get nothing and a notice saying so. That is `doppler-trusted-refs-only`, on by
+default in every workflow; turning it off means a pull request's proposed code
+runs in a job that holds a secret. A pull request from a fork never fetches
+anything, whichever way the input is set.
+
+The Snyk job runs only off pull requests for the same reason, and Codecov
+uploads run in their own job that never sees a pull request (see [CI](#ci)).
+Everything a repository must meet beyond these workflows - who can push,
+branch protection, Actions settings, scanning - is in [BASELINE.md](BASELINE.md),
+with `scripts/audit_baseline.py` to check every repository against it.
 
 ### One-time, per repository
 
@@ -321,9 +340,14 @@ plan. On a Developer plan, use path 2 and skip step 3.
 
 3. **Identity.** On the service account, add an Identity of type OIDC:
    - Issuer: `https://token.actions.githubusercontent.com`
-   - Subject: `repo:ChiefGyk3D/<repo>:*` (or tighten to
-     `repo:ChiefGyk3D/<repo>:ref:refs/heads/main` and
-     `repo:ChiefGyk3D/<repo>:ref:refs/tags/*` for release-only access)
+   - Subject: `repo:ChiefGyk3D/<repo>:ref:refs/heads/main` (`master` where
+     that is the default branch), plus `repo:ChiefGyk3D/<repo>:ref:refs/tags/*`
+     where Doppler accepts more than one subject per identity, or a second
+     identity for tags if it does not. The subject must never match
+     `repo:ChiefGyk3D/<repo>:pull_request`: the workflows refuse to fetch on a
+     pull request, and the identity is the second lock on the same door. The
+     broad `repo:ChiefGyk3D/<repo>:*` works but matches pull-request tokens,
+     so it relies on the workflow-side gate alone.
    - Audience: leave GitHub's default, `https://github.com/ChiefGyk3D`, which
      is what `dopplerhq/secrets-fetch-action` requests
 
@@ -340,7 +364,10 @@ plan. On a Developer plan, use path 2 and skip step 3.
 
 ## Repository settings that no YAML can set
 
-For each calling repository, once its first run is green:
+[BASELINE.md](BASELINE.md) is the full list with the reasons, and
+`python scripts/audit_baseline.py` reports every repository in
+`baseline/repos.txt` against it. In short, for each calling repository, once
+its first run is green:
 
 1. **Branch protection on `main`**: require the `CI green` status check
    (python-ci's gate job), require a pull request, and dismiss stale
