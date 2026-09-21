@@ -24,8 +24,11 @@ a pipeline run are deliberately absent.
 ## What a push goes through
 
 A push to a calling repository, or a pull request against it, runs three
-workflows, and a fourth watches for Dependabot's own pull requests. Each one is a reusable workflow in this repository, pinned by the
-caller to a commit SHA with the version in a comment.
+workflows, and a fourth watches for Dependabot's own pull requests. Each one
+is a reusable workflow in this repository, pinned by the caller to a commit
+SHA with the version in a comment. A repository with more than one language
+calls one CI workflow per language, from one caller job each, and requires
+every gate.
 
 **CI** (`python-ci.yml`) runs ruff on the code, the test suite across a
 Python matrix, an optional smoke test that installs the package and runs it,
@@ -34,6 +37,15 @@ trusted. Coverage is uploaded to Codecov by a separate job that only ever
 touches the report artifact. A final job called `CI green` needs every other
 job and fails if any of them failed. Branch protection points at that one job,
 so a job added later is covered without editing a rule anywhere.
+
+**Bash CI** (`bash-ci.yml`) is the same shape for the shell every repository
+carries: shellcheck and shfmt over every tracked script, found by name or
+shebang rather than listed; a test command and a configuration lint
+(yamllint, ansible-lint) when the repository has them; the workflow lint;
+and the same `CI green` gate. The two linters are downloaded at a pinned
+version and checked against a pinned hash, so no action joins the allow-list
+for them. No job in it holds more than `contents: read`, because a lint
+needs nothing.
 
 **Security** (`security.yml`) runs CodeQL, a full-history gitleaks scan,
 pip-audit on the requirements, dependency review on pull requests, Snyk on
@@ -156,6 +168,8 @@ token was one more thing to store for no reason, and it is gone.
 | step-security harden-runner | Egress audit on every job | The only way to see what a job talks to without instrumenting it; the audit summary is what a `block` allow-list is later written from. |
 | ruff | Lint | One fast tool in place of flake8, isort and pyupgrade, with the bandit rules available under the same config. Each project picks its rule set; the check is gating, not advisory. |
 | pytest | Tests | The projects already used it. The matrix runs it on every supported Python. |
+| shellcheck | Lint for shell | The one linter every shell project uses; pinned by version and hash rather than by an action, so the allow-list does not grow for it. |
+| shfmt | Formatting for shell | The `--diff` of one formatter, with the indent the repository already writes, ends arguments about style the way ruff's format check does for Python. |
 | Codecov | Coverage over time | Free for public repositories, authenticates over OIDC, and the upload runs in its own job away from the test code. |
 | actionlint and zizmor | Lint for the workflows themselves | actionlint catches YAML and expression mistakes; zizmor catches the security ones, including a pin whose version comment no longer matches. Both run on the caller's workflow files, not only on these. |
 | CodeQL | Static analysis | GitHub's own, free for public repositories, results in the Security tab. |

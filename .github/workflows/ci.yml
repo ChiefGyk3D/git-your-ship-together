@@ -118,6 +118,24 @@ jobs:
         test "$(docker run --rm --entrypoint id "$IMAGE" -u)" != "0"
       zizmor-persona: pedantic
 
+  # bash-ci.yml at this ref over every script in this repository: the
+  # fixture's, and scripts/doppler-ci-set.sh. Block mode with the workflow's
+  # own default list, so a host the list lacks fails here, named in the log,
+  # before a caller meets it. Workflow lint is off because the jobs above
+  # already run actionlint and zizmor over these files.
+  fixture-bash:
+    name: fixture shell
+    uses: ./.github/workflows/bash-ci.yml # zizmor: ignore[self-repository]
+    permissions:
+      contents: read
+    with:
+      shfmt-args: -i 2 -ci
+      test-command: fixture/tests/test_greet.sh
+      config-lint-command: |
+        yamllint -d '{extends: relaxed, rules: {line-length: disable}}' .github fixture baseline
+      workflow-lint: false
+      egress-policy: block
+
   # The fixture image through python-docker-release.yml at this ref: build,
   # check and scan, never publish. The writes are what the release job
   # declares for the publishing path; the called job holds them on a pull
@@ -144,7 +162,7 @@ jobs:
   ci-green:
     name: CI green
     if: always()
-    needs: [actionlint, zizmor, test, fixture-ci, fixture-release]
+    needs: [actionlint, zizmor, test, fixture-ci, fixture-bash, fixture-release]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}

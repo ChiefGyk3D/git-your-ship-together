@@ -33,6 +33,7 @@ REUSABLE = [
     if p.name
     in (
         "python-ci.yml",
+        "bash-ci.yml",
         "python-docker-release.yml",
         "security.yml",
         "dependabot-auto-merge.yml",
@@ -41,7 +42,9 @@ REUSABLE = [
 # The subset that fetches CI secrets. The Doppler rules are about those steps,
 # so a callable workflow that needs no secret is not held to them; it is held
 # to everything else, and it must not grow a fetch without joining this list.
-DOPPLER = [p for p in REUSABLE if p.name != "dependabot-auto-merge.yml"]
+DOPPLER = [p for p in REUSABLE if p.name not in ("dependabot-auto-merge.yml", "bash-ci.yml")]
+# The language CI workflows: each ends in the `CI green` gate branch protection requires.
+LANGUAGE_CI = [p for p in REUSABLE if p.name.endswith("-ci.yml")]
 OWN = [p for p in WORKFLOW_FILES if p not in REUSABLE]
 
 SELF = "ChiefGyk3D/git-your-ship-together/"
@@ -77,8 +80,9 @@ def all_steps(path: Path):
 
 
 def test_there_is_something_to_check():
-    assert len(REUSABLE) == 4, "expected the four callable workflows"
+    assert len(REUSABLE) == 5, "expected the five callable workflows"
     assert len(DOPPLER) == 3, "expected three of them to fetch CI secrets"
+    assert [p.name for p in LANGUAGE_CI] == ["bash-ci.yml", "python-ci.yml"]
     assert ACTION_FILES, "no composite actions found"
 
 
@@ -363,7 +367,6 @@ def test_no_job_that_can_run_on_a_pull_request_holds_an_oidc_token(path):
 def test_the_job_running_the_callers_tests_holds_no_oidc_token():
     """`test-command` is the caller's code, and a dependency of it; it must not run beside a token."""
     doc = load(WORKFLOWS / "python-ci.yml")
-    assert "id-token" not in (jobs(doc)["test"].get("permissions") or {})
     coverage = jobs(doc)["coverage"]
     assert coverage["needs"] == "test" or coverage["needs"] == ["test"]
     assert "github.event_name != 'pull_request'" in coverage["if"]
@@ -410,12 +413,50 @@ def test_every_input_used_is_declared(path):
     assert used <= set(inputs), f"{path.name} reads undeclared inputs: {sorted(used - set(inputs))}"
 
 
-def test_ci_green_gate_needs_every_other_job():
-    """Branch protection watches one job; a job left out of its needs merges red."""
-    doc = load(WORKFLOWS / "python-ci.yml")
+@pytest.mark.parametrize("path", LANGUAGE_CI, ids=lambda p: p.name)
+def test_ci_green_gate_needs_every_other_job(path):
+    """Branch protection watches one job; a job left out of its needs merges red.
+
+    The same gate in every language's workflow is what lets BASELINE.md name
+    one check shape, `<job> / CI green`, whatever the repository is written in.
+    """
+    doc = load(path)
     gate = jobs(doc)["ci-green"]
+    assert gate["name"] == "CI green"
     assert gate.get("if") == "always()"
     assert set(gate["needs"]) == set(jobs(doc)) - {"ci-green"}
+    assert gate["permissions"] == {}
+
+
+@pytest.mark.parametrize("path", LANGUAGE_CI, ids=lambda p: p.name)
+def test_the_job_running_the_callers_tests_holds_no_oidc_token_in_any_language(path):
+    doc = load(path)
+    assert "id-token" not in (jobs(doc)["test"].get("permissions") or {})
+
+
+def test_bash_ci_holds_no_token_at_all():
+    """A lint needs nothing; a job that fetches nothing has nothing to leak."""
+    doc = load(WORKFLOWS / "bash-ci.yml")
+    for job_name, job in jobs(doc).items():
+        assert job["permissions"] in ({}, {"contents": "read"}), f"bash-ci job {job_name!r} widens its permissions"
+    assert "secrets" not in triggers(doc)["workflow_call"]
+
+
+DOWNLOAD = re.compile(r"\bcurl\b")
+
+
+@pytest.mark.parametrize("path", REUSABLE, ids=lambda p: p.name)
+def test_every_downloaded_tool_is_checked_against_a_pinned_hash(path):
+    """A tool fetched by URL is only as fixed as the URL. A pinned SHA-256 is what makes it a pin."""
+    for job_name, step in all_steps(path):
+        body = step.get("run")
+        if not isinstance(body, str) or not DOWNLOAD.search(body):
+            continue
+        assert "sha256sum -c" in body, f"{path.name}: job {job_name!r} downloads with curl and never checks a hash"
+        env = step.get("env") or {}
+        assert any(v.startswith("${{ inputs.") and k.endswith("SHA256") for k, v in env.items()), (
+            f"{path.name}: job {job_name!r} checks a hash that is not a workflow input"
+        )
 
 
 def test_release_signs_attests_and_records_provenance_only_after_a_push():

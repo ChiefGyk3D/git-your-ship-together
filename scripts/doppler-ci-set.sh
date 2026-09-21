@@ -21,7 +21,10 @@ if [ $# -eq 0 ]; then
 fi
 case $name in
   [A-Z_][A-Z0-9_]*) ;;
-  *) echo "not a secret name: $name" >&2; exit 2 ;;
+  *)
+    echo "not a secret name: $name" >&2
+    exit 2
+    ;;
 esac
 config=${DOPPLER_CI_CONFIG:-ci}
 

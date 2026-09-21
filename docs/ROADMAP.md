@@ -23,6 +23,8 @@ Status as of 2026-09-21.
 | Dependabot patch and minor bumps merge themselves once the gate is green | `dependabot-auto-merge.yml`, `auto-merge-enabled` check |
 | GitHub Releases with notes for every tag of this repository | the Releases page |
 | Scan and test tools out of Boon-Tube-Daemon's runtime requirements, which took nltk out of the image and closed the only risk-register entry | `Boon-Tube-Daemon` deps PR, register now empty |
+| The composition rule (item 2): one caller job per language, and the audit derives the required `<job> / CI green` set from the caller's workflow files and fails on any gate missing | `scripts/audit_baseline.py`, `BASELINE.md` §2 |
+| `bash-ci.yml` (item 3): shellcheck and shfmt at pinned versions and hashes, a test command, a configuration lint for yamllint and ansible-lint (item 11), the `CI green` gate, no token in any job; run on this repository in block mode | `.github/workflows/bash-ci.yml`, `fixture/scripts/` |
 
 ## Next, cheap
 
@@ -125,28 +127,15 @@ each should say how.
 
 ### The items
 
-2. **The composition rule, and the audit that enforces it.** A repository
-   calls one shared CI workflow per language it contains, one caller job
-   each: `ci:` for the primary language, then `shell:`, `tofu:`, and so on.
-   Every one of those jobs reports a `<job> / CI green` check, and every one
-   is required. `audit_baseline.py` derives the expected set from the
-   caller's `.github/workflows/ci.yml`, every job whose `uses:` names this
-   repository, and fails on any of them missing from branch protection. The
-   alternative, a `shell-lint` switch inside `python-ci.yml`, is quicker for
-   the nine callers and does nothing for the shell-first repositories, so it
-   is not taken.
-3. **`bash-ci.yml`.** There are 47 shell scripts across the nine calling
-   repositories and not one of them is linted by anything today; actionlint
-   only reads the `run:` blocks inside workflow files. shellcheck, `shfmt
-   --diff`, and a `test-command` input in the same shape as `python-ci.yml`:
-   commands as inputs, harden-runner first, a `CI green` gate. No repository
-   uses bats; Skid-Finder has twenty `tests/test-*.sh` with its own runner,
-   which is what the input is for. Severity is an input defaulting to
-   `warning`, which is what Skid-Finder and Patch-Gremlin run, with a
-   `continue-on-error` migration input for the two repositories that run at
-   `error` today, the way pip-audit was introduced. The workflow fetches
-   nothing from Doppler and holds no token: it belongs with
-   `dependabot-auto-merge.yml` in the tests, not with the three that fetch.
+2. **The composition rule, and the audit that enforces it.** Done; see the
+   table above. One caller job per language (`ci:`, `shell:`, `tofu:`), each
+   reporting `<job> / CI green`, every one required. The alternative, a
+   `shell-lint` switch inside `python-ci.yml`, was quicker for the nine
+   callers and did nothing for the shell-first repositories, so it was not
+   taken.
+3. **`bash-ci.yml`.** Done; see the table above. What is left is the
+   adoption: no caller uses it until item 6 writes the caller job, and the
+   47 scripts in the nine callers stay unlinted until then.
 4. **A dependency audit that is not pip-shaped, and neutral defaults.**
    `security.yml`'s one Python-specific job becomes a command input in the
    same idiom as the CI workflow's, so a Node, Rust or Go repository gets the
@@ -201,10 +190,10 @@ each should say how.
     tests, and the binary through `artifact-release.yml`. Skid-Finder's
     `nodes/esp32` sketch is the first consumer. PlatformIO is an input away
     when a project uses it.
-11. **Ansible and YAML.** mother-ticker runs ansible-lint and yamllint. They
-    are a job each in `bash-ci.yml` behind an input, because a repository
-    with a playbook has scripts beside it every time, and one caller job is
-    simpler than three for a repository that is mostly shell.
+11. **Ansible and YAML.** Done with item 3: `bash-ci.yml`'s `config-lint`
+    job runs whatever `config-lint-command` names, yamllint and ansible-lint
+    for mother-ticker, behind one input, because a repository with a
+    playbook has scripts beside it every time.
 
 The order is the order above: the rule and the audit first because every
 later item depends on it, then the workflow with the most consumers, then
