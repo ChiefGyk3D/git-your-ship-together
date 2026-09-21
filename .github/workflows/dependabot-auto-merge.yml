@@ -1,0 +1,155 @@
+# Let Dependabot's own pull requests merge themselves once the gate is green.
+#
+# The seven-day cooldown in dependabot.yml means a release cut this morning is
+# not proposed this afternoon; `ci / CI green` means a bump that breaks the
+# build cannot land; this workflow is what removes the last manual step for
+# the bumps that are not worth a human's attention. A bump larger than
+# `max-update-type` is left alone.
+#
+# Call it with:
+#
+#   on: pull_request
+#   permissions:
+#     contents: read
+#   jobs:
+#     auto-merge:
+#       uses: ChiefGyk3D/git-your-ship-together/.github/workflows/dependabot-auto-merge.yml@<sha> # vX.Y.Z
+#       permissions:
+#         contents: write        # enable auto-merge on the pull request
+#         pull-requests: write   # and read its metadata
+#
+# The repository must have auto-merge enabled (Settings -> General -> Allow
+# auto-merge, or `gh api -X PATCH repos/OWNER/REPO -F allow_auto_merge=true`),
+# and a required status check, or there is nothing for the merge to wait on.
+#
+# This workflow never checks the pull request out. It runs two pinned actions
+# and the `gh` CLI against the API, so none of the proposed code executes
+# here, which is what makes `contents: write` on a pull-request trigger safe.
+# dependabot/fetch-metadata verifies the commits really are Dependabot's
+# before reporting what they change; a pull request that merely claims the
+# name gets no metadata and no merge.
+
+name: Dependabot auto-merge (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      max-update-type:
+        description: >-
+          The largest semver change that may merge on its own: `patch`,
+          `minor` or `major`. Anything above it is left for a human, as is a
+          pull request whose update type Dependabot did not report.
+        type: string
+        default: minor
+      merge-method:
+        description: >-
+          How to merge: `squash`, `merge` or `rebase`. Squash is the default
+          because a repository that requires linear history refuses a merge
+          commit.
+        type: string
+        default: squash
+      egress-policy:
+        description: harden-runner egress policy, `audit` or `block`.
+        type: string
+        default: audit
+      allowed-endpoints:
+        description: >-
+          Hosts this job may reach under `block`, space-separated `host:port`
+          on one line. The default is the API this job talks to.
+        type: string
+        default: api.github.com:443
+      extra-allowed-endpoints:
+        description: Appended to `allowed-endpoints`, for hosts only this repository reaches.
+        type: string
+        default: ""
+      timeout-minutes:
+        description: Job timeout.
+        type: number
+        default: 10
+
+permissions:
+  contents: read
+
+jobs:
+  auto-merge:
+    name: Dependabot auto-merge
+    # Dependabot's pull requests only. GitHub gives a fork's pull request a
+    # read-only token whatever this workflow asks for, so the grant below
+    # cannot reach one even if the login somehow matched.
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: write  # enable auto-merge on the pull request
+      pull-requests: write  # read its Dependabot metadata
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: ${{ inputs.egress-policy }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          # The agent may only stop reporting to StepSecurity in block mode.
+          disable-telemetry: ${{ inputs.egress-policy == 'block' }}
+
+      - name: Read what Dependabot is proposing
+        id: metadata
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Decide whether this bump may merge on its own
+        id: decide
+        env:
+          # `update-type` is the largest change in the pull request, so a
+          # grouped bump is judged by its biggest step, not its smallest.
+          UPDATE_TYPE: ${{ steps.metadata.outputs.update-type }}
+          NAMES: ${{ steps.metadata.outputs.dependency-names }}
+          MAX: ${{ inputs.max-update-type }}
+          METHOD: ${{ inputs.merge-method }}
+        run: |
+          set -euo pipefail
+          case "$METHOD" in
+            squash|merge|rebase) ;;
+            *) echo "::error title=Auto-merge::merge-method must be squash, merge or rebase, not '$METHOD'"; exit 1 ;;
+          esac
+          rank() {
+            case "$1" in
+              patch) echo 1 ;;
+              minor) echo 2 ;;
+              major) echo 3 ;;
+              *) echo 0 ;;
+            esac
+          }
+          max=$(rank "$MAX")
+          if [ "$max" -eq 0 ]; then
+            echo "::error title=Auto-merge::max-update-type must be patch, minor or major, not '$MAX'"
+            exit 1
+          fi
+          # An update type this workflow does not recognise, or none at all,
+          # is a reason to stop rather than to guess.
+          level=$(rank "${UPDATE_TYPE#version-update:semver-}")
+          if [ "$level" -eq 0 ]; then
+            echo "::notice title=Auto-merge::update type '${UPDATE_TYPE:-none reported}' is not a semver bump; leaving ${NAMES:-this pull request} for a human"
+            echo "merge=false" >> "$GITHUB_OUTPUT"
+          elif [ "$level" -gt "$max" ]; then
+            echo "::notice title=Auto-merge::${UPDATE_TYPE#version-update:semver-} is larger than max-update-type=$MAX; leaving ${NAMES:-this pull request} for a human"
+            echo "merge=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "merge=true" >> "$GITHUB_OUTPUT"
+            echo "auto-merging ${NAMES:-this pull request} (${UPDATE_TYPE#version-update:semver-}) once the required checks pass"
+          fi
+
+      - name: Merge it when the required checks pass
+        if: steps.decide.outputs.merge == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          METHOD: ${{ inputs.merge-method }}
+        run: |
+          set -euo pipefail
+          # --auto queues the merge behind branch protection; it does not
+          # merge now, and a red check leaves the pull request open.
+          case "$METHOD" in
+            squash) gh pr merge --auto --squash "$PR_URL" ;;
+            merge) gh pr merge --auto --merge "$PR_URL" ;;
+            rebase) gh pr merge --auto --rebase "$PR_URL" ;;
+          esac

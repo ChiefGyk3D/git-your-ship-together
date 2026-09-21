@@ -46,6 +46,7 @@ Three reusable workflows and one composite action:
 | `.github/workflows/python-ci.yml` | Lint, workflow lint, test matrix, coverage upload, optional CLI smoke test, single-arch container build with a check, one `CI green` gate job |
 | `.github/workflows/python-docker-release.yml` | Build, test, Trivy-scan, then publish multi-arch to GHCR (and Docker Hub), sign with cosign, attach a syft SBOM, record SLSA provenance |
 | `.github/workflows/security.yml` | CodeQL, gitleaks, pip-audit, dependency review on pull requests, optional Snyk, optional OpenSSF Scorecard |
+| `.github/workflows/dependabot-auto-merge.yml` | Queues a Dependabot bump to merge itself once the required checks pass, up to a size you choose |
 | `.github/actions/doppler-secrets` | Fetches a Doppler config as masked environment variables, over OIDC or a Service Token. The workflows inline a copy of it (see the design rules); this is the source |
 
 This repository's own pipeline, which runs the workflows against a real
@@ -55,6 +56,7 @@ project before any caller pins them:
 |---|---|
 | `.github/workflows/ci.yml` | actionlint, zizmor, the pytest contract, then `python-ci.yml` and `python-docker-release.yml` called at the pull request's own ref against `fixture/`, and a `CI green` gate that needs all of it |
 | `.github/workflows/security-self.yml` | `security.yml` called the same way, on push, pull request and a Monday schedule |
+| `.github/workflows/dependabot-auto-merge-self.yml` | `dependabot-auto-merge.yml` called the same way, so this repository's own bumps exercise it |
 | `.github/dependabot.yml` | Weekly action and pip bumps with a seven-day cooldown, actions grouped into one pull request |
 | `fixture/` | A package with a console script, one test, a non-root Dockerfile and a hash-pinned `requirements.txt`: one of everything a job needs. `fixture/README.md` says how to regenerate the lock |
 | `tests/` | The contract, as pytest, one file per thing it holds still. See [Developing](#developing) |
@@ -381,6 +383,54 @@ The Snyk job fails only when Snyk did not run: an expired or revoked token
 tab as SARIF and do not fail the job; Snyk is a reporter here, CodeQL and
 pip-audit are the gates.
 
+### Dependabot auto-merge
+
+Three things already stand between a dependency bump and the default branch:
+the seven-day cooldown in `dependabot.yml`, the `ci / CI green` gate, and a
+required pull request. What was left was a human clicking merge on a patch
+bump that all three had already cleared. This workflow removes that click and
+nothing else.
+
+```yaml
+name: Dependabot auto-merge
+on: pull_request
+
+permissions:
+  contents: read
+
+jobs:
+  auto-merge:
+    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/dependabot-auto-merge.yml@<sha> # v1.4.0
+    permissions:
+      contents: write        # enable auto-merge on the pull request
+      pull-requests: write   # read its Dependabot metadata
+```
+
+Two settings have to be on, or nothing happens: **Allow auto-merge** in the
+repository (`gh api -X PATCH repos/OWNER/REPO -F allow_auto_merge=true`) and a
+required status check for the merge to wait on. Both are in
+[BASELINE.md](BASELINE.md).
+
+| Input | Default | Meaning |
+|---|---|---|
+| `max-update-type` | `minor` | The largest semver change that may merge on its own: `patch`, `minor` or `major`. A grouped bump is judged by its largest step |
+| `merge-method` | `squash` | `squash`, `merge` or `rebase`. Squash is the default because a repository that requires linear history refuses a merge commit |
+| `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `audit`, `api.github.com:443`, empty | harden-runner, as in `python-ci.yml` |
+| `timeout-minutes` | `10` | Job timeout |
+
+A major bump, or a pull request whose update type Dependabot did not report,
+is left open with a notice saying so. The decision fails closed: an update
+type the workflow does not recognise is never merged.
+
+Why this is safe to give `contents: write` on a pull-request trigger, which
+is normally the shape to avoid: **the job never checks the pull request out**.
+It runs two pinned actions and the `gh` CLI against the API, so none of the
+proposed code executes beside the grant. `dependabot/fetch-metadata` verifies
+the commits really are Dependabot's before reporting what they change, the job
+is gated on the pull request's author, and GitHub gives a fork's pull request
+a read-only token whatever the workflow asks for. No `pull_request_target`, no
+checkout, no code.
+
 ## Doppler setup
 
 Doppler is the one rotation point. A CI job authenticates with a token that
@@ -546,10 +596,17 @@ repository, once its first run is green:
 6. **Repository variable `DOPPLER_IDENTITY_ID`**: see Doppler setup above.
 7. **No GitHub Actions secrets** once the Doppler path has produced a green
    run. `gh secret list` should print nothing.
+8. **Allow auto-merge**, so a Dependabot bump that clears the cooldown and the
+   gate can land without a click. See
+   [Dependabot auto-merge](#dependabot-auto-merge).
+9. **Version tags are immutable**: a ruleset on `refs/tags/v*` that forbids
+   deleting, moving or force-pushing a tag. Callers pin SHAs, but Dependabot
+   follows tags, and a moved tag is the one way a pin and its version comment
+   can silently disagree.
 
 Signed commits are not required yet. The laptop signs with a registered SSH
 key and its commits and tags verify; the rule goes on when every place that
-commits is signing (roadmap item 10).
+commits is signing (roadmap item 5).
 
 ## Releasing a version of this repository
 

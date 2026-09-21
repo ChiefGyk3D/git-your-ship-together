@@ -23,23 +23,13 @@
 #
 # tests/test_risk_register.py checks the shape and the dates.
 
-entries:
-  - id: GHSA-8mgp-746c-j5xp
-    aliases: [PYSEC-2026-3740]
-    package: nltk
-    versions: "<=3.10.3"
-    repos: [ChiefGyk3D/Boon-Tube-Daemon]
-    where: [pip-audit, dependency-review]
-    reason: >
-      nltk is a transitive dependency of safety, the scanner listed in the
-      runtime requirements; 3.10.3 is the newest release on PyPI, so there is
-      no fixed version to move to. The advisory is in NLTK's model-artifact
-      download APIs, which safety does not call.
-    mitigation: >
-      Nothing in the image calls nltk. The real fix is to take safety (and the
-      other scan tools) out of the runtime requirements into a dev lock, which
-      removes nltk from the image; that is a maintainer decision recorded in
-      docs/ROADMAP.md.
-    accepted: 2026-09-21
-    review_by: 2026-12-20
-    owner: ChiefGyk3D
+# An empty register is the goal state: no pipeline anywhere is being told to
+# ignore an advisory. The first exception taken adds an entry here, and the
+# audit's `risk-exceptions` check fails until it does.
+#
+# Closed so far:
+#   GHSA-8mgp-746c-j5xp / PYSEC-2026-3740 (nltk, via safety in
+#   Boon-Tube-Daemon's runtime requirements). Closed 2026-09-21 by moving the
+#   scan tools into a dev lock, which took nltk out of the image entirely.
+
+entries: []

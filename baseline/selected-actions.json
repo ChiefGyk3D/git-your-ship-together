@@ -26,6 +26,7 @@
     "aquasecurity/setup-trivy@*",
     "anchore/sbom-action/download-syft@*",
     "raven-actions/actionlint/*",
-    "zizmorcore/zizmor-action/*"
+    "zizmorcore/zizmor-action/*",
+    "dependabot/fetch-metadata@*"
   ]
 }
