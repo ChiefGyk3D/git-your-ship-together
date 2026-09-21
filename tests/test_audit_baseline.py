@@ -139,6 +139,7 @@ def test_a_compliant_repository_passes_every_check():
         "actions-allowlist",
         "workflows-pinned",
         "uses-shared-workflows",
+        "risk-exceptions",
         "dependabot-config",
         "doppler-identity",
     }
@@ -347,3 +348,79 @@ def test_the_shared_repository_requires_its_own_gate_name():
         "checks": [{"context": "CI green"}]
     }
     assert by_check(audit.audit_repo(REPO_NAME, fetcher(caller)))["required-check"][0] == audit.FAIL
+
+
+# --- risk exceptions --------------------------------------------------------
+
+SECURITY_CALLER = (
+    "name: Security\non: [pull_request]\npermissions:\n  contents: read\njobs:\n  security:\n"
+    f"    uses: {SHARED}security.yml@{PIN} # v1.0.0\n"
+    "    with:\n"
+    "      # nltk has no fixed release yet (see the register)\n"
+    "      pip-audit-extra-args: --ignore-vuln PYSEC-2026-3740\n"
+    "      dependency-review-allow-ghsas: GHSA-8mgp-746c-j5xp, GHSA-aaaa-bbbb-cccc\n"
+)
+
+TODAY = audit.dt.date(2026, 9, 21)
+REGISTER = [
+    {
+        "id": "GHSA-8mgp-746c-j5xp",
+        "aliases": ["PYSEC-2026-3740"],
+        "repos": [REPO_NAME],
+        "review_by": audit.dt.date(2026, 12, 20),
+    },
+    {"id": "GHSA-aaaa-bbbb-cccc", "repos": [REPO_NAME], "review_by": audit.dt.date(2026, 12, 20)},
+]
+
+
+def test_exceptions_are_read_from_both_inputs_and_not_from_comments():
+    text = SECURITY_CALLER + "      # --ignore-vuln PYSEC-0000-1 is only mentioned here\n"
+    assert audit.exceptions_in(text) == {"PYSEC-2026-3740", "GHSA-8mgp-746c-j5xp", "GHSA-aaaa-bbbb-cccc"}
+
+
+def test_registered_unexpired_exceptions_pass():
+    ids = audit.exceptions_in(SECURITY_CALLER)
+    result = audit.check_risk_exceptions(REPO_NAME, ids, REGISTER, today=TODAY)
+    assert result.status == audit.PASS, result
+
+
+def test_an_unregistered_exception_fails_by_id():
+    ids = {"GHSA-zzzz-yyyy-xxxx"}
+    result = audit.check_risk_exceptions(REPO_NAME, ids, REGISTER, today=TODAY)
+    assert result.status == audit.FAIL
+    assert "GHSA-zzzz-yyyy-xxxx" in result.detail and "risk-register" in result.detail
+
+
+def test_an_exception_registered_for_another_repository_fails():
+    result = audit.check_risk_exceptions("ChiefGyk3D/other", {"PYSEC-2026-3740"}, REGISTER, today=TODAY)
+    assert result.status == audit.FAIL
+    assert "not for ChiefGyk3D/other" in result.detail
+
+
+def test_an_expired_exception_fails_and_says_so():
+    late = audit.dt.date(2027, 1, 1)
+    result = audit.check_risk_exceptions(REPO_NAME, {"PYSEC-2026-3740"}, REGISTER, today=late)
+    assert result.status == audit.FAIL
+    assert "has passed" in result.detail
+
+
+def test_no_exceptions_is_a_pass():
+    assert audit.check_risk_exceptions(REPO_NAME, set(), [], today=TODAY).status == audit.PASS
+
+
+def test_the_audit_reads_exceptions_out_of_the_security_workflow():
+    answers = good_answers()
+    answers[f"/repos/{REPO_NAME}/contents/.github/workflows"] = (
+        200,
+        [{"name": "ci.yml"}, {"name": "security.yml"}],
+    )
+    answers[f"/repos/{REPO_NAME}/contents/.github/workflows/security.yml"] = (200, encoded(SECURITY_CALLER))
+    results = by_check(audit.audit_repo(REPO_NAME, fetcher(answers), register=[]))
+    status, detail = results["risk-exceptions"]
+    assert status == audit.FAIL and "GHSA-8mgp-746c-j5xp" in detail
+
+
+def test_the_shipped_register_covers_the_shipped_exceptions():
+    """The real file parses, and what it says is what the audit reads."""
+    register = audit.load_register()
+    assert any(e["id"] == "GHSA-8mgp-746c-j5xp" for e in register)

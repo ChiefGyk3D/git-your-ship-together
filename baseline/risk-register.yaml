@@ -1,0 +1,45 @@
+# The risk register: every advisory a pipeline is told to ignore, with the
+# reason, and a date by which somebody looks again.
+#
+# A caller may name an advisory in two places: `pip-audit-extra-args:
+# --ignore-vuln <id>` and `dependency-review-allow-ghsas: <id>`. The audit
+# (scripts/audit_baseline.py, check `risk-exceptions`) reads every caller's
+# security workflow and fails when an ID it finds is not entered here for that
+# repository, or when the entry's review_by date has passed. So an exception
+# cannot be added quietly and cannot be forgotten: it is either in this file
+# with a reason, or the audit is red.
+#
+# Fields (all required unless noted):
+#   id         the advisory ID as the tool reports it (GHSA-... or PYSEC-...)
+#   aliases    other IDs for the same advisory (optional)
+#   package    the affected package, and `versions` the affected range
+#   repos      the repositories allowed to except it, owner/name
+#   where      which check names it: pip-audit, dependency-review
+#   reason     why it is accepted rather than fixed, in plain words
+#   mitigation what limits the exposure meanwhile
+#   accepted   the date the exception was taken (YYYY-MM-DD)
+#   review_by  the date it expires unless renewed; at most 90 days out
+#   owner      who renews or closes it
+#
+# tests/test_risk_register.py checks the shape and the dates.
+
+entries:
+  - id: GHSA-8mgp-746c-j5xp
+    aliases: [PYSEC-2026-3740]
+    package: nltk
+    versions: "<=3.10.3"
+    repos: [ChiefGyk3D/Boon-Tube-Daemon]
+    where: [pip-audit, dependency-review]
+    reason: >
+      nltk is a transitive dependency of safety, the scanner listed in the
+      runtime requirements; 3.10.3 is the newest release on PyPI, so there is
+      no fixed version to move to. The advisory is in NLTK's model-artifact
+      download APIs, which safety does not call.
+    mitigation: >
+      Nothing in the image calls nltk. The real fix is to take safety (and the
+      other scan tools) out of the runtime requirements into a dev lock, which
+      removes nltk from the image; that is a maintainer decision recorded in
+      docs/ROADMAP.md.
+    accepted: 2026-09-21
+    review_by: 2026-12-20
+    owner: ChiefGyk3D

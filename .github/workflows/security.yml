@@ -75,6 +75,10 @@ on:
         description: Fail the review at this severity or above.
         type: string
         default: moderate
+      dependency-review-allow-ghsas:
+        description: Comma-separated GitHub Advisory IDs the review may not fail on. Each one must have an entry in the shared repository's baseline/risk-register.yaml (the audit checks); an advisory with no fixed release is the usual case.
+        type: string
+        default: ""
       snyk:
         description: Run Snyk Code and Snyk Open Source. Needs SNYK_TOKEN in the Doppler config.
         type: boolean
@@ -327,6 +331,7 @@ jobs:
       - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
         with:
           fail-on-severity: ${{ inputs.dependency-review-severity }}
+          allow-ghsas: ${{ inputs.dependency-review-allow-ghsas }}
           comment-summary-in-pr: on-failure
 
   snyk:

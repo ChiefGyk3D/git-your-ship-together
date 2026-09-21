@@ -186,7 +186,22 @@ gh api -X PUT repos/OWNER/REPO/private-vulnerability-reporting
 gh api -X PUT repos/OWNER/REPO/automated-security-fixes
 ```
 
-## 7. What is deliberately not required yet
+## 7. Risk exceptions are registered
+
+**An advisory a pipeline ignores is written down, with a reason and an expiry.**
+Two inputs of `security.yml` let a caller skip an advisory: `pip-audit-extra-args:
+--ignore-vuln <id>` and `dependency-review-allow-ghsas: <id>`. The usual case is
+an advisory with no fixed release yet. Each ID a caller names must have an
+entry in [`baseline/risk-register.yaml`](baseline/risk-register.yaml) for that
+repository: the affected package, why it is accepted rather than fixed, what
+limits the exposure meanwhile, the date it was accepted, a `review_by` date at
+most 90 days out, and an owner. An exception that is not in the register, is
+registered for another repository, or whose review date has passed, fails the
+audit. `tests/test_risk_register.py` checks the file's shape and dates.
+
+Checked: `risk-exceptions`.
+
+## 8. What is deliberately not required yet
 
 - **Signed commits and tags.** Worth requiring once a signing key exists on
   the maintainer's machine; none does today, so a rule would only block the
