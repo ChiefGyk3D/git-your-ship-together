@@ -83,6 +83,7 @@ And what keeps the callers honest:
 | `baseline/selected-actions.json` | The allowed-actions policy every repository sets: GitHub-owned plus the named third parties these workflows use, subdirectory forms included |
 | `baseline/risk-register.yaml` | Every advisory a pipeline is told to ignore, with the reason, the mitigation, an owner and an expiry. See [Risk register](#risk-register) |
 | `scripts/audit_baseline.py` | Reads each repository's settings and workflows from the API and reports PASS, FAIL or UNKNOWN per baseline item. Exit 0 only when every check passed |
+| `scripts/new-repo.sh` | Adopts a repository, or starts one: reads what it holds, writes the caller workflows and `dependabot.yml` from that, commits on a branch and opens the pull request, applies every BASELINE setting, appends to `baseline/repos.txt`. `--dry-run` writes the files somewhere else and prints the settings instead; that is what its test runs |
 | `scripts/doppler-ci-set.sh` | Sets one secret in the shared Doppler `ci` config. The value is typed twice with echo off and never reaches a command line, shell history or the terminal |
 | `docs/DESIGN.md` | The reasoning: the threat model, why Doppler, the products, what the tests enforce |
 | `docs/ROADMAP.md` | What is done, what is next, and what the lab could carry |
@@ -902,9 +903,16 @@ workflow therefore runs against a real project here before any caller pins
 it, and `CI green` needs those runs. `fixture/README.md` says how to
 regenerate its hash-pinned `requirements.txt`.
 
-Adding a repository: add it to `baseline/repos.txt`, call the workflows as
-shown above with one CI job per language, set the settings in BASELINE.md,
-and run the audit until it is clean. A repository not in the list is not covered.
+Adding a repository: `scripts/new-repo.sh OWNER/NAME`. It reads the
+repository (languages, tool configuration, Dockerfile, the workflows already
+there), writes the caller files from what it found with one CI job per
+language, replaces the old CI workflows and names them in the pull request
+it opens, applies every setting in BASELINE.md, and appends the repository to
+`baseline/repos.txt`. What it cannot do is Doppler: the service account and
+identity are made in the dashboard, and it prints those two steps and takes
+the UUID back through `--doppler-identity`. `--dry-run --out DIR` shows the
+files and the settings without touching anything. Then run the audit until
+it is clean. A repository not in the list is not covered.
 
 ## Licence
 
