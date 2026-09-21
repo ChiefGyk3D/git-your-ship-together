@@ -7,6 +7,10 @@ repository. These are the GitHub Actions workflows shared by ChiefGyk3D's
 Python projects (Typo Sniper, Stream Daemon, Star Daemon, Boon Tube Daemon, and
 whatever comes next).
 
+Why it is built this way, what it is built on, and what it defends against:
+[docs/DESIGN.md](docs/DESIGN.md). What every calling repository must meet:
+[BASELINE.md](BASELINE.md).
+
 Three reusable workflows and one composite action:
 
 | File | What it does |
