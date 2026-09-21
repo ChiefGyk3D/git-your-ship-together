@@ -31,11 +31,31 @@ Design rules, applied throughout:
   pass through `env:`.
 - **Every job has a timeout**, and every checkout sets
   `persist-credentials: false`.
+- **Every job starts with harden-runner.** `audit` by default, which logs
+  every outbound connection in the job summary; switch a caller to `block`
+  with an `allowed-endpoints` list once the audit shows what a job needs.
+- **The workflows never reference this repository by branch.** A reusable
+  workflow cannot name the commit it runs from, so the Doppler steps are
+  inlined rather than referenced as `@main`; a test holds the four copies
+  identical to `.github/actions/doppler-secrets`, which stays as the source
+  and for use outside these workflows.
 
 ## Calling the workflows
 
-Callers reference `@main`. Pin to a tag or SHA instead if you want a caller
-to stop moving with this repository.
+Callers pin a **commit SHA with the version in a comment**, the same rule
+every third-party action is held to here, and Dependabot moves the pin:
+
+```yaml
+uses: ChiefGyk3D/git-your-ship-together/.github/workflows/python-ci.yml@<sha> # v1.0.0
+```
+
+Resolve a tag with `git ls-remote --tags <repo> 'refs/tags/vX.Y.Z*'` and take
+the `^{}` (peeled) line when there is one: an annotated tag's own SHA is a tag
+object, not a commit. Four pins in the first version of this repository were
+tag objects; GitHub happened to resolve them, Dependabot would not have.
+
+Secrets are passed by name, never with `secrets: inherit`, so a called
+workflow can only ever see the one secret it declares.
 
 ### CI
 
@@ -51,11 +71,12 @@ permissions:
 
 jobs:
   ci:
-    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/python-ci.yml@main
+    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/python-ci.yml@<sha> # v1.0.0
     permissions:
       contents: read
       id-token: write
-    secrets: inherit
+    secrets:
+      DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}   # optional fallback, may be unset
     with:
       python-versions: '["3.11", "3.12", "3.13"]'
       test-command: pytest --cov=my_package --cov-report=xml
@@ -89,8 +110,17 @@ Inputs of `python-ci.yml`:
 | `dockerfile` | `Dockerfile` | Path to the Dockerfile |
 | `docker-context` | `.` | Build context |
 | `docker-test-command` | empty (skips the check) | Run against the built image; `$IMAGE` names it |
+| `workflow-lint` | `true` | actionlint and zizmor over the caller's own `.github/workflows` |
+| `zizmor-persona` | `regular` | zizmor strictness: `regular`, `pedantic`, `auditor` |
+| `egress-policy` | `audit` | harden-runner on every job: `audit` logs outbound connections, `block` allows only `allowed-endpoints` |
+| `allowed-endpoints` | empty | harden-runner allow-list, `host:port` per line, for `block` |
 | `doppler-project`, `doppler-config`, `doppler-identity-id` | empty | See [Doppler setup](#doppler-setup) |
 | `timeout-minutes` | `30` | Per-job timeout |
+
+Every command input (`lint-command`, `test-command`, `smoke-command`,
+`docker-test-command`, the install commands) reaches the shell as an
+environment variable run by `bash -eo pipefail -c`, never by template
+expansion into the script. Multi-line values work as written.
 
 ### Container release
 
@@ -109,14 +139,15 @@ permissions:
 
 jobs:
   container:
-    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/python-docker-release.yml@main
+    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/python-docker-release.yml@<sha> # v1.0.0
     permissions:
       contents: read
       packages: write
       id-token: write
       attestations: write
       security-events: write
-    secrets: inherit
+    secrets:
+      DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
     with:
       dockerfile: docker/Dockerfile
       push: ${{ github.event_name != 'pull_request' }}
@@ -178,8 +209,14 @@ Inputs of `python-docker-release.yml`:
 | `trivy` | `true` | Scan the image, upload SARIF |
 | `trivy-severity` | `CRITICAL,HIGH` | Severities reported |
 | `trivy-exit-code` | `"0"` | `"1"` makes findings fail the job |
+| `egress-policy`, `allowed-endpoints` | `audit`, empty | harden-runner, as in `python-ci.yml` |
 | `doppler-project`, `doppler-config`, `doppler-identity-id` | empty | See [Doppler setup](#doppler-setup) |
 | `timeout-minutes` | `60` | Job timeout; native builds on arm64 under QEMU are slow |
+
+A publishing build never reads the GitHub Actions cache. Anyone who can open
+a pull request can write to that cache, and a poisoned layer inside a signed
+release is the one outcome the signature cannot undo. Pull-request builds use
+the cache, publishing builds start clean.
 
 Outputs: `digest` and `image` (`ghcr.io/...@sha256:...`) of the published
 index, empty when not pushed.
@@ -200,13 +237,14 @@ permissions:
 
 jobs:
   security:
-    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/security.yml@main
+    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/security.yml@<sha> # v1.0.0
     permissions:
       contents: read
       security-events: write
       pull-requests: write
       id-token: write
-    secrets: inherit
+    secrets:
+      DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
     with:
       codeql-config: |
         paths-ignore:
@@ -228,7 +266,9 @@ Inputs of `security.yml`:
 | `dependency-review` | `true` | On pull requests only |
 | `dependency-review-severity` | `moderate` | Fail the review at this severity or above |
 | `snyk` | `false` | Snyk Code and Snyk Open Source; needs `SNYK_TOKEN` in the Doppler config |
+| `scorecard` | `false` | OpenSSF Scorecard, published; runs only on the default branch (push or schedule) |
 | `python-version` | `3.13` | Python for pip-audit and Snyk |
+| `egress-policy`, `allowed-endpoints` | `audit`, empty | harden-runner, as in `python-ci.yml` |
 | `doppler-project`, `doppler-config`, `doppler-identity-id` | empty | See [Doppler setup](#doppler-setup) |
 | `timeout-minutes` | `30` | Per-job timeout |
 
@@ -238,14 +278,15 @@ Doppler is the one rotation point. A CI job authenticates with a token that
 lives for the job and is scoped to one repository's identity, and reads one
 config that holds only what CI needs.
 
-The composite action `.github/actions/doppler-secrets` tries, in order:
+The Doppler steps (inlined in each workflow; `.github/actions/doppler-secrets`
+is the same thing as a composite action) try, in order:
 
 1. **OIDC** when `doppler-identity-id` is set. GitHub mints a JWT for the job
    (`id-token: write`), the action posts it to Doppler's
    `/v3/auth/oidc`, and Doppler returns a short-lived token for the identity's
    Service Account. Nothing static is stored anywhere.
 2. **Service Token** when the caller passes the GitHub secret
-   `DOPPLER_TOKEN` (via `secrets: inherit`). Read-only, one config. Doppler
+   `DOPPLER_TOKEN` (`secrets: { DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }} }`). Read-only, one config. Doppler
    still rotates it, but it is one static credential in GitHub per repository.
    Use it only where OIDC is not available.
 3. **Nothing**, with a notice, so a pipeline runs before Doppler is wired up.
@@ -304,6 +345,7 @@ pip install -r requirements-dev.txt
 pytest
 ruff check tests/ && ruff format --check tests/
 actionlint          # https://github.com/rhysd/actionlint
+zizmor --offline .  # https://docs.zizmor.sh
 ```
 
 `tests/test_workflows.py` is the contract: SHA pins with version comments, the

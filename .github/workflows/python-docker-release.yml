@@ -14,22 +14,23 @@
 #
 #   jobs:
 #     release:
-#       uses: ChiefGyk3D/git-your-ship-together/.github/workflows/python-docker-release.yml@main
+#       uses: ChiefGyk3D/git-your-ship-together/.github/workflows/python-docker-release.yml@<sha> # vX.Y.Z
 #       permissions:
 #         contents: read
 #         packages: write
 #         id-token: write
 #         attestations: write
 #         security-events: write
-#       secrets: inherit
+#       secrets:
+#         DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}   # optional fallback
 #       with:
 #         dockerfile: docker/Dockerfile
 #         push: ${{ github.event_name != 'pull_request' }}
 #         docker-test-command: docker run --rm "$IMAGE" --version
 #
-# Secrets come from Doppler (see .github/actions/doppler-secrets). Docker Hub
-# publishing reads DOCKERHUB_USERNAME and DOCKERHUB_TOKEN from the Doppler
-# config; GHCR needs only the job's own GITHUB_TOKEN.
+# A publishing build never reads the Actions cache. Anyone who can open a pull
+# request can write to that cache, and a poisoned layer in a signed release is
+# the one outcome the signature cannot undo. Pull-request builds use it.
 #
 # Verify a published image with:
 #
@@ -117,6 +118,14 @@ on:
         description: Trivy exit code when findings exist. "1" makes findings fail the job.
         type: string
         default: "0"
+      egress-policy:
+        description: harden-runner egress policy - `audit` logs outbound connections, `block` allows only `allowed-endpoints`.
+        type: string
+        default: audit
+      allowed-endpoints:
+        description: harden-runner allow-list (host:port per line), used when `egress-policy` is `block`.
+        type: string
+        default: ""
       doppler-project:
         description: Doppler project slug.
         type: string
@@ -155,26 +164,79 @@ jobs:
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read
-      packages: write
-      id-token: write
-      attestations: write
-      security-events: write
+      packages: write  # push the image, signature, SBOM attestation and provenance
+      id-token: write  # Doppler OIDC, cosign keyless signing, GitHub attestation
+      attestations: write  # record SLSA provenance
+      security-events: write  # Trivy SARIF upload
     outputs:
       digest: ${{ steps.push.outputs.digest }}
       image: ${{ steps.names.outputs.ghcr }}@${{ steps.push.outputs.digest }}
     steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: ${{ inputs.egress-policy }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }}
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - name: Fetch CI secrets from Doppler
+      # --- Doppler (same steps as .github/actions/doppler-secrets) ---------
+      - name: Decide how to authenticate to Doppler
+        id: doppler
         if: inputs.push && inputs.dockerhub
-        uses: ChiefGyk3D/git-your-ship-together/.github/actions/doppler-secrets@main
+        env:
+          IDENTITY_ID: ${{ inputs.doppler-identity-id }}
+          TOKEN: ${{ secrets.DOPPLER_TOKEN }}
+          PROJECT: ${{ inputs.doppler-project }}
+          CONFIG: ${{ inputs.doppler-config }}
+          REQUIRED: "false"
+          IS_FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+        run: |
+          set -euo pipefail
+          mode=none
+          if [ "$IS_FORK" = "true" ]; then
+            # A fork's pull request has no id-token and must never receive a
+            # secret. Silent skip is correct here, whatever `required` says.
+            echo "::notice title=Doppler::pull request from a fork - no secrets are fetched"
+          elif [ -n "$IDENTITY_ID" ]; then
+            mode=oidc
+          elif [ -n "$TOKEN" ]; then
+            mode=token
+          fi
+          if [ "$mode" != "none" ] && { [ -z "$PROJECT" ] || [ -z "$CONFIG" ]; }; then
+            echo "::error title=Doppler::project and config are required when authenticating"
+            exit 1
+          fi
+          if [ "$mode" = "none" ] && [ "$IS_FORK" != "true" ]; then
+            if [ "$REQUIRED" = "true" ]; then
+              echo "::error title=Doppler::no identity-id and no DOPPLER_TOKEN; this job needs one (see README, 'Doppler setup')"
+              exit 1
+            fi
+            echo "::notice title=Doppler::not configured (no identity-id, no DOPPLER_TOKEN) - continuing without CI secrets"
+          fi
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo "Doppler auth mode: $mode"
+
+      - name: Fetch CI secrets from Doppler (OIDC)
+        if: steps.doppler.outputs.mode == 'oidc'
+        uses: dopplerhq/secrets-fetch-action@451892f16195f9ac360e1a5bcbf0b5fd0e957534 # v2.0.0
         with:
-          project: ${{ inputs.doppler-project }}
-          config: ${{ inputs.doppler-config }}
-          identity-id: ${{ inputs.doppler-identity-id }}
-          token: ${{ secrets.DOPPLER_TOKEN }}
+          auth-method: oidc
+          doppler-identity-id: ${{ inputs.doppler-identity-id }}
+          doppler-project: ${{ inputs.doppler-project }}
+          doppler-config: ${{ inputs.doppler-config }}
+          inject-env-vars: true
+
+      - name: Fetch CI secrets from Doppler (Service Token)
+        if: steps.doppler.outputs.mode == 'token'
+        uses: dopplerhq/secrets-fetch-action@451892f16195f9ac360e1a5bcbf0b5fd0e957534 # v2.0.0
+        with:
+          doppler-token: ${{ secrets.DOPPLER_TOKEN }}
+          doppler-project: ${{ inputs.doppler-project }}
+          doppler-config: ${{ inputs.doppler-config }}
+          inject-env-vars: true
+      # ---------------------------------------------------------------------
 
       - name: Resolve image names
         id: names
@@ -246,18 +308,21 @@ jobs:
           load: true
           tags: release-candidate:local
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # The Actions cache is writable by anyone who can open a pull
+          # request; a publishing build must not read it.
+          cache-from: ${{ !inputs.push && 'type=gha' || '' }}
+          cache-to: ${{ !inputs.push && 'type=gha,mode=max' || '' }}
 
       - name: Check the image
         if: inputs.docker-test-command != ''
         env:
           IMAGE: release-candidate:local
-        run: ${{ inputs.docker-test-command }}
+          COMMAND: ${{ inputs.docker-test-command }}
+        run: bash -eo pipefail -c "$COMMAND"
 
       - name: Scan the image with Trivy
         if: inputs.trivy
-        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: release-candidate:local
           format: sarif
@@ -268,7 +333,7 @@ jobs:
 
       - name: Upload Trivy results to the Security tab
         if: inputs.trivy && always() && hashFiles('trivy-results.sarif') != ''
-        uses: github/codeql-action/upload-sarif@c23de5a82f64bb08c6d9f28844551440ca298e76 # v4.38.1
+        uses: github/codeql-action/upload-sarif@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4.38.1
         with:
           sarif_file: trivy-results.sarif
           category: trivy-image
@@ -289,8 +354,6 @@ jobs:
           # duplicate them and add unknown/unknown entries to the index.
           provenance: false
           sbom: false
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
 
       - name: Install cosign
         if: inputs.push && (inputs.sign || inputs.sbom)
@@ -311,7 +374,7 @@ jobs:
 
       - name: Generate the SBOM with syft
         if: inputs.push && inputs.sbom
-        uses: anchore/sbom-action@006b7ce8314066bdf1765b4500370d40fa6917a3 # v0.24.2
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
         with:
           image: ${{ steps.names.outputs.ghcr }}@${{ steps.push.outputs.digest }}
           registry-username: ${{ github.actor }}
@@ -347,7 +410,6 @@ jobs:
         if: inputs.push
         env:
           GHCR: ${{ steps.names.outputs.ghcr }}
-          DOCKERHUB: ${{ steps.names.outputs.dockerhub }}
           DIGEST: ${{ steps.push.outputs.digest }}
           TAGS: ${{ steps.meta.outputs.tags }}
           SIGNED: ${{ inputs.sign }}

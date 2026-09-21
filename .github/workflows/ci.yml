@@ -32,6 +32,23 @@ jobs:
           version: 1.7.11
           fail-on-error: true
 
+  zizmor:
+    name: zizmor
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: zizmorcore/zizmor-action@cc914d7f3750a2d13d75c7f184a1060aa0e9d482 # v0.6.4
+        with:
+          version: 1.30.1
+          persona: pedantic
+          advanced-security: false
+
   test:
     name: Test the workflows
     runs-on: ubuntu-latest
@@ -62,7 +79,7 @@ jobs:
   ci-green:
     name: CI green
     if: always()
-    needs: [actionlint, test]
+    needs: [actionlint, zizmor, test]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}

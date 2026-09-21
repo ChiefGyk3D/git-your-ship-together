@@ -1,0 +1,32 @@
+# This repository's own security checks, run through the reusable workflow it
+# ships: CodeQL over the workflow files themselves (the `actions` language),
+# gitleaks over the history, and pip-audit over the test dependencies.
+name: Security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  security:
+    # `$/.github/workflows/security.yml` is the form GitHub recommends since
+    # July 2026 and what zizmor asks for; actionlint still rejects it, and the
+    # workflow-lint job runs both, so the `./` form stays until actionlint
+    # parses `$/`.
+    uses: ./.github/workflows/security.yml # zizmor: ignore[self-repository]
+    permissions:
+      contents: read
+      security-events: write  # CodeQL and Scorecard SARIF uploads
+      pull-requests: write  # dependency-review summary comment
+      id-token: write  # Scorecard publishing
+    with:
+      codeql-languages: actions
+      pip-audit-requirements: requirements-dev.txt
+      scorecard: true

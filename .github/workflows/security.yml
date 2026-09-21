@@ -6,6 +6,7 @@
 #   pip-audit          Known vulnerabilities in the pinned dependencies.
 #   dependency-review  On pull requests: what a dependency change brings in.
 #   snyk               Optional; SNYK_TOKEN comes from the Doppler config.
+#   scorecard          Optional; OpenSSF Scorecard on the default branch.
 #
 # Call it with:
 #
@@ -15,17 +16,19 @@
 #     schedule: [{ cron: '0 6 * * 1' }]
 #   jobs:
 #     security:
-#       uses: ChiefGyk3D/git-your-ship-together/.github/workflows/security.yml@main
+#       uses: ChiefGyk3D/git-your-ship-together/.github/workflows/security.yml@<sha> # vX.Y.Z
 #       permissions:
 #         contents: read
 #         security-events: write
 #         pull-requests: write     # dependency-review's PR summary comment
-#         id-token: write          # Doppler OIDC, when snyk is enabled
-#       secrets: inherit
+#         id-token: write          # Doppler OIDC; Scorecard publishing
+#       secrets:
+#         DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}   # optional fallback
 #
 # gitleaks-action needs no licence for a personal account. A repository under
 # an organisation needs GITLEAKS_LICENSE, which is read from the Doppler
-# config when one is given.
+# config when one is given. A `.gitleaks.toml` at the caller's root is picked
+# up automatically for allowlisting documented placeholders.
 
 name: Security (reusable)
 
@@ -37,7 +40,7 @@ on:
         type: boolean
         default: true
       codeql-languages:
-        description: CodeQL languages, comma-separated.
+        description: CodeQL languages, comma-separated (`python`, `actions`, ...).
         type: string
         default: python
       codeql-queries:
@@ -76,10 +79,22 @@ on:
         description: Run Snyk Code and Snyk Open Source. Needs SNYK_TOKEN in the Doppler config.
         type: boolean
         default: false
+      scorecard:
+        description: Run OpenSSF Scorecard and publish the result. Runs only on the default branch (push or schedule).
+        type: boolean
+        default: false
       python-version:
         description: Python for pip-audit and Snyk.
         type: string
         default: "3.13"
+      egress-policy:
+        description: harden-runner egress policy for every job - `audit` logs outbound connections, `block` allows only `allowed-endpoints`.
+        type: string
+        default: audit
+      allowed-endpoints:
+        description: harden-runner allow-list (host:port per line), used when `egress-policy` is `block`.
+        type: string
+        default: ""
       doppler-project:
         description: Doppler project slug.
         type: string
@@ -112,19 +127,24 @@ jobs:
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read
-      security-events: write
+      security-events: write  # CodeQL SARIF upload
     steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: ${{ inputs.egress-policy }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }}
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - uses: github/codeql-action/init@c23de5a82f64bb08c6d9f28844551440ca298e76 # v4.38.1
+      - uses: github/codeql-action/init@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4.38.1
         with:
           languages: ${{ inputs.codeql-languages }}
           queries: ${{ inputs.codeql-queries }}
           config: ${{ inputs.codeql-config }}
 
-      - uses: github/codeql-action/analyze@c23de5a82f64bb08c6d9f28844551440ca298e76 # v4.38.1
+      - uses: github/codeql-action/analyze@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4.38.1
 
   gitleaks:
     name: Secret scan (gitleaks)
@@ -133,21 +153,74 @@ jobs:
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read
-      id-token: write
+      id-token: write  # Doppler OIDC for an optional GITLEAKS_LICENSE
     steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: ${{ inputs.egress-policy }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }}
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           fetch-depth: 0
 
-      - name: Fetch CI secrets from Doppler
+      # --- Doppler (same steps as .github/actions/doppler-secrets) ---------
+      - name: Decide how to authenticate to Doppler
+        id: doppler
         if: inputs.doppler-project != ''
-        uses: ChiefGyk3D/git-your-ship-together/.github/actions/doppler-secrets@main
+        env:
+          IDENTITY_ID: ${{ inputs.doppler-identity-id }}
+          TOKEN: ${{ secrets.DOPPLER_TOKEN }}
+          PROJECT: ${{ inputs.doppler-project }}
+          CONFIG: ${{ inputs.doppler-config }}
+          REQUIRED: "false"
+          IS_FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+        run: |
+          set -euo pipefail
+          mode=none
+          if [ "$IS_FORK" = "true" ]; then
+            # A fork's pull request has no id-token and must never receive a
+            # secret. Silent skip is correct here, whatever `required` says.
+            echo "::notice title=Doppler::pull request from a fork - no secrets are fetched"
+          elif [ -n "$IDENTITY_ID" ]; then
+            mode=oidc
+          elif [ -n "$TOKEN" ]; then
+            mode=token
+          fi
+          if [ "$mode" != "none" ] && { [ -z "$PROJECT" ] || [ -z "$CONFIG" ]; }; then
+            echo "::error title=Doppler::project and config are required when authenticating"
+            exit 1
+          fi
+          if [ "$mode" = "none" ] && [ "$IS_FORK" != "true" ]; then
+            if [ "$REQUIRED" = "true" ]; then
+              echo "::error title=Doppler::no identity-id and no DOPPLER_TOKEN; this job needs one (see README, 'Doppler setup')"
+              exit 1
+            fi
+            echo "::notice title=Doppler::not configured (no identity-id, no DOPPLER_TOKEN) - continuing without CI secrets"
+          fi
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo "Doppler auth mode: $mode"
+
+      - name: Fetch CI secrets from Doppler (OIDC)
+        if: steps.doppler.outputs.mode == 'oidc'
+        uses: dopplerhq/secrets-fetch-action@451892f16195f9ac360e1a5bcbf0b5fd0e957534 # v2.0.0
         with:
-          project: ${{ inputs.doppler-project }}
-          config: ${{ inputs.doppler-config }}
-          identity-id: ${{ inputs.doppler-identity-id }}
-          token: ${{ secrets.DOPPLER_TOKEN }}
+          auth-method: oidc
+          doppler-identity-id: ${{ inputs.doppler-identity-id }}
+          doppler-project: ${{ inputs.doppler-project }}
+          doppler-config: ${{ inputs.doppler-config }}
+          inject-env-vars: true
+
+      - name: Fetch CI secrets from Doppler (Service Token)
+        if: steps.doppler.outputs.mode == 'token'
+        uses: dopplerhq/secrets-fetch-action@451892f16195f9ac360e1a5bcbf0b5fd0e957534 # v2.0.0
+        with:
+          doppler-token: ${{ secrets.DOPPLER_TOKEN }}
+          doppler-project: ${{ inputs.doppler-project }}
+          doppler-config: ${{ inputs.doppler-config }}
+          inject-env-vars: true
+      # ---------------------------------------------------------------------
 
       - uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
         env:
@@ -163,6 +236,11 @@ jobs:
     permissions:
       contents: read
     steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: ${{ inputs.egress-policy }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }}
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -193,8 +271,13 @@ jobs:
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read
-      pull-requests: write
+      pull-requests: write  # the summary comment on failure
     steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: ${{ inputs.egress-policy }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }}
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -211,20 +294,73 @@ jobs:
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read
-      security-events: write
-      id-token: write
+      security-events: write  # Snyk SARIF upload
+      id-token: write  # Doppler OIDC for SNYK_TOKEN
     steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: ${{ inputs.egress-policy }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }}
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - name: Fetch CI secrets from Doppler
-        uses: ChiefGyk3D/git-your-ship-together/.github/actions/doppler-secrets@main
+      # --- Doppler (same steps as .github/actions/doppler-secrets) ---------
+      - name: Decide how to authenticate to Doppler
+        id: doppler
+        env:
+          IDENTITY_ID: ${{ inputs.doppler-identity-id }}
+          TOKEN: ${{ secrets.DOPPLER_TOKEN }}
+          PROJECT: ${{ inputs.doppler-project }}
+          CONFIG: ${{ inputs.doppler-config }}
+          REQUIRED: "false"
+          IS_FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+        run: |
+          set -euo pipefail
+          mode=none
+          if [ "$IS_FORK" = "true" ]; then
+            # A fork's pull request has no id-token and must never receive a
+            # secret. Silent skip is correct here, whatever `required` says.
+            echo "::notice title=Doppler::pull request from a fork - no secrets are fetched"
+          elif [ -n "$IDENTITY_ID" ]; then
+            mode=oidc
+          elif [ -n "$TOKEN" ]; then
+            mode=token
+          fi
+          if [ "$mode" != "none" ] && { [ -z "$PROJECT" ] || [ -z "$CONFIG" ]; }; then
+            echo "::error title=Doppler::project and config are required when authenticating"
+            exit 1
+          fi
+          if [ "$mode" = "none" ] && [ "$IS_FORK" != "true" ]; then
+            if [ "$REQUIRED" = "true" ]; then
+              echo "::error title=Doppler::no identity-id and no DOPPLER_TOKEN; this job needs one (see README, 'Doppler setup')"
+              exit 1
+            fi
+            echo "::notice title=Doppler::not configured (no identity-id, no DOPPLER_TOKEN) - continuing without CI secrets"
+          fi
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo "Doppler auth mode: $mode"
+
+      - name: Fetch CI secrets from Doppler (OIDC)
+        if: steps.doppler.outputs.mode == 'oidc'
+        uses: dopplerhq/secrets-fetch-action@451892f16195f9ac360e1a5bcbf0b5fd0e957534 # v2.0.0
         with:
-          project: ${{ inputs.doppler-project }}
-          config: ${{ inputs.doppler-config }}
-          identity-id: ${{ inputs.doppler-identity-id }}
-          token: ${{ secrets.DOPPLER_TOKEN }}
+          auth-method: oidc
+          doppler-identity-id: ${{ inputs.doppler-identity-id }}
+          doppler-project: ${{ inputs.doppler-project }}
+          doppler-config: ${{ inputs.doppler-config }}
+          inject-env-vars: true
+
+      - name: Fetch CI secrets from Doppler (Service Token)
+        if: steps.doppler.outputs.mode == 'token'
+        uses: dopplerhq/secrets-fetch-action@451892f16195f9ac360e1a5bcbf0b5fd0e957534 # v2.0.0
+        with:
+          doppler-token: ${{ secrets.DOPPLER_TOKEN }}
+          doppler-project: ${{ inputs.doppler-project }}
+          doppler-config: ${{ inputs.doppler-config }}
+          inject-env-vars: true
+      # ---------------------------------------------------------------------
 
       # No token means no scan, said out loud in the run's annotations rather
       # than as a red job on every pull request before Doppler is wired up.
@@ -266,14 +402,52 @@ jobs:
       # old scan report would otherwise upload it as if it were fresh.
       - name: Upload Snyk Code results
         if: steps.token.outputs.present == 'true' && hashFiles('snyk-code.sarif') != ''
-        uses: github/codeql-action/upload-sarif@c23de5a82f64bb08c6d9f28844551440ca298e76 # v4.38.1
+        uses: github/codeql-action/upload-sarif@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4.38.1
         with:
           sarif_file: snyk-code.sarif
           category: snyk-code
 
       - name: Upload Snyk Open Source results
         if: steps.token.outputs.present == 'true' && hashFiles('snyk-opensource.sarif') != ''
-        uses: github/codeql-action/upload-sarif@c23de5a82f64bb08c6d9f28844551440ca298e76 # v4.38.1
+        uses: github/codeql-action/upload-sarif@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4.38.1
         with:
           sarif_file: snyk-opensource.sarif
           category: snyk-opensource
+
+  scorecard:
+    name: OpenSSF Scorecard
+    # Scorecard publishes only from the default branch; on a pull request it
+    # would score the base and mislead.
+    if: inputs.scorecard && github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+      security-events: write  # Scorecard SARIF upload
+      id-token: write  # publishing the result
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: ${{ inputs.egress-policy }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }}
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ossf/scorecard-action@2d1146689b8cda280b9bc96326124645441f03bc # v2.4.4
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          publish_results: true
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: scorecard.sarif
+          path: results.sarif
+          retention-days: 5
+
+      - uses: github/codeql-action/upload-sarif@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4.38.1
+        with:
+          sarif_file: results.sarif
+          category: scorecard

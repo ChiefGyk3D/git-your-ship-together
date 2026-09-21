@@ -1,15 +1,17 @@
 # Reusable CI for a Python project: lint, a test matrix, an optional CLI smoke
-# test, and a single-arch container build that is run before it is trusted.
+# test, a single-arch container build that is run before it is trusted, and a
+# lint of the caller's own workflow files.
 #
 # Call it from a repository with:
 #
 #   jobs:
 #     ci:
-#       uses: ChiefGyk3D/git-your-ship-together/.github/workflows/python-ci.yml@main
+#       uses: ChiefGyk3D/git-your-ship-together/.github/workflows/python-ci.yml@<sha> # vX.Y.Z
 #       permissions:
 #         contents: read
-#         id-token: write        # only if Doppler OIDC is used (Codecov token)
-#       secrets: inherit
+#         id-token: write        # Doppler OIDC (Codecov token)
+#       secrets:
+#         DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}   # optional fallback
 #       with:
 #         python-versions: '["3.11", "3.12", "3.13"]'
 #         test-command: pytest --cov=my_pkg --cov-report=xml
@@ -19,8 +21,13 @@
 # job at the end is the one to name in branch protection: it fails when any job
 # it needs failed, so a job added here can never merge unchecked.
 #
-# Secrets come from Doppler (see .github/actions/doppler-secrets). This workflow
-# needs at most one: CODECOV_TOKEN, and only when `codecov: true`.
+# Commands a caller supplies (`lint-command`, `test-command`, ...) reach the
+# shell through an environment variable, never by template expansion into the
+# script, so a value can only ever be data.
+#
+# Secrets come from Doppler over the job's own OIDC identity; the steps are the
+# same as .github/actions/doppler-secrets, inlined so that a caller pinned to a
+# commit of this file gets exactly that commit's behaviour.
 
 name: Python CI (reusable)
 
@@ -70,7 +77,7 @@ on:
         type: boolean
         default: false
       smoke-command:
-        description: Shell run after `install-command` on `coverage-python-version`; empty skips the job.
+        description: Shell run after `smoke-install-command` on `coverage-python-version`; empty skips the job.
         type: string
         default: ""
       smoke-install-command:
@@ -91,6 +98,22 @@ on:
         default: "."
       docker-test-command:
         description: Shell run against the built image; `$IMAGE` names it. Empty skips the check.
+        type: string
+        default: ""
+      workflow-lint:
+        description: Run actionlint and zizmor over the caller's own .github/workflows.
+        type: boolean
+        default: true
+      zizmor-persona:
+        description: zizmor strictness - `regular`, `pedantic` or `auditor`.
+        type: string
+        default: regular
+      egress-policy:
+        description: harden-runner egress policy for every job - `audit` logs outbound connections, `block` allows only `allowed-endpoints`.
+        type: string
+        default: audit
+      allowed-endpoints:
+        description: harden-runner allow-list (host:port per line), used when `egress-policy` is `block`.
         type: string
         default: ""
       doppler-project:
@@ -125,6 +148,11 @@ jobs:
     permissions:
       contents: read
     steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: ${{ inputs.egress-policy }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }}
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -135,11 +163,45 @@ jobs:
           cache: pip
 
       - name: Install linters
-        run: ${{ inputs.lint-install-command }}
+        env:
+          COMMAND: ${{ inputs.lint-install-command }}
+        run: bash -eo pipefail -c "$COMMAND"
 
       - name: Lint
         continue-on-error: ${{ inputs.lint-continue-on-error }}
-        run: ${{ inputs.lint-command }}
+        env:
+          COMMAND: ${{ inputs.lint-command }}
+        run: bash -eo pipefail -c "$COMMAND"
+
+  workflow-lint:
+    name: Workflow lint (actionlint, zizmor)
+    if: inputs.workflow-lint
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: ${{ inputs.egress-policy }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }}
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: raven-actions/actionlint@3d39aea434753780c3b3d4a1a31c854b4dbf49d7 # v2.2.0
+        with:
+          version: 1.7.11
+          fail-on-error: true
+
+      - uses: zizmorcore/zizmor-action@cc914d7f3750a2d13d75c7f184a1060aa0e9d482 # v0.6.4
+        with:
+          version: 1.30.1
+          persona: ${{ inputs.zizmor-persona }}
+          # Findings go to the log and fail the job; the Security tab would
+          # need security-events: write from every caller for a lint.
+          advanced-security: false
 
   test:
     name: Test (Python ${{ matrix.python-version }})
@@ -147,12 +209,17 @@ jobs:
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read
-      id-token: write
+      id-token: write  # Doppler OIDC for the Codecov token
     strategy:
       fail-fast: false
       matrix:
         python-version: ${{ fromJSON(inputs.python-versions) }}
     steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: ${{ inputs.egress-policy }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }}
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -163,10 +230,14 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: ${{ inputs.install-command }}
+        env:
+          COMMAND: ${{ inputs.install-command }}
+        run: bash -eo pipefail -c "$COMMAND"
 
       - name: Run tests
-        run: ${{ inputs.test-command }}
+        env:
+          COMMAND: ${{ inputs.test-command }}
+        run: bash -eo pipefail -c "$COMMAND"
 
       - name: Upload coverage report
         if: matrix.python-version == inputs.coverage-python-version && hashFiles(inputs.coverage-file) != ''
@@ -176,18 +247,66 @@ jobs:
           path: ${{ inputs.coverage-file }}
           retention-days: 7
 
-      - name: Fetch CI secrets from Doppler
+      # --- Doppler (same steps as .github/actions/doppler-secrets) ---------
+      - name: Decide how to authenticate to Doppler
+        id: doppler
         if: inputs.codecov && matrix.python-version == inputs.coverage-python-version
-        uses: ChiefGyk3D/git-your-ship-together/.github/actions/doppler-secrets@main
+        env:
+          IDENTITY_ID: ${{ inputs.doppler-identity-id }}
+          TOKEN: ${{ secrets.DOPPLER_TOKEN }}
+          PROJECT: ${{ inputs.doppler-project }}
+          CONFIG: ${{ inputs.doppler-config }}
+          REQUIRED: "false"
+          IS_FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+        run: |
+          set -euo pipefail
+          mode=none
+          if [ "$IS_FORK" = "true" ]; then
+            # A fork's pull request has no id-token and must never receive a
+            # secret. Silent skip is correct here, whatever `required` says.
+            echo "::notice title=Doppler::pull request from a fork - no secrets are fetched"
+          elif [ -n "$IDENTITY_ID" ]; then
+            mode=oidc
+          elif [ -n "$TOKEN" ]; then
+            mode=token
+          fi
+          if [ "$mode" != "none" ] && { [ -z "$PROJECT" ] || [ -z "$CONFIG" ]; }; then
+            echo "::error title=Doppler::project and config are required when authenticating"
+            exit 1
+          fi
+          if [ "$mode" = "none" ] && [ "$IS_FORK" != "true" ]; then
+            if [ "$REQUIRED" = "true" ]; then
+              echo "::error title=Doppler::no identity-id and no DOPPLER_TOKEN; this job needs one (see README, 'Doppler setup')"
+              exit 1
+            fi
+            echo "::notice title=Doppler::not configured (no identity-id, no DOPPLER_TOKEN) - continuing without CI secrets"
+          fi
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo "Doppler auth mode: $mode"
+
+      - name: Fetch CI secrets from Doppler (OIDC)
+        if: steps.doppler.outputs.mode == 'oidc'
+        uses: dopplerhq/secrets-fetch-action@451892f16195f9ac360e1a5bcbf0b5fd0e957534 # v2.0.0
         with:
-          project: ${{ inputs.doppler-project }}
-          config: ${{ inputs.doppler-config }}
-          identity-id: ${{ inputs.doppler-identity-id }}
-          token: ${{ secrets.DOPPLER_TOKEN }}
+          auth-method: oidc
+          doppler-identity-id: ${{ inputs.doppler-identity-id }}
+          doppler-project: ${{ inputs.doppler-project }}
+          doppler-config: ${{ inputs.doppler-config }}
+          inject-env-vars: true
+
+      - name: Fetch CI secrets from Doppler (Service Token)
+        if: steps.doppler.outputs.mode == 'token'
+        uses: dopplerhq/secrets-fetch-action@451892f16195f9ac360e1a5bcbf0b5fd0e957534 # v2.0.0
+        with:
+          doppler-token: ${{ secrets.DOPPLER_TOKEN }}
+          doppler-project: ${{ inputs.doppler-project }}
+          doppler-config: ${{ inputs.doppler-config }}
+          inject-env-vars: true
+      # ---------------------------------------------------------------------
 
       - name: Upload coverage to Codecov
         if: inputs.codecov && matrix.python-version == inputs.coverage-python-version && env.CODECOV_TOKEN != ''
-        uses: codecov/codecov-action@2320916714171c258d01dbd81040d64d798c6f8e # v7.1.1
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           files: ${{ inputs.coverage-file }}
           fail_ci_if_error: false
@@ -201,6 +320,11 @@ jobs:
     permissions:
       contents: read
     steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: ${{ inputs.egress-policy }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }}
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -211,10 +335,14 @@ jobs:
           cache: pip
 
       - name: Install the project
-        run: ${{ inputs.smoke-install-command }}
+        env:
+          COMMAND: ${{ inputs.smoke-install-command }}
+        run: bash -eo pipefail -c "$COMMAND"
 
       - name: Smoke test
-        run: ${{ inputs.smoke-command }}
+        env:
+          COMMAND: ${{ inputs.smoke-command }}
+        run: bash -eo pipefail -c "$COMMAND"
 
   docker:
     name: Container build
@@ -224,6 +352,11 @@ jobs:
     permissions:
       contents: read
     steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: ${{ inputs.egress-policy }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }}
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -245,18 +378,24 @@ jobs:
         if: inputs.docker-test-command != ''
         env:
           IMAGE: ci-image:local
-        run: ${{ inputs.docker-test-command }}
+          COMMAND: ${{ inputs.docker-test-command }}
+        run: bash -eo pipefail -c "$COMMAND"
 
   # The one job branch protection should require. `always()` so it runs when
   # a needed job was skipped; the shell then decides what counts as green.
   ci-green:
     name: CI green
     if: always()
-    needs: [lint, test, smoke, docker]
+    needs: [lint, workflow-lint, test, smoke, docker]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}
     steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: ${{ inputs.egress-policy }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }}
+
       - name: Every job passed or was deliberately skipped
         env:
           RESULTS: ${{ toJSON(needs) }}

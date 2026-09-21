@@ -7,6 +7,10 @@ updates:
     schedule:
       interval: weekly
       day: monday
+    # A release that turns out to be malicious is usually pulled within days;
+    # waiting a week before proposing it costs nothing.
+    cooldown:
+      default-days: 7
     groups:
       actions:
         patterns: ["*"]
@@ -17,4 +21,6 @@ updates:
     schedule:
       interval: weekly
       day: monday
+    cooldown:
+      default-days: 7
     labels: [dependencies, python]

