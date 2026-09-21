@@ -1,13 +1,13 @@
 # Why this repository exists, and what it is built on
 
 Nine Python projects, each with six copy-pasted workflow files, and every one
-of them slightly different because they were fixed one at a time. A pinned
-action bumped in one repository and not the others. A Snyk step that had been
-red for months in one project and green in the one next to it because a
-secret had been pasted into one and forgotten in the other. And the secrets
-themselves lived in GitHub's encrypted store, which is write-only: you can
-set a value, you cannot read it back, so nobody could say with confidence
-which repository held which credential or when it was last rotated.
+of them slightly different because they were fixed one at a time. Snyk turned
+on in one project and never given a token in the one next to it. Four of the
+first pins on this repository pointed at tag objects rather than commits, and
+GitHub happened to resolve them. And the secrets themselves lived in GitHub's
+encrypted store, which is write-only: you can set a value, you cannot read it
+back, so nobody could say with confidence which repository held which
+credential or when it was last rotated.
 
 This repository is the answer to that. One CI pipeline, one release pipeline,
 one security pipeline, each written once and called by every project. A bug
@@ -127,8 +127,8 @@ The CI design keeps the runtime and CI worlds apart on purpose:
 
 A Service Token path exists as a fallback for a Doppler plan without OIDC
 identities. It is one static credential per repository in GitHub, which is
-exactly the thing the design is trying to end, so it is documented as the
-second choice and the tests make sure it can never be the silent default.
+exactly the thing the design is trying to end, so it is the documented second
+choice, and OIDC wins whenever an identity is configured.
 
 Codecov is the one provider that needs no credential at all. Its action
 verifies the job's GitHub OIDC token directly, so for a public repository the
