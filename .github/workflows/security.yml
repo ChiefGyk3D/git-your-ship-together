@@ -107,6 +107,10 @@ on:
         description: Doppler Service Account Identity UUID for OIDC.
         type: string
         default: ""
+      doppler-trusted-refs-only:
+        description: Fetch CI secrets only on the default branch, a tag or a schedule; never on a pull request or another branch. `false` restores fetching on every same-repository run.
+        type: boolean
+        default: true
       timeout-minutes:
         description: Per-job timeout.
         type: number
@@ -175,24 +179,49 @@ jobs:
           PROJECT: ${{ inputs.doppler-project }}
           CONFIG: ${{ inputs.doppler-config }}
           REQUIRED: "false"
+          TRUSTED_ONLY: ${{ inputs.doppler-trusted-refs-only }}
           IS_FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
           mode=none
+          skip=""
+          # A trusted ref is one only a push by someone with write access, or the
+          # schedule, can produce: the default branch, a tag, or a scheduled run
+          # (which GitHub always starts from the default branch). A pull request
+          # is never trusted, whichever repository its head is in.
+          trusted=false
+          case "$EVENT" in
+            schedule) trusted=true ;;
+            pull_request|pull_request_target) trusted=false ;;
+            *)
+              if [ -n "$DEFAULT_BRANCH" ] && [ "$REF" = "refs/heads/$DEFAULT_BRANCH" ]; then
+                trusted=true
+              elif [ "${REF#refs/tags/}" != "$REF" ]; then
+                trusted=true
+              fi ;;
+          esac
           if [ "$IS_FORK" = "true" ]; then
             # A fork's pull request has no id-token and must never receive a
             # secret. Silent skip is correct here, whatever `required` says.
-            echo "::notice title=Doppler::pull request from a fork - no secrets are fetched"
+            skip="pull request from a fork"
+          elif [ "$TRUSTED_ONLY" = "true" ] && [ "$trusted" != "true" ]; then
+            skip="$EVENT on $REF is not the default branch, a tag or a schedule (trusted-refs-only)"
           elif [ -n "$IDENTITY_ID" ]; then
             mode=oidc
           elif [ -n "$TOKEN" ]; then
             mode=token
           fi
+          if [ -n "$skip" ]; then
+            echo "::notice title=Doppler::$skip - no secrets are fetched"
+          fi
           if [ "$mode" != "none" ] && { [ -z "$PROJECT" ] || [ -z "$CONFIG" ]; }; then
             echo "::error title=Doppler::project and config are required when authenticating"
             exit 1
           fi
-          if [ "$mode" = "none" ] && [ "$IS_FORK" != "true" ]; then
+          if [ "$mode" = "none" ] && [ -z "$skip" ]; then
             if [ "$REQUIRED" = "true" ]; then
               echo "::error title=Doppler::no identity-id and no DOPPLER_TOKEN; this job needs one (see README, 'Doppler setup')"
               exit 1
@@ -290,7 +319,9 @@ jobs:
 
   snyk:
     name: Snyk
-    if: inputs.snyk
+    # Never on a pull request: the job holds an OIDC token for SNYK_TOKEN, and
+    # a pull request's code must not run beside one.
+    if: inputs.snyk && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
@@ -316,24 +347,49 @@ jobs:
           PROJECT: ${{ inputs.doppler-project }}
           CONFIG: ${{ inputs.doppler-config }}
           REQUIRED: "false"
+          TRUSTED_ONLY: ${{ inputs.doppler-trusted-refs-only }}
           IS_FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
           mode=none
+          skip=""
+          # A trusted ref is one only a push by someone with write access, or the
+          # schedule, can produce: the default branch, a tag, or a scheduled run
+          # (which GitHub always starts from the default branch). A pull request
+          # is never trusted, whichever repository its head is in.
+          trusted=false
+          case "$EVENT" in
+            schedule) trusted=true ;;
+            pull_request|pull_request_target) trusted=false ;;
+            *)
+              if [ -n "$DEFAULT_BRANCH" ] && [ "$REF" = "refs/heads/$DEFAULT_BRANCH" ]; then
+                trusted=true
+              elif [ "${REF#refs/tags/}" != "$REF" ]; then
+                trusted=true
+              fi ;;
+          esac
           if [ "$IS_FORK" = "true" ]; then
             # A fork's pull request has no id-token and must never receive a
             # secret. Silent skip is correct here, whatever `required` says.
-            echo "::notice title=Doppler::pull request from a fork - no secrets are fetched"
+            skip="pull request from a fork"
+          elif [ "$TRUSTED_ONLY" = "true" ] && [ "$trusted" != "true" ]; then
+            skip="$EVENT on $REF is not the default branch, a tag or a schedule (trusted-refs-only)"
           elif [ -n "$IDENTITY_ID" ]; then
             mode=oidc
           elif [ -n "$TOKEN" ]; then
             mode=token
           fi
+          if [ -n "$skip" ]; then
+            echo "::notice title=Doppler::$skip - no secrets are fetched"
+          fi
           if [ "$mode" != "none" ] && { [ -z "$PROJECT" ] || [ -z "$CONFIG" ]; }; then
             echo "::error title=Doppler::project and config are required when authenticating"
             exit 1
           fi
-          if [ "$mode" = "none" ] && [ "$IS_FORK" != "true" ]; then
+          if [ "$mode" = "none" ] && [ -z "$skip" ]; then
             if [ "$REQUIRED" = "true" ]; then
               echo "::error title=Doppler::no identity-id and no DOPPLER_TOKEN; this job needs one (see README, 'Doppler setup')"
               exit 1

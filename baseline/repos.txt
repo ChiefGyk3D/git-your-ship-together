@@ -1,0 +1,12 @@
+# One repository per line, owner/name. `scripts/audit_baseline.py` checks each
+# against BASELINE.md. Lines starting with # are ignored.
+ChiefGyk3D/git-your-ship-together
+ChiefGyk3D/typo-sniper
+ChiefGyk3D/Stream-Daemon
+ChiefGyk3D/Star-Daemon
+ChiefGyk3D/Boon-Tube-Daemon
+ChiefGyk3D/solarstorm_scout
+ChiefGyk3D/netpulse
+ChiefGyk3D/jumpcloud-wazuh-bridge
+ChiefGyk3D/yomama-as-a-service
+ChiefGyk3D/penguin-overlord

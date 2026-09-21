@@ -122,10 +122,11 @@ def test_every_workflow_declares_read_only_top_level_permissions(path):
 # Every write any job here may hold, with the reason. A new write is a review
 # decision, not a side effect of adding a step.
 ALLOWED_WRITES = {
-    # Codecov (python-ci), Docker Hub credentials (release), Snyk and the
-    # gitleaks licence (security) come from Doppler over OIDC; Scorecard
-    # publishes its result with the same OIDC identity.
-    ("python-ci.yml", "test", "id-token"),
+    # Codecov (python-ci's coverage job, never the job that runs the caller's
+    # tests), Docker Hub credentials (release), Snyk and the gitleaks licence
+    # (security) come from Doppler over OIDC; Scorecard publishes its result
+    # with the same OIDC identity.
+    ("python-ci.yml", "coverage", "id-token"),
     ("python-docker-release.yml", "release", "id-token"),
     ("security.yml", "gitleaks", "id-token"),
     ("security.yml", "snyk", "id-token"),
@@ -257,6 +258,74 @@ def test_doppler_fetch_steps_are_gated_on_the_decision(path):
             assert with_.get("doppler-token") == "${{ secrets.DOPPLER_TOKEN }}"
         else:
             assert with_.get("doppler-identity-id") == "${{ inputs.doppler-identity-id }}"
+
+
+GATE_ENV = {
+    "TRUSTED_ONLY": "${{ inputs.doppler-trusted-refs-only }}",
+    "EVENT": "${{ github.event_name }}",
+    "REF": "${{ github.ref }}",
+    "DEFAULT_BRANCH": "${{ github.event.repository.default_branch }}",
+}
+
+
+@pytest.mark.parametrize("path", REUSABLE, ids=lambda p: p.name)
+def test_every_decide_step_feeds_the_ref_gate(path):
+    """The script refuses untrusted refs only if it is told what the ref is."""
+    decides = [s for _, s in all_steps(path) if str(s.get("name", "")).startswith("Decide how to authenticate")]
+    assert decides, f"{path.name} has no Doppler decide step"
+    for step in decides:
+        env = step.get("env") or {}
+        for key, value in GATE_ENV.items():
+            assert env.get(key) == value, f"{path.name}: decide step env {key} is {env.get(key)!r}, expected {value!r}"
+
+
+@pytest.mark.parametrize("path", REUSABLE, ids=lambda p: p.name)
+def test_trusted_refs_only_defaults_on(path):
+    inputs = triggers(load(path))["workflow_call"]["inputs"]
+    spec = inputs.get("doppler-trusted-refs-only")
+    assert spec and spec.get("type") == "boolean" and spec.get("default") is True, (
+        f"{path.name}: doppler-trusted-refs-only must be a boolean defaulting to true"
+    )
+
+
+# A job that holds id-token: write can mint a JWT for this repository; on a
+# pull request that job runs the pull request's code. Every such job is either
+# kept off pull requests by its `if`, or listed here with why it is acceptable.
+PR_ID_TOKEN_EXCEPTIONS = {
+    # Only pinned actions run here; nothing from the checkout is executed. The
+    # licence it may fetch is for organisation accounts and the Doppler step
+    # refuses pull requests anyway.
+    ("security.yml", "gitleaks"),
+    # Builds and tests the image on pull requests without pushing. The
+    # Dockerfile's RUN steps and the docker-test-command execute inside
+    # containers that do not carry the runner's OIDC request token, and the
+    # Doppler step refuses pull requests.
+    ("python-docker-release.yml", "release"),
+}
+
+
+@pytest.mark.parametrize("path", REUSABLE, ids=lambda p: p.name)
+def test_no_job_that_can_run_on_a_pull_request_holds_an_oidc_token(path):
+    for job_name, job in jobs(load(path)).items():
+        perms = job.get("permissions") or {}
+        if perms.get("id-token") != "write":
+            continue
+        cond = str(job.get("if", ""))
+        if "github.event_name != 'pull_request'" in cond:
+            continue
+        assert (path.name, job_name) in PR_ID_TOKEN_EXCEPTIONS, (
+            f"{path.name}: job {job_name!r} holds id-token: write and may run on a pull request. "
+            "Gate it with github.event_name != 'pull_request' or add it to PR_ID_TOKEN_EXCEPTIONS with a reason."
+        )
+
+
+def test_the_job_running_the_callers_tests_holds_no_oidc_token():
+    """`test-command` is the caller's code, and a dependency of it; it must not run beside a token."""
+    doc = load(WORKFLOWS / "python-ci.yml")
+    assert "id-token" not in (jobs(doc)["test"].get("permissions") or {})
+    coverage = jobs(doc)["coverage"]
+    assert coverage["needs"] == "test" or coverage["needs"] == ["test"]
+    assert "github.event_name != 'pull_request'" in coverage["if"]
 
 
 # --- shape ------------------------------------------------------------------
