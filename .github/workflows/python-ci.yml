@@ -113,7 +113,11 @@ on:
         type: string
         default: audit
       allowed-endpoints:
-        description: harden-runner allow-list (host:port per line), used when `egress-policy` is `block`.
+        description: harden-runner allow-list for `block`, space-separated host:port entries. The default is every endpoint this workflow's jobs reached in audit mode across the calling repositories; the runner's own infrastructure needs no entry. Wildcards are not supported and a newline-separated list matches nothing.
+        type: string
+        default: "api.doppler.com:443 api.github.com:443 auth.docker.io:443 cli.codecov.io:443 deb.debian.org:80 files.pythonhosted.org:443 ghcr.io:443 github.com:443 ingest.codecov.io:443 keybase.io:443 pkg-containers.githubusercontent.com:443 production.cloudfront.docker.com:443 pypi.org:443 raw.githubusercontent.com:443 registry-1.docker.io:443 registry.npmjs.org:443 release-assets.githubusercontent.com:443 storage.googleapis.com:443"
+      extra-allowed-endpoints:
+        description: Appended to `allowed-endpoints`, for hosts only this repository reaches, such as an apt repository its Dockerfile adds. Same format.
         type: string
         default: ""
       doppler-project:
@@ -155,7 +159,7 @@ jobs:
       - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
         with:
           egress-policy: ${{ inputs.egress-policy }}
-          allowed-endpoints: ${{ inputs.allowed-endpoints }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -188,7 +192,7 @@ jobs:
       - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
         with:
           egress-policy: ${{ inputs.egress-policy }}
-          allowed-endpoints: ${{ inputs.allowed-endpoints }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -221,7 +225,7 @@ jobs:
       - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
         with:
           egress-policy: ${{ inputs.egress-policy }}
-          allowed-endpoints: ${{ inputs.allowed-endpoints }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -267,7 +271,7 @@ jobs:
       - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
         with:
           egress-policy: ${{ inputs.egress-policy }}
-          allowed-endpoints: ${{ inputs.allowed-endpoints }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -381,7 +385,7 @@ jobs:
       - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
         with:
           egress-policy: ${{ inputs.egress-policy }}
-          allowed-endpoints: ${{ inputs.allowed-endpoints }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -413,7 +417,7 @@ jobs:
       - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
         with:
           egress-policy: ${{ inputs.egress-policy }}
-          allowed-endpoints: ${{ inputs.allowed-endpoints }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -452,7 +456,7 @@ jobs:
       - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
         with:
           egress-policy: ${{ inputs.egress-policy }}
-          allowed-endpoints: ${{ inputs.allowed-endpoints }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
 
       - name: Every job passed or was deliberately skipped
         env:

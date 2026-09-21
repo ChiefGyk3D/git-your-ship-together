@@ -97,7 +97,11 @@ so zizmor's online audit can confirm the two agree. Dependabot moves the pins,
 with a seven-day cooldown so a freshly cut release is not adopted the hour it
 appears.
 
-**Every job runs under harden-runner** in at least audit mode, starts from
+**Every job runs under harden-runner in `block` mode** for the CI and release
+workflows, with the measured allow-list the shared workflows carry as their
+default and `extra-allowed-endpoints` for a host only that repository
+reaches. The security workflow stays in audit mode until the Snyk job has
+been measured with a token in place. Every job starts from
 `contents: read`, and widens per job with a reason recorded in
 `tests/test_workflows.py`'s `ALLOWED_WRITES`.
 
@@ -176,9 +180,9 @@ gh api -X PUT repos/OWNER/REPO/automated-security-fixes
 - **Signed commits and tags.** Worth requiring once a signing key exists on
   the maintainer's machine; none does today, so a rule would only block the
   maintainer.
-- **harden-runner in `block` mode.** Each repository's allow-list has to be
-  measured from a few audit-mode runs first; `egress-policy: block` and
-  `allowed-endpoints` are the inputs when it is.
+- **harden-runner in `block` mode for `security.yml`.** The Snyk job's hosts
+  are unmeasured until a token exists; one audit-mode run with it, then the
+  default list gains them and callers switch.
 
 ## Adding a repository
 
