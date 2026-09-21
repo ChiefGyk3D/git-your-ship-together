@@ -14,7 +14,8 @@ test), a test (test matrix), a linted tree (lint), a Dockerfile that runs as a
 non-root user (build, check, Trivy) and a hash-pinned `requirements.txt`
 (install under `--require-hashes`, as the callers do), one OpenTofu module
 under `tofu/` with no provider, so `init` needs no network (fmt, validate,
-tflint, the configuration scan), and one shell script,
+tflint, the configuration scan), one Arduino sketch under `firmware/blink/`
+compiled for an Uno (the smallest core), and one shell script,
 `scripts/greet.sh`, with `tests/test_greet.sh` to run it (shellcheck, shfmt,
 the test command). `bash-ci.yml` is run over the whole repository, so
 `scripts/doppler-ci-set.sh` is linted by the same call.

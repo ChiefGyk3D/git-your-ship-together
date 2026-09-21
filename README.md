@@ -48,13 +48,14 @@ Read in this order. Each one is short.
 
 ## What is in the repository
 
-Nine reusable workflows and one composite action:
+Ten reusable workflows and one composite action:
 
 | File | What it does |
 |---|---|
 | `.github/workflows/python-ci.yml` | Lint, workflow lint, test matrix, coverage upload, optional CLI smoke test, single-arch container build with a check, one `CI green` gate job |
 | `.github/workflows/bash-ci.yml` | shellcheck and shfmt over every tracked script, an optional test command, an optional configuration lint (yamllint, ansible-lint), workflow lint, the same `CI green` gate. Holds no token |
 | `.github/workflows/tofu-ci.yml` | For OpenTofu or Terraform: fmt, validate without a backend, tflint and a Trivy configuration scan on every push and pull request; a plan on the default branch only, with credentials through the Doppler gate; the same `CI green` gate. Nothing applies |
+| `.github/workflows/arduino-ci.yml` | For firmware built with arduino-cli: compile every sketch for a board with pinned cores and libraries, keep the binaries as an artifact, host-side tests, workflow lint, the same `CI green` gate. Holds no token; the binaries reach a release through `artifact-release.yml` |
 | `.github/workflows/container-release.yml` | Build, test, Trivy-scan, then publish multi-arch to GHCR (and Docker Hub), sign with cosign, attach a syft SBOM, record SLSA provenance. Builds whatever the Dockerfile builds |
 | `.github/workflows/python-docker-release.yml` | The old name of the above: a thin caller that forwards every input, the secret and the outputs through a `./` reference at its own commit, so an existing pin keeps working. New callers use `container-release.yml` |
 | `.github/workflows/python-package-release.yml` | Build the sdist and wheel, `twine check`, refuse a tag that disagrees with the packaged version, smoke-test from the wheel, then publish to PyPI (Trusted Publishing, PEP 740 attestations) and to the GitHub release with SHA256SUMS and build provenance. No secret anywhere |
@@ -68,7 +69,7 @@ project before any caller pins them:
 
 | File | What it does |
 |---|---|
-| `.github/workflows/ci.yml` | actionlint, zizmor, the pytest contract, then `python-ci.yml`, `bash-ci.yml`, `tofu-ci.yml`, `python-package-release.yml`, `artifact-release.yml` and `python-docker-release.yml` called at the pull request's own ref against `fixture/` (bash-ci over the whole repository; bash-ci and the package build in block mode), and a `CI green` gate that needs all of it |
+| `.github/workflows/ci.yml` | actionlint, zizmor, the pytest contract, then `python-ci.yml`, `bash-ci.yml`, `tofu-ci.yml`, `arduino-ci.yml`, `python-package-release.yml`, `artifact-release.yml` and `python-docker-release.yml` called at the pull request's own ref against `fixture/` (bash-ci over the whole repository; bash-ci and the package build in block mode), and a `CI green` gate that needs all of it |
 | `.github/workflows/security-self.yml` | `security.yml` called the same way, on push, pull request and a Monday schedule |
 | `.github/workflows/dependabot-auto-merge-self.yml` | `dependabot-auto-merge.yml` called the same way, so this repository's own bumps exercise it |
 | `.github/dependabot.yml` | Weekly action and pip bumps with a seven-day cooldown, actions grouped into one pull request |
@@ -351,6 +352,49 @@ Inputs of `tofu-ci.yml`:
 | `doppler-project`, `doppler-config`, `doppler-identity-id` | empty | See [Doppler setup](#doppler-setup); only the plan job reads them |
 | `doppler-trusted-refs-only` | `true` | Fetch only on the default branch, a tag or a schedule; never on a pull request |
 | `timeout-minutes` | `20` | Per-job timeout |
+
+### Arduino CI
+
+For firmware, which today is Skid-Finder's ESP32 sensor node. arduino-cli is
+downloaded at a pinned version and hash; the cores and libraries are named
+with versions by the caller, so the build is the same build next year.
+Every sketch is compiled for the board and the binaries are kept as an
+artifact; a release signs and attests them through `artifact-release.yml`,
+with the same compile as its build command.
+
+```yaml
+jobs:
+  firmware:
+    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/arduino-ci.yml@<sha> # vX.Y.Z
+    permissions:
+      contents: read
+    with:
+      sketches: nodes/esp32/skidfinder_node
+      fqbn: esp32:esp32:esp32
+      cores: esp32:esp32@3.3.12
+      additional-urls: https://espressif.github.io/arduino-esp32/package_esp32_index.json
+      workflow-lint: false   # another caller job already lints the workflow files
+      egress-policy: block
+      extra-allowed-endpoints: espressif.github.io:443 dl.espressif.com:443
+```
+
+Inputs of `arduino-ci.yml`:
+
+| Input | Default | Meaning |
+|---|---|---|
+| `sketches` | `.` | Space-separated sketch directories, each holding a `.ino` named after it |
+| `fqbn` | `arduino:avr:uno` | The board to compile for |
+| `cores` | `arduino:avr@1.8.8` | Space-separated cores to install, versioned |
+| `additional-urls` | empty | Board manager URLs for cores outside Arduino's index |
+| `libraries` | empty | Space-separated libraries from the library manager, versioned |
+| `warnings` | `all` | arduino-cli compile warning level |
+| `arduino-cli-version`, `arduino-cli-sha256` | `1.5.1` and its tarball's hash | The arduino-cli release downloaded from arduino/arduino-cli |
+| `test-install-command` | empty | Run before the host-side tests |
+| `test-command` | empty (skips the job) | The host-side unit tests |
+| `workflow-lint` | `true` | actionlint and zizmor over the caller's own `.github/workflows` |
+| `zizmor-persona` | `regular` | zizmor strictness |
+| `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `audit`, arduino-cli's download and Arduino's index, empty | harden-runner, as in `python-ci.yml`. A core from another index adds its hosts |
+| `timeout-minutes` | `30` | Per-job timeout; a first core install takes minutes |
 
 ### Container release
 

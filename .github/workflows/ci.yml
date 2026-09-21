@@ -195,6 +195,19 @@ jobs:
       workflow-lint: false
       egress-policy: block
 
+  # arduino-ci.yml at this ref over the fixture's blink sketch for an Uno:
+  # the smallest core there is, so the job measures arduino-cli's own hosts
+  # and nothing else. Block mode with the default list.
+  fixture-arduino:
+    name: fixture firmware
+    uses: ./.github/workflows/arduino-ci.yml # zizmor: ignore[self-repository]
+    permissions:
+      contents: read
+    with:
+      sketches: fixture/firmware/blink
+      workflow-lint: false
+      egress-policy: block
+
   # The fixture image through python-docker-release.yml at this ref: build,
   # check and scan, never publish. The writes are what the release job
   # declares for the publishing path; the called job holds them on a pull
@@ -221,7 +234,7 @@ jobs:
   ci-green:
     name: CI green
     if: always()
-    needs: [actionlint, zizmor, test, fixture-ci, fixture-bash, fixture-tofu, fixture-package, fixture-artifact, fixture-release]
+    needs: [actionlint, zizmor, test, fixture-ci, fixture-bash, fixture-tofu, fixture-arduino, fixture-package, fixture-artifact, fixture-release]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}

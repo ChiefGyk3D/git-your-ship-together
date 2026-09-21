@@ -35,6 +35,7 @@ REUSABLE = [
         "python-ci.yml",
         "bash-ci.yml",
         "tofu-ci.yml",
+        "arduino-ci.yml",
         "container-release.yml",
         "python-docker-release.yml",
         "python-package-release.yml",
@@ -54,6 +55,7 @@ DOPPLER = [
     not in (
         "dependabot-auto-merge.yml",
         "bash-ci.yml",
+        "arduino-ci.yml",
         "python-package-release.yml",
         "artifact-release.yml",
         "python-docker-release.yml",
@@ -96,9 +98,9 @@ def all_steps(path: Path):
 
 
 def test_there_is_something_to_check():
-    assert len(REUSABLE) == 9, "expected the nine callable workflows"
+    assert len(REUSABLE) == 10, "expected the ten callable workflows"
     assert len(DOPPLER) == 4, "expected four of them to fetch CI secrets"
-    assert [p.name for p in LANGUAGE_CI] == ["bash-ci.yml", "python-ci.yml", "tofu-ci.yml"]
+    assert [p.name for p in LANGUAGE_CI] == ["arduino-ci.yml", "bash-ci.yml", "python-ci.yml", "tofu-ci.yml"]
     assert ACTION_FILES, "no composite actions found"
 
 
@@ -497,11 +499,12 @@ def test_tofu_plans_only_off_pull_requests_and_validates_without_a_backend():
             assert "id-token" not in (job.get("permissions") or {}), f"{job_name} holds a token it does not need"
 
 
-def test_bash_ci_holds_no_token_at_all():
-    """A lint needs nothing; a job that fetches nothing has nothing to leak."""
-    doc = load(WORKFLOWS / "bash-ci.yml")
+@pytest.mark.parametrize("name", ["bash-ci.yml", "arduino-ci.yml"])
+def test_a_workflow_that_fetches_nothing_holds_no_token_at_all(name):
+    """A lint or a compile needs nothing; a job that fetches nothing has nothing to leak."""
+    doc = load(WORKFLOWS / name)
     for job_name, job in jobs(doc).items():
-        assert job["permissions"] in ({}, {"contents": "read"}), f"bash-ci job {job_name!r} widens its permissions"
+        assert job["permissions"] in ({}, {"contents": "read"}), f"{name} job {job_name!r} widens its permissions"
     assert "secrets" not in triggers(doc)["workflow_call"]
 
 
