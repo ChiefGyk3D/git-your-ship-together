@@ -4,12 +4,15 @@
 
 One place to fix a pipeline bug or add a scan step, instead of one per
 repository. These are the GitHub Actions workflows shared by ChiefGyk3D's
-Python projects (Typo Sniper, Stream Daemon, Star Daemon, Boon Tube Daemon, and
-whatever comes next).
+Python projects: Typo Sniper, Stream Daemon, Star Daemon, Boon Tube Daemon,
+SolarStorm Scout, NetPulse, jumpcloud-wazuh-bridge, yomama-as-a-service and
+penguin-overlord today (`baseline/repos.txt` is the list), and whatever comes
+next.
 
 Why it is built this way, what it is built on, and what it defends against:
 [docs/DESIGN.md](docs/DESIGN.md). What every calling repository must meet:
-[BASELINE.md](BASELINE.md).
+[BASELINE.md](BASELINE.md). What is still to do, and what the lab could
+carry: [docs/ROADMAP.md](docs/ROADMAP.md).
 
 Three reusable workflows and one composite action:
 
@@ -19,6 +22,21 @@ Three reusable workflows and one composite action:
 | `.github/workflows/python-docker-release.yml` | Build, test, Trivy-scan, then publish multi-arch to GHCR (and Docker Hub), sign with cosign, attach a syft SBOM, record SLSA provenance |
 | `.github/workflows/security.yml` | CodeQL, gitleaks, pip-audit, dependency review on pull requests, optional Snyk |
 | `.github/actions/doppler-secrets` | Fetches a Doppler config as masked environment variables, over OIDC or a Service Token |
+
+And around them, what keeps the callers honest:
+
+| Path | What it is |
+|---|---|
+| `BASELINE.md` | The minimum every calling repository meets: people, branch protection, secrets, workflows, Actions settings, scanning, risk exceptions |
+| `baseline/repos.txt` | The repositories the baseline covers, one per line |
+| `baseline/selected-actions.json` | The allowed-actions policy every repository sets: GitHub-owned plus the named third parties these workflows use |
+| `baseline/risk-register.yaml` | Every advisory a pipeline is told to ignore, with the reason, the mitigation, an owner and an expiry. See [Risk register](#risk-register) |
+| `scripts/audit_baseline.py` | Reads each repository's settings and workflows from the API and reports PASS, FAIL or UNKNOWN per baseline item |
+| `scripts/doppler-ci-set.sh` | Sets one secret in the shared Doppler `ci` config without the value touching a shell history |
+| `fixture/` | The smallest Python project with one of everything a job needs; this repository's own CI runs `python-ci.yml` and `python-docker-release.yml` against it. See [Developing](#developing) |
+| `docs/DESIGN.md` | The reasoning: the threat model, why Doppler, what the tests enforce |
+| `docs/ROADMAP.md` | What is done, what is next, and what the lab's spare compute could carry |
+| `tests/` | The contract, as pytest: workflow shape, the Doppler gate, the audit, the register, the fixture |
 
 Design rules, applied throughout:
 
@@ -455,21 +473,54 @@ And in this repository: tag releases from `main` (`git tag -a vX.Y.Z <sha>`,
 tag that does not exist, which is the intended check that a pin and its
 comment agree.
 
+## Risk register
+
+A scanner sometimes names an advisory that cannot be fixed yet: the newest
+release of a package is the affected one, or the affected code is a
+transitive dependency nothing here calls. Two inputs of `security.yml` let a
+caller skip such an advisory, `pip-audit-extra-args: --ignore-vuln <id>` and
+`dependency-review-allow-ghsas: <id>`, and both lead to
+[`baseline/risk-register.yaml`](baseline/risk-register.yaml). Taking an
+exception is three steps, in this order:
+
+1. **Enter it in the register**, in this repository: the advisory ID and its
+   aliases (the GHSA and the PYSEC ID are usually the same advisory), the
+   package and affected range, the repositories allowed to except it, which
+   check names it, the reason it is accepted rather than fixed, what limits
+   the exposure meanwhile, the date accepted, a `review_by` date at most 90
+   days out, and an owner. `tests/test_risk_register.py` checks the shape and
+   the dates, and fails the day an entry expires.
+2. **Name it in the caller**, with a comment pointing at the register entry.
+3. **Run the audit.** Its `risk-exceptions` check reads every caller's
+   security workflow and fails on an ignored advisory that is not registered,
+   is registered for another repository, or whose review date has passed. An
+   exception therefore cannot be taken quietly and cannot be forgotten.
+
+When the fix ships, remove both the caller's line and the entry. Renewing an
+entry means moving `review_by` and saying why in the reason.
+
 ## Developing
 
 ```sh
 pip install -r requirements-dev.txt
 pytest
-ruff check tests/ && ruff format --check tests/
+ruff check tests/ scripts/ fixture/ && ruff format --check tests/ fixture/
 actionlint          # https://github.com/rhysd/actionlint
 zizmor --offline .  # https://docs.zizmor.sh
+python scripts/audit_baseline.py   # needs a token with admin read on the repositories
 ```
 
-`tests/test_workflows.py` is the contract: SHA pins with version comments, the
-write-permission allow-list, per-job permissions and timeouts, no untrusted
-interpolation, every input declared, defaulted, used and documented here, and
-that the Doppler fallback secret reaches every fetch. Break any one of those
-and CI names the fix.
+The tests are the contract, one file per thing they hold still:
+
+| File | Holds |
+|---|---|
+| `tests/test_workflows.py` | SHA pins with version comments, the write-permission allow-list, per-job permissions and timeouts, no untrusted interpolation, every input declared, defaulted, used and documented here, the Doppler fallback secret reaching every fetch, every reusable workflow run from this repository's own CI |
+| `tests/test_doppler_gate.py` | The decide script, run under bash for every event and ref shape |
+| `tests/test_audit_baseline.py` | The audit, fed a passing repository and a broken one per criterion; a 403 comes back UNKNOWN, never PASS |
+| `tests/test_risk_register.py` | The register's shape, its dates, and that no entry has expired |
+| `tests/test_fixture.py` | Every fixture requirement carries a hash; the fixture image is digest-pinned and non-root |
+
+Break any one of those and CI names the fix.
 
 The tests are structural. What runs the workflows is `fixture/`: a Python
 project small enough to be obviously correct, with one of everything a job
