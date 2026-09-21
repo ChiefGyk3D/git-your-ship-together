@@ -378,6 +378,19 @@ def test_exceptions_are_read_from_both_inputs_and_not_from_comments():
     assert audit.exceptions_in(text) == {"PYSEC-2026-3740", "GHSA-8mgp-746c-j5xp", "GHSA-aaaa-bbbb-cccc"}
 
 
+def test_an_input_description_is_not_an_exception():
+    """The shared security.yml documents the inputs with example IDs; those are prose, not exceptions."""
+    text = (
+        "on:\n  workflow_call:\n    inputs:\n      pip-audit-extra-args:\n"
+        "        description: Extra pip-audit arguments, e.g. `--ignore-vuln PYSEC-2026-3740`"
+        " for an advisory with no fix yet.\n"
+        '        default: ""\n      dependency-review-allow-ghsas:\n'
+        "        description: Comma-separated GitHub Advisory IDs the review may not fail on.\n"
+        '        type: string\n        default: ""\n'
+    )
+    assert audit.exceptions_in(text) == set()
+
+
 def test_registered_unexpired_exceptions_pass():
     ids = audit.exceptions_in(SECURITY_CALLER)
     result = audit.check_risk_exceptions(REPO_NAME, ids, REGISTER, today=TODAY)
