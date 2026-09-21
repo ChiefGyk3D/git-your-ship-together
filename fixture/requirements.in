@@ -1,0 +1,4 @@
+# Direct dependencies of the fixture project. `make -C fixture lock` (or the
+# command in fixture/README.md) resolves them into requirements.txt with every
+# hash pinned.
+pytest==9.1.1

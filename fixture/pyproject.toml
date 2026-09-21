@@ -1,0 +1,20 @@
+# The fixture project: the smallest Python project that exercises every job of
+# python-ci.yml and python-docker-release.yml. It exists so that a change to
+# those workflows runs against a real project at the pull request's own ref,
+# before it ships to the repositories that pin a tag.
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fixture-app"
+version = "0.1.0"
+description = "Fixture project for git-your-ship-together's own CI"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+fixture-app = "fixture_app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

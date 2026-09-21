@@ -145,6 +145,14 @@ ALLOWED_WRITES = {
     ("security-self.yml", "security", "security-events"),
     ("security-self.yml", "security", "pull-requests"),
     ("security-self.yml", "security", "id-token"),
+    # And python-ci.yml and python-docker-release.yml on the fixture project:
+    # the grants a caller gives, so the called jobs' own permissions blocks
+    # are satisfied; the release job never pushes here (push: false).
+    ("ci.yml", "fixture-ci", "id-token"),
+    ("ci.yml", "fixture-release", "id-token"),
+    ("ci.yml", "fixture-release", "packages"),
+    ("ci.yml", "fixture-release", "attestations"),
+    ("ci.yml", "fixture-release", "security-events"),
 }
 
 
@@ -439,3 +447,41 @@ def test_the_default_allow_list_is_one_line_of_sorted_host_ports(path):
     for entry in entries:
         assert re.fullmatch(r"[a-z0-9.-]+:\d+", entry), f"{path.name}: {entry!r} is not host:port"
     assert inputs["extra-allowed-endpoints"]["default"] == ""
+
+
+# --- dogfooding ------------------------------------------------------------
+
+
+def dogfood_callers():
+    """(own workflow, job, reusable workflow it calls at this ref)."""
+    found = []
+    for path in OWN:
+        for job_name, job in jobs(load(path)).items():
+            uses = str(job.get("uses", ""))
+            if uses.startswith("./.github/workflows/"):
+                found.append((path.name, job_name, uses.removeprefix("./.github/workflows/").split(" ")[0]))
+    return found
+
+
+def test_every_reusable_workflow_is_run_from_this_repository_at_the_pull_requests_ref():
+    """A workflow tested only structurally ships to nine repositories before anything runs it."""
+    called = {reusable for _, _, reusable in dogfood_callers()}
+    assert called == {p.name for p in REUSABLE}, f"not dogfooded: {sorted({p.name for p in REUSABLE} - called)}"
+
+
+def test_the_fixture_release_never_publishes():
+    doc = load(WORKFLOWS / "ci.yml")
+    job = jobs(doc)["fixture-release"]
+    assert job["with"]["push"] is False
+
+
+def test_the_fixture_ci_installs_under_require_hashes():
+    doc = load(WORKFLOWS / "ci.yml")
+    install = jobs(doc)["fixture-ci"]["with"]["install-command"]
+    assert "pip install --require-hashes -r fixture/requirements.txt" in install
+
+
+def test_this_repositorys_gate_needs_every_other_job():
+    doc = load(WORKFLOWS / "ci.yml")
+    others = sorted(name for name in jobs(doc) if name != "ci-green")
+    assert sorted(jobs(doc)["ci-green"]["needs"]) == others

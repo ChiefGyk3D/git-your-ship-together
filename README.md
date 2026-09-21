@@ -432,8 +432,10 @@ mode after the token is in, then add them.
 its first run is green:
 
 1. **Branch protection on `main`**: require the `CI green` status check
-   (python-ci's gate job), require a pull request, and dismiss stale
-   approvals on new pushes. A job added to python-ci is covered
+   (python-ci's gate job), require a pull request with no approval count
+   (a single maintainer cannot approve their own pull request, so a count
+   of one only blocks the merge until an admin overrides it), and dismiss
+   stale approvals on new pushes. A job added to python-ci is covered
    automatically because the gate `needs` every other job.
 2. **Secret scanning and push protection** (Settings → Code security): both
    on. Push protection refuses a commit that carries a known credential
@@ -467,6 +469,15 @@ write-permission allow-list, per-job permissions and timeouts, no untrusted
 interpolation, every input declared, defaulted, used and documented here, and
 that the Doppler fallback secret reaches every fetch. Break any one of those
 and CI names the fix.
+
+The tests are structural. What runs the workflows is `fixture/`: a Python
+project small enough to be obviously correct, with one of everything a job
+needs, that this repository's own CI puts through `python-ci.yml` and
+`python-docker-release.yml` (`push: false`) at the pull request's ref, while
+`security-self.yml` does the same for `security.yml`. A change to a reusable
+workflow therefore runs against a real project here before any caller pins
+it, and `CI green` needs those runs. `fixture/README.md` says how to
+regenerate its hash-pinned `requirements.txt`.
 
 ## Licence
 

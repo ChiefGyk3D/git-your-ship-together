@@ -1,5 +1,8 @@
-# CI for the workflows themselves: actionlint over every workflow and action,
-# and the test suite that pins the properties the callers rely on.
+# CI for the workflows themselves: actionlint and zizmor over every workflow
+# and action, the test suite that pins the properties the callers rely on, and
+# the two reusable workflows run against the fixture project from this ref, so
+# a change is exercised here before a caller pins it. security.yml is run the
+# same way by security-self.yml.
 name: CI
 
 on:
@@ -85,10 +88,63 @@ jobs:
       - name: Run the tests
         run: pytest -q
 
+  # The fixture project (fixture/README.md) through python-ci.yml at this ref.
+  # The grant is what a caller gives: python-ci narrows it to contents: read
+  # on every job but the coverage upload, which never runs on a pull request.
+  fixture-ci:
+    name: fixture
+    # `$/.github/workflows/...` is the form zizmor asks for; actionlint still
+    # rejects it (see security-self.yml).
+    uses: ./.github/workflows/python-ci.yml # zizmor: ignore[self-repository]
+    permissions:
+      contents: read
+      id-token: write  # what a caller grants for Codecov and Doppler; python-ci keeps it off the test job
+    with:
+      install-command: |
+        python -m pip install --upgrade pip
+        pip install --require-hashes -r fixture/requirements.txt
+        pip install --no-deps ./fixture
+      test-command: pytest fixture/tests
+      lint-install-command: pip install "$(grep -E '^ruff==' requirements-dev.txt)"
+      lint-command: ruff check fixture
+      smoke-install-command: pip install --no-deps ./fixture
+      smoke-command: |
+        fixture-app --version
+        python -m fixture_app ci
+      dockerfile: fixture/Dockerfile
+      docker-context: fixture
+      docker-test-command: |
+        docker run --rm "$IMAGE" --version
+        test "$(docker run --rm --entrypoint id "$IMAGE" -u)" != "0"
+      zizmor-persona: pedantic
+
+  # The fixture image through python-docker-release.yml at this ref: build,
+  # check and scan, never publish. The writes are what the release job
+  # declares for the publishing path; the called job holds them on a pull
+  # request from this repository exactly as it does in every caller, and a
+  # fork's pull request, whose token could not carry them, skips the job.
+  fixture-release:
+    name: fixture release
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    uses: ./.github/workflows/python-docker-release.yml # zizmor: ignore[self-repository]
+    permissions:
+      contents: read
+      packages: write  # the release job declares it for the publishing path it never takes here
+      id-token: write  # likewise: cosign keyless signing and provenance, only after a push
+      attestations: write  # likewise: the SLSA provenance record
+      security-events: write  # the Trivy SARIF upload, which does run
+    with:
+      push: false
+      dockerfile: fixture/Dockerfile
+      context: fixture
+      docker-test-command: |
+        docker run --rm "$IMAGE" --version
+        test "$(docker run --rm --entrypoint id "$IMAGE" -u)" != "0"
+
   ci-green:
     name: CI green
     if: always()
-    needs: [actionlint, zizmor, test]
+    needs: [actionlint, zizmor, test, fixture-ci, fixture-release]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}

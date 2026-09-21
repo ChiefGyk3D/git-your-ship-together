@@ -32,6 +32,14 @@ approvals are dismissed on new pushes, force pushes and deletion are off, and
 the required status check is `ci / CI green`. That job needs every other job in
 `python-ci.yml`, so a job added later is covered without editing the rule.
 
+**No approval count.** GitHub does not let an author approve their own pull
+request, and these repositories have one person with write access, so a count
+of one never produces a review: it only blocks the merge until the owner
+overrides it as an administrator, which teaches the habit of overriding. Zero
+keeps the pull request and the green check required and lets a Dependabot bump
+merge on its own once `ci / CI green` passes. Any review that is given is
+still dismissed by a new push.
+
 Checked: `required-check`, `pull-request-required`, `history-protected`.
 
 Set with:
@@ -40,7 +48,7 @@ Set with:
 gh api -X PUT repos/OWNER/REPO/branches/main/protection --input - <<'JSON'
 {"required_status_checks": {"strict": false, "checks": [{"context": "ci / CI green"}]},
  "enforce_admins": false,
- "required_pull_request_reviews": {"required_approving_review_count": 1, "dismiss_stale_reviews": true},
+ "required_pull_request_reviews": {"required_approving_review_count": 0, "dismiss_stale_reviews": true},
  "restrictions": null, "required_linear_history": false,
  "allow_force_pushes": false, "allow_deletions": false, "required_conversation_resolution": false}
 JSON

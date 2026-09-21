@@ -2,3 +2,7 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .venv/
+
+# Build residue of a local `pip install ./fixture`
+/fixture/build/
+/fixture/src/*.egg-info/
