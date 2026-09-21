@@ -261,8 +261,9 @@ jobs:
         env:
           REQUIREMENTS: ${{ inputs.pip-audit-requirements }}
           EXTRA_ARGS: ${{ inputs.pip-audit-extra-args }}
-        # shellcheck disable=SC2086 # EXTRA_ARGS is a list of flags by design
-        run: pip-audit --requirement "$REQUIREMENTS" --strict $EXTRA_ARGS
+        run: |
+          read -r -a extra <<< "$EXTRA_ARGS"
+          pip-audit --requirement "$REQUIREMENTS" --strict "${extra[@]}"
 
   dependency-review:
     name: Dependency review
