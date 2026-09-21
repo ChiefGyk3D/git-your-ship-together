@@ -42,7 +42,9 @@ SHA = re.compile(r"^[0-9a-f]{40}$")
 USES = re.compile(r"^\s*(?:-\s*)?uses:\s*(?P<action>[^@\s]+)@(?P<ref>\S+)(?P<rest>.*)$")
 VERSION_COMMENT = re.compile(r"^\s*#\s*v\d+\.\d+(\.\d+)?\s*$")
 IGNORE_VULN = re.compile(r"--ignore-vuln[\s=]+([A-Za-z0-9-]+)")
-ALLOW_GHSAS = re.compile(r"^\s*dependency-review-allow-ghsas:\s*(.+?)\s*$", re.M)
+# Same-line whitespace only: `\s*` would cross the newline of a bare input
+# declaration and capture the `type:` line beneath it.
+ALLOW_GHSAS = re.compile(r"^[ \t]*dependency-review-allow-ghsas:[ \t]*(\S.*?)[ \t]*$", re.M)
 REGISTER = Path(__file__).resolve().parent.parent / "baseline" / "risk-register.yaml"
 
 PASS, FAIL, UNKNOWN = "PASS", "FAIL", "UNKNOWN"
@@ -315,9 +317,14 @@ def exceptions_in(text: str) -> set[str]:
     Two shapes: `--ignore-vuln ID` inside pip-audit-extra-args, and the
     comma-separated `dependency-review-allow-ghsas:` input. Comment lines are
     skipped so that a reason written beside the line is not read as a second
-    exception.
+    exception, and so are `description:` lines: the shared workflow documents
+    both inputs with example IDs, which are prose, not exceptions.
     """
-    live = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
+    live = "\n".join(
+        line
+        for line in text.splitlines()
+        if not line.lstrip().startswith("#") and not line.lstrip().startswith("description:")
+    )
     found = set(IGNORE_VULN.findall(live))
     for match in ALLOW_GHSAS.finditer(live):
         value = match.group(1).strip().strip("'\"")
@@ -344,9 +351,7 @@ def check_risk_exceptions(
         return Result(repo, "risk-exceptions", PASS, "no advisory is ignored")
     problems = []
     for advisory in sorted(exceptions):
-        entries = [
-            e for e in register if advisory in {e.get("id"), *(e.get("aliases") or [])}
-        ]
+        entries = [e for e in register if advisory in {e.get("id"), *(e.get("aliases") or [])}]
         if not entries:
             problems.append(f"{advisory} is ignored but not in baseline/risk-register.yaml")
             continue
