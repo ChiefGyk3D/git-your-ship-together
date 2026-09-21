@@ -22,6 +22,10 @@
     "pypa/gh-action-pypi-publish@*",
     "snyk/actions/setup@*",
     "github/codeql-action@*",
-    "github/codeql-action/*"
+    "github/codeql-action/*",
+    "aquasecurity/setup-trivy@*",
+    "anchore/sbom-action/download-syft@*",
+    "raven-actions/actionlint/*",
+    "zizmorcore/zizmor-action/*"
   ]
 }
