@@ -86,6 +86,15 @@ def good_answers() -> dict[str, tuple[int, dict | list]]:
             200,
             {"approval_policy": "all_external_contributors"},
         ),
+        f"{r}/actions/permissions": (200, {"enabled": True, "allowed_actions": "selected"}),
+        f"{r}/actions/permissions/selected-actions": (
+            200,
+            {
+                "github_owned_allowed": True,
+                "verified_allowed": False,
+                "patterns_allowed": ["step-security/harden-runner@*", "dopplerhq/secrets-fetch-action@*"],
+            },
+        ),
         f"{r}/contents/.github/workflows": (200, [{"name": "ci.yml"}, {"name": "README.md"}]),
         f"{r}/contents/.github/workflows/ci.yml": (200, encoded(CALLER)),
         f"{r}/contents/.github/dependabot.yml": (
@@ -127,6 +136,7 @@ def test_a_compliant_repository_passes_every_check():
         "private-vulnerability-reporting",
         "workflow-token-read-only",
         "fork-pr-approval",
+        "actions-allowlist",
         "workflows-pinned",
         "uses-shared-workflows",
         "dependabot-config",
@@ -189,9 +199,10 @@ def test_a_proxy_refusal_is_unknown_not_pass():
     refused = (403, {"message": "Access to this GitHub Actions path is not permitted through this proxy."})
     answers[f"/repos/{REPO_NAME}/actions/permissions/workflow"] = refused
     answers[f"/repos/{REPO_NAME}/actions/permissions/fork-pr-contributor-approval"] = refused
+    answers[f"/repos/{REPO_NAME}/actions/permissions"] = refused
     answers[f"/repos/{REPO_NAME}/actions/variables/DOPPLER_IDENTITY_ID"] = refused
     results = by_check(audit.audit_repo(REPO_NAME, fetcher(answers)))
-    for check in ("workflow-token-read-only", "fork-pr-approval", "doppler-identity"):
+    for check in ("workflow-token-read-only", "fork-pr-approval", "actions-allowlist", "doppler-identity"):
         assert results[check][0] == audit.UNKNOWN and "403" in results[check][1], check
 
 
@@ -213,6 +224,33 @@ def test_first_time_contributor_policy_fails():
     )
     status, detail = by_check(audit.audit_repo(REPO_NAME, fetcher(answers)))["fork-pr-approval"]
     assert status == audit.FAIL and "all_external_contributors" in detail
+
+
+def test_allowing_all_actions_fails():
+    answers = good_answers()
+    answers[f"/repos/{REPO_NAME}/actions/permissions"] = (200, {"enabled": True, "allowed_actions": "all"})
+    status, detail = by_check(audit.audit_repo(REPO_NAME, fetcher(answers)))["actions-allowlist"]
+    assert status == audit.FAIL and "all" in detail
+
+
+def test_allowing_marketplace_verified_creators_fails():
+    answers = good_answers()
+    answers[f"/repos/{REPO_NAME}/actions/permissions/selected-actions"] = (
+        200,
+        {"github_owned_allowed": True, "verified_allowed": True, "patterns_allowed": ["step-security/harden-runner@*"]},
+    )
+    status, detail = by_check(audit.audit_repo(REPO_NAME, fetcher(answers)))["actions-allowlist"]
+    assert status == audit.FAIL and "verified" in detail
+
+
+def test_an_empty_pattern_list_fails():
+    answers = good_answers()
+    answers[f"/repos/{REPO_NAME}/actions/permissions/selected-actions"] = (
+        200,
+        {"github_owned_allowed": True, "verified_allowed": False, "patterns_allowed": []},
+    )
+    status, detail = by_check(audit.audit_repo(REPO_NAME, fetcher(answers)))["actions-allowlist"]
+    assert status == audit.FAIL and "pattern" in detail
 
 
 @pytest.mark.parametrize(
