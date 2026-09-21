@@ -12,7 +12,9 @@ It is not an example to copy; the callers' own `.github/workflows` are. What it
 has is one of everything a job needs: a package with a console script (smoke
 test), a test (test matrix), a linted tree (lint), a Dockerfile that runs as a
 non-root user (build, check, Trivy) and a hash-pinned `requirements.txt`
-(install under `--require-hashes`, as the callers do), and one shell script,
+(install under `--require-hashes`, as the callers do), one OpenTofu module
+under `tofu/` with no provider, so `init` needs no network (fmt, validate,
+tflint, the configuration scan), and one shell script,
 `scripts/greet.sh`, with `tests/test_greet.sh` to run it (shellcheck, shfmt,
 the test command). `bash-ci.yml` is run over the whole repository, so
 `scripts/doppler-ci-set.sh` is linted by the same call.
