@@ -447,13 +447,28 @@ jobs:
       - uses: snyk/actions/setup@9adf32b1121593767fc3c057af55b55db032dc04 # v1.0.0
         if: steps.token.outputs.present == 'true'
 
+      # Snyk exits 1 when it finds something and 2 when it could not run at
+      # all, an expired or revoked SNYK_TOKEN included. Findings are reported
+      # through the SARIF upload, not by failing the job; a scan that never
+      # happened fails it, so an expired token shows up as a red job on the
+      # next push or schedule instead of a quietly empty Security tab.
       - name: Snyk Code (SAST)
         if: steps.token.outputs.present == 'true'
-        run: snyk code test --sarif-file-output=snyk-code.sarif || true
+        run: |
+          if snyk code test --sarif-file-output=snyk-code.sarif; then rc=0; else rc=$?; fi
+          case "$rc" in
+            0|1) ;;
+            *) echo "::error title=Snyk::snyk code test did not run (exit $rc); an expired or revoked SNYK_TOKEN exits 2"; exit "$rc" ;;
+          esac
 
       - name: Snyk Open Source (SCA)
         if: steps.token.outputs.present == 'true'
-        run: snyk test --all-projects --severity-threshold=high --sarif-file-output=snyk-opensource.sarif || true
+        run: |
+          if snyk test --all-projects --severity-threshold=high --sarif-file-output=snyk-opensource.sarif; then rc=0; else rc=$?; fi
+          case "$rc" in
+            0|1) ;;
+            *) echo "::error title=Snyk::snyk test did not run (exit $rc); an expired or revoked SNYK_TOKEN exits 2"; exit "$rc" ;;
+          esac
 
       # Gated on the token as well as the file: a repository that committed an
       # old scan report would otherwise upload it as if it were fresh.
