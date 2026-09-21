@@ -1,0 +1,341 @@
+# Reusable Python package release: build the sdist and wheel once, check
+# them, prove the wheel installs and runs, then publish the same files to
+# PyPI through Trusted Publishing and to a GitHub release with build
+# provenance. Four repositories carried a copy of this by hand.
+#
+#   1. Build: `python -m build`, `twine check --strict`, the version read
+#      from the sdist's own name. On a tag, refuse a tag that disagrees with
+#      that version. Install the wheel into a fresh venv and run the caller's
+#      smoke command. Run the caller's verify command (a CHANGELOG section,
+#      say) and its release-notes command. Everything here runs with
+#      contents: read.
+#   2. When `publish` is true and the event is not a pull request:
+#        - publish dist/ to PyPI over the job's OIDC identity, with PEP 740
+#          attestations, from a job that checks nothing out;
+#        - record build provenance for every file and attach them, with a
+#          SHA256SUMS, to the GitHub release for the tag, creating it from
+#          the notes when it does not exist and uploading to it when it does
+#          (a caller that triggers on `release: published`).
+#
+# Call it with:
+#
+#   jobs:
+#     package:
+#       uses: ChiefGyk3D/git-your-ship-together/.github/workflows/python-package-release.yml@<sha> # vX.Y.Z
+#       permissions:
+#         contents: write
+#         id-token: write
+#         attestations: write
+#       with:
+#         publish: ${{ startsWith(github.ref, 'refs/tags/v') }}
+#         smoke-command: my-cli --version
+#
+# Nothing here needs a secret: PyPI trusts the job's OIDC identity once the
+# project names this workflow as a publisher, and the GitHub release uses
+# the job's own token. No Doppler step, no secrets: block.
+#
+# Commands a caller supplies reach the shell through an environment variable,
+# never by template expansion into the script, so a value can only ever be
+# data. They run in the build job, which holds contents: read; the two
+# publishing jobs run only pinned actions and `gh`.
+
+name: Python package release (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      python-version:
+        description: Python used to build, check and smoke-test the package.
+        type: string
+        default: "3.13"
+      package-directory:
+        description: Directory holding pyproject.toml, relative to the repository root.
+        type: string
+        default: "."
+      build-install-command:
+        description: Shell that installs the build tooling.
+        type: string
+        default: python -m pip install --upgrade pip build twine
+      build-command:
+        description: Shell that writes the sdist and wheel to dist/.
+        type: string
+        default: python -m build
+      tag-prefix:
+        description: What precedes the version in a release tag; `v` makes v1.2.3 the tag for version 1.2.3.
+        type: string
+        default: v
+      verify-command:
+        description: Shell run after the build with `$VERSION` set, to refuse a release whose tree disagrees with it, e.g. `grep -q "^## \[$VERSION\]" CHANGELOG.md`; empty runs nothing.
+        type: string
+        default: ""
+      smoke-command:
+        description: Shell run with the built wheel installed in a fresh venv on PATH and `$VERSION` set, e.g. `my-cli --version`; empty skips the check.
+        type: string
+        default: ""
+      release-notes-command:
+        description: Shell that prints the GitHub release notes to stdout with `$VERSION` set, e.g. a CHANGELOG section; empty lets GitHub generate them from the commits.
+        type: string
+        default: ""
+      publish:
+        description: Publish to PyPI and the GitHub release. False builds, checks and stops; a pull request never publishes whatever this says.
+        type: boolean
+        default: false
+      pypi:
+        description: Publish to PyPI (Trusted Publishing; the project must name this workflow and the environment as a publisher).
+        type: boolean
+        default: true
+      pypi-environment:
+        description: The GitHub environment the PyPI job runs in, which is what the Trusted Publisher names.
+        type: string
+        default: pypi
+      github-release:
+        description: Attach the distribution files, their SHA256SUMS and build provenance to the GitHub release for the tag.
+        type: boolean
+        default: true
+      release-title:
+        description: Title of a GitHub release this workflow creates; empty uses the tag.
+        type: string
+        default: ""
+      attest:
+        description: Record SLSA build provenance for every distribution file through GitHub's attestation API.
+        type: boolean
+        default: true
+      egress-policy:
+        description: harden-runner egress policy for every job - `audit` logs outbound connections, `block` allows only `allowed-endpoints`.
+        type: string
+        default: audit
+      allowed-endpoints:
+        description: harden-runner allow-list for `block`, space-separated host:port entries. The build hosts were measured by running the build in block mode here; the publishing hosts are PyPI's and Sigstore's documented ones. Wildcards are not supported and a newline-separated list matches nothing.
+        type: string
+        default: "api.github.com:443 files.pythonhosted.org:443 fulcio.sigstore.dev:443 github.com:443 pypi.org:443 rekor.sigstore.dev:443 release-assets.githubusercontent.com:443 timestamp.sigstore.dev:443 tuf-repo-cdn.sigstore.dev:443 upload.pypi.org:443 uploads.github.com:443"
+      extra-allowed-endpoints:
+        description: Appended to `allowed-endpoints`, for hosts only this repository reaches. Same format.
+        type: string
+        default: ""
+      timeout-minutes:
+        description: Per-job timeout.
+        type: number
+        default: 20
+    outputs:
+      version:
+        description: The version the sdist was built as.
+        value: ${{ jobs.build.outputs.version }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build, check${{ inputs.smoke-command != '' && ', smoke-test' || '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read  # every caller command runs here, beside nothing
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.package-directory }}
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: ${{ inputs.egress-policy }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          # The agent may only stop reporting to StepSecurity in block mode.
+          disable-telemetry: ${{ inputs.egress-policy == 'block' }}
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - name: Install the build tooling
+        env:
+          COMMAND: ${{ inputs.build-install-command }}
+        run: bash -eo pipefail -c "$COMMAND"
+
+      - name: Build the sdist and wheel
+        env:
+          COMMAND: ${{ inputs.build-command }}
+        run: |
+          rm -rf dist
+          bash -eo pipefail -c "$COMMAND"
+          ls -l dist
+
+      - name: Check the distribution metadata
+        run: twine check --strict dist/*
+
+      # The version is read from what was built, not from where the project
+      # keeps it, so a static `version =`, a dynamic attribute and a VCS
+      # plugin all answer the same way.
+      - name: Read the version from the sdist
+        id: version
+        run: |
+          set -euo pipefail
+          sdists=(dist/*.tar.gz)
+          if [ "${#sdists[@]}" -ne 1 ]; then
+            echo "::error::expected one sdist in dist/, found ${#sdists[@]}"
+            exit 1
+          fi
+          stem="${sdists[0]##*/}"
+          stem="${stem%.tar.gz}"
+          version="${stem##*-}"
+          echo "version=$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      # The tag is the one input typed by hand. A tag that disagrees with the
+      # packaged version would publish a file nobody can trace to a commit.
+      - name: The tag must agree with the packaged version
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          TAG: ${{ github.ref_name }}
+          PREFIX: ${{ inputs.tag-prefix }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          echo "tag=$TAG packaged=$VERSION"
+          if [ "${TAG#"$PREFIX"}" != "$VERSION" ]; then
+            echo "::error::tag $TAG does not match the packaged version $VERSION"
+            exit 1
+          fi
+
+      - name: Verify the tree agrees with the version
+        if: inputs.verify-command != ''
+        env:
+          COMMAND: ${{ inputs.verify-command }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: bash -eo pipefail -c "$COMMAND"
+
+      # From the artifact, not the tree: a wheel that installs and cannot run
+      # is the failure a source checkout never shows.
+      - name: Install the wheel into a fresh venv and smoke-test it
+        if: inputs.smoke-command != ''
+        env:
+          COMMAND: ${{ inputs.smoke-command }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          python -m venv "$RUNNER_TEMP/smoke"
+          "$RUNNER_TEMP/smoke/bin/pip" install --disable-pip-version-check dist/*.whl
+          PATH="$RUNNER_TEMP/smoke/bin:$PATH" bash -eo pipefail -c "$COMMAND"
+
+      - name: Write the release notes
+        env:
+          COMMAND: ${{ inputs.release-notes-command }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -n "$COMMAND" ]; then
+            bash -eo pipefail -c "$COMMAND" > "$RUNNER_TEMP/release-notes.md"
+            echo "release notes: $(wc -l < "$RUNNER_TEMP/release-notes.md") line(s)"
+          else
+            : > "$RUNNER_TEMP/release-notes.md"
+            echo "release notes: generated by GitHub"
+          fi
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dist
+          path: ${{ inputs.package-directory }}/dist/
+          if-no-files-found: error
+          retention-days: 7
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-notes
+          path: ${{ runner.temp }}/release-notes.md
+          retention-days: 7
+
+  # No checkout: the token that PyPI trusts never sits beside the tree. The
+  # environment is what the Trusted Publisher on PyPI names.
+  publish-pypi:
+    name: Publish to PyPI
+    needs: build
+    if: inputs.publish && inputs.pypi && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    environment: ${{ inputs.pypi-environment }}
+    permissions:
+      id-token: write  # PyPI Trusted Publishing
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: ${{ inputs.egress-policy }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          # The agent may only stop reporting to StepSecurity in block mode.
+          disable-telemetry: ${{ inputs.egress-policy == 'block' }}
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: dist
+          path: dist/
+
+      # Publishes PEP 740 attestations alongside the distribution by default.
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+
+  # No checkout here either: the one write in the workflow runs beside
+  # nothing from the tree, only the files the build job handed over.
+  github-release:
+    name: GitHub release
+    needs: build
+    if: inputs.publish && inputs.github-release && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: write  # create the release, upload its assets
+      id-token: write  # build provenance is signed with the job's identity
+      attestations: write  # and recorded through GitHub's attestation API
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: ${{ inputs.egress-policy }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          # The agent may only stop reporting to StepSecurity in block mode.
+          disable-telemetry: ${{ inputs.egress-policy == 'block' }}
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: dist
+          path: dist/
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-notes
+          path: notes/
+
+      - name: Checksums
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum ./* > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Record build provenance
+        if: inputs.attest
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*
+
+      - name: Create the release, or upload to the one that exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          TITLE: ${{ inputs.release-title }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            echo "release $TAG exists; uploading"
+            gh release upload "$TAG" dist/* --clobber
+          else
+            args=(--title "${TITLE:-$TAG}" --verify-tag)
+            if [ -s notes/release-notes.md ]; then
+              args+=(--notes-file notes/release-notes.md)
+            else
+              args+=(--generate-notes)
+            fi
+            gh release create "$TAG" dist/* "${args[@]}"
+          fi

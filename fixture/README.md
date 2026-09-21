@@ -1,8 +1,8 @@
 # fixture
 
 The smallest project that exercises every job of `python-ci.yml`,
-`bash-ci.yml` and `python-docker-release.yml`. `.github/workflows/ci.yml`
-calls the three reusable workflows against it from the pull request's own
+`bash-ci.yml`, `python-package-release.yml` and `python-docker-release.yml`.
+`.github/workflows/ci.yml` calls the four reusable workflows against it from the pull request's own
 ref, so a change to a workflow runs against a real project before it reaches
 the repositories that pin a tag. `security.yml` is dogfooded the same way by
 `security-self.yml`.
