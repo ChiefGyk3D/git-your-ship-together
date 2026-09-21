@@ -180,6 +180,21 @@ jobs:
       artifacts: dist/*.tgz
       egress-policy: block
 
+  # tofu-ci.yml at this ref over the fixture's provider-free module: fmt,
+  # validate, tflint and the configuration scan; no plan command, so the
+  # Doppler-gated job is skipped. Block mode with the default list, which
+  # is the tool downloads and Trivy's checks bundle.
+  fixture-tofu:
+    name: fixture tofu
+    uses: ./.github/workflows/tofu-ci.yml # zizmor: ignore[self-repository]
+    permissions:
+      contents: read
+      id-token: write  # what a caller grants for the plan job's Doppler fetch; skipped here
+    with:
+      directories: fixture/tofu
+      workflow-lint: false
+      egress-policy: block
+
   # The fixture image through python-docker-release.yml at this ref: build,
   # check and scan, never publish. The writes are what the release job
   # declares for the publishing path; the called job holds them on a pull
@@ -206,7 +221,7 @@ jobs:
   ci-green:
     name: CI green
     if: always()
-    needs: [actionlint, zizmor, test, fixture-ci, fixture-bash, fixture-package, fixture-artifact, fixture-release]
+    needs: [actionlint, zizmor, test, fixture-ci, fixture-bash, fixture-tofu, fixture-package, fixture-artifact, fixture-release]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}

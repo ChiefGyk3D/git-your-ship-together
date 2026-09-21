@@ -25,6 +25,7 @@ Status as of 2026-09-21.
 | Scan and test tools out of Boon-Tube-Daemon's runtime requirements, which took nltk out of the image and closed the only risk-register entry | `Boon-Tube-Daemon` deps PR, register now empty |
 | The composition rule (item 2): one caller job per language, and the audit derives the required `<job> / CI green` set from the caller's workflow files and fails on any gate missing | `scripts/audit_baseline.py`, `BASELINE.md` §2 |
 | `security.yml` with neutral defaults (item 4): the dependency audit takes an `audit-command` for any ecosystem beside its pip-audit default, and CodeQL's default languages include `actions` | `security.yml`, `security-self.yml` runs both audit paths |
+| `tofu-ci.yml` (item 9): fmt, validate without a backend, tflint and a Trivy configuration scan on pull requests; plan on the default branch through the Doppler gate; OpenTofu and tflint pinned by version and hash; nothing applies | `.github/workflows/tofu-ci.yml`, `fixture/tofu/` |
 | `artifact-release.yml` (item 8): a caller's build command, then SHA256SUMS, build provenance, a keyless cosign bundle per file and the GitHub release, from a job that checks nothing out | `.github/workflows/artifact-release.yml`, run on a tarball of the fixture |
 | `container-release.yml` (item 7): the release workflow under its honest name; `python-docker-release.yml` stays as a thin caller forwarding every input through a `./` reference, held identical by a test | `.github/workflows/container-release.yml`, `python-docker-release.yml` |
 | `python-package-release.yml` (item 5): build, check, tag-against-version, smoke from the wheel, PyPI Trusted Publishing with PEP 740 attestations, GitHub release with SHA256SUMS and provenance; no secret in it | `.github/workflows/python-package-release.yml`, run on the fixture |
@@ -169,13 +170,9 @@ each should say how.
 8. **`artifact-release.yml`.** Done; see the table above. hammunition-hill's
    `.deb`, Skid-Finder's firmware and mother-ticker's bundle move onto it
    as item 6 adopts each.
-9. **`tofu-ci.yml`.** On a pull request: `fmt -check`, `validate`, tflint and
-   a config scan (Trivy), which is everything that runs without a cloud
-   credential. `plan` runs on push to the default branch with a read-only
-   role fetched through the Doppler gate, which is the one place the gate
-   already allows a secret. Nothing applies from CI at all. The binary is
-   OpenTofu, because that is what typo-sniper's examples use; a `binary`
-   input allows Terraform for anyone who needs it.
+9. **`tofu-ci.yml`.** Done; see the table above. typo-sniper's
+   `infra/terraform` is the first consumer, through item 6; its plan needs
+   a read-only AWS role in the Doppler config before `plan-command` is set.
 10. **Embedded.** An arduino-cli compile of the sketch, the host-side unit
     tests, and the binary through `artifact-release.yml`. Skid-Finder's
     `nodes/esp32` sketch is the first consumer. PlatformIO is an input away

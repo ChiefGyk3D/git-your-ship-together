@@ -34,6 +34,7 @@ REUSABLE = [
     in (
         "python-ci.yml",
         "bash-ci.yml",
+        "tofu-ci.yml",
         "container-release.yml",
         "python-docker-release.yml",
         "python-package-release.yml",
@@ -95,9 +96,9 @@ def all_steps(path: Path):
 
 
 def test_there_is_something_to_check():
-    assert len(REUSABLE) == 8, "expected the eight callable workflows"
-    assert len(DOPPLER) == 3, "expected three of them to fetch CI secrets"
-    assert [p.name for p in LANGUAGE_CI] == ["bash-ci.yml", "python-ci.yml"]
+    assert len(REUSABLE) == 9, "expected the nine callable workflows"
+    assert len(DOPPLER) == 4, "expected four of them to fetch CI secrets"
+    assert [p.name for p in LANGUAGE_CI] == ["bash-ci.yml", "python-ci.yml", "tofu-ci.yml"]
     assert ACTION_FILES, "no composite actions found"
 
 
@@ -172,6 +173,7 @@ ALLOWED_WRITES = {
     # (release), Snyk and the gitleaks licence (security) come from Doppler
     # over OIDC; Scorecard publishes its result with the same OIDC identity.
     ("python-ci.yml", "coverage", "id-token"),
+    ("tofu-ci.yml", "plan", "id-token"),  # the plan's credentials come from Doppler, off pull requests only
     ("container-release.yml", "release", "id-token"),
     ("python-docker-release.yml", "release", "id-token"),  # forwarded to container-release.yml
     ("security.yml", "gitleaks", "id-token"),
@@ -219,6 +221,7 @@ ALLOWED_WRITES = {
     # the grants a caller gives, so the called jobs' own permissions blocks
     # are satisfied; the release job never pushes here (push: false).
     ("ci.yml", "fixture-ci", "id-token"),
+    ("ci.yml", "fixture-tofu", "id-token"),
     ("ci.yml", "fixture-release", "id-token"),
     ("ci.yml", "fixture-release", "packages"),
     ("ci.yml", "fixture-release", "attestations"),
@@ -320,6 +323,7 @@ def test_the_inlined_doppler_script_matches_the_composite_action():
     copies = {path.name: doppler_script(path) for path in DOPPLER}
     assert copies == {
         "python-ci.yml": [composite[0]],
+        "tofu-ci.yml": [composite[0]],
         "container-release.yml": [composite[0]],
         "security.yml": [composite[0]] * 2,
     }, "an inlined Doppler script differs from .github/actions/doppler-secrets/action.yml"
@@ -474,7 +478,23 @@ def test_ci_green_gate_needs_every_other_job(path):
 @pytest.mark.parametrize("path", LANGUAGE_CI, ids=lambda p: p.name)
 def test_the_job_running_the_callers_tests_holds_no_oidc_token_in_any_language(path):
     doc = load(path)
+    if "test" not in jobs(doc):
+        pytest.skip(f"{path.name} has no test job")
     assert "id-token" not in (jobs(doc)["test"].get("permissions") or {})
+
+
+def test_tofu_plans_only_off_pull_requests_and_validates_without_a_backend():
+    """A plan needs a credential and the gate is where one may exist; validate never does, and never applies."""
+    doc = load(WORKFLOWS / "tofu-ci.yml")
+    plan = jobs(doc)["plan"]
+    assert "github.event_name != 'pull_request'" in str(plan["if"]) and "inputs.plan-command" in str(plan["if"])
+    validate = [s for s in steps_of(jobs(doc)["validate"]) if str(s.get("name", "")).startswith("init")][0]
+    assert "-backend=false" in validate["run"]
+    text = (WORKFLOWS / "tofu-ci.yml").read_text()
+    assert " apply" not in text.replace("Nothing applies", "").replace("nothing applies", ""), "nothing applies from CI"
+    for job_name, job in jobs(doc).items():
+        if job_name != "plan":
+            assert "id-token" not in (job.get("permissions") or {}), f"{job_name} holds a token it does not need"
 
 
 def test_bash_ci_holds_no_token_at_all():

@@ -48,12 +48,13 @@ Read in this order. Each one is short.
 
 ## What is in the repository
 
-Eight reusable workflows and one composite action:
+Nine reusable workflows and one composite action:
 
 | File | What it does |
 |---|---|
 | `.github/workflows/python-ci.yml` | Lint, workflow lint, test matrix, coverage upload, optional CLI smoke test, single-arch container build with a check, one `CI green` gate job |
 | `.github/workflows/bash-ci.yml` | shellcheck and shfmt over every tracked script, an optional test command, an optional configuration lint (yamllint, ansible-lint), workflow lint, the same `CI green` gate. Holds no token |
+| `.github/workflows/tofu-ci.yml` | For OpenTofu or Terraform: fmt, validate without a backend, tflint and a Trivy configuration scan on every push and pull request; a plan on the default branch only, with credentials through the Doppler gate; the same `CI green` gate. Nothing applies |
 | `.github/workflows/container-release.yml` | Build, test, Trivy-scan, then publish multi-arch to GHCR (and Docker Hub), sign with cosign, attach a syft SBOM, record SLSA provenance. Builds whatever the Dockerfile builds |
 | `.github/workflows/python-docker-release.yml` | The old name of the above: a thin caller that forwards every input, the secret and the outputs through a `./` reference at its own commit, so an existing pin keeps working. New callers use `container-release.yml` |
 | `.github/workflows/python-package-release.yml` | Build the sdist and wheel, `twine check`, refuse a tag that disagrees with the packaged version, smoke-test from the wheel, then publish to PyPI (Trusted Publishing, PEP 740 attestations) and to the GitHub release with SHA256SUMS and build provenance. No secret anywhere |
@@ -67,7 +68,7 @@ project before any caller pins them:
 
 | File | What it does |
 |---|---|
-| `.github/workflows/ci.yml` | actionlint, zizmor, the pytest contract, then `python-ci.yml`, `bash-ci.yml`, `python-package-release.yml`, `artifact-release.yml` and `python-docker-release.yml` called at the pull request's own ref against `fixture/` (bash-ci over the whole repository; bash-ci and the package build in block mode), and a `CI green` gate that needs all of it |
+| `.github/workflows/ci.yml` | actionlint, zizmor, the pytest contract, then `python-ci.yml`, `bash-ci.yml`, `tofu-ci.yml`, `python-package-release.yml`, `artifact-release.yml` and `python-docker-release.yml` called at the pull request's own ref against `fixture/` (bash-ci over the whole repository; bash-ci and the package build in block mode), and a `CI green` gate that needs all of it |
 | `.github/workflows/security-self.yml` | `security.yml` called the same way, on push, pull request and a Monday schedule |
 | `.github/workflows/dependabot-auto-merge-self.yml` | `dependabot-auto-merge.yml` called the same way, so this repository's own bumps exercise it |
 | `.github/dependabot.yml` | Weekly action and pip bumps with a seven-day cooldown, actions grouped into one pull request |
@@ -291,6 +292,64 @@ Inputs of `bash-ci.yml`:
 | `allowed-endpoints` | the measured list | harden-runner allow-list for `block`, space-separated `host:port` |
 | `extra-allowed-endpoints` | empty | Appended to the list, for hosts only this repository reaches |
 | `timeout-minutes` | `15` | Per-job timeout |
+
+### Tofu CI
+
+For the infrastructure in a repository, which today is typo-sniper's
+`infra/terraform`. Everything that runs on a pull request runs without a
+cloud credential: `fmt -check`, `validate` with no backend, tflint, and
+Trivy's configuration scan. A plan needs a credential, so it runs only on a
+push to the default branch, with whatever the Doppler config holds in its
+environment, which is the one place the gate lets a secret exist. Nothing
+applies from CI.
+
+```yaml
+jobs:
+  tofu:
+    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/tofu-ci.yml@<sha> # vX.Y.Z
+    permissions:
+      contents: read
+      id-token: write   # the plan job's Doppler fetch, off pull requests only
+    secrets:
+      DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
+    with:
+      directories: infra/terraform/examples/ecs-fargate infra/terraform/examples/eks-cronjob
+      plan-command: |
+        cd infra/terraform/examples/ecs-fargate
+        tofu init -input=false && tofu plan -input=false
+      workflow-lint: false   # python-ci already lints the workflow files
+      egress-policy: block
+      extra-allowed-endpoints: registry.terraform.io:443 sts.amazonaws.com:443
+      doppler-project: ci
+      doppler-config: ci
+      doppler-identity-id: ${{ vars.DOPPLER_IDENTITY_ID }}
+```
+
+The binary is OpenTofu, downloaded at a pinned version and checked against
+a pinned hash; `binary: terraform` uses the Terraform the runner image ships
+instead. tflint is downloaded the same way. A repository with more than one
+root module lists them in `directories`; each is validated and linted on its
+own.
+
+Inputs of `tofu-ci.yml`:
+
+| Input | Default | Meaning |
+|---|---|---|
+| `directories` | `.` | Space-separated root modules, validated and linted one by one |
+| `binary` | `tofu` | `tofu` (downloaded) or `terraform` (the runner's) |
+| `tofu-version`, `tofu-sha256` | `1.12.6` and its zip's hash | The OpenTofu release downloaded from opentofu/opentofu |
+| `tflint` | `true` | Run tflint over every directory |
+| `tflint-version`, `tflint-sha256` | `0.64.0` and its zip's hash | The tflint release downloaded from terraform-linters/tflint |
+| `trivy` | `true` | Trivy configuration scan over the repository |
+| `trivy-severity` | `CRITICAL,HIGH` | Severities the scan reports |
+| `trivy-exit-code` | `1` | `1` fails the job on a finding, `0` reports only. A migration aid |
+| `plan-command` | empty (skips the job) | The plan, run only on a push to the default branch with the Doppler config's secrets in the environment |
+| `workflow-lint` | `true` | actionlint and zizmor over the caller's own `.github/workflows`; turn off when another caller job already runs it |
+| `zizmor-persona` | `regular` | zizmor strictness |
+| `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `audit`, the tool downloads and Trivy's checks bundle, empty | harden-runner, as in `python-ci.yml`. A provider registry or a cloud API the plan reaches goes in `extra-allowed-endpoints` |
+| `doppler-project`, `doppler-config`, `doppler-identity-id` | empty | See [Doppler setup](#doppler-setup); only the plan job reads them |
+| `doppler-trusted-refs-only` | `true` | Fetch only on the default branch, a tag or a schedule; never on a pull request |
+| `timeout-minutes` | `20` | Per-job timeout |
 
 ### Container release
 

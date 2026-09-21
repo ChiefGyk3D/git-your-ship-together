@@ -48,6 +48,13 @@ version and checked against a pinned hash, so no action joins the allow-list
 for them. No job in it holds more than `contents: read`, because a lint
 needs nothing.
 
+**Tofu CI** (`tofu-ci.yml`) is the shape for infrastructure: fmt, validate
+with no backend, tflint and Trivy's configuration scan on every pull
+request, none of which needs a credential; a plan on the default branch
+only, with credentials through the same Doppler gate the other workflows
+use; nothing that applies. OpenTofu and tflint are downloaded at a pinned
+version and hash, like bash-ci's tools.
+
 **Security** (`security.yml`) runs CodeQL (over the workflow files as well as
 the code, since the `actions` language is in the default), a full-history
 gitleaks scan, a dependency audit (pip-audit on the requirements, and any
