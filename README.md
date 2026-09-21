@@ -48,13 +48,14 @@ Read in this order. Each one is short.
 
 ## What is in the repository
 
-Six reusable workflows and one composite action:
+Seven reusable workflows and one composite action:
 
 | File | What it does |
 |---|---|
 | `.github/workflows/python-ci.yml` | Lint, workflow lint, test matrix, coverage upload, optional CLI smoke test, single-arch container build with a check, one `CI green` gate job |
 | `.github/workflows/bash-ci.yml` | shellcheck and shfmt over every tracked script, an optional test command, an optional configuration lint (yamllint, ansible-lint), workflow lint, the same `CI green` gate. Holds no token |
-| `.github/workflows/python-docker-release.yml` | Build, test, Trivy-scan, then publish multi-arch to GHCR (and Docker Hub), sign with cosign, attach a syft SBOM, record SLSA provenance |
+| `.github/workflows/container-release.yml` | Build, test, Trivy-scan, then publish multi-arch to GHCR (and Docker Hub), sign with cosign, attach a syft SBOM, record SLSA provenance. Builds whatever the Dockerfile builds |
+| `.github/workflows/python-docker-release.yml` | The old name of the above: a thin caller that forwards every input, the secret and the outputs through a `./` reference at its own commit, so an existing pin keeps working. New callers use `container-release.yml` |
 | `.github/workflows/python-package-release.yml` | Build the sdist and wheel, `twine check`, refuse a tag that disagrees with the packaged version, smoke-test from the wheel, then publish to PyPI (Trusted Publishing, PEP 740 attestations) and to the GitHub release with SHA256SUMS and build provenance. No secret anywhere |
 | `.github/workflows/security.yml` | CodeQL (the `actions` language included by default), gitleaks, a dependency audit (pip-audit, and any other tool by command), dependency review on pull requests, optional Snyk, optional OpenSSF Scorecard |
 | `.github/workflows/dependabot-auto-merge.yml` | Queues a Dependabot bump to merge itself once the required checks pass, up to a size you choose |
@@ -309,7 +310,7 @@ permissions:
 
 jobs:
   container:
-    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/python-docker-release.yml@<sha> # v1.3.1
+    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/container-release.yml@<sha> # vX.Y.Z
     permissions:
       contents: read
       packages: write
@@ -365,7 +366,16 @@ The certificate identity is the *reusable* workflow, not the caller. That is
 how Sigstore attributes a job that runs inside a reusable workflow, and it is
 the point: one identity to trust across every repository that calls it.
 
-Inputs of `python-docker-release.yml`:
+A caller pinned to `.github/workflows/python-docker-release.yml@<sha>` sees
+no difference: that file forwards every input, the secret and the outputs to
+`container-release.yml` at the same commit, and a test holds the two sets of
+inputs identical. Move to the new name at the next pin bump. One thing to
+know when verifying: the signing job's OIDC identity names the innermost
+workflow, so a `--certificate-identity` written out in full says
+`container-release.yml`; the `--certificate-identity-regexp` shown above
+matches either.
+
+Inputs of `container-release.yml`:
 
 | Input | Default | Meaning |
 |---|---|---|

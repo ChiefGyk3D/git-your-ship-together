@@ -71,7 +71,9 @@ GitHub release with build provenance and checksums. Every caller command
 runs in the read-only build job; the two writes run pinned actions and `gh`
 against files the build handed over, and never check the tree out.
 
-**Release** (`python-docker-release.yml`) builds the image for the runner's
+**Release** (`container-release.yml`; `python-docker-release.yml` is the same
+file's old name, a thin caller that forwards everything through a `./`
+reference at its own commit, so a pin to it still pins) builds the image for the runner's
 architecture, runs it, scans it with Trivy, and only then builds the multi-arch
 image and pushes it to GHCR (and to Docker Hub where a project already
 publishes there). It then signs the image with cosign, attaches a syft SBOM as
