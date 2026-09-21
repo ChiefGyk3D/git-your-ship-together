@@ -159,6 +159,27 @@ jobs:
       release-notes-command: printf 'fixture %s\n' "$VERSION"
       egress-policy: block
 
+  # artifact-release.yml at this ref over a tarball of the fixture's scripts:
+  # build, verify, collect, never publish. Same grants and gating as the
+  # package job above. Block mode with the default list: the build reaches
+  # nothing, so what is measured here is the workflow's own overhead.
+  fixture-artifact:
+    name: fixture artifact
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    uses: ./.github/workflows/artifact-release.yml # zizmor: ignore[self-repository]
+    permissions:
+      contents: write  # the publish job declares it for the path it never takes here
+      id-token: write  # likewise: keyless signing and provenance, only when publish is true
+      attestations: write  # likewise: the SLSA provenance record
+    with:
+      publish: false
+      build-command: |
+        mkdir -p dist
+        tar czf "dist/fixture-scripts-$VERSION.tgz" fixture/scripts
+      verify-command: tar tzf dist/fixture-scripts-*.tgz | grep -q greet.sh
+      artifacts: dist/*.tgz
+      egress-policy: block
+
   # The fixture image through python-docker-release.yml at this ref: build,
   # check and scan, never publish. The writes are what the release job
   # declares for the publishing path; the called job holds them on a pull
@@ -185,7 +206,7 @@ jobs:
   ci-green:
     name: CI green
     if: always()
-    needs: [actionlint, zizmor, test, fixture-ci, fixture-bash, fixture-package, fixture-release]
+    needs: [actionlint, zizmor, test, fixture-ci, fixture-bash, fixture-package, fixture-artifact, fixture-release]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}
