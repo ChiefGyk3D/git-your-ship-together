@@ -85,11 +85,13 @@ message, a branch name or a pull request title reaches a `run:` block through
 `env:`, never through `${{ }}` inside the script. The tests scan every `run:`
 block for it.
 
-**Every job starts with harden-runner.** In audit mode by default, which
-writes every outbound connection into the job summary. Once a few runs show
-what a job actually talks to, a caller can switch to `block` with an
-`allowed-endpoints` list. That switch is not forced yet, because an allow-list
-written before it is measured is a guess.
+**Every job starts with harden-runner.** The input defaults to `audit`,
+which writes every outbound connection into the job summary; every calling
+repository runs `block`, which refuses any host not on the allow-list each
+workflow carries as its default. Those lists were measured from a day of
+audit runs across the callers, not written from guesses, and a host only one
+repository reaches goes in that caller's `extra-allowed-endpoints`. A new
+dependency announces itself as a `domain not allowed` line.
 
 **These workflows never reference this repository by branch.** A reusable
 workflow cannot know the commit it runs from, so the Doppler steps are inlined
@@ -197,14 +199,14 @@ a date, no review more than 90 days out, no entry expired.
 
 ## What it does not do yet
 
-Signed commits and tags are not required, because no signing key exists on the
-maintainer's machines today and a rule would only block the maintainer.
-harden-runner is not in `block` mode, because each repository's allow-list has
-to be measured first. And a pinned allow-list of actions in repository settings
-is not set, because everything is already SHA-pinned and the list would
-duplicate the pins for the cost of a settings change on every new action.
-BASELINE.md carries the same list with the reasoning, and it is the place that
-changes when one of them is adopted.
+Signed commits and tags are not required. The maintainer's laptop signs with
+an SSH key registered on GitHub, and its commits and tags verify, but the
+cloud sessions and the other machines still commit unsigned, so a rule today
+would only block them. It goes on when they sign too. BASELINE.md carries the
+same item with the reasoning, and it is the place that changes when it is
+adopted. Trivy reports rather than gates, until the images are clean enough
+that a finding is news; and the audit runs from a laptop, not on a schedule,
+which is roadmap item 11.
 
 ## Using this for your own repositories
 

@@ -7,61 +7,106 @@ repository. These are the GitHub Actions workflows shared by ChiefGyk3D's
 Python projects: Typo Sniper, Stream Daemon, Star Daemon, Boon Tube Daemon,
 SolarStorm Scout, NetPulse, jumpcloud-wazuh-bridge, yomama-as-a-service and
 penguin-overlord today (`baseline/repos.txt` is the list), and whatever comes
-next.
+next. Every one of them runs lint, tests, a container build, a signed
+multi-arch release and six kinds of scan with three short YAML files that say
+only what is specific to that project. Secrets live in Doppler, fetched over
+OIDC; there is not one GitHub Actions secret in any of the ten repositories.
 
-Why it is built this way, what it is built on, and what it defends against:
-[docs/DESIGN.md](docs/DESIGN.md). What every calling repository must meet:
-[BASELINE.md](BASELINE.md). What is still to do, and what the lab could
-carry: [docs/ROADMAP.md](docs/ROADMAP.md).
+It is also written to be read. If you want to see what a hardened CI setup
+for a small Python shop looks like end to end, with the reasoning and the
+mistakes left in, start below.
+
+## Start here
+
+Read in this order. Each one is short.
+
+1. [docs/DESIGN.md](docs/DESIGN.md): why it is built this way, what it
+   defends against, and what every product in the chain is for.
+2. This file: how to call the workflows, how to wire Doppler, what the
+   settings outside YAML are, and the lessons that cost a day each.
+3. [BASELINE.md](BASELINE.md): the settings every calling repository must
+   meet, with the `gh api` command that sets each one and the audit that
+   checks it.
+4. `tests/test_workflows.py`: the contract. Every rule in DESIGN.md is a
+   test here, so a pull request that breaks one fails before review.
+5. `fixture/`: the smallest project that exercises every job, run by this
+   repository's own CI. Not an example to copy; the callers are.
+6. A caller. [typo-sniper's `.github/workflows`](https://github.com/ChiefGyk3D/typo-sniper/tree/main/.github/workflows)
+   are three files of the shape shown below, and that is the whole per-project
+   footprint.
+7. [docs/ROADMAP.md](docs/ROADMAP.md): what is done, what is next, and what
+   the lab's spare compute could carry.
+
+## What is in the repository
 
 Three reusable workflows and one composite action:
 
 | File | What it does |
 |---|---|
-| `.github/workflows/python-ci.yml` | Lint, test matrix, optional CLI smoke test, single-arch container build with a check, one `ci-green` gate job |
+| `.github/workflows/python-ci.yml` | Lint, workflow lint, test matrix, coverage upload, optional CLI smoke test, single-arch container build with a check, one `CI green` gate job |
 | `.github/workflows/python-docker-release.yml` | Build, test, Trivy-scan, then publish multi-arch to GHCR (and Docker Hub), sign with cosign, attach a syft SBOM, record SLSA provenance |
-| `.github/workflows/security.yml` | CodeQL, gitleaks, pip-audit, dependency review on pull requests, optional Snyk |
-| `.github/actions/doppler-secrets` | Fetches a Doppler config as masked environment variables, over OIDC or a Service Token |
+| `.github/workflows/security.yml` | CodeQL, gitleaks, pip-audit, dependency review on pull requests, optional Snyk, optional OpenSSF Scorecard |
+| `.github/actions/doppler-secrets` | Fetches a Doppler config as masked environment variables, over OIDC or a Service Token. The workflows inline a copy of it (see the design rules); this is the source |
 
-And around them, what keeps the callers honest:
+This repository's own pipeline, which runs the workflows against a real
+project before any caller pins them:
+
+| File | What it does |
+|---|---|
+| `.github/workflows/ci.yml` | actionlint, zizmor, the pytest contract, then `python-ci.yml` and `python-docker-release.yml` called at the pull request's own ref against `fixture/`, and a `CI green` gate that needs all of it |
+| `.github/workflows/security-self.yml` | `security.yml` called the same way, on push, pull request and a Monday schedule |
+| `.github/dependabot.yml` | Weekly action and pip bumps with a seven-day cooldown, actions grouped into one pull request |
+| `fixture/` | A package with a console script, one test, a non-root Dockerfile and a hash-pinned `requirements.txt`: one of everything a job needs. `fixture/README.md` says how to regenerate the lock |
+| `tests/` | The contract, as pytest, one file per thing it holds still. See [Developing](#developing) |
+| `pyproject.toml`, `requirements-dev.txt` | ruff and pytest configuration, and the three pinned tools the tests need |
+
+And what keeps the callers honest:
 
 | Path | What it is |
 |---|---|
 | `BASELINE.md` | The minimum every calling repository meets: people, branch protection, secrets, workflows, Actions settings, scanning, risk exceptions |
-| `baseline/repos.txt` | The repositories the baseline covers, one per line |
-| `baseline/selected-actions.json` | The allowed-actions policy every repository sets: GitHub-owned plus the named third parties these workflows use |
+| `baseline/repos.txt` | The repositories the baseline covers, one per line, this one included |
+| `baseline/selected-actions.json` | The allowed-actions policy every repository sets: GitHub-owned plus the named third parties these workflows use, subdirectory forms included |
 | `baseline/risk-register.yaml` | Every advisory a pipeline is told to ignore, with the reason, the mitigation, an owner and an expiry. See [Risk register](#risk-register) |
-| `scripts/audit_baseline.py` | Reads each repository's settings and workflows from the API and reports PASS, FAIL or UNKNOWN per baseline item |
-| `scripts/doppler-ci-set.sh` | Sets one secret in the shared Doppler `ci` config without the value touching a shell history |
-| `fixture/` | The smallest Python project with one of everything a job needs; this repository's own CI runs `python-ci.yml` and `python-docker-release.yml` against it. See [Developing](#developing) |
-| `docs/DESIGN.md` | The reasoning: the threat model, why Doppler, what the tests enforce |
-| `docs/ROADMAP.md` | What is done, what is next, and what the lab's spare compute could carry |
-| `tests/` | The contract, as pytest: workflow shape, the Doppler gate, the audit, the register, the fixture |
+| `scripts/audit_baseline.py` | Reads each repository's settings and workflows from the API and reports PASS, FAIL or UNKNOWN per baseline item. Exit 0 only when every check passed |
+| `scripts/doppler-ci-set.sh` | Sets one secret in the shared Doppler `ci` config. The value is typed twice with echo off and never reaches a command line, shell history or the terminal |
+| `docs/DESIGN.md` | The reasoning: the threat model, why Doppler, the products, what the tests enforce |
+| `docs/ROADMAP.md` | What is done, what is next, and what the lab could carry |
 
-Design rules, applied throughout:
+## Design rules
+
+Applied throughout, and each one is a test:
 
 - **Doppler is the single source of truth for secrets, in CI as well as at
-  runtime.** A workflow authenticates to Doppler with a short-lived token minted
-  from the job's own GitHub OIDC identity. Nothing is duplicated into GitHub's
-  encrypted secrets. See [Doppler setup](#doppler-setup).
-- **Every third-party action is pinned to a commit SHA** with a version comment;
-  Dependabot moves both together. `tests/test_workflows.py` fails otherwise.
+  runtime.** A workflow authenticates to Doppler with a short-lived token
+  minted from the job's own GitHub OIDC identity. Nothing is duplicated into
+  GitHub's encrypted secrets. See [Doppler setup](#doppler-setup).
+- **Every third-party action is pinned to a commit SHA** with a version
+  comment; Dependabot moves both together. `tests/test_workflows.py` fails
+  otherwise, and zizmor fails a caller whose comment and SHA disagree.
 - **Permissions are declared per job and every write is on a list** with a
   reason (`ALLOWED_WRITES` in the tests). `contents: read` at the top of every
   file; jobs widen only what they need.
 - **Nothing from an untrusted context is interpolated into a shell.** Values
-  pass through `env:`.
+  pass through `env:`. That includes every command a caller supplies.
 - **Every job has a timeout**, and every checkout sets
   `persist-credentials: false`.
-- **Every job starts with harden-runner.** `audit` by default, which logs
-  every outbound connection; `egress-policy: block` on the caller turns on
-  the measured allow-list each workflow carries as its default. See
-  [Egress](#egress).
+- **Every job starts with harden-runner.** The input defaults to `audit`,
+  which logs every outbound connection; every caller in `baseline/repos.txt`
+  runs `block`, which allows only the measured list each workflow carries as
+  its default. See [Egress](#egress).
+- **The job that runs the caller's code holds no OIDC token.** The test job
+  has `contents: read` and nothing else. Coverage goes to Codecov from a
+  separate job that only ever touches the report artifact.
+- **Secrets are fetched only on a trusted ref.** A push to the default
+  branch, a tag or a schedule. A pull request gets a notice and nothing.
+- **A publishing build never reads the Actions cache.** Anyone who can open
+  a pull request can write to that cache, and a poisoned layer inside a
+  signed release is the one outcome the signature cannot undo.
 - **The workflows never reference this repository by branch.** A reusable
   workflow cannot name the commit it runs from, so the Doppler steps are
   inlined rather than referenced as `@main`; a test holds the four copies
-  identical to `.github/actions/doppler-secrets`, which stays as the source
-  and for use outside these workflows.
+  identical to `.github/actions/doppler-secrets`.
 
 ## Calling the workflows
 
@@ -69,7 +114,7 @@ Callers pin a **commit SHA with the version in a comment**, the same rule
 every third-party action is held to here, and Dependabot moves the pin:
 
 ```yaml
-uses: ChiefGyk3D/git-your-ship-together/.github/workflows/python-ci.yml@<sha> # v1.0.0
+uses: ChiefGyk3D/git-your-ship-together/.github/workflows/python-ci.yml@<sha> # v1.3.1
 ```
 
 Resolve a tag with `git ls-remote --tags <repo> 'refs/tags/vX.Y.Z*'` and take
@@ -78,9 +123,14 @@ object, not a commit. Four pins in the first version of this repository were
 tag objects; GitHub happened to resolve them, Dependabot would not have.
 
 Secrets are passed by name, never with `secrets: inherit`, so a called
-workflow can only ever see the one secret it declares.
+workflow can only ever see the one secret it declares. `DOPPLER_TOKEN` is
+the Service Token fallback and may be unset; every caller here leaves it
+unset and uses OIDC.
 
 ### CI
+
+A real caller, trimmed. The comment at the top of each caller says what is
+specific to that project, because the file is otherwise the same everywhere.
 
 ```yaml
 name: CI
@@ -92,26 +142,40 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   ci:
-    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/python-ci.yml@<sha> # v1.0.0
+    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/python-ci.yml@<sha> # v1.3.1
     permissions:
       contents: read
-      id-token: write
+      id-token: write   # Doppler OIDC and Codecov; python-ci keeps it off the test job
     secrets:
-      DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}   # optional fallback, may be unset
+      DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}   # optional fallback, unset means OIDC only
     with:
-      python-versions: '["3.11", "3.12", "3.13"]'
-      test-command: pytest --cov=my_package --cov-report=xml
+      python-versions: '["3.10", "3.11", "3.12", "3.13"]'
+      install-command: |
+        python -m pip install --upgrade pip
+        pip install --require-hashes -r requirements-dev.txt
+      test-command: pytest --cov=src --cov-report=xml
+      lint-install-command: pip install "$(grep -E '^ruff==' requirements-dev.in)"
+      lint-command: ruff check src/ tests/
+      smoke-command: typo-sniper --version
       dockerfile: docker/Dockerfile
-      docker-test-command: docker run --rm "$IMAGE" python -c "import my_package"
-      doppler-project: my-project
+      docker-test-command: |
+        docker run --rm "$IMAGE" --version
+        test "$(docker run --rm --entrypoint id "$IMAGE" -u)" != "0"
+      egress-policy: block
+      doppler-project: ci
       doppler-config: ci
       doppler-identity-id: ${{ vars.DOPPLER_IDENTITY_ID }}
 ```
 
-Point branch protection at the **CI green** job. It needs every other job and
-fails if any of them failed, so a job added here can never merge unchecked.
+Point branch protection at the **CI green** job (`ci / CI green` as a caller
+reports it). It needs every other job and fails if any of them failed, so a
+job added here can never merge unchecked.
 
 The `test` job runs the caller's own code and holds no OIDC token. Coverage is
 uploaded to Codecov by a separate `coverage` job that downloads the report
@@ -132,7 +196,7 @@ Inputs of `python-ci.yml`:
 | `lint-python-version` | `3.13` | Python for the lint job |
 | `lint-install-command` | `pip install ruff` | Installs the linters |
 | `lint-command` | `ruff check .` | The lint step |
-| `lint-continue-on-error` | `false` | Report lint failures without failing CI. A migration aid |
+| `lint-continue-on-error` | `false` | Report lint failures without failing CI. A migration aid; no caller sets it any more |
 | `smoke-command` | empty (skips the job) | Run after installing the project, e.g. `my-cli --version` |
 | `smoke-install-command` | `pip install .` | Installs the project for the smoke test |
 | `docker-build` | `true` | Build the image, single platform, never pushed |
@@ -160,9 +224,11 @@ name: Release
 on:
   push:
     branches: [main]
-    tags: ['v*']
+    tags: ['v*.*.*']
   pull_request:
     branches: [main]
+  schedule:
+    - cron: '0 5 * * 1'   # weekly rebuild of `latest`, so base-image fixes ship between commits
   workflow_dispatch:
 
 permissions:
@@ -170,7 +236,7 @@ permissions:
 
 jobs:
   container:
-    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/python-docker-release.yml@<sha> # v1.0.0
+    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/python-docker-release.yml@<sha> # v1.3.1
     permissions:
       contents: read
       packages: write
@@ -180,11 +246,13 @@ jobs:
     secrets:
       DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
     with:
-      dockerfile: docker/Dockerfile
+      dockerfile: Docker/Dockerfile
       push: ${{ github.event_name != 'pull_request' }}
-      docker-test-command: docker run --rm "$IMAGE" python -c "import my_package"
       dockerhub: true
-      doppler-project: my-project
+      docker-test-command: docker run --rm "$IMAGE" python -c "import stream_daemon"
+      egress-policy: block
+      extra-allowed-endpoints: www.sqlite.org:443   # one project's Dockerfile fetches this; not in the shared list
+      doppler-project: ci
       doppler-config: ci
       doppler-identity-id: ${{ vars.DOPPLER_IDENTITY_ID }}
 ```
@@ -201,6 +269,9 @@ What a push produces, for every platform in `platforms`:
    and kept as the `sbom.spdx.json` workflow artifact.
 4. **SLSA build provenance** as a GitHub Artifact Attestation.
 5. A Trivy scan, uploaded to the Security tab as SARIF (on pull requests too).
+
+On a pull request it builds, tests and scans and stops. Nothing is pushed,
+signed or attested from a pull request, and a test holds that order.
 
 Verify a published image:
 
@@ -243,12 +314,7 @@ Inputs of `python-docker-release.yml`:
 | `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `audit`, the measured list, empty | harden-runner, as in `python-ci.yml` |
 | `doppler-project`, `doppler-config`, `doppler-identity-id` | empty | See [Doppler setup](#doppler-setup) |
 | `doppler-trusted-refs-only` | `true` | Fetch CI secrets only on the default branch, a tag or a schedule; never on a pull request. See [Doppler setup](#doppler-setup) |
-| `timeout-minutes` | `60` | Job timeout; native builds on arm64 under QEMU are slow |
-
-A publishing build never reads the GitHub Actions cache. Anyone who can open
-a pull request can write to that cache, and a poisoned layer inside a signed
-release is the one outcome the signature cannot undo. Pull-request builds use
-the cache, publishing builds start clean.
+| `timeout-minutes` | `60` | Job timeout; arm64 builds under QEMU are slow |
 
 Outputs: `digest` and `image` (`ghcr.io/...@sha256:...`) of the published
 index, empty when not pushed.
@@ -261,7 +327,7 @@ on:
   push: { branches: [main] }
   pull_request:
   schedule:
-    - cron: '0 6 * * 1'
+    - cron: '0 6 * * 1'   # weekly, so new advisories surface between commits
   workflow_dispatch:
 
 permissions:
@@ -269,7 +335,7 @@ permissions:
 
 jobs:
   security:
-    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/security.yml@<sha> # v1.0.0
+    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/security.yml@<sha> # v1.3.1
     permissions:
       contents: read
       security-events: write
@@ -278,9 +344,13 @@ jobs:
     secrets:
       DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
     with:
-      codeql-config: |
-        paths-ignore:
-          - tests/
+      codeql-queries: security-extended,security-and-quality
+      snyk: true
+      scorecard: true
+      egress-policy: block
+      doppler-project: ci
+      doppler-config: ci
+      doppler-identity-id: ${{ vars.DOPPLER_IDENTITY_ID }}
 ```
 
 Inputs of `security.yml`:
@@ -298,13 +368,18 @@ Inputs of `security.yml`:
 | `dependency-review` | `true` | On pull requests only |
 | `dependency-review-severity` | `moderate` | Fail the review at this severity or above |
 | `dependency-review-allow-ghsas` | empty | Comma-separated GHSA IDs the review may not fail on. Each needs an entry in [`baseline/risk-register.yaml`](baseline/risk-register.yaml); the audit checks |
-| `snyk` | `false` | Snyk Code and Snyk Open Source; needs `SNYK_TOKEN` in the Doppler config |
+| `snyk` | `false` | Snyk Code and Snyk Open Source; needs `SNYK_TOKEN` in the Doppler config. Runs only on a trusted ref, never on a pull request |
 | `scorecard` | `false` | OpenSSF Scorecard, published; runs only on the default branch (push or schedule) |
 | `python-version` | `3.13` | Python for pip-audit and Snyk |
 | `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `audit`, the measured list, empty | harden-runner, as in `python-ci.yml` |
 | `doppler-project`, `doppler-config`, `doppler-identity-id` | empty | See [Doppler setup](#doppler-setup) |
 | `doppler-trusted-refs-only` | `true` | Fetch CI secrets only on the default branch, a tag or a schedule; never on a pull request. See [Doppler setup](#doppler-setup) |
 | `timeout-minutes` | `30` | Per-job timeout |
+
+The Snyk job fails only when Snyk did not run: an expired or revoked token
+(exit 2) or a project it could not read. Findings (exit 1) go to the Security
+tab as SARIF and do not fail the job; Snyk is a reporter here, CodeQL and
+pip-audit are the gates.
 
 ## Doppler setup
 
@@ -320,25 +395,21 @@ is the same thing as a composite action) try, in order:
    `/v3/auth/oidc`, and Doppler returns a short-lived token for the identity's
    Service Account. Nothing static is stored anywhere.
 2. **Service Token** when the caller passes the GitHub secret
-   `DOPPLER_TOKEN` (`secrets: { DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }} }`). Read-only, one config. Doppler
-   still rotates it, but it is one static credential in GitHub per repository.
-   Use it only where OIDC is not available.
+   `DOPPLER_TOKEN`. Read-only, one config. Doppler still rotates it, but it is
+   one static credential in GitHub per repository. Use it only where OIDC is
+   not available (Doppler's Developer plan).
 3. **Nothing**, with a notice, so a pipeline runs before Doppler is wired up.
-   Steps that need a secret then skip (Docker Hub publish) or fail
-   with a message naming the missing name (Snyk).
+   Steps that need a secret then skip (Docker Hub publish) or fail with a
+   message naming the missing name (Snyk).
 
 A fetch happens only on a **trusted ref**: a push to the default branch, a
 tag, or a schedule. A pull request from anywhere and a push to any other branch
 get nothing and a notice saying so. That is `doppler-trusted-refs-only`, on by
 default in every workflow; turning it off means a pull request's proposed code
 runs in a job that holds a secret. A pull request from a fork never fetches
-anything, whichever way the input is set.
-
-The Snyk job runs only off pull requests for the same reason, and Codecov
-uploads run in their own job that never sees a pull request (see [CI](#ci)).
-Everything a repository must meet beyond these workflows - who can push,
-branch protection, Actions settings, scanning - is in [BASELINE.md](BASELINE.md),
-with `scripts/audit_baseline.py` to check every repository against it.
+anything, whichever way the input is set: GitHub mints no OIDC token for it,
+and the step refuses it regardless. `tests/test_doppler_gate.py` runs that
+decision under bash for every event and ref shape.
 
 ### Once, for the workplace
 
@@ -375,9 +446,10 @@ plan. On a Developer plan, use path 2 and skip the identity step below.
    ```
 
    Snyk: the personal API token from Account settings (service accounts are
-   Enterprise only). Docker Hub: a personal access token with `repo:write`;
-   tokens are account-wide, not per repository. Rotation is the same command
-   again, once.
+   Enterprise only; the token expires and the security job says so when it
+   has). Docker Hub: a personal access token with `repo:write`; tokens are
+   account-wide, not per repository. Rotation is the same command again,
+   once.
 
    The trade is stated plainly: every CI job of every repository holds every
    CI credential while it runs, including a Docker Hub token in a repository
@@ -389,7 +461,7 @@ plan. On a Developer plan, use path 2 and skip the identity step below.
 
 2. **Service Account.** Workplace → Team → Service Accounts → create one per
    repository (e.g. `gha-typo-sniper`), grant it *Viewer* on the `ci`
-   project's `ci` environment and nothing else.
+   project's `ci` environment and nothing else. Its workplace role is empty.
 
 3. **Identity.** On the service account, add an Identity of type OIDC:
    - Issuer: `https://token.actions.githubusercontent.com`
@@ -414,7 +486,8 @@ plan. On a Developer plan, use path 2 and skip the identity step below.
 5. **Delete** `DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN`, `CODECOV_TOKEN` and
    `SNYK_TOKEN` from the repository's GitHub secrets once a run has gone green
    through Doppler (`CODECOV_TOKEN` is simply no longer read). `GITHUB_TOKEN`
-   is not a stored secret and stays.
+   is not a stored secret and stays. Then rotate the values at the provider:
+   moving a token does not change it.
 
 ## Egress
 
@@ -430,50 +503,70 @@ with:
   egress-policy: block
 ```
 
+Every caller in `baseline/repos.txt` runs `block` on all three workflows.
 A host only one repository reaches, such as an apt repository or an
 installer its Dockerfile pulls, goes in `extra-allowed-endpoints` on that
-caller, not in the shared default. Two things the agent does not say out
-loud, learned the hard way: the list is space-separated, so a YAML literal
-block (`|`) keeps the newlines and the agent then matches nothing and blocks
-everything; and wildcards such as `*.example.com` are not supported and
-invalidate the list. `blocked` connections show in the job log as `domain
-not allowed: <host>`, which is also how a new dependency announces itself.
+caller, not in the shared default. A blocked connection shows in the job log
+as `domain not allowed: <host>`, which is also how a new dependency announces
+itself.
 
-The Snyk job's hosts (`api`, `app`, `deeproxy`, `downloads` and `static`
-under `snyk.io`) are in `security.yml`'s default from Snyk's own list, not
-from a measurement: the first run with a token logged its connections by
-IP only. A `domain not allowed` line in a Snyk job is the measurement that
-corrects it.
+The Snyk hosts in `security.yml`'s default (`api`, `app`, `deeproxy`,
+`downloads` and `static` under `snyk.io`) came from Snyk's documentation
+rather than a measurement, because the first run with a token logged its
+connections by IP only. Every Snyk-enabled repository has since run green
+under `block` with no `domain not allowed` line, which is the measurement.
 
 ## Repository settings that no YAML can set
 
-[BASELINE.md](BASELINE.md) is the full list with the reasons, and
-`python scripts/audit_baseline.py` reports every repository in
-`baseline/repos.txt` against it. In short, for each calling repository, once
-its first run is green:
+[BASELINE.md](BASELINE.md) is the full list with the reasons and the `gh api`
+command for each, and `python scripts/audit_baseline.py` reports every
+repository in `baseline/repos.txt` against it. In short, for each calling
+repository, once its first run is green:
 
-1. **Branch protection on `main`**: require the `CI green` status check
-   (python-ci's gate job), require a pull request with no approval count
-   (a single maintainer cannot approve their own pull request, so a count
-   of one only blocks the merge until an admin overrides it), and dismiss
-   stale approvals on new pushes. A job added to python-ci is covered
-   automatically because the gate `needs` every other job.
-2. **Secret scanning and push protection** (Settings → Code security): both
+1. **Branch protection on the default branch**: require the `ci / CI green`
+   status check, require a pull request with an approval count of zero, and
+   dismiss stale approvals on new pushes. A count of one on a single-maintainer
+   repository never produces a review, because GitHub does not let an author
+   approve their own pull request; it only blocks the merge until the owner
+   overrides it as an administrator, which teaches the habit of overriding.
+   Zero keeps the pull request and the green check required and lets a
+   Dependabot bump merge on its own.
+2. **Actions settings**: `GITHUB_TOKEN` read-only by default and unable to
+   approve pull requests; every outside contributor's run needs approval, not
+   only a first-time contributor's; and only GitHub-owned actions plus the
+   list in `baseline/selected-actions.json` may run at all. The pins say
+   which commit of an action runs; this setting says which actions may run,
+   so a pull request that adds one outside the list fails at workflow start.
+3. **Secret scanning and push protection** (Settings → Code security): both
    on. Push protection refuses a commit that carries a known credential
    shape before gitleaks ever sees it.
-3. **Private vulnerability reporting**: on, so `SECURITY.md`'s link works.
-4. **Dependabot security updates**: on. The version updates come from the
+4. **Private vulnerability reporting**: on, so `SECURITY.md`'s link works.
+5. **Dependabot security updates**: on. The version updates come from the
    repository's `dependabot.yml`; this switch adds the advisory-driven ones.
-5. **Repository variable `DOPPLER_IDENTITY_ID`**: see Doppler setup above.
-6. **Delete the GitHub secrets** the old workflows used once the Doppler path
-   has produced one green run: `DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN`,
-   `CODECOV_TOKEN`, `SNYK_TOKEN`.
+6. **Repository variable `DOPPLER_IDENTITY_ID`**: see Doppler setup above.
+7. **No GitHub Actions secrets** once the Doppler path has produced a green
+   run. `gh secret list` should print nothing.
 
-And in this repository: tag releases from `main` (`git tag -a vX.Y.Z <sha>`,
-`git push origin vX.Y.Z`). Callers' Dependabot follows the tags; zizmor's
-`ref-version-mismatch` audit fails a caller whose `# vX.Y.Z` comment names a
-tag that does not exist, which is the intended check that a pin and its
-comment agree.
+Signed commits are not required yet. The laptop signs with a registered SSH
+key and its commits and tags verify; the rule goes on when every place that
+commits is signing (roadmap item 10).
+
+## Releasing a version of this repository
+
+Callers' Dependabot follows the tags, so a tag is the release.
+
+```sh
+git fetch --tags && git tag -l | sort -V | tail -3   # see what exists before choosing a number
+git tag -a v1.3.1 <sha> -m "v1.3.1: ..."
+git push origin v1.3.1
+```
+
+Fetch first. Another session cut v1.3.0 while this one believed the latest
+was v1.2.0, and the v1.2.1 that followed would have moved every caller's pin
+backwards on the next Dependabot run; it was deleted and re-cut as v1.3.1.
+zizmor's `ref-version-mismatch` audit fails a caller whose `# vX.Y.Z` comment
+names a tag that does not exist, which is the intended check that a pin and
+its comment agree.
 
 ## Risk register
 
@@ -501,6 +594,56 @@ exception is three steps, in this order:
 When the fix ships, remove both the caller's line and the entry. Renewing an
 entry means moving `review_by` and saying why in the reason.
 
+## Lessons learned the hard way
+
+Each of these cost at least an afternoon. They are here so they cost you
+nothing.
+
+- **A tag's SHA is not a commit's SHA.** `git ls-remote --tags` lists an
+  annotated tag twice; the `^{}` line is the commit. Pin that one. GitHub
+  resolves a tag object in `uses:`, Dependabot does not.
+- **harden-runner's allow-list is one space-separated line.** A YAML literal
+  block (`|`) keeps the newlines, the agent matches nothing and blocks
+  everything, including PyPI. Use a folded block (`>`) or one line. Wildcards
+  (`*.example.com`) are not supported and invalidate the whole list. A test
+  now holds the defaults to one sorted line of `host:port`.
+- **The Actions allow-list needs the subdirectory forms too.** `snyk/actions@*`
+  does not cover `snyk/actions/setup`; `github/codeql-action@*` does not cover
+  `github/codeql-action/init`. And a composite action's own `uses:` lines
+  count: `aquasecurity/trivy-action` calls `aquasecurity/setup-trivy`, and
+  without that entry every release job failed at start with no annotation to
+  say why. Read an action's `action.yml` for nested `uses:` before listing it.
+- **Snyk's pip resolver cannot read extras.** A requirement like
+  `package[aws,vault]>=0.2` makes `snyk test` exit 2 with "Missing required
+  packages" even when everything is installed. `--skip-unresolved=true` is
+  Snyk's documented answer, and the workflow's failure message now names this
+  case as well as the token.
+- **Trivy's setuptools finding may be pip's, not yours.** pip vendors its own
+  copies of setuptools and msgpack under `pip/_vendor`, so upgrading
+  setuptools in the image clears nothing. `pip uninstall -y pip` as the last
+  build step does, and a runtime image has no use for pip anyway.
+- **A required review count of one is a required admin override** when one
+  person holds write. Set it to zero and let the required check do the
+  gating.
+- **Dismiss-stale plus Dependabot rebases means re-approving every bump.**
+  With the count at zero that is moot; with it at one, every rebase from a
+  merged sibling bump dismissed the approval.
+- **Codecov needs no token on a public repository.** `use_oidc: true` and the
+  job's own identity is enough. The token that used to live in every
+  repository that uploads was one more thing to rotate for nothing.
+- **A deleted code-scanning configuration leaves its analyses in the API.**
+  GitHub records the deletion as one empty analysis in that category; the old
+  ones stay listed and look alive. The pull-request check summary is the
+  truth: "1 configuration not found" means the deletion has not happened.
+- **The first block-mode run may log IPs, not names.** harden-runner's audit
+  summary showed Snyk's hosts as addresses only, so that list came from
+  Snyk's documentation and was confirmed by a clean run, not measured first.
+- **Fetch the tags before you cut one.** See [Releasing](#releasing-a-version-of-this-repository).
+- **Every value in a Doppler config is exported.** A CI config that shares an
+  environment with runtime secrets makes every runtime secret a CI secret in
+  every job. Separate project, separate config, and only the names the
+  pipelines read.
+
 ## Developing
 
 ```sh
@@ -516,22 +659,26 @@ The tests are the contract, one file per thing they hold still:
 
 | File | Holds |
 |---|---|
-| `tests/test_workflows.py` | SHA pins with version comments, the write-permission allow-list, per-job permissions and timeouts, no untrusted interpolation, every input declared, defaulted, used and documented here, the Doppler fallback secret reaching every fetch, every reusable workflow run from this repository's own CI |
-| `tests/test_doppler_gate.py` | The decide script, run under bash for every event and ref shape |
-| `tests/test_audit_baseline.py` | The audit, fed a passing repository and a broken one per criterion; a 403 comes back UNKNOWN, never PASS |
-| `tests/test_risk_register.py` | The register's shape, its dates, and that no entry has expired |
-| `tests/test_fixture.py` | Every fixture requirement carries a hash; the fixture image is digest-pinned and non-root |
+| `tests/test_workflows.py` | SHA pins with version comments; no reference to this repository by branch; no `pull_request_target`; the write-permission allow-list; per-job permissions and timeouts; harden-runner first in every job; `persist-credentials: false` on every checkout; no untrusted interpolation; the inlined Doppler script identical to the composite action and gated on the decide step; no OIDC token on a job a pull request can run, and none on the test job; every input declared, defaulted, used and documented here; `CI green` needing every other job; signing and attestation only after a push; no Actions cache on a publishing build; the allow-list defaults one sorted line; every reusable workflow run against the fixture from this repository at the pull request's ref, never publishing |
+| `tests/test_doppler_gate.py` | The decide script, run under bash for every event and ref shape: trusted refs fetch, untrusted refs get a notice and never fail, forks never fetch, the Service Token path is gated the same way |
+| `tests/test_audit_baseline.py` | The audit, fed a passing repository and a broken one per criterion; a 403 comes back UNKNOWN, never PASS; exit codes tell FAIL from UNKNOWN |
+| `tests/test_risk_register.py` | The register's shape, its dates, no duplicate advisory, every repository named is in the baseline list, and no entry has expired |
+| `tests/test_fixture.py` | Every fixture requirement carries a hash, every direct dependency is in the lock, the fixture image runs as a non-root user |
 
 Break any one of those and CI names the fix.
 
 The tests are structural. What runs the workflows is `fixture/`: a Python
 project small enough to be obviously correct, with one of everything a job
-needs, that this repository's own CI puts through `python-ci.yml` and
+needs, that this repository's own `ci.yml` puts through `python-ci.yml` and
 `python-docker-release.yml` (`push: false`) at the pull request's ref, while
 `security-self.yml` does the same for `security.yml`. A change to a reusable
 workflow therefore runs against a real project here before any caller pins
 it, and `CI green` needs those runs. `fixture/README.md` says how to
 regenerate its hash-pinned `requirements.txt`.
+
+Adding a repository: add it to `baseline/repos.txt`, call the three workflows
+as shown above, set the settings in BASELINE.md, and run the audit until it
+is clean. A repository not in the list is not covered.
 
 ## Licence
 

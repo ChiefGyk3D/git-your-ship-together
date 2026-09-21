@@ -15,7 +15,10 @@ Status as of 2026-09-21.
 | Fixture project: `python-ci.yml` and `python-docker-release.yml` run against a real project from the pull request's own ref, so a change is exercised here before a caller pins it | `fixture/`, `.github/workflows/ci.yml` |
 | Hash-pinned Python dependencies in every calling repository: `requirements.in` is the source, `requirements.txt` a universal lock with every hash, installed under `--require-hashes` in CI and the images | one pull request per repository |
 | Risk register: an advisory a pipeline ignores is entered with a reason, an owner and an expiry, and the audit fails on one that is not | `baseline/risk-register.yaml`, `risk-exceptions` check |
-| Required approval count zero (documented; the setting is applied per repository with the command in BASELINE.md §2) | `BASELINE.md` |
+| Required approval count zero on every repository | `BASELINE.md` §2 |
+| Actions settings on every repository (read-only token, all-contributor approval, the actions allow-list) and the audit at zero FAIL, zero UNKNOWN | `BASELINE.md` §5, `baseline/selected-actions.json` |
+| harden-runner `block` mode on CI, release and security in every caller, with the measured lists as the workflows' defaults | v1.3.1, `README.md` Egress |
+| Snyk and Docker Hub tokens in the shared `ci` config; no GitHub Actions secret left in any repository | `scripts/doppler-ci-set.sh` |
 
 ## Next, cheap
 
@@ -39,9 +42,7 @@ Status as of 2026-09-21.
 5. **GitHub Releases with notes for each tag here.** Dependabot's bump pull
    requests then show the changelog inline, which is what makes a pin bump
    reviewable in ten seconds.
-6. **Actions settings and the audit to zero** (BASELINE.md §5): the two
-   `gh api` calls per repository, then `python scripts/audit_baseline.py`
-   exits 0 with no UNKNOWN.
+
 
 ## Next, one step deeper
 
@@ -52,9 +53,6 @@ Status as of 2026-09-21.
    Then `trivy-exit-code: "1"` once the images are clean.
 8. **`disable-sudo: true` in harden-runner** on jobs that never need it, which
    is most of them. One input per job in the shared workflows.
-9. **harden-runner `block` mode for `security.yml`.** In the default list
-   from v1.2.1 with Snyk's documented hosts; callers switch with
-   `egress-policy: block` on security.yml as they did for CI and release.
 10. **Signed commits and tags.** The laptop signs with its SSH key now
     (`gpg.format ssh`, commits and tags), the key is registered on GitHub as
     a signing key, and v1.2.0 and the commits since verify as valid. What is
