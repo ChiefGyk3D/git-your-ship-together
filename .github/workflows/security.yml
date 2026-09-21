@@ -60,6 +60,10 @@ on:
         description: Report advisories without failing the job. A migration aid, not a resting state.
         type: boolean
         default: false
+      pip-audit-extra-args:
+        description: Extra pip-audit arguments, e.g. `--ignore-vuln PYSEC-2026-3740` for an advisory with no fix yet. Name the reason in the caller.
+        type: string
+        default: ""
       dependency-review:
         description: Run dependency-review on pull requests.
         type: boolean
@@ -178,7 +182,9 @@ jobs:
         continue-on-error: ${{ inputs.pip-audit-continue-on-error }}
         env:
           REQUIREMENTS: ${{ inputs.pip-audit-requirements }}
-        run: pip-audit --requirement "$REQUIREMENTS" --strict
+          EXTRA_ARGS: ${{ inputs.pip-audit-extra-args }}
+        # shellcheck disable=SC2086 # EXTRA_ARGS is a list of flags by design
+        run: pip-audit --requirement "$REQUIREMENTS" --strict $EXTRA_ARGS
 
   dependency-review:
     name: Dependency review

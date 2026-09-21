@@ -224,6 +224,7 @@ Inputs of `security.yml`:
 | `gitleaks` | `true` | Secret scan over the full history. Personal accounts need no licence; an organisation puts `GITLEAKS_LICENSE` in the Doppler config |
 | `pip-audit-requirements` | `requirements.txt` | File audited with `--strict`; empty skips the job |
 | `pip-audit-continue-on-error` | `false` | Report advisories without failing. A migration aid |
+| `pip-audit-extra-args` | empty | Extra pip-audit flags, e.g. `--ignore-vuln PYSEC-2026-3740` for an advisory with no fix yet; say why in the caller |
 | `dependency-review` | `true` | On pull requests only |
 | `dependency-review-severity` | `moderate` | Fail the review at this severity or above |
 | `snyk` | `false` | Snyk Code and Snyk Open Source; needs `SNYK_TOKEN` in the Doppler config |
