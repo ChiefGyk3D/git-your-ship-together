@@ -230,24 +230,33 @@ def workflow_findings(name: str, text: str) -> list[str]:
     return findings
 
 
-def check_workflows(repo: str, fetch: Fetcher) -> list[Result]:
+def check_workflows(repo: str, fetch: Fetcher) -> tuple[list[Result], bool]:
+    """The workflow checks, and whether any workflow reads DOPPLER_IDENTITY_ID.
+
+    The second value decides whether the identity variable is required: a
+    repository whose workflows never pass `doppler-identity-id` (this shared
+    repository, or a caller that fetches nothing) has nothing to set.
+    """
     code, listing = fetch(f"/repos/{repo}/contents/.github/workflows")
     if code == 404:
-        return [Result(repo, "workflows-pinned", FAIL, "no .github/workflows directory")]
+        return [Result(repo, "workflows-pinned", FAIL, "no .github/workflows directory")], False
     if code != 200 or not isinstance(listing, list):
-        return [Result(repo, "workflows-pinned", UNKNOWN, unreadable(code, listing))]
+        return [Result(repo, "workflows-pinned", UNKNOWN, unreadable(code, listing))], False
     findings: list[str] = []
     callers = 0
+    reads_doppler = False
     for entry in listing:
         name = entry.get("name", "")
         if not name.endswith((".yml", ".yaml")):
             continue
         code, file = fetch(f"/repos/{repo}/contents/.github/workflows/{name}")
         if code != 200 or not isinstance(file, dict) or "content" not in file:
-            return [Result(repo, "workflows-pinned", UNKNOWN, f"{name}: {unreadable(code, file)}")]
+            return [Result(repo, "workflows-pinned", UNKNOWN, f"{name}: {unreadable(code, file)}")], False
         text = base64.b64decode(file["content"]).decode()
         if REUSABLE_PREFIX in text:
             callers += 1
+        if "DOPPLER_IDENTITY_ID" in text:
+            reads_doppler = True
         findings.extend(workflow_findings(name, text))
     results = []
     if findings:
@@ -262,7 +271,7 @@ def check_workflows(repo: str, fetch: Fetcher) -> list[Result]:
         results.append(Result(repo, "uses-shared-workflows", PASS, "this is the shared repository"))
     else:
         results.append(Result(repo, "uses-shared-workflows", FAIL, "no workflow calls git-your-ship-together"))
-    return results
+    return results, reads_doppler
 
 
 def check_dependabot(repo: str, fetch: Fetcher) -> Result:
@@ -277,7 +286,9 @@ def check_dependabot(repo: str, fetch: Fetcher) -> Result:
     return Result(repo, "dependabot-config", PASS, "present, with a cooldown")
 
 
-def check_doppler_variable(repo: str, fetch: Fetcher) -> Result:
+def check_doppler_variable(repo: str, fetch: Fetcher, reads_doppler: bool) -> Result:
+    if not reads_doppler:
+        return Result(repo, "doppler-identity", PASS, "no workflow reads DOPPLER_IDENTITY_ID; nothing to set")
     code, body = fetch(f"/repos/{repo}/actions/variables/DOPPLER_IDENTITY_ID")
     if code == 404:
         return Result(repo, "doppler-identity", FAIL, "repository variable DOPPLER_IDENTITY_ID is not set")
@@ -301,9 +312,10 @@ def audit_repo(repo: str, fetch: Fetcher) -> list[Result]:
     results.append(check_private_vulnerability_reporting(repo, fetch))
     results.append(check_workflow_token(repo, fetch))
     results.append(check_fork_pr_approval(repo, fetch))
-    results += check_workflows(repo, fetch)
+    workflow_results, reads_doppler = check_workflows(repo, fetch)
+    results += workflow_results
     results.append(check_dependabot(repo, fetch))
-    results.append(check_doppler_variable(repo, fetch))
+    results.append(check_doppler_variable(repo, fetch, reads_doppler))
     return results
 
 
