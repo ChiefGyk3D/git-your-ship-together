@@ -81,7 +81,8 @@ pull request. `tests/test_workflows.py` enforces this.
 **`secrets: inherit` is never used.** A caller passes `DOPPLER_TOKEN` by name,
 and it may be unset.
 
-Checked: `doppler-identity` (the variable exists and is a UUID) and
+Checked: `doppler-identity` (the variable exists and is a UUID; a repository
+whose workflows never read `DOPPLER_IDENTITY_ID` has nothing to set and passes) and
 `workflows-pinned` (no `secrets: inherit`). The Doppler side is checked by
 hand: `doppler secrets --project P --config ci --only-names` must list only
 CI names, and the identity's subject must be the tight form.

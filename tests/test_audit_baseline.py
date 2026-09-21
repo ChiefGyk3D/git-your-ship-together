@@ -33,6 +33,13 @@ CALLER = (
     "name: CI\non: [push]\npermissions:\n  contents: read\njobs:\n  ci:\n"
     f"    uses: {SHARED}python-ci.yml@{PIN} # v1.0.0\n"
     "    secrets:\n      DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}\n"
+    "    with:\n      doppler-identity-id: ${{ vars.DOPPLER_IDENTITY_ID }}\n"
+)
+
+# A caller that never reads Doppler: no identity input, no token secret.
+CALLER_WITHOUT_DOPPLER = (
+    "name: CI\non: [push]\npermissions:\n  contents: read\njobs:\n  ci:\n"
+    f"    uses: {SHARED}python-ci.yml@{PIN} # v1.0.0\n"
 )
 
 
@@ -249,6 +256,15 @@ def test_dependabot_without_cooldown_fails_and_missing_file_fails():
     assert by_check(audit.audit_repo(REPO_NAME, fetcher(answers)))["dependabot-config"][0] == audit.FAIL
     answers[f"/repos/{REPO_NAME}/contents/.github/dependabot.yml"] = (404, {"message": "Not Found"})
     assert by_check(audit.audit_repo(REPO_NAME, fetcher(answers)))["dependabot-config"][0] == audit.FAIL
+
+
+def test_a_repository_that_reads_no_doppler_needs_no_identity():
+    answers = good_answers()
+    answers[f"/repos/{REPO_NAME}/contents/.github/workflows/ci.yml"] = (200, encoded(CALLER_WITHOUT_DOPPLER))
+    # The variable endpoint is not consulted at all: the fetcher raises on it.
+    del answers[f"/repos/{REPO_NAME}/actions/variables/DOPPLER_IDENTITY_ID"]
+    status, detail = by_check(audit.audit_repo(REPO_NAME, fetcher(answers)))["doppler-identity"]
+    assert status == audit.PASS and "no workflow reads" in detail
 
 
 def test_a_missing_identity_variable_fails():
