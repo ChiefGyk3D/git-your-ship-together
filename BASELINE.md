@@ -132,7 +132,10 @@ stays off. An action used from a subdirectory of its repository (Snyk's
 `snyk/actions/setup`, CodeQL's `github/codeql-action/init`) needs the
 subdirectory form of the pattern as well as the repository form; the
 repository form alone left a security run in `startup_failure` with no
-annotation to say why.
+annotation to say why. A composite action's own `uses:` lines count too:
+`aquasecurity/trivy-action` calls `aquasecurity/setup-trivy`, and without
+that entry every release job failed at start until it was added. Before
+adding an action, read its `action.yml` for nested `uses:` and list those.
 
 Checked: `workflow-token-read-only`, `fork-pr-approval`, `actions-allowlist`
 (allowed_actions is `selected`, GitHub-owned on, verified creators off, at
