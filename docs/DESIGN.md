@@ -23,12 +23,13 @@ a pipeline run are deliberately absent.
 
 ## What a push goes through
 
-A push to a calling repository, or a pull request against it, runs three
-workflows, and a fourth watches for Dependabot's own pull requests. Each one
-is a reusable workflow in this repository, pinned by the caller to a commit
-SHA with the version in a comment. A repository with more than one language
-calls one CI workflow per language, from one caller job each, and requires
-every gate.
+A push to a calling repository, or a pull request against it, runs a CI
+workflow per language the repository holds, the security workflow and the
+release workflow, and one more watches for Dependabot's own pull requests.
+Each one is a reusable workflow in this repository, pinned by the caller to
+a commit SHA with the version in a comment. A repository with more than one
+language calls one CI workflow per language, from one caller job each, and
+requires every gate.
 
 **CI** (`python-ci.yml`) runs ruff on the code, the test suite across a
 Python matrix, an optional smoke test that installs the package and runs it,
@@ -47,10 +48,14 @@ version and checked against a pinned hash, so no action joins the allow-list
 for them. No job in it holds more than `contents: read`, because a lint
 needs nothing.
 
-**Security** (`security.yml`) runs CodeQL, a full-history gitleaks scan,
-pip-audit on the requirements, dependency review on pull requests, Snyk on
-pushes to the default branch, and the OpenSSF Scorecard on the default branch
-only. Results land in the repository's Security tab as SARIF.
+**Security** (`security.yml`) runs CodeQL (over the workflow files as well as
+the code, since the `actions` language is in the default), a full-history
+gitleaks scan, a dependency audit (pip-audit on the requirements, and any
+other ecosystem's tool by command), dependency review on pull requests, Snyk
+on pushes to the default branch, and the OpenSSF Scorecard on the default
+branch only. Results land in the repository's Security tab as SARIF. Only the
+audit's default is Python-shaped; a shell repository turns that default off
+and changes nothing else.
 
 **Auto-merge** (`dependabot-auto-merge.yml`) is the fourth, and the only one
 that is not part of a push's path. On a Dependabot pull request it reads what
@@ -174,7 +179,7 @@ token was one more thing to store for no reason, and it is gone.
 | actionlint and zizmor | Lint for the workflows themselves | actionlint catches YAML and expression mistakes; zizmor catches the security ones, including a pin whose version comment no longer matches. Both run on the caller's workflow files, not only on these. |
 | CodeQL | Static analysis | GitHub's own, free for public repositories, results in the Security tab. |
 | gitleaks | Secret scan of the full history | GitHub's push protection stops a known credential shape at push time; gitleaks is the second net, over history, on every pull request. |
-| pip-audit | Known-vulnerable dependencies | Reads the requirements file directly; no account, no token. |
+| pip-audit | Known-vulnerable dependencies | Reads the requirements file directly; no account, no token. The same job runs `npm audit`, `govulncheck` or `cargo audit` when a caller names it. |
 | dependency-review | New vulnerable or badly licensed dependencies in a pull request | GitHub's own; posts a summary on the pull request. |
 | Snyk | Open Source and Code scanning | Optional. It needs a token, and it runs only off pull requests so the token is never beside proposed code. |
 | OpenSSF Scorecard | An outside opinion of the repository's practices | Runs on the default branch only, publishes with the job's OIDC identity. |

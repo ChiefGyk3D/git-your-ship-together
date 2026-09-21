@@ -459,6 +459,22 @@ def test_every_downloaded_tool_is_checked_against_a_pinned_hash(path):
         )
 
 
+def test_security_defaults_are_neutral_where_they_can_be():
+    """One job is Python-shaped by default and only by default; the rest read any repository."""
+    doc = load(WORKFLOWS / "security.yml")
+    inputs = triggers(doc)["workflow_call"]["inputs"]
+    assert "actions" in inputs["codeql-languages"]["default"].split(","), (
+        "CodeQL should read the workflow files everywhere"
+    )
+    assert inputs["pip-audit-requirements"]["default"] == "requirements.txt", "the nine callers rely on this default"
+    assert inputs["audit-command"]["default"] == ""
+    audit = jobs(doc)["dependency-audit"]
+    assert "inputs.audit-command != ''" in audit["if"] and "inputs.pip-audit-requirements != ''" in audit["if"]
+    assert audit["permissions"] == {"contents": "read"}, "the audit runs a caller's command; it holds nothing"
+    names = [s.get("name") for s in steps_of(audit)]
+    assert names.index("Audit pinned dependencies (pip-audit)") < names.index("Audit dependencies (audit-command)")
+
+
 def test_release_signs_attests_and_records_provenance_only_after_a_push():
     doc = load(WORKFLOWS / "python-docker-release.yml")
     steps = {s.get("name"): s for s in steps_of(jobs(doc)["release"])}

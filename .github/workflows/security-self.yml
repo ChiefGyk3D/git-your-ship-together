@@ -1,6 +1,8 @@
 # This repository's own security checks, run through the reusable workflow it
 # ships: CodeQL over the workflow files themselves (the `actions` language),
-# gitleaks over the history, and pip-audit over the test dependencies.
+# gitleaks over the history, pip-audit over the test dependencies, and the
+# generic `audit-command` path over the fixture's lock, so both ways of
+# naming a dependency audit are exercised here before a caller uses them.
 name: Security
 
 on:
@@ -27,6 +29,8 @@ jobs:
       pull-requests: write  # dependency-review summary comment
       id-token: write  # Scorecard publishing
     with:
-      codeql-languages: actions
+      codeql-languages: actions  # no Python package here; `python` would find nothing and fail
       pip-audit-requirements: requirements-dev.txt
+      audit-install-command: pip install pip-audit
+      audit-command: pip-audit --requirement fixture/requirements.txt --strict
       scorecard: true

@@ -40,9 +40,9 @@ on:
         type: boolean
         default: true
       codeql-languages:
-        description: CodeQL languages, comma-separated (`python`, `actions`, ...).
+        description: CodeQL languages, comma-separated. `actions` scans the workflow files themselves and fits every repository; a repository with no Python passes `actions` alone, since CodeQL fails on a language with no source.
         type: string
-        default: python
+        default: python,actions
       codeql-queries:
         description: CodeQL query suite.
         type: string
@@ -56,7 +56,7 @@ on:
         type: boolean
         default: true
       pip-audit-requirements:
-        description: Requirements file audited by pip-audit; empty skips the job.
+        description: Requirements file audited by pip-audit; empty skips that step. With `audit-command` empty too, the job is skipped.
         type: string
         default: requirements.txt
       pip-audit-continue-on-error:
@@ -67,6 +67,18 @@ on:
         description: Extra pip-audit arguments, e.g. `--ignore-vuln PYSEC-2026-3740` for an advisory with no fix yet. Name the reason in the caller.
         type: string
         default: ""
+      audit-install-command:
+        description: Shell run before `audit-command`, e.g. `npm ci --ignore-scripts` or `cargo install cargo-audit`; empty installs nothing. Python is available.
+        type: string
+        default: ""
+      audit-command:
+        description: A dependency audit that is not pip-shaped, e.g. `npm audit --audit-level=high`, `govulncheck ./...`, `cargo audit`; empty runs none. Runs in the same job as pip-audit, after it.
+        type: string
+        default: ""
+      audit-continue-on-error:
+        description: Report `audit-command` findings without failing the job. A migration aid, not a resting state.
+        type: boolean
+        default: false
       dependency-review:
         description: Run dependency-review on pull requests.
         type: boolean
@@ -269,9 +281,9 @@ jobs:
           GITLEAKS_LICENSE: ${{ env.GITLEAKS_LICENSE }}
           GITLEAKS_ENABLE_COMMENTS: "false"
 
-  pip-audit:
-    name: Dependency audit (pip-audit)
-    if: inputs.pip-audit-requirements != ''
+  dependency-audit:
+    name: Dependency audit
+    if: inputs.pip-audit-requirements != '' || inputs.audit-command != ''
     runs-on: ubuntu-latest
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
@@ -293,13 +305,15 @@ jobs:
           python-version: ${{ inputs.python-version }}
 
       - name: Install pip-audit
+        if: inputs.pip-audit-requirements != ''
         run: pip install pip-audit
 
       # Scoped to the declared dependencies on purpose. Auditing the whole
       # environment reports advisories against the runner's own pip and
       # setuptools, which nobody here ships or controls, and a recurring red
       # that everyone learns to ignore is worse than no check.
-      - name: Audit pinned dependencies
+      - name: Audit pinned dependencies (pip-audit)
+        if: inputs.pip-audit-requirements != ''
         continue-on-error: ${{ inputs.pip-audit-continue-on-error }}
         env:
           REQUIREMENTS: ${{ inputs.pip-audit-requirements }}
@@ -307,6 +321,22 @@ jobs:
         run: |
           read -r -a extra <<< "$EXTRA_ARGS"
           pip-audit --requirement "$REQUIREMENTS" --strict "${extra[@]}"
+
+      # The same job for any other ecosystem: the caller names the tool. The
+      # command reaches the shell through the environment, as every caller
+      # command does, and this job holds contents: read and nothing else.
+      - name: Install the audit tool
+        if: inputs.audit-install-command != ''
+        env:
+          COMMAND: ${{ inputs.audit-install-command }}
+        run: bash -eo pipefail -c "$COMMAND"
+
+      - name: Audit dependencies (audit-command)
+        if: inputs.audit-command != ''
+        continue-on-error: ${{ inputs.audit-continue-on-error }}
+        env:
+          COMMAND: ${{ inputs.audit-command }}
+        run: bash -eo pipefail -c "$COMMAND"
 
   dependency-review:
     name: Dependency review
