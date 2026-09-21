@@ -34,10 +34,17 @@ from dataclasses import dataclass
 from pathlib import Path
 
 API = "https://api.github.com"
-REQUIRED_CHECK = "ci / CI green"  # the gate job of python-ci.yml, as a caller's `ci:` job reports it
+GATE = "CI green"  # the last job of every shared `*-ci.yml`; a caller's job `ci:` reports it as `ci / CI green`
+REQUIRED_CHECK = f"ci / {GATE}"  # what a caller with no derivable gate is held to
 SHARED_REPO = "ChiefGyk3D/git-your-ship-together"
-SHARED_REPO_CHECK = "CI green"  # this repository runs the gate directly, so the check has no `ci /` prefix
+SHARED_REPO_CHECK = GATE  # this repository runs the gate directly, so the check has no `ci /` prefix
 REUSABLE_PREFIX = "ChiefGyk3D/git-your-ship-together/"
+# A caller job that uses one of the shared CI workflows. The release and
+# security workflows have no gate, so a job calling them is not a check.
+SHARED_CI_CALL = re.compile(
+    r"^\s+uses:\s*" + re.escape(REUSABLE_PREFIX) + r"\.github/workflows/[A-Za-z0-9_-]+-ci\.ya?ml@"
+)
+JOB_KEY = re.compile(r"^  ([A-Za-z0-9_-]+):\s*$")
 SHA = re.compile(r"^[0-9a-f]{40}$")
 USES = re.compile(r"^\s*(?:-\s*)?uses:\s*(?P<action>[^@\s]+)@(?P<ref>\S+)(?P<rest>.*)$")
 VERSION_COMMENT = re.compile(r"^\s*#\s*v\d+\.\d+(\.\d+)?\s*$")
@@ -114,12 +121,43 @@ def check_collaborators(repo: str, fetch: Fetcher, owner: str) -> Result:
     return Result(repo, "collaborators", PASS, f"only {owner} can push")
 
 
-def required_check_for(repo: str) -> str:
-    return SHARED_REPO_CHECK if repo.lower() == SHARED_REPO.lower() else REQUIRED_CHECK
+def expected_gates(text: str) -> set[str]:
+    """The `<job> / CI green` checks a caller workflow produces.
+
+    One per job whose `uses:` names a shared `*-ci.yml`: a repository with
+    Python and shell calls two workflows from two jobs and must require both
+    gates, or the second language merges unchecked. Read by line, the way the
+    pin check reads the file, so the script stays free of a YAML dependency.
+    """
+    gates: set[str] = set()
+    job = None
+    in_jobs = False
+    for line in text.splitlines():
+        if line.lstrip().startswith("#"):
+            continue
+        if re.match(r"^jobs:\s*$", line):
+            in_jobs = True
+            continue
+        if not in_jobs:
+            continue
+        if re.match(r"^\S", line):  # another top-level key ends the jobs block
+            in_jobs = False
+            continue
+        key = JOB_KEY.match(line)
+        if key:
+            job = key.group(1)
+        elif job and SHARED_CI_CALL.match(line):
+            gates.add(f"{job} / {GATE}")
+    return gates
 
 
-def check_branch_protection(repo: str, fetch: Fetcher, default_branch: str) -> list[Result]:
-    required = required_check_for(repo)
+def required_checks_for(repo: str, gates: set[str]) -> set[str]:
+    if repo.lower() == SHARED_REPO.lower():
+        return {SHARED_REPO_CHECK}
+    return gates or {REQUIRED_CHECK}
+
+
+def check_branch_protection(repo: str, fetch: Fetcher, default_branch: str, required: set[str]) -> list[Result]:
     code, body = fetch(f"/repos/{repo}/branches/{default_branch}/protection")
     if code == 404:
         return [Result(repo, "branch-protection", FAIL, f"{default_branch} is not protected")]
@@ -128,13 +166,14 @@ def check_branch_protection(repo: str, fetch: Fetcher, default_branch: str) -> l
     results = []
     checks = body.get("required_status_checks") or {}
     names = [c.get("context") for c in checks.get("checks") or []] or list(checks.get("contexts") or [])
-    if required in names:
-        extra = sorted(n for n in names if n != required)
+    missing = sorted(required - set(names))
+    if not missing:
+        extra = sorted(n for n in names if n not in required)
         results.append(
-            Result(repo, "required-check", PASS, f"requires {required!r}" + (f"; also {extra}" if extra else ""))
+            Result(repo, "required-check", PASS, f"requires {sorted(required)}" + (f"; also {extra}" if extra else ""))
         )
     else:
-        results.append(Result(repo, "required-check", FAIL, f"required checks are {names}, not {required!r}"))
+        results.append(Result(repo, "required-check", FAIL, f"required checks are {names}; missing {missing}"))
     reviews = body.get("required_pull_request_reviews")
     if not reviews:
         results.append(Result(repo, "pull-request-required", FAIL, "direct pushes to the default branch are allowed"))
@@ -303,9 +342,8 @@ def check_tag_ruleset(repo: str, fetch: Fetcher) -> Result:
     return Result(repo, "tag-ruleset", FAIL, "no active ruleset protects refs/tags/v*")
 
 
-
-def check_workflows(repo: str, fetch: Fetcher) -> tuple[list[Result], bool, set[str]]:
-    """The workflow checks, whether any workflow reads DOPPLER_IDENTITY_ID, and the advisories ignored.
+def check_workflows(repo: str, fetch: Fetcher) -> tuple[list[Result], bool, set[str], set[str]]:
+    """The workflow checks, whether any workflow reads DOPPLER_IDENTITY_ID, the advisories ignored, and the gates.
 
     The second value decides whether the identity variable is required: a
     repository whose workflows never pass `doppler-identity-id` (this shared
@@ -313,23 +351,25 @@ def check_workflows(repo: str, fetch: Fetcher) -> tuple[list[Result], bool, set[
     """
     code, listing = fetch(f"/repos/{repo}/contents/.github/workflows")
     if code == 404:
-        return [Result(repo, "workflows-pinned", FAIL, "no .github/workflows directory")], False
+        return [Result(repo, "workflows-pinned", FAIL, "no .github/workflows directory")], False, set(), set()
     if code != 200 or not isinstance(listing, list):
-        return [Result(repo, "workflows-pinned", UNKNOWN, unreadable(code, listing))], False
+        return [Result(repo, "workflows-pinned", UNKNOWN, unreadable(code, listing))], False, set(), set()
     findings: list[str] = []
     callers = 0
     reads_doppler = False
     exceptions: set[str] = set()
+    gates: set[str] = set()
     for entry in listing:
         name = entry.get("name", "")
         if not name.endswith((".yml", ".yaml")):
             continue
         code, file = fetch(f"/repos/{repo}/contents/.github/workflows/{name}")
         if code != 200 or not isinstance(file, dict) or "content" not in file:
-            return [Result(repo, "workflows-pinned", UNKNOWN, f"{name}: {unreadable(code, file)}")], False
+            return [Result(repo, "workflows-pinned", UNKNOWN, f"{name}: {unreadable(code, file)}")], False, set(), set()
         text = base64.b64decode(file["content"]).decode()
         if REUSABLE_PREFIX in text:
             callers += 1
+        gates |= expected_gates(text)
         if "DOPPLER_IDENTITY_ID" in text:
             reads_doppler = True
         exceptions |= exceptions_in(text)
@@ -347,7 +387,7 @@ def check_workflows(repo: str, fetch: Fetcher) -> tuple[list[Result], bool, set[
         results.append(Result(repo, "uses-shared-workflows", PASS, "this is the shared repository"))
     else:
         results.append(Result(repo, "uses-shared-workflows", FAIL, "no workflow calls git-your-ship-together"))
-    return results, reads_doppler, exceptions
+    return results, reads_doppler, exceptions, gates
 
 
 def exceptions_in(text: str) -> set[str]:
@@ -441,8 +481,10 @@ def audit_repo(repo: str, fetch: Fetcher, register: list[dict] | None = None) ->
     if code != 200 or not isinstance(body, dict):
         return [Result(repo, "repository", UNKNOWN, unreadable(code, body))]
     default_branch = body.get("default_branch") or "main"
+    # The workflows first: which gates branch protection must require is read from them.
+    workflow_results, reads_doppler, exceptions, gates = check_workflows(repo, fetch)
     results = [check_collaborators(repo, fetch, owner)]
-    results += check_branch_protection(repo, fetch, default_branch)
+    results += check_branch_protection(repo, fetch, default_branch, required_checks_for(repo, gates))
     results += check_security_features(repo, body)
     results.append(check_private_vulnerability_reporting(repo, fetch))
     results.append(check_workflow_token(repo, fetch))
@@ -450,7 +492,6 @@ def audit_repo(repo: str, fetch: Fetcher, register: list[dict] | None = None) ->
     results.append(check_actions_allowlist(repo, fetch))
     results.append(check_auto_merge(repo, body))
     results.append(check_tag_ruleset(repo, fetch))
-    workflow_results, reads_doppler, exceptions = check_workflows(repo, fetch)
     results += workflow_results
     results.append(check_risk_exceptions(repo, exceptions, register if register is not None else load_register()))
     results.append(check_dependabot(repo, fetch))

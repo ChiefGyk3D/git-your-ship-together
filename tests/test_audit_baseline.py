@@ -390,6 +390,45 @@ def test_the_repo_list_lists_this_repository_and_ignores_comments():
     assert len(repos) == len(set(repos))
 
 
+CALLER_TWO_LANGUAGES = CALLER + f"  shell:\n    uses: {SHARED}bash-ci.yml@{PIN} # v1.0.0\n"
+RELEASE_ONLY = (
+    "name: Release\non: [push]\npermissions:\n  contents: read\njobs:\n  container:\n"
+    f"    uses: {SHARED}python-docker-release.yml@{PIN} # v1.0.0\n"
+)
+
+
+def test_expected_gates_are_one_per_shared_ci_call():
+    """Every caller job that uses a `*-ci.yml` here reports `<job> / CI green`; nothing else does."""
+    assert audit.expected_gates(CALLER) == {"ci / CI green"}
+    assert audit.expected_gates(CALLER_TWO_LANGUAGES) == {"ci / CI green", "shell / CI green"}
+    assert audit.expected_gates(RELEASE_ONLY) == set()
+    assert audit.expected_gates("# uses: " + SHARED + "python-ci.yml@" + PIN + "\n") == set()
+
+
+def test_every_language_gate_must_be_required():
+    """A second language's gate left out of branch protection merges red; the audit names it."""
+    answers = good_answers()
+    answers[f"/repos/{REPO_NAME}/contents/.github/workflows/ci.yml"] = (200, encoded(CALLER_TWO_LANGUAGES))
+    status, detail = by_check(audit.audit_repo(REPO_NAME, fetcher(answers)))["required-check"]
+    assert status == audit.FAIL and "shell / CI green" in detail and "ci / CI green" not in detail.split("missing")[1]
+    answers[f"/repos/{REPO_NAME}/branches/main/protection"][1]["required_status_checks"] = {
+        "checks": [{"context": "ci / CI green"}, {"context": "shell / CI green"}]
+    }
+    status, detail = by_check(audit.audit_repo(REPO_NAME, fetcher(answers)))["required-check"]
+    assert status == audit.PASS and "shell / CI green" in detail
+
+
+def test_a_caller_with_no_shared_ci_call_is_held_to_the_default_gate():
+    """The expected name must still be stated when there is nothing to derive it from."""
+    answers = good_answers()
+    answers[f"/repos/{REPO_NAME}/contents/.github/workflows/ci.yml"] = (200, encoded(RELEASE_ONLY))
+    results = by_check(audit.audit_repo(REPO_NAME, fetcher(answers)))
+    assert results["required-check"][0] == audit.PASS  # good_answers requires `ci / CI green`
+    answers[f"/repos/{REPO_NAME}/branches/main/protection"][1]["required_status_checks"] = {"checks": []}
+    status, detail = by_check(audit.audit_repo(REPO_NAME, fetcher(answers)))["required-check"]
+    assert status == audit.FAIL and "ci / CI green" in detail
+
+
 def test_the_shared_repository_requires_its_own_gate_name():
     """git-your-ship-together runs python-ci's gate directly, so its check is `CI green`, not `ci / CI green`."""
     shared = "ChiefGyk3D/git-your-ship-together"
