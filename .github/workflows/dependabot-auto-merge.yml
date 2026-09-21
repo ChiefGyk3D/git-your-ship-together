@@ -55,9 +55,11 @@ on:
       allowed-endpoints:
         description: >-
           Hosts this job may reach under `block`, space-separated `host:port`
-          on one line. The default is the API this job talks to.
+          on one line. The default is the GitHub subset of the list measured
+          for the CI workflow: the API this job calls, plus where the runner
+          downloads the two actions from.
         type: string
-        default: api.github.com:443
+        default: api.github.com:443 github.com:443 release-assets.githubusercontent.com:443
       extra-allowed-endpoints:
         description: Appended to `allowed-endpoints`, for hosts only this repository reaches.
         type: string

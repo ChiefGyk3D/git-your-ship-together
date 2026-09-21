@@ -415,7 +415,7 @@ required status check for the merge to wait on. Both are in
 |---|---|---|
 | `max-update-type` | `minor` | The largest semver change that may merge on its own: `patch`, `minor` or `major`. A grouped bump is judged by its largest step |
 | `merge-method` | `squash` | `squash`, `merge` or `rebase`. Squash is the default because a repository that requires linear history refuses a merge commit |
-| `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `audit`, `api.github.com:443`, empty | harden-runner, as in `python-ci.yml` |
+| `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `audit`, three GitHub hosts, empty | harden-runner, as in `python-ci.yml`. The default is the GitHub subset of the CI measurement: `api.github.com`, `github.com` and `release-assets.githubusercontent.com`. It is not measured from a run of this workflow, so it stays in `audit` until a real Dependabot bump confirms it |
 | `timeout-minutes` | `10` | Job timeout |
 
 A major bump, or a pull request whose update type Dependabot did not report,
