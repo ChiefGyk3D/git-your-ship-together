@@ -55,7 +55,7 @@ Five reusable workflows and one composite action:
 | `.github/workflows/python-ci.yml` | Lint, workflow lint, test matrix, coverage upload, optional CLI smoke test, single-arch container build with a check, one `CI green` gate job |
 | `.github/workflows/bash-ci.yml` | shellcheck and shfmt over every tracked script, an optional test command, an optional configuration lint (yamllint, ansible-lint), workflow lint, the same `CI green` gate. Holds no token |
 | `.github/workflows/python-docker-release.yml` | Build, test, Trivy-scan, then publish multi-arch to GHCR (and Docker Hub), sign with cosign, attach a syft SBOM, record SLSA provenance |
-| `.github/workflows/security.yml` | CodeQL, gitleaks, pip-audit, dependency review on pull requests, optional Snyk, optional OpenSSF Scorecard |
+| `.github/workflows/security.yml` | CodeQL (the `actions` language included by default), gitleaks, a dependency audit (pip-audit, and any other tool by command), dependency review on pull requests, optional Snyk, optional OpenSSF Scorecard |
 | `.github/workflows/dependabot-auto-merge.yml` | Queues a Dependabot bump to merge itself once the required checks pass, up to a size you choose |
 | `.github/actions/doppler-secrets` | Fetches a Doppler config as masked environment variables, over OIDC or a Service Token. The workflows inline a copy of it (see the design rules); this is the source |
 
@@ -430,13 +430,16 @@ Inputs of `security.yml`:
 | Input | Default | Meaning |
 |---|---|---|
 | `codeql` | `true` | Run CodeQL |
-| `codeql-languages` | `python` | Comma-separated |
+| `codeql-languages` | `python,actions` | Comma-separated. `actions` scans the workflow files themselves and fits every repository; a repository with no Python passes `actions` alone, since CodeQL fails on a language with no source |
 | `codeql-queries` | `security-extended` | Query suite |
 | `codeql-config` | empty | Inline CodeQL configuration, e.g. `paths-ignore` |
 | `gitleaks` | `true` | Secret scan over the full history. Personal accounts need no licence; an organisation puts `GITLEAKS_LICENSE` in the Doppler config |
-| `pip-audit-requirements` | `requirements.txt` | File audited with `--strict`; empty skips the job |
+| `pip-audit-requirements` | `requirements.txt` | File audited with `--strict`; empty skips that step, and the job when `audit-command` is empty too |
 | `pip-audit-continue-on-error` | `false` | Report advisories without failing. A migration aid |
 | `pip-audit-extra-args` | empty | Extra pip-audit flags, e.g. `--ignore-vuln PYSEC-2026-3740` for an advisory with no fix yet; the ID needs an entry in [`baseline/risk-register.yaml`](baseline/risk-register.yaml) |
+| `audit-install-command` | empty | Run before `audit-command`, e.g. `npm ci --ignore-scripts`; Python is available |
+| `audit-command` | empty (runs nothing) | A dependency audit that is not pip-shaped: `npm audit --audit-level=high`, `govulncheck ./...`, `cargo audit`. Same job as pip-audit, after it; the tool's registry goes in `extra-allowed-endpoints` under `block` |
+| `audit-continue-on-error` | `false` | Report `audit-command` findings without failing. A migration aid |
 | `dependency-review` | `true` | On pull requests only |
 | `dependency-review-severity` | `moderate` | Fail the review at this severity or above |
 | `dependency-review-allow-ghsas` | empty | Comma-separated GHSA IDs the review may not fail on. Each needs an entry in [`baseline/risk-register.yaml`](baseline/risk-register.yaml); the audit checks |
@@ -447,6 +450,14 @@ Inputs of `security.yml`:
 | `doppler-project`, `doppler-config`, `doppler-identity-id` | empty | See [Doppler setup](#doppler-setup) |
 | `doppler-trusted-refs-only` | `true` | Fetch CI secrets only on the default branch, a tag or a schedule; never on a pull request. See [Doppler setup](#doppler-setup) |
 | `timeout-minutes` | `30` | Per-job timeout |
+
+Only one job in `security.yml` is Python-shaped, and only by default: the
+dependency audit runs pip-audit when `pip-audit-requirements` names a file
+and whatever `audit-command` names otherwise, or both. CodeQL, gitleaks,
+dependency review, Snyk and Scorecard read the repository whatever it is
+written in. A shell-only repository therefore calls it with
+`codeql-languages: actions` and `pip-audit-requirements: ""` and changes
+nothing else.
 
 The Snyk job fails only when Snyk did not run: an expired or revoked token
 (exit 2) or a project it could not read. Findings (exit 1) go to the Security
