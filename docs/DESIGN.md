@@ -24,7 +24,7 @@ a pipeline run are deliberately absent.
 ## What a push goes through
 
 A push to a calling repository, or a pull request against it, runs three
-workflows. Each one is a reusable workflow in this repository, pinned by the
+workflows, and a fourth watches for Dependabot's own pull requests. Each one is a reusable workflow in this repository, pinned by the
 caller to a commit SHA with the version in a comment.
 
 **CI** (`python-ci.yml`) runs ruff on the code, the test suite across a
@@ -39,6 +39,12 @@ so a job added later is covered without editing a rule anywhere.
 pip-audit on the requirements, dependency review on pull requests, Snyk on
 pushes to the default branch, and the OpenSSF Scorecard on the default branch
 only. Results land in the repository's Security tab as SARIF.
+
+**Auto-merge** (`dependabot-auto-merge.yml`) is the fourth, and the only one
+that is not part of a push's path. On a Dependabot pull request it reads what
+the bump changes and queues the merge for when the required checks pass,
+refusing anything above the size the caller allows. It checks nothing out, so
+the write permission it holds never runs beside the proposed change.
 
 **Release** (`python-docker-release.yml`) builds the image for the runner's
 architecture, runs it, scans it with Trivy, and only then builds the multi-arch
@@ -164,7 +170,8 @@ token was one more thing to store for no reason, and it is gone.
 | cosign (sigstore) | Image signature, keyless | The signature is bound to the job's OIDC identity and logged in Rekor. No signing key to store, lose or rotate. |
 | syft | SBOM | Generated from the built image and attached as a cosign attestation, so the SBOM is bound to the same identity as the signature. |
 | GitHub attestations | SLSA build provenance | GitHub's own record of which workflow, at which commit, produced the image. |
-| Dependabot | Moves the pins | Bumps action SHAs and their version comments together, and bumps the callers' pin on this repository when a tag is cut. |
+| Dependabot | Moves the pins | Bumps action SHAs and their version comments together, and bumps the callers' pin on this repository when a tag is cut. A seven-day cooldown keeps a release cut this morning from being proposed this afternoon. |
+| dependabot/fetch-metadata | Says what a bump actually changes | Reads the update type and packages out of Dependabot's own commit trailers, and verifies the commits are Dependabot's before answering, which is what makes an automatic merge decision trustworthy. |
 
 ## What the tests enforce
 
@@ -178,7 +185,9 @@ credentials; no `run:` block interpolates an untrusted context; the inlined
 Doppler script matches the composite action byte for byte; every Doppler fetch
 is gated on the decide step and every decide step feeds the trusted-ref gate;
 no job that can run on a pull request holds an OIDC token unless it is listed
-with a reason; the job running the caller's tests holds no OIDC token; every
+with a reason; only the workflows that fetch CI secrets carry the Doppler
+steps, and a workflow that grows a fetch without joining that list fails the
+build; the job running the caller's tests holds no OIDC token; every
 input is declared, defaulted, used and documented in the README; `CI green`
 needs every other job; the release signs and attests only after a push; and a
 publishing build never reads the Actions cache.
@@ -210,7 +219,7 @@ which is roadmap item 6.
 
 ## Using this for your own repositories
 
-Fork it or copy the three workflow files and the tests. The things you will
+Fork it or copy the workflow files and the tests. The things you will
 change: the owner in the OIDC subject and audience, the Doppler project names,
 and the Docker Hub and Snyk inputs if you do not use them. Service Account
 identities need Doppler's Team plan or above; on a Developer plan use the
