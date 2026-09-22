@@ -1,0 +1,268 @@
+# Reusable CI for firmware built with arduino-cli: compile every sketch for
+# a board, keep the binaries as an artifact, run the host-side tests when
+# there are any, lint the caller's workflow files, and end in the same
+# `CI green` gate as the other language workflows. The binaries reach a
+# release through artifact-release.yml, which is where they are signed and
+# attested; this workflow proves they build.
+#
+# Call it from a repository with:
+#
+#   jobs:
+#     firmware:
+#       uses: ChiefGyk3D/git-your-ship-together/.github/workflows/arduino-ci.yml@<sha> # vX.Y.Z
+#       permissions:
+#         contents: read
+#       with:
+#         sketches: nodes/esp32/skidfinder_node
+#         fqbn: esp32:esp32:esp32
+#         cores: esp32:esp32@3.3.12
+#         additional-urls: https://espressif.github.io/arduino-esp32/package_esp32_index.json
+#
+# arduino-cli is downloaded at a pinned version and checked against a pinned
+# SHA-256. Cores and libraries are named with versions by the caller, so a
+# build is the same build next year. Nothing here fetches a secret and no
+# job holds more than contents: read.
+
+name: Arduino CI (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      sketches:
+        description: Space-separated sketch directories, each holding a .ino named after it.
+        type: string
+        default: "."
+      fqbn:
+        description: Fully qualified board name to compile for, e.g. `arduino:avr:uno` or `esp32:esp32:esp32`.
+        type: string
+        default: arduino:avr:uno
+      cores:
+        description: Space-separated cores to install, versioned, e.g. `arduino:avr@1.8.8` or `esp32:esp32@3.3.12`.
+        type: string
+        default: arduino:avr@1.8.8
+      additional-urls:
+        description: Space-separated board manager URLs for cores outside Arduino's index, e.g. Espressif's package_esp32_index.json.
+        type: string
+        default: ""
+      libraries:
+        description: Space-separated libraries to install from the library manager, versioned, e.g. `ArduinoJson@7.4.2`.
+        type: string
+        default: ""
+      warnings:
+        description: arduino-cli compile warning level - `none`, `default`, `more` or `all`.
+        type: string
+        default: all
+      arduino-cli-version:
+        description: arduino-cli release to download (arduino/arduino-cli), without the `v`.
+        type: string
+        default: "1.5.1"
+      arduino-cli-sha256:
+        description: SHA-256 of the arduino-cli Linux_64bit tarball for that version.
+        type: string
+        default: "28a8e119c498a25607821c36cb2dc49e8463941b261a0d99091baa7bc692dd2b"
+      test-install-command:
+        description: Shell run before the host-side tests; empty installs nothing.
+        type: string
+        default: ""
+      test-command:
+        description: The host-side unit tests, e.g. `pytest tests/host`; empty skips the job.
+        type: string
+        default: ""
+      workflow-lint:
+        description: Run actionlint and zizmor over the caller's own workflow files. Turn off on one caller job when another already runs it.
+        type: boolean
+        default: true
+      zizmor-persona:
+        description: zizmor strictness - `regular`, `pedantic` or `auditor`.
+        type: string
+        default: regular
+      egress-policy:
+        description: harden-runner egress policy for every job - `audit` logs outbound connections, `block` allows only `allowed-endpoints`.
+        type: string
+        default: audit
+      allowed-endpoints:
+        description: harden-runner allow-list for `block`, space-separated host:port entries. The default is arduino-cli's download and Arduino's package index and tools; a core from another index (Espressif's) adds its hosts through `extra-allowed-endpoints`. Wildcards are not supported and a newline-separated list matches nothing.
+        type: string
+        default: "api.github.com:443 downloads.arduino.cc:443 github.com:443 objects.githubusercontent.com:443 release-assets.githubusercontent.com:443"
+      extra-allowed-endpoints:
+        description: Appended to `allowed-endpoints`, for the hosts a core or library index reaches. Same format.
+        type: string
+        default: ""
+      timeout-minutes:
+        description: Per-job timeout. A first core install is minutes, not seconds.
+        type: number
+        default: 30
+
+permissions:
+  contents: read
+
+jobs:
+  compile:
+    name: Compile (${{ inputs.fqbn }})
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: ${{ inputs.egress-policy }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          # The agent may only stop reporting to StepSecurity in block mode.
+          disable-telemetry: ${{ inputs.egress-policy == 'block' }}
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install arduino-cli at the pinned version
+        env:
+          VERSION: ${{ inputs.arduino-cli-version }}
+          SHA256: ${{ inputs.arduino-cli-sha256 }}
+        run: |
+          set -euo pipefail
+          curl -sSfL -o /tmp/arduino-cli.tar.gz "https://github.com/arduino/arduino-cli/releases/download/v${VERSION}/arduino-cli_${VERSION}_Linux_64bit.tar.gz"
+          echo "${SHA256}  /tmp/arduino-cli.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/arduino-cli.tar.gz -C /tmp arduino-cli
+          install -m 0755 /tmp/arduino-cli /usr/local/bin/arduino-cli
+          arduino-cli version
+
+      - name: Install the cores and libraries
+        env:
+          CORES: ${{ inputs.cores }}
+          URLS: ${{ inputs.additional-urls }}
+          LIBRARIES: ${{ inputs.libraries }}
+        run: |
+          set -euo pipefail
+          extra=()
+          if [ -n "$URLS" ]; then
+            extra=(--additional-urls "${URLS// /,}")
+          fi
+          arduino-cli core update-index "${extra[@]}"
+          read -r -a cores <<< "$CORES"
+          arduino-cli core install "${extra[@]}" "${cores[@]}"
+          if [ -n "$LIBRARIES" ]; then
+            read -r -a libs <<< "$LIBRARIES"
+            arduino-cli lib install "${libs[@]}"
+          fi
+          arduino-cli core list
+
+      - name: Compile every sketch
+        env:
+          SKETCHES: ${{ inputs.sketches }}
+          FQBN: ${{ inputs.fqbn }}
+          WARNINGS: ${{ inputs.warnings }}
+        run: |
+          set -euo pipefail
+          read -r -a sketches <<< "$SKETCHES"
+          mkdir -p "$RUNNER_TEMP/firmware"
+          for sketch in "${sketches[@]}"; do
+            echo "== $sketch"
+            arduino-cli compile --fqbn "$FQBN" --warnings "$WARNINGS" --export-binaries "$sketch"
+            name=$(basename "$(cd "$sketch" && pwd)")
+            mkdir -p "$RUNNER_TEMP/firmware/$name"
+            cp -v "$sketch"/build/*/* "$RUNNER_TEMP/firmware/$name/"
+          done
+          ls -lR "$RUNNER_TEMP/firmware"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: firmware
+          path: ${{ runner.temp }}/firmware/
+          if-no-files-found: error
+          retention-days: 7
+
+  test:
+    name: Host tests
+    if: inputs.test-command != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read  # this job runs the caller's own code; it holds nothing else
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: ${{ inputs.egress-policy }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          # The agent may only stop reporting to StepSecurity in block mode.
+          disable-telemetry: ${{ inputs.egress-policy == 'block' }}
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install test dependencies
+        if: inputs.test-install-command != ''
+        env:
+          COMMAND: ${{ inputs.test-install-command }}
+        run: bash -eo pipefail -c "$COMMAND"
+
+      - name: Run tests
+        env:
+          COMMAND: ${{ inputs.test-command }}
+        run: bash -eo pipefail -c "$COMMAND"
+
+  workflow-lint:
+    name: Workflow lint (actionlint, zizmor)
+    if: inputs.workflow-lint
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: ${{ inputs.egress-policy }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          # The agent may only stop reporting to StepSecurity in block mode.
+          disable-telemetry: ${{ inputs.egress-policy == 'block' }}
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: raven-actions/actionlint@3d39aea434753780c3b3d4a1a31c854b4dbf49d7 # v2.2.0
+        with:
+          version: 1.7.11
+          fail-on-error: true
+
+      - uses: zizmorcore/zizmor-action@cc914d7f3750a2d13d75c7f184a1060aa0e9d482 # v0.6.4
+        with:
+          version: 1.30.1
+          persona: ${{ inputs.zizmor-persona }}
+          # Findings go to the log and fail the job; the Security tab would
+          # need security-events: write from every caller for a lint.
+          advanced-security: false
+
+  # The one job branch protection should require. `always()` so it runs when
+  # a needed job was skipped; the shell then decides what counts as green.
+  ci-green:
+    name: CI green
+    if: always()
+    needs: [compile, test, workflow-lint]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: ${{ inputs.egress-policy }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          # The agent may only stop reporting to StepSecurity in block mode.
+          disable-telemetry: ${{ inputs.egress-policy == 'block' }}
+
+      - name: Every job passed or was deliberately skipped
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          echo "$RESULTS"
+          bad=$(echo "$RESULTS" | python3 -c '
+          import json, sys
+          needs = json.load(sys.stdin)
+          print(" ".join(k for k, v in needs.items() if v["result"] not in ("success", "skipped")))
+          ')
+          if [ -n "$bad" ]; then
+            echo "::error::failed jobs: $bad"
+            exit 1
+          fi

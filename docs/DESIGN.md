@@ -55,6 +55,12 @@ only, with credentials through the same Doppler gate the other workflows
 use; nothing that applies. OpenTofu and tflint are downloaded at a pinned
 version and hash, like bash-ci's tools.
 
+**Arduino CI** (`arduino-ci.yml`) is the shape for firmware: arduino-cli at
+a pinned version and hash, cores and libraries pinned by the caller, every
+sketch compiled for the board and its binaries kept, host-side tests when
+there are any, no token anywhere. The binaries reach a release through the
+artifact release, which is where they are signed and attested.
+
 **Security** (`security.yml`) runs CodeQL (over the workflow files as well as
 the code, since the `actions` language is in the default), a full-history
 gitleaks scan, a dependency audit (pip-audit on the requirements, and any

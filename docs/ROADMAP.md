@@ -26,6 +26,7 @@ Status as of 2026-09-21.
 | `scripts/new-repo.sh` (item 6): adopts a repository from what it holds, or starts one; `--dry-run` for the tests, which run it over three synthetic trees and a real one was read before writing it | `scripts/new-repo.sh`, `tests/test_new_repo.py` |
 | The composition rule (item 2): one caller job per language, and the audit derives the required `<job> / CI green` set from the caller's workflow files and fails on any gate missing | `scripts/audit_baseline.py`, `BASELINE.md` §2 |
 | `security.yml` with neutral defaults (item 4): the dependency audit takes an `audit-command` for any ecosystem beside its pip-audit default, and CodeQL's default languages include `actions` | `security.yml`, `security-self.yml` runs both audit paths |
+| `arduino-ci.yml` (item 10): arduino-cli pinned by version and hash, cores and libraries pinned by the caller, every sketch compiled and its binaries kept, host tests, the `CI green` gate, no token; the release is `artifact-release.yml` | `.github/workflows/arduino-ci.yml`, `fixture/firmware/` |
 | `tofu-ci.yml` (item 9): fmt, validate without a backend, tflint and a Trivy configuration scan on pull requests; plan on the default branch through the Doppler gate; OpenTofu and tflint pinned by version and hash; nothing applies | `.github/workflows/tofu-ci.yml`, `fixture/tofu/` |
 | `artifact-release.yml` (item 8): a caller's build command, then SHA256SUMS, build provenance, a keyless cosign bundle per file and the GitHub release, from a job that checks nothing out | `.github/workflows/artifact-release.yml`, run on a tarball of the fixture |
 | `container-release.yml` (item 7): the release workflow under its honest name; `python-docker-release.yml` stays as a thin caller forwarding every input through a `./` reference, held identical by a test | `.github/workflows/container-release.yml`, `python-docker-release.yml` |
@@ -169,10 +170,10 @@ each should say how.
 9. **`tofu-ci.yml`.** Done; see the table above. typo-sniper's
    `infra/terraform` is the first consumer, through item 6; its plan needs
    a read-only AWS role in the Doppler config before `plan-command` is set.
-10. **Embedded.** An arduino-cli compile of the sketch, the host-side unit
-    tests, and the binary through `artifact-release.yml`. Skid-Finder's
-    `nodes/esp32` sketch is the first consumer. PlatformIO is an input away
-    when a project uses it.
+10. **Embedded.** Done; see the table above. Skid-Finder's `nodes/esp32`
+    sketch is the first consumer, through item 6, with the ESP32 core's
+    hosts added to the allow-list on its first block-mode run. PlatformIO
+    is a sibling workflow when a project uses it, not before.
 11. **Ansible and YAML.** Done with item 3: `bash-ci.yml`'s `config-lint`
     job runs whatever `config-lint-command` names, yamllint and ansible-lint
     for mother-ticker, behind one input, because a repository with a
