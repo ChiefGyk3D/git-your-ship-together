@@ -1,0 +1,488 @@
+# Reusable CI for OpenTofu (or Terraform) configuration: fmt, validate, tflint
+# and a Trivy configuration scan on every push and pull request, none of
+# which needs a cloud credential; and a plan on pushes to the default
+# branch only, with credentials fetched through the Doppler gate, which
+# refuses a pull request by design. Nothing applies from CI, ever.
+#
+# Call it from a repository with:
+#
+#   jobs:
+#     tofu:
+#       uses: ChiefGyk3D/git-your-ship-together/.github/workflows/tofu-ci.yml@<sha> # vX.Y.Z
+#       permissions:
+#         contents: read
+#         id-token: write        # only the plan job uses it, and only off a pull request
+#       secrets:
+#         DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}   # optional fallback
+#       with:
+#         directories: infra/terraform/examples/ecs-fargate infra/terraform/examples/eks-cronjob
+#
+# The binary is OpenTofu, downloaded at a pinned version and checked against
+# a pinned SHA-256; `binary: terraform` uses the Terraform the runner image
+# ships instead. tflint is downloaded the same way. The `ci-green` job at the
+# end is the one to name in branch protection.
+#
+# Commands a caller supplies reach the shell through an environment
+# variable, never by template expansion into the script. The Doppler steps
+# are the same as .github/actions/doppler-secrets, inlined so that a caller
+# pinned to a commit of this file gets exactly that commit's behaviour.
+
+name: Tofu CI (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      directories:
+        description: Space-separated root modules to validate, lint and scan, relative to the repository root.
+        type: string
+        default: "."
+      binary:
+        description: "`tofu` (downloaded at `tofu-version`) or `terraform` (the runner image's)."
+        type: string
+        default: tofu
+      tofu-version:
+        description: OpenTofu release to download (opentofu/opentofu), without the `v`.
+        type: string
+        default: "1.12.6"
+      tofu-sha256:
+        description: SHA-256 of the OpenTofu linux_amd64 zip for that version.
+        type: string
+        default: "5dc43da4f750f33873dc25e94587128709e819e544b7be9016b255316153c3a8"
+      tflint:
+        description: Run tflint over every directory.
+        type: boolean
+        default: true
+      tflint-version:
+        description: tflint release to download (terraform-linters/tflint), without the `v`.
+        type: string
+        default: "0.64.0"
+      tflint-sha256:
+        description: SHA-256 of the tflint linux_amd64 zip for that version.
+        type: string
+        default: "cca9d13e2e1d7a2c627af60ff899a3c9b74212899416aeb96ec764d2ef954537"
+      trivy:
+        description: Run Trivy's configuration scan over the repository.
+        type: boolean
+        default: true
+      trivy-severity:
+        description: Severities the configuration scan reports.
+        type: string
+        default: CRITICAL,HIGH
+      trivy-exit-code:
+        description: Exit code when the scan finds something; `1` fails the job, `0` reports only. A migration aid, not a resting state.
+        type: string
+        default: "1"
+      plan-command:
+        description: Shell that plans, e.g. `cd infra/live && tofu init -input=false && tofu plan -input=false`, run only on a push to the default branch with the Doppler config's secrets in the environment; empty skips the job.
+        type: string
+        default: ""
+      workflow-lint:
+        description: Run actionlint and zizmor over the caller's own workflow files. Turn off on one caller job when another already runs it.
+        type: boolean
+        default: true
+      zizmor-persona:
+        description: zizmor strictness - `regular`, `pedantic` or `auditor`.
+        type: string
+        default: regular
+      egress-policy:
+        description: harden-runner egress policy for every job - `audit` logs outbound connections, `block` allows only `allowed-endpoints`.
+        type: string
+        default: audit
+      allowed-endpoints:
+        description: harden-runner allow-list for `block`, space-separated host:port entries. The default is the tool downloads and Trivy's checks bundle; provider registries a real module reaches go in `extra-allowed-endpoints`. Wildcards are not supported and a newline-separated list matches nothing.
+        type: string
+        default: "api.doppler.com:443 api.github.com:443 check.trivy.dev:443 get.trivy.dev:443 ghcr.io:443 github.com:443 mirror.gcr.io:443 objects.githubusercontent.com:443 pkg-containers.githubusercontent.com:443 registry.opentofu.org:443 release-assets.githubusercontent.com:443"
+      extra-allowed-endpoints:
+        description: Appended to `allowed-endpoints`, for hosts only this repository reaches, such as a provider registry or a cloud API the plan talks to. Same format.
+        type: string
+        default: ""
+      doppler-project:
+        description: Doppler project slug.
+        type: string
+        default: ""
+      doppler-config:
+        description: Doppler config slug holding the plan's credentials.
+        type: string
+        default: ""
+      doppler-identity-id:
+        description: Doppler Service Account Identity UUID for OIDC.
+        type: string
+        default: ""
+      doppler-trusted-refs-only:
+        description: Fetch secrets only on the default branch, a tag or a schedule; never on a pull request or another branch. `false` restores fetching on every same-repository run.
+        type: boolean
+        default: true
+      timeout-minutes:
+        description: Per-job timeout.
+        type: number
+        default: 20
+    secrets:
+      DOPPLER_TOKEN:
+        description: Doppler Service Token fallback when OIDC is not configured.
+        required: false
+
+permissions:
+  contents: read
+
+# Every job that runs the binary starts the same way; the steps are repeated
+# rather than shared so that each job stands alone in the log.
+jobs:
+  fmt:
+    name: fmt
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: ${{ inputs.egress-policy }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          # The agent may only stop reporting to StepSecurity in block mode.
+          disable-telemetry: ${{ inputs.egress-policy == 'block' }}
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the binary at the pinned version
+        env:
+          BINARY: ${{ inputs.binary }}
+          VERSION: ${{ inputs.tofu-version }}
+          SHA256: ${{ inputs.tofu-sha256 }}
+        run: |
+          set -euo pipefail
+          case "$BINARY" in
+            tofu)
+              curl -sSfL -o /tmp/tofu.zip "https://github.com/opentofu/opentofu/releases/download/v${VERSION}/tofu_${VERSION}_linux_amd64.zip"
+              echo "${SHA256}  /tmp/tofu.zip" | sha256sum -c -
+              unzip -q -o /tmp/tofu.zip tofu -d /tmp
+              install -m 0755 /tmp/tofu /usr/local/bin/tofu
+              ;;
+            terraform) command -v terraform ;;
+            *) echo "::error::binary must be tofu or terraform, not $BINARY"; exit 1 ;;
+          esac
+          "$BINARY" version
+
+      - name: fmt -check
+        env:
+          BINARY: ${{ inputs.binary }}
+          DIRECTORIES: ${{ inputs.directories }}
+        run: |
+          set -euo pipefail
+          read -r -a dirs <<< "$DIRECTORIES"
+          for d in "${dirs[@]}"; do
+            echo "== $d"
+            "$BINARY" fmt -check -diff -recursive "$d"
+          done
+
+  validate:
+    name: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: ${{ inputs.egress-policy }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          # The agent may only stop reporting to StepSecurity in block mode.
+          disable-telemetry: ${{ inputs.egress-policy == 'block' }}
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the binary at the pinned version
+        env:
+          BINARY: ${{ inputs.binary }}
+          VERSION: ${{ inputs.tofu-version }}
+          SHA256: ${{ inputs.tofu-sha256 }}
+        run: |
+          set -euo pipefail
+          case "$BINARY" in
+            tofu)
+              curl -sSfL -o /tmp/tofu.zip "https://github.com/opentofu/opentofu/releases/download/v${VERSION}/tofu_${VERSION}_linux_amd64.zip"
+              echo "${SHA256}  /tmp/tofu.zip" | sha256sum -c -
+              unzip -q -o /tmp/tofu.zip tofu -d /tmp
+              install -m 0755 /tmp/tofu /usr/local/bin/tofu
+              ;;
+            terraform) command -v terraform ;;
+            *) echo "::error::binary must be tofu or terraform, not $BINARY"; exit 1 ;;
+          esac
+          "$BINARY" version
+
+      # No backend and no credentials: validate reads the configuration and
+      # the providers' schemas, which is all a pull request may do.
+      - name: init -backend=false, validate
+        env:
+          BINARY: ${{ inputs.binary }}
+          DIRECTORIES: ${{ inputs.directories }}
+        run: |
+          set -euo pipefail
+          read -r -a dirs <<< "$DIRECTORIES"
+          for d in "${dirs[@]}"; do
+            echo "== $d"
+            (cd "$d" && "$BINARY" init -backend=false -input=false && "$BINARY" validate)
+          done
+
+  tflint:
+    name: tflint
+    if: inputs.tflint
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: ${{ inputs.egress-policy }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          # The agent may only stop reporting to StepSecurity in block mode.
+          disable-telemetry: ${{ inputs.egress-policy == 'block' }}
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install tflint at the pinned version
+        env:
+          VERSION: ${{ inputs.tflint-version }}
+          SHA256: ${{ inputs.tflint-sha256 }}
+        run: |
+          set -euo pipefail
+          curl -sSfL -o /tmp/tflint.zip "https://github.com/terraform-linters/tflint/releases/download/v${VERSION}/tflint_linux_amd64.zip"
+          echo "${SHA256}  /tmp/tflint.zip" | sha256sum -c -
+          unzip -q -o /tmp/tflint.zip tflint -d /tmp
+          install -m 0755 /tmp/tflint /usr/local/bin/tflint
+          tflint --version
+
+      - name: tflint
+        env:
+          DIRECTORIES: ${{ inputs.directories }}
+        run: |
+          set -euo pipefail
+          read -r -a dirs <<< "$DIRECTORIES"
+          for d in "${dirs[@]}"; do
+            echo "== $d"
+            (cd "$d" && tflint --init && tflint --format compact)
+          done
+
+  trivy:
+    name: Configuration scan (Trivy)
+    if: inputs.trivy
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: ${{ inputs.egress-policy }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          # The agent may only stop reporting to StepSecurity in block mode.
+          disable-telemetry: ${{ inputs.egress-policy == 'block' }}
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: config
+          scan-ref: .
+          severity: ${{ inputs.trivy-severity }}
+          exit-code: ${{ inputs.trivy-exit-code }}
+          format: table
+
+  # Only off a pull request, with whatever the Doppler config holds: a plan
+  # against a real cloud needs a credential, and the gate is where one may
+  # exist. Nothing applies.
+  plan:
+    name: plan
+    if: inputs.plan-command != '' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+      id-token: write  # Doppler OIDC
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: ${{ inputs.egress-policy }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          # The agent may only stop reporting to StepSecurity in block mode.
+          disable-telemetry: ${{ inputs.egress-policy == 'block' }}
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the binary at the pinned version
+        env:
+          BINARY: ${{ inputs.binary }}
+          VERSION: ${{ inputs.tofu-version }}
+          SHA256: ${{ inputs.tofu-sha256 }}
+        run: |
+          set -euo pipefail
+          case "$BINARY" in
+            tofu)
+              curl -sSfL -o /tmp/tofu.zip "https://github.com/opentofu/opentofu/releases/download/v${VERSION}/tofu_${VERSION}_linux_amd64.zip"
+              echo "${SHA256}  /tmp/tofu.zip" | sha256sum -c -
+              unzip -q -o /tmp/tofu.zip tofu -d /tmp
+              install -m 0755 /tmp/tofu /usr/local/bin/tofu
+              ;;
+            terraform) command -v terraform ;;
+            *) echo "::error::binary must be tofu or terraform, not $BINARY"; exit 1 ;;
+          esac
+          "$BINARY" version
+
+      - name: Decide how to authenticate to Doppler
+        id: doppler
+        env:
+          IDENTITY_ID: ${{ inputs.doppler-identity-id }}
+          TOKEN: ${{ secrets.DOPPLER_TOKEN }}
+          PROJECT: ${{ inputs.doppler-project }}
+          CONFIG: ${{ inputs.doppler-config }}
+          REQUIRED: "false"
+          TRUSTED_ONLY: ${{ inputs.doppler-trusted-refs-only }}
+          IS_FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          mode=none
+          skip=""
+          # A trusted ref is one only a push by someone with write access, or the
+          # schedule, can produce: the default branch, a tag, or a scheduled run
+          # (which GitHub always starts from the default branch). A pull request
+          # is never trusted, whichever repository its head is in.
+          trusted=false
+          case "$EVENT" in
+            schedule) trusted=true ;;
+            pull_request|pull_request_target) trusted=false ;;
+            *)
+              if [ -n "$DEFAULT_BRANCH" ] && [ "$REF" = "refs/heads/$DEFAULT_BRANCH" ]; then
+                trusted=true
+              elif [ "${REF#refs/tags/}" != "$REF" ]; then
+                trusted=true
+              fi ;;
+          esac
+          if [ "$IS_FORK" = "true" ]; then
+            # A fork's pull request has no id-token and must never receive a
+            # secret. Silent skip is correct here, whatever `required` says.
+            skip="pull request from a fork"
+          elif [ "$TRUSTED_ONLY" = "true" ] && [ "$trusted" != "true" ]; then
+            skip="$EVENT on $REF is not the default branch, a tag or a schedule (trusted-refs-only)"
+          elif [ -n "$IDENTITY_ID" ]; then
+            mode=oidc
+          elif [ -n "$TOKEN" ]; then
+            mode=token
+          fi
+          if [ -n "$skip" ]; then
+            echo "::notice title=Doppler::$skip - no secrets are fetched"
+          fi
+          if [ "$mode" != "none" ] && { [ -z "$PROJECT" ] || [ -z "$CONFIG" ]; }; then
+            echo "::error title=Doppler::project and config are required when authenticating"
+            exit 1
+          fi
+          if [ "$mode" = "none" ] && [ -z "$skip" ]; then
+            if [ "$REQUIRED" = "true" ]; then
+              echo "::error title=Doppler::no identity-id and no DOPPLER_TOKEN; this job needs one (see README, 'Doppler setup')"
+              exit 1
+            fi
+            echo "::notice title=Doppler::not configured (no identity-id, no DOPPLER_TOKEN) - continuing without CI secrets"
+          fi
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo "Doppler auth mode: $mode"
+
+      - name: Fetch CI secrets from Doppler (OIDC)
+        if: steps.doppler.outputs.mode == 'oidc'
+        uses: dopplerhq/secrets-fetch-action@451892f16195f9ac360e1a5bcbf0b5fd0e957534 # v2.0.0
+        with:
+          auth-method: oidc
+          doppler-identity-id: ${{ inputs.doppler-identity-id }}
+          doppler-project: ${{ inputs.doppler-project }}
+          doppler-config: ${{ inputs.doppler-config }}
+          inject-env-vars: true
+
+      - name: Fetch CI secrets from Doppler (Service Token)
+        if: steps.doppler.outputs.mode == 'token'
+        uses: dopplerhq/secrets-fetch-action@451892f16195f9ac360e1a5bcbf0b5fd0e957534 # v2.0.0
+        with:
+          doppler-token: ${{ secrets.DOPPLER_TOKEN }}
+          doppler-project: ${{ inputs.doppler-project }}
+          doppler-config: ${{ inputs.doppler-config }}
+          inject-env-vars: true
+
+      - name: plan
+        env:
+          COMMAND: ${{ inputs.plan-command }}
+        run: bash -eo pipefail -c "$COMMAND"
+
+  workflow-lint:
+    name: Workflow lint (actionlint, zizmor)
+    if: inputs.workflow-lint
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: ${{ inputs.egress-policy }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          # The agent may only stop reporting to StepSecurity in block mode.
+          disable-telemetry: ${{ inputs.egress-policy == 'block' }}
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: raven-actions/actionlint@3d39aea434753780c3b3d4a1a31c854b4dbf49d7 # v2.2.0
+        with:
+          version: 1.7.11
+          fail-on-error: true
+
+      - uses: zizmorcore/zizmor-action@cc914d7f3750a2d13d75c7f184a1060aa0e9d482 # v0.6.4
+        with:
+          version: 1.30.1
+          persona: ${{ inputs.zizmor-persona }}
+          # Findings go to the log and fail the job; the Security tab would
+          # need security-events: write from every caller for a lint.
+          advanced-security: false
+
+  # The one job branch protection should require. `always()` so it runs when
+  # a needed job was skipped; the shell then decides what counts as green.
+  ci-green:
+    name: CI green
+    if: always()
+    needs: [fmt, validate, tflint, trivy, plan, workflow-lint]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: ${{ inputs.egress-policy }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          # The agent may only stop reporting to StepSecurity in block mode.
+          disable-telemetry: ${{ inputs.egress-policy == 'block' }}
+
+      - name: Every job passed or was deliberately skipped
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          echo "$RESULTS"
+          bad=$(echo "$RESULTS" | python3 -c '
+          import json, sys
+          needs = json.load(sys.stdin)
+          print(" ".join(k for k, v in needs.items() if v["result"] not in ("success", "skipped")))
+          ')
+          if [ -n "$bad" ]; then
+            echo "::error::failed jobs: $bad"
+            exit 1
+          fi
