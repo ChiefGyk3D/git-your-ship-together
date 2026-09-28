@@ -1,0 +1,10 @@
+# Direct dev/test dependencies of this repository's own test suite
+# (tests/, run by .github/workflows/ci.yml). Regenerate the lock after
+# editing this file:
+#
+#   pip install pip-tools
+#   pip-compile --generate-hashes --strip-extras --no-header --output-file requirements-dev.txt requirements-dev.in
+#
+pytest==9.1.1
+PyYAML==6.0.3
+ruff==0.16.8

@@ -78,7 +78,7 @@ jobs:
           cache: pip
 
       - name: Install test dependencies
-        run: pip install -r requirements-dev.txt
+        run: pip install --require-hashes -r requirements-dev.txt
 
       - name: Lint the tests
         run: |
