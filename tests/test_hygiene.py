@@ -215,3 +215,12 @@ def test_every_run_block_here_reads_inputs_through_env():
         for job_name, step in all_steps(WORKFLOWS / name):
             if step.get("name") in ("Check the coverage threshold", "Type check"):
                 assert "${{" not in str(step.get("run")), f"{job_name}: {step.get('name')} interpolates into run:"
+
+
+@pytest.mark.parametrize("path", [WORKFLOWS / "python-ci.yml", WORKFLOWS / "bash-ci.yml"], ids=lambda p: p.name)
+def test_the_distro_job_marks_the_mounted_checkout_safe_for_git(path):
+    """The image runs as root over a checkout owned by the runner's user; git refuses that until told."""
+    steps = load(path)["jobs"]["distro"]["steps"]
+    run = next(s["run"] for s in steps if s.get("name") == "Run the tests in the image")
+    assert "git config --global --add safe.directory /src" in run
+    assert run.index('eval "$SETUP"') < run.index("safe.directory") < run.index('eval "$TEST"')
