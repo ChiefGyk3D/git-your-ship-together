@@ -72,6 +72,7 @@ project before any caller pins them:
 | `.github/workflows/ci.yml` | actionlint, zizmor, the pytest contract, then `python-ci.yml`, `bash-ci.yml`, `tofu-ci.yml`, `arduino-ci.yml`, `python-package-release.yml`, `artifact-release.yml` and `python-docker-release.yml` called at the pull request's own ref against `fixture/` (bash-ci over the whole repository; bash-ci and the package build in block mode), and a `CI green` gate that needs all of it |
 | `.github/workflows/security-self.yml` | `security.yml` called the same way, on push, pull request and a Monday schedule |
 | `.github/workflows/dependabot-auto-merge-self.yml` | `dependabot-auto-merge.yml` called the same way, so this repository's own bumps exercise it |
+| `.github/workflows/audit.yml` | The weekly audit: `scripts/audit_baseline.py` over every repository in `baseline/repos.txt` on Monday 07:00 UTC, with its own token from its own Doppler project; and an issue here for each risk-register entry about to expire. Not reusable; see [The weekly audit](#the-weekly-audit) |
 | `.github/dependabot.yml` | Weekly action and pip bumps with a seven-day cooldown, actions grouped into one pull request |
 | `fixture/` | A package with a console script, one test, a non-root Dockerfile, a hash-pinned `requirements.txt`, and one shell script with its own test: one of everything a job needs. `fixture/README.md` says how to regenerate the lock |
 | `tests/` | The contract, as pytest, one file per thing it holds still. See [Developing](#developing) |
@@ -1119,6 +1120,74 @@ identity are made in the dashboard, and it prints those two steps and takes
 the UUID back through `--doppler-identity`. `--dry-run --out DIR` shows the
 files and the settings without touching anything. Then run the audit until
 it is clean. A repository not in the list is not covered.
+
+## The weekly audit
+
+`.github/workflows/audit.yml` runs on Monday at 07:00 UTC and on demand
+(Actions, Audit, Run workflow). It has two jobs.
+
+**`audit`** runs `scripts/audit_baseline.py` over every repository in
+`baseline/repos.txt` and puts the report in the job summary. The job is red on
+any FAIL and on any UNKNOWN: a check the token could not make is not a pass.
+The token is `AUDIT_GITHUB_TOKEN`, fetched from Doppler over the job's OIDC
+identity. It lives in a **separate Doppler project**, `audit`, config `prd`,
+holding that one secret, and not in the shared `ci` project: the token can read
+the settings of every repository, and the `ci` config is read by every
+caller's pipeline. The job runs only from `main` or the schedule, and the
+identity is scoped to that ref alone. harden-runner is in `block` mode with
+five hosts: `api.doppler.com`, `api.github.com`, `files.pythonhosted.org`,
+`github.com` and `pypi.org`.
+
+**`register-issues`** holds no token but the workflow's own `GITHUB_TOKEN`
+(`issues: write`, this repository only). It runs
+`python scripts/audit_baseline.py --expiring 21`, which prints one
+tab-separated line per [risk-register](#risk-register) entry whose `review_by`
+is within 21 days or past, and opens one issue per entry titled
+`Risk register: <id> expires <date>`. An open issue for the same `<id>` is
+reused, and its title is edited when the date has moved, so a renewal never
+opens a second issue. Close the issue when the entry is renewed or removed.
+
+### Setup (the owner's, in the dashboards)
+
+Nothing in the repository can do these; until they are done the `audit` job
+fails at the Doppler step, which is the right answer to "the audit could not
+run".
+
+1. **Doppler:** create the project `audit` with the config `prd` and add the
+   secret `AUDIT_GITHUB_TOKEN`.
+2. **Doppler:** create the service account `gha-audit` with read access to
+   that project only, and an OIDC identity on it whose subject is
+   `repo:ChiefGyk3D/git-your-ship-together:ref:refs/heads/main`.
+3. **GitHub:** set the repository variable `AUDIT_DOPPLER_IDENTITY_ID` on
+   this repository to that identity's UUID.
+4. **GitHub:** create the token as a fine-grained personal access token with
+   resource owner `ChiefGyk3D`, access to the repositories in
+   `baseline/repos.txt`, and these read-only repository permissions, which
+   are exactly what the script's API calls need:
+   - **Administration: read** (branch protection, security features,
+     private vulnerability reporting, the Actions permission endpoints, rulesets)
+   - **Contents: read** (the workflow files, `dependabot.yml` and the lock
+     files it reads)
+   - **Variables: read** (`DOPPLER_IDENTITY_ID` on each repository)
+   - **Metadata: read** (added automatically; the repository and collaborator lists)
+
+   No write permission, and nothing at the account or organization level. Give
+   it the shortest expiry you will keep up with and note the date: an expired
+   token turns the audit red with UNKNOWN, never green.
+
+### Reading a red run
+
+Open the job summary. Each repository lists its checks as `PASS`, `FAIL` or
+`UNKNOWN` with a one-line reason, and the last line counts them. A `FAIL`
+names the setting that drifted; fix it in the repository (see
+[`BASELINE.md`](BASELINE.md) for what each check wants), or, if the baseline
+was wrong, change the baseline in the same pull request that changes the
+check. `UNKNOWN` is a check the token could not make, almost always an
+expired or under-scoped token (a 403 or 404 in the reason): fix the token, not
+the check. A run that fails before the report, at the Doppler step, is a
+setup problem; the notice above it says which input was missing. Run the
+same thing by hand with `python scripts/audit_baseline.py` and your own
+`gh auth login`.
 
 ## Licence
 

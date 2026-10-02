@@ -264,6 +264,16 @@ Checked: `risk-exceptions`.
   sessions and the other machines still commit unsigned, and a rule would
   block them; it goes on when they sign too (roadmap item 14).
 
+## How the audit runs
+
+The checks above are read from the GitHub API by `scripts/audit_baseline.py`,
+which `.github/workflows/audit.yml` runs every Monday at 07:00 UTC over every
+repository in `baseline/repos.txt`, using a read-only fine-grained token held in
+its own Doppler project (`audit`), never in the shared `ci` config. A FAIL or an
+UNKNOWN makes the run red, and the same workflow opens an issue here for any
+risk-register entry within 21 days of its `review_by`. Setup and the token's
+permissions are in the README's "The weekly audit".
+
 ## Adding a repository
 
 `scripts/new-repo.sh OWNER/NAME` does all of it: the caller files with one
