@@ -2,3 +2,4 @@
 # command in fixture/README.md) resolves them into requirements.txt with every
 # hash pinned.
 pytest==9.1.1
+pytest-cov==7.1.0

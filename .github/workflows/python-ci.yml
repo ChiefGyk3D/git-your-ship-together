@@ -56,6 +56,10 @@ on:
         description: Coverage report path uploaded as an artifact when present.
         type: string
         default: coverage.xml
+      coverage-threshold:
+        description: Minimum total line coverage, a percentage such as `85`; the test job fails below it. Read from `coverage-file` (Cobertura XML, which coverage.py and pytest-cov write) on the leg that uploads it, so the test command must produce that file. Empty skips the check.
+        type: string
+        default: ""
       codecov:
         description: Upload the coverage report to Codecov over GitHub OIDC; no Codecov token is stored anywhere. The repository must be enabled in the Codecov GitHub App.
         type: boolean
@@ -76,6 +80,14 @@ on:
         description: Report lint failures without failing CI. A migration aid, not a resting state.
         type: boolean
         default: false
+      typecheck-install-command:
+        description: Shell that installs the type checker and whatever it needs to resolve imports, e.g. `pip install mypy==2.4.0`; empty installs nothing. Runs on `lint-python-version`.
+        type: string
+        default: ""
+      typecheck-command:
+        description: Shell that type-checks, e.g. `mypy src`; empty skips the `Type check` job.
+        type: string
+        default: ""
       smoke-command:
         description: Shell run after `smoke-install-command` on `coverage-python-version`; empty skips the job.
         type: string
@@ -187,6 +199,7 @@ jobs:
         with:
           egress-policy: ${{ inputs.egress-policy }}
           allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          disable-sudo: true
           # The agent may only stop reporting to StepSecurity in block mode.
           disable-telemetry: ${{ inputs.egress-policy == 'block' }}
 
@@ -210,6 +223,42 @@ jobs:
           COMMAND: ${{ inputs.lint-command }}
         run: bash -eo pipefail -c "$COMMAND"
 
+  typecheck:
+    name: Type check
+    if: inputs.typecheck-command != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: ${{ inputs.egress-policy }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          disable-sudo: true
+          # The agent may only stop reporting to StepSecurity in block mode.
+          disable-telemetry: ${{ inputs.egress-policy == 'block' }}
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ inputs.lint-python-version }}
+          cache: pip
+
+      - name: Install the type checker
+        if: inputs.typecheck-install-command != ''
+        env:
+          COMMAND: ${{ inputs.typecheck-install-command }}
+        run: bash -eo pipefail -c "$COMMAND"
+
+      - name: Type check
+        env:
+          COMMAND: ${{ inputs.typecheck-command }}
+        run: bash -eo pipefail -c "$COMMAND"
+
   workflow-lint:
     name: Workflow lint (actionlint, zizmor)
     if: inputs.workflow-lint
@@ -222,6 +271,7 @@ jobs:
         with:
           egress-policy: ${{ inputs.egress-policy }}
           allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          disable-sudo: true
           # The agent may only stop reporting to StepSecurity in block mode.
           disable-telemetry: ${{ inputs.egress-policy == 'block' }}
 
@@ -258,6 +308,7 @@ jobs:
         with:
           egress-policy: ${{ inputs.egress-policy }}
           allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          disable-sudo: true
           # The agent may only stop reporting to StepSecurity in block mode.
           disable-telemetry: ${{ inputs.egress-policy == 'block' }}
 
@@ -281,6 +332,37 @@ jobs:
           COMMAND: ${{ inputs.test-command }}
         shell: bash
         run: bash -eo pipefail -c "$COMMAND"
+
+      # Read from the report the tests just wrote, so the threshold and the
+      # upload judge the same numbers. Only the leg that uploads it checks.
+      - name: Check the coverage threshold
+        if: inputs.coverage-threshold != '' && matrix.python-version == inputs.coverage-python-version && matrix.runner == fromJSON(inputs.runners)[0]
+        env:
+          THRESHOLD: ${{ inputs.coverage-threshold }}
+          COVERAGE_FILE_PATH: ${{ inputs.coverage-file }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+          import sys
+          import xml.etree.ElementTree as ET
+
+          path = os.environ["COVERAGE_FILE_PATH"]
+          threshold = float(os.environ["THRESHOLD"])
+          if not os.path.isfile(path):
+              print(f"::error::coverage-threshold is set but {path} was not written; the test command must produce it")
+              sys.exit(1)
+          rate = ET.parse(path).getroot().get("line-rate")
+          if rate is None:
+              print(f"::error::{path} has no line-rate attribute; it must be Cobertura XML")
+              sys.exit(1)
+          total = float(rate) * 100
+          print(f"total line coverage {total:.2f}% (threshold {threshold:g}%)")
+          if total < threshold:
+              print(f"::error::coverage {total:.2f}% is below the threshold {threshold:g}%")
+              sys.exit(1)
+          PY
 
       - name: Upload coverage report
         if: matrix.python-version == inputs.coverage-python-version && matrix.runner == fromJSON(inputs.runners)[0] && hashFiles(inputs.coverage-file) != ''
@@ -312,6 +394,7 @@ jobs:
         with:
           egress-policy: ${{ inputs.distro-egress-policy }}
           allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          disable-sudo: true
           # The agent may only stop reporting to StepSecurity in block mode.
           disable-telemetry: ${{ inputs.distro-egress-policy == 'block' }}
 
@@ -346,6 +429,7 @@ jobs:
         with:
           egress-policy: ${{ inputs.egress-policy }}
           allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          disable-sudo: true
           # The agent may only stop reporting to StepSecurity in block mode.
           disable-telemetry: ${{ inputs.egress-policy == 'block' }}
 
@@ -462,6 +546,7 @@ jobs:
         with:
           egress-policy: ${{ inputs.egress-policy }}
           allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          disable-sudo: true
           # The agent may only stop reporting to StepSecurity in block mode.
           disable-telemetry: ${{ inputs.egress-policy == 'block' }}
 
@@ -496,6 +581,7 @@ jobs:
         with:
           egress-policy: ${{ inputs.egress-policy }}
           allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          disable-sudo: true
           # The agent may only stop reporting to StepSecurity in block mode.
           disable-telemetry: ${{ inputs.egress-policy == 'block' }}
 
@@ -528,7 +614,7 @@ jobs:
   ci-green:
     name: CI green
     if: always()
-    needs: [lint, workflow-lint, test, distro, coverage, smoke, docker]
+    needs: [lint, typecheck, workflow-lint, test, distro, coverage, smoke, docker]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}
@@ -537,6 +623,7 @@ jobs:
         with:
           egress-policy: ${{ inputs.egress-policy }}
           allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          disable-sudo: true
           # The agent may only stop reporting to StepSecurity in block mode.
           disable-telemetry: ${{ inputs.egress-policy == 'block' }}
 

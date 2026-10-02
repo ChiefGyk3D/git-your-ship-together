@@ -384,7 +384,7 @@ write_ci() {
     echo
     echo "concurrency:"
     echo '  group: ${{ github.workflow }}-${{ github.ref }}'
-    echo "  cancel-in-progress: true"
+    echo '  cancel-in-progress: ${{ github.event_name == '"'pull_request'"' }}'
     echo
     echo "jobs:"
     if $has_python; then

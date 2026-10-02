@@ -138,6 +138,7 @@ jobs:
         with:
           egress-policy: ${{ inputs.egress-policy }}
           allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          disable-sudo: true
           # The agent may only stop reporting to StepSecurity in block mode.
           disable-telemetry: ${{ inputs.egress-policy == 'block' }}
 
@@ -145,18 +146,36 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Restore the cached tofu archive
+        if: inputs.binary == 'tofu'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/tool-cache/tofu
+          key: tool-tofu-${{ inputs.tofu-version }}-${{ runner.os }}-${{ runner.arch }}
+
       - name: Install the binary at the pinned version
         env:
           BINARY: ${{ inputs.binary }}
           VERSION: ${{ inputs.tofu-version }}
           SHA256: ${{ inputs.tofu-sha256 }}
+          CACHE_DIR: ${{ runner.temp }}/tool-cache/tofu
         run: |
           set -euo pipefail
           case "$BINARY" in
             tofu)
-              curl -sSfL -o /tmp/tofu.zip "https://github.com/opentofu/opentofu/releases/download/v${VERSION}/tofu_${VERSION}_linux_amd64.zip"
-              echo "${SHA256}  /tmp/tofu.zip" | sha256sum -c -
-              unzip -q -o /tmp/tofu.zip tofu -d /tmp
+              mkdir -p "$CACHE_DIR"
+              # The cache holds only the downloaded archive, and the archive is
+              # checked against the pinned hash whether it came from the cache or
+              # the network; a cached file that fails is discarded and fetched again.
+              if [ -f "$CACHE_DIR/tofu.zip" ] && ! echo "${SHA256}  $CACHE_DIR/tofu.zip" | sha256sum --status -c -; then
+                echo "cached OpenTofu archive does not match the pinned hash; fetching it again"
+                rm -f "$CACHE_DIR/tofu.zip"
+              fi
+              if [ ! -f "$CACHE_DIR/tofu.zip" ]; then
+                curl -sSfL -o "$CACHE_DIR/tofu.zip" "https://github.com/opentofu/opentofu/releases/download/v${VERSION}/tofu_${VERSION}_linux_amd64.zip"
+              fi
+              echo "${SHA256}  $CACHE_DIR/tofu.zip" | sha256sum -c -
+              unzip -q -o "$CACHE_DIR/tofu.zip" tofu -d /tmp
               install -m 0755 /tmp/tofu /usr/local/bin/tofu
               ;;
             terraform) command -v terraform ;;
@@ -187,6 +206,7 @@ jobs:
         with:
           egress-policy: ${{ inputs.egress-policy }}
           allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          disable-sudo: true
           # The agent may only stop reporting to StepSecurity in block mode.
           disable-telemetry: ${{ inputs.egress-policy == 'block' }}
 
@@ -194,18 +214,36 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Restore the cached tofu archive
+        if: inputs.binary == 'tofu'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/tool-cache/tofu
+          key: tool-tofu-${{ inputs.tofu-version }}-${{ runner.os }}-${{ runner.arch }}
+
       - name: Install the binary at the pinned version
         env:
           BINARY: ${{ inputs.binary }}
           VERSION: ${{ inputs.tofu-version }}
           SHA256: ${{ inputs.tofu-sha256 }}
+          CACHE_DIR: ${{ runner.temp }}/tool-cache/tofu
         run: |
           set -euo pipefail
           case "$BINARY" in
             tofu)
-              curl -sSfL -o /tmp/tofu.zip "https://github.com/opentofu/opentofu/releases/download/v${VERSION}/tofu_${VERSION}_linux_amd64.zip"
-              echo "${SHA256}  /tmp/tofu.zip" | sha256sum -c -
-              unzip -q -o /tmp/tofu.zip tofu -d /tmp
+              mkdir -p "$CACHE_DIR"
+              # The cache holds only the downloaded archive, and the archive is
+              # checked against the pinned hash whether it came from the cache or
+              # the network; a cached file that fails is discarded and fetched again.
+              if [ -f "$CACHE_DIR/tofu.zip" ] && ! echo "${SHA256}  $CACHE_DIR/tofu.zip" | sha256sum --status -c -; then
+                echo "cached OpenTofu archive does not match the pinned hash; fetching it again"
+                rm -f "$CACHE_DIR/tofu.zip"
+              fi
+              if [ ! -f "$CACHE_DIR/tofu.zip" ]; then
+                curl -sSfL -o "$CACHE_DIR/tofu.zip" "https://github.com/opentofu/opentofu/releases/download/v${VERSION}/tofu_${VERSION}_linux_amd64.zip"
+              fi
+              echo "${SHA256}  $CACHE_DIR/tofu.zip" | sha256sum -c -
+              unzip -q -o "$CACHE_DIR/tofu.zip" tofu -d /tmp
               install -m 0755 /tmp/tofu /usr/local/bin/tofu
               ;;
             terraform) command -v terraform ;;
@@ -239,6 +277,7 @@ jobs:
         with:
           egress-policy: ${{ inputs.egress-policy }}
           allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          disable-sudo: true
           # The agent may only stop reporting to StepSecurity in block mode.
           disable-telemetry: ${{ inputs.egress-policy == 'block' }}
 
@@ -246,15 +285,32 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Restore the cached tflint archive
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/tool-cache/tflint
+          key: tool-tflint-${{ inputs.tflint-version }}-${{ runner.os }}-${{ runner.arch }}
+
       - name: Install tflint at the pinned version
         env:
           VERSION: ${{ inputs.tflint-version }}
           SHA256: ${{ inputs.tflint-sha256 }}
+          CACHE_DIR: ${{ runner.temp }}/tool-cache/tflint
         run: |
           set -euo pipefail
-          curl -sSfL -o /tmp/tflint.zip "https://github.com/terraform-linters/tflint/releases/download/v${VERSION}/tflint_linux_amd64.zip"
-          echo "${SHA256}  /tmp/tflint.zip" | sha256sum -c -
-          unzip -q -o /tmp/tflint.zip tflint -d /tmp
+          mkdir -p "$CACHE_DIR"
+          # The cache holds only the downloaded archive, and the archive is
+          # checked against the pinned hash whether it came from the cache or
+          # the network; a cached file that fails is discarded and fetched again.
+          if [ -f "$CACHE_DIR/tflint.zip" ] && ! echo "${SHA256}  $CACHE_DIR/tflint.zip" | sha256sum --status -c -; then
+            echo "cached tflint archive does not match the pinned hash; fetching it again"
+            rm -f "$CACHE_DIR/tflint.zip"
+          fi
+          if [ ! -f "$CACHE_DIR/tflint.zip" ]; then
+            curl -sSfL -o "$CACHE_DIR/tflint.zip" "https://github.com/terraform-linters/tflint/releases/download/v${VERSION}/tflint_linux_amd64.zip"
+          fi
+          echo "${SHA256}  $CACHE_DIR/tflint.zip" | sha256sum -c -
+          unzip -q -o "$CACHE_DIR/tflint.zip" tflint -d /tmp
           install -m 0755 /tmp/tflint /usr/local/bin/tflint
           tflint --version
 
@@ -281,6 +337,7 @@ jobs:
         with:
           egress-policy: ${{ inputs.egress-policy }}
           allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          disable-sudo: true
           # The agent may only stop reporting to StepSecurity in block mode.
           disable-telemetry: ${{ inputs.egress-policy == 'block' }}
 
@@ -312,6 +369,7 @@ jobs:
         with:
           egress-policy: ${{ inputs.egress-policy }}
           allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          disable-sudo: true
           # The agent may only stop reporting to StepSecurity in block mode.
           disable-telemetry: ${{ inputs.egress-policy == 'block' }}
 
@@ -319,18 +377,36 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Restore the cached tofu archive
+        if: inputs.binary == 'tofu'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/tool-cache/tofu
+          key: tool-tofu-${{ inputs.tofu-version }}-${{ runner.os }}-${{ runner.arch }}
+
       - name: Install the binary at the pinned version
         env:
           BINARY: ${{ inputs.binary }}
           VERSION: ${{ inputs.tofu-version }}
           SHA256: ${{ inputs.tofu-sha256 }}
+          CACHE_DIR: ${{ runner.temp }}/tool-cache/tofu
         run: |
           set -euo pipefail
           case "$BINARY" in
             tofu)
-              curl -sSfL -o /tmp/tofu.zip "https://github.com/opentofu/opentofu/releases/download/v${VERSION}/tofu_${VERSION}_linux_amd64.zip"
-              echo "${SHA256}  /tmp/tofu.zip" | sha256sum -c -
-              unzip -q -o /tmp/tofu.zip tofu -d /tmp
+              mkdir -p "$CACHE_DIR"
+              # The cache holds only the downloaded archive, and the archive is
+              # checked against the pinned hash whether it came from the cache or
+              # the network; a cached file that fails is discarded and fetched again.
+              if [ -f "$CACHE_DIR/tofu.zip" ] && ! echo "${SHA256}  $CACHE_DIR/tofu.zip" | sha256sum --status -c -; then
+                echo "cached OpenTofu archive does not match the pinned hash; fetching it again"
+                rm -f "$CACHE_DIR/tofu.zip"
+              fi
+              if [ ! -f "$CACHE_DIR/tofu.zip" ]; then
+                curl -sSfL -o "$CACHE_DIR/tofu.zip" "https://github.com/opentofu/opentofu/releases/download/v${VERSION}/tofu_${VERSION}_linux_amd64.zip"
+              fi
+              echo "${SHA256}  $CACHE_DIR/tofu.zip" | sha256sum -c -
+              unzip -q -o "$CACHE_DIR/tofu.zip" tofu -d /tmp
               install -m 0755 /tmp/tofu /usr/local/bin/tofu
               ;;
             terraform) command -v terraform ;;
@@ -434,6 +510,7 @@ jobs:
         with:
           egress-policy: ${{ inputs.egress-policy }}
           allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          disable-sudo: true
           # The agent may only stop reporting to StepSecurity in block mode.
           disable-telemetry: ${{ inputs.egress-policy == 'block' }}
 
@@ -468,6 +545,7 @@ jobs:
         with:
           egress-policy: ${{ inputs.egress-policy }}
           allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          disable-sudo: true
           # The agent may only stop reporting to StepSecurity in block mode.
           disable-telemetry: ${{ inputs.egress-policy == 'block' }}
 
