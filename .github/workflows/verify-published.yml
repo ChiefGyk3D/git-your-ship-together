@@ -40,7 +40,6 @@ on:
         description: Image reference to verify, for example `ghcr.io/chiefgyk3d/star-daemon:latest`. A digest reference is stronger than a tag.
         type: string
         required: true
-        default: ""  # required wins; the default only satisfies the repository's every-input-has-a-default test
       identity-regexp:
         description: Regular expression the cosign certificate identity must match. Both cosign commands use it.
         type: string

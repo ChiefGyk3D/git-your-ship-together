@@ -443,11 +443,18 @@ def test_reusable_workflows_are_only_callable(path):
 
 @pytest.mark.parametrize("path", REUSABLE, ids=lambda p: p.name)
 def test_every_input_has_a_description_and_a_default(path):
-    """Callers read the description; the default is what makes `with:` optional."""
+    """Callers read the description; the default is what makes `with:` optional.
+
+    A required input has no default by design: actionlint rejects a default
+    that can never be used.
+    """
     inputs = triggers(load(path))["workflow_call"].get("inputs") or {}
     for name, spec in inputs.items():
         assert spec.get("description"), f"{path.name}: input {name!r} has no description"
-        assert "default" in spec, f"{path.name}: input {name!r} has no default"
+        if spec.get("required") is True:
+            assert "default" not in spec, f"{path.name}: input {name!r} is required, so a default is never used"
+        else:
+            assert "default" in spec, f"{path.name}: input {name!r} has no default"
 
 
 @pytest.mark.parametrize("path", REUSABLE, ids=lambda p: p.name)
