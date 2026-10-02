@@ -634,7 +634,9 @@ def test_the_release_builds_each_platform_natively_and_merges_only_when_publishi
     assert "linux/arm64) runner=ubuntu-24.04-arm" in plan
     needs = merge["needs"] if isinstance(merge["needs"], list) else [merge["needs"]]
     assert "build" in needs
-    assert merge["if"] == "inputs.push && github.event_name != 'pull_request'", "merge publishes only when told and never on a pull request"
+    assert merge["if"] == "inputs.push && github.event_name != 'pull_request'", (
+        "merge publishes only when told and never on a pull request"
+    )
     load_step = release_steps("build")["Build for this platform and load it"]["with"]
     assert load_step["platforms"] == "${{ matrix.platform }}" and load_step["load"] is True
     assert triggers(doc)["workflow_call"]["outputs"]["digest"]["value"] == "${{ jobs.merge.outputs.digest }}"
