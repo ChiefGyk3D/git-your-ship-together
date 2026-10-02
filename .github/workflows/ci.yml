@@ -105,7 +105,7 @@ jobs:
         pip install --require-hashes -r fixture/requirements.txt
         pip install --no-deps ./fixture
       test-command: pytest fixture/tests
-      lint-install-command: pip install "$(grep -E '^ruff==' requirements-dev.txt)"
+      lint-install-command: pip install "$(grep -oE '^ruff==[0-9.]+' requirements-dev.txt)"
       lint-command: ruff check fixture
       smoke-install-command: pip install --no-deps ./fixture
       smoke-command: |
