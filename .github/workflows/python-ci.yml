@@ -402,6 +402,9 @@ jobs:
         with:
           persist-credentials: false
 
+      # The checkout belongs to the runner's user and the image runs as root,
+      # so git inside it refuses the directory until it is marked safe; a
+      # test that shells out to git (ls-files, describe) would fail with 128.
       - name: Run the tests in the image
         env:
           IMAGE: ${{ matrix.image }}
@@ -410,7 +413,7 @@ jobs:
           TEST: ${{ inputs.test-command }}
         run: |
           docker run --rm -v "$GITHUB_WORKSPACE:/src" -w /src -e CI=true -e SETUP -e INSTALL -e TEST "$IMAGE" \
-            bash -eo pipefail -c 'eval "$SETUP"; python3 -m venv /tmp/venv; . /tmp/venv/bin/activate; eval "$INSTALL"; eval "$TEST"'
+            bash -eo pipefail -c 'eval "$SETUP"; git config --global --add safe.directory /src; python3 -m venv /tmp/venv; . /tmp/venv/bin/activate; eval "$INSTALL"; eval "$TEST"'
 
   coverage:
     name: Coverage upload
