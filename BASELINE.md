@@ -161,7 +161,18 @@ expansion into `run:`.
 update type Dependabot did not report, open for a person. The job checks
 nothing out, so the write it holds never runs beside proposed code.
 
-Checked: `workflows-pinned`, `uses-shared-workflows`, `dependabot-config`. The
+**A universal uv lock is updated by the `uv` ecosystem.** A lock compiled by
+`uv pip compile --universal` is updated by Dependabot's `uv` ecosystem, never
+`pip`, because pip re-resolves it for one interpreter and drops the
+marker-gated lines. The bump then fails `pip install --require-hashes` on part
+of the Python matrix. The `uv` ecosystem runs `uv pip compile` again and keeps
+`--universal`, `--python-version` and `--generate-hashes` from the lock's
+header. A repository whose root `requirements.txt` or `requirements-dev.txt`
+carries that header, with a `pip` entry for `/` in `dependabot.yml` or no
+`dependabot.yml` at all, fails.
+
+Checked: `workflows-pinned`, `uses-shared-workflows`, `dependabot-config`,
+`dependabot-ecosystem`. The
 harden-runner, permissions and injection rules are properties of the shared
 workflows themselves and are tested here on every commit.
 
