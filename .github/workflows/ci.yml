@@ -16,7 +16,7 @@ permissions:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   actionlint:
@@ -107,7 +107,12 @@ jobs:
         python -m pip install --upgrade pip
         pip install --require-hashes -r fixture/requirements.txt
         pip install --no-deps ./fixture
-      test-command: pytest fixture/tests
+      # pytest-cov is in the hash-locked fixture requirements; the XML it
+      # writes feeds the threshold, measured at 76% and set a few points below.
+      test-command: pytest fixture/tests --cov=fixture_app --cov-report=xml
+      coverage-threshold: "70"
+      typecheck-install-command: pip install mypy==2.4.0
+      typecheck-command: mypy fixture/src
       lint-install-command: pip install "$(grep -oE '^ruff==[0-9.]+' requirements-dev.txt)"
       lint-command: ruff check fixture
       smoke-install-command: pip install --no-deps ./fixture

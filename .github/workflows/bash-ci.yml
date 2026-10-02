@@ -166,6 +166,7 @@ jobs:
         with:
           egress-policy: ${{ inputs.egress-policy }}
           allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          disable-sudo: true
           # The agent may only stop reporting to StepSecurity in block mode.
           disable-telemetry: ${{ inputs.egress-policy == 'block' }}
 
@@ -173,16 +174,33 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Restore the cached shellcheck archive
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/tool-cache/shellcheck
+          key: tool-shellcheck-${{ inputs.shellcheck-version }}-${{ runner.os }}-${{ runner.arch }}
+
       - name: Install shellcheck at the pinned version
         env:
           VERSION: ${{ inputs.shellcheck-version }}
           SHA256: ${{ inputs.shellcheck-sha256 }}
+          CACHE_DIR: ${{ runner.temp }}/tool-cache/shellcheck
         run: |
           set -euo pipefail
           url="https://github.com/koalaman/shellcheck/releases/download/v${VERSION}/shellcheck-v${VERSION}.linux.x86_64.tar.xz"
-          curl -sSfL -o /tmp/shellcheck.tar.xz "$url"
-          echo "${SHA256}  /tmp/shellcheck.tar.xz" | sha256sum -c -
-          tar -xJf /tmp/shellcheck.tar.xz -C /tmp "shellcheck-v${VERSION}/shellcheck"
+          mkdir -p "$CACHE_DIR"
+          # The cache holds only the downloaded archive, and the archive is
+          # checked against the pinned hash whether it came from the cache or
+          # the network; a cached file that fails is discarded and fetched again.
+          if [ -f "$CACHE_DIR/shellcheck.tar.xz" ] && ! echo "${SHA256}  $CACHE_DIR/shellcheck.tar.xz" | sha256sum --status -c -; then
+            echo "cached shellcheck archive does not match the pinned hash; fetching it again"
+            rm -f "$CACHE_DIR/shellcheck.tar.xz"
+          fi
+          if [ ! -f "$CACHE_DIR/shellcheck.tar.xz" ]; then
+            curl -sSfL -o "$CACHE_DIR/shellcheck.tar.xz" "$url"
+          fi
+          echo "${SHA256}  $CACHE_DIR/shellcheck.tar.xz" | sha256sum -c -
+          tar -xJf "$CACHE_DIR/shellcheck.tar.xz" -C /tmp "shellcheck-v${VERSION}/shellcheck"
           install -m 0755 "/tmp/shellcheck-v${VERSION}/shellcheck" /usr/local/bin/shellcheck
           shellcheck --version
 
@@ -226,6 +244,7 @@ jobs:
         with:
           egress-policy: ${{ inputs.egress-policy }}
           allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          disable-sudo: true
           # The agent may only stop reporting to StepSecurity in block mode.
           disable-telemetry: ${{ inputs.egress-policy == 'block' }}
 
@@ -233,15 +252,32 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Restore the cached shfmt archive
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/tool-cache/shfmt
+          key: tool-shfmt-${{ inputs.shfmt-version }}-${{ runner.os }}-${{ runner.arch }}
+
       - name: Install shfmt at the pinned version
         env:
           VERSION: ${{ inputs.shfmt-version }}
           SHA256: ${{ inputs.shfmt-sha256 }}
+          CACHE_DIR: ${{ runner.temp }}/tool-cache/shfmt
         run: |
           set -euo pipefail
-          curl -sSfL -o /tmp/shfmt "https://github.com/mvdan/sh/releases/download/v${VERSION}/shfmt_v${VERSION}_linux_amd64"
-          echo "${SHA256}  /tmp/shfmt" | sha256sum -c -
-          install -m 0755 /tmp/shfmt /usr/local/bin/shfmt
+          mkdir -p "$CACHE_DIR"
+          # The cache holds only the downloaded archive, and the archive is
+          # checked against the pinned hash whether it came from the cache or
+          # the network; a cached file that fails is discarded and fetched again.
+          if [ -f "$CACHE_DIR/shfmt" ] && ! echo "${SHA256}  $CACHE_DIR/shfmt" | sha256sum --status -c -; then
+            echo "cached shfmt archive does not match the pinned hash; fetching it again"
+            rm -f "$CACHE_DIR/shfmt"
+          fi
+          if [ ! -f "$CACHE_DIR/shfmt" ]; then
+            curl -sSfL -o "$CACHE_DIR/shfmt" "https://github.com/mvdan/sh/releases/download/v${VERSION}/shfmt_v${VERSION}_linux_amd64"
+          fi
+          echo "${SHA256}  $CACHE_DIR/shfmt" | sha256sum -c -
+          install -m 0755 "$CACHE_DIR/shfmt" /usr/local/bin/shfmt
           shfmt --version
 
       - name: Find the scripts
@@ -287,6 +323,7 @@ jobs:
         with:
           egress-policy: ${{ inputs.egress-policy }}
           allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          # No disable-sudo: this job runs a caller install command that may need it.
           # The agent may only stop reporting to StepSecurity in block mode.
           disable-telemetry: ${{ inputs.egress-policy == 'block' }}
 
@@ -326,6 +363,7 @@ jobs:
         with:
           egress-policy: ${{ inputs.distro-egress-policy }}
           allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          disable-sudo: true
           # The agent may only stop reporting to StepSecurity in block mode.
           disable-telemetry: ${{ inputs.distro-egress-policy == 'block' }}
 
@@ -355,6 +393,7 @@ jobs:
         with:
           egress-policy: ${{ inputs.egress-policy }}
           allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          disable-sudo: true
           # The agent may only stop reporting to StepSecurity in block mode.
           disable-telemetry: ${{ inputs.egress-policy == 'block' }}
 
@@ -388,6 +427,7 @@ jobs:
         with:
           egress-policy: ${{ inputs.egress-policy }}
           allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          disable-sudo: true
           # The agent may only stop reporting to StepSecurity in block mode.
           disable-telemetry: ${{ inputs.egress-policy == 'block' }}
 
@@ -422,6 +462,7 @@ jobs:
         with:
           egress-policy: ${{ inputs.egress-policy }}
           allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          disable-sudo: true
           # The agent may only stop reporting to StepSecurity in block mode.
           disable-telemetry: ${{ inputs.egress-policy == 'block' }}
 

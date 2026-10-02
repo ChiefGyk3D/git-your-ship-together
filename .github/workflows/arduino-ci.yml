@@ -108,6 +108,7 @@ jobs:
         with:
           egress-policy: ${{ inputs.egress-policy }}
           allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          disable-sudo: true
           # The agent may only stop reporting to StepSecurity in block mode.
           disable-telemetry: ${{ inputs.egress-policy == 'block' }}
 
@@ -115,17 +116,56 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Restore the cached arduino-cli archive
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/tool-cache/arduino-cli
+          key: tool-arduino-cli-${{ inputs.arduino-cli-version }}-${{ runner.os }}-${{ runner.arch }}
+
       - name: Install arduino-cli at the pinned version
         env:
           VERSION: ${{ inputs.arduino-cli-version }}
           SHA256: ${{ inputs.arduino-cli-sha256 }}
+          CACHE_DIR: ${{ runner.temp }}/tool-cache/arduino-cli
         run: |
           set -euo pipefail
-          curl -sSfL -o /tmp/arduino-cli.tar.gz "https://github.com/arduino/arduino-cli/releases/download/v${VERSION}/arduino-cli_${VERSION}_Linux_64bit.tar.gz"
-          echo "${SHA256}  /tmp/arduino-cli.tar.gz" | sha256sum -c -
-          tar -xzf /tmp/arduino-cli.tar.gz -C /tmp arduino-cli
+          mkdir -p "$CACHE_DIR"
+          # The cache holds only the downloaded archive, and the archive is
+          # checked against the pinned hash whether it came from the cache or
+          # the network; a cached file that fails is discarded and fetched again.
+          if [ -f "$CACHE_DIR/arduino-cli.tar.gz" ] && ! echo "${SHA256}  $CACHE_DIR/arduino-cli.tar.gz" | sha256sum --status -c -; then
+            echo "cached arduino-cli archive does not match the pinned hash; fetching it again"
+            rm -f "$CACHE_DIR/arduino-cli.tar.gz"
+          fi
+          if [ ! -f "$CACHE_DIR/arduino-cli.tar.gz" ]; then
+            curl -sSfL -o "$CACHE_DIR/arduino-cli.tar.gz" "https://github.com/arduino/arduino-cli/releases/download/v${VERSION}/arduino-cli_${VERSION}_Linux_64bit.tar.gz"
+          fi
+          echo "${SHA256}  $CACHE_DIR/arduino-cli.tar.gz" | sha256sum -c -
+          tar -xzf "$CACHE_DIR/arduino-cli.tar.gz" -C /tmp arduino-cli
           install -m 0755 /tmp/arduino-cli /usr/local/bin/arduino-cli
           arduino-cli version
+
+      # The slow part is the package index: cores and libraries are hundreds
+      # of megabytes. The cache holds arduino-cli's download staging directory
+      # only, and arduino-cli checks every archive in it against the checksum
+      # in the package index before it installs it, re-fetching on a mismatch.
+      # The key is the arduino-cli version plus a hash of what is installed.
+      - name: Key the package downloads
+        id: pkgkey
+        env:
+          CORES: ${{ inputs.cores }}
+          URLS: ${{ inputs.additional-urls }}
+          LIBRARIES: ${{ inputs.libraries }}
+        run: |
+          set -euo pipefail
+          hash=$(printf '%s\n%s\n%s\n' "$CORES" "$URLS" "$LIBRARIES" | sha256sum | cut -c1-16)
+          echo "hash=$hash" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the cached package downloads
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.arduino15/staging
+          key: arduino-packages-${{ inputs.arduino-cli-version }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.pkgkey.outputs.hash }}
 
       - name: Install the cores and libraries
         env:
@@ -184,6 +224,7 @@ jobs:
         with:
           egress-policy: ${{ inputs.egress-policy }}
           allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          # No disable-sudo: this job runs a caller install command that may need it.
           # The agent may only stop reporting to StepSecurity in block mode.
           disable-telemetry: ${{ inputs.egress-policy == 'block' }}
 
@@ -214,6 +255,7 @@ jobs:
         with:
           egress-policy: ${{ inputs.egress-policy }}
           allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          disable-sudo: true
           # The agent may only stop reporting to StepSecurity in block mode.
           disable-telemetry: ${{ inputs.egress-policy == 'block' }}
 
@@ -248,6 +290,7 @@ jobs:
         with:
           egress-policy: ${{ inputs.egress-policy }}
           allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          disable-sudo: true
           # The agent may only stop reporting to StepSecurity in block mode.
           disable-telemetry: ${{ inputs.egress-policy == 'block' }}
 

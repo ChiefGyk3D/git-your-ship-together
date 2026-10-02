@@ -147,6 +147,41 @@ workflow can only ever see the one secret it declares. `DOPPLER_TOKEN` is
 the Service Token fallback and may be unset; every caller here leaves it
 unset and uses OIDC.
 
+### Hygiene
+
+Three habits apply to every shared workflow, and tests hold them.
+
+- **`disable-sudo: true`** on every harden-runner step, so a compromised step
+  cannot become root on the runner. The two exceptions are the jobs that run a
+  caller's own install command, which a caller may legitimately write as
+  `sudo apt-get install ...`: the `test` job of `bash-ci.yml` and `arduino-ci.yml`
+  (`test-install-command`) and the `build` job of `artifact-release.yml`
+  (`build-install-command`). Nothing in a shared workflow's own steps uses sudo.
+- **Downloaded tools are cached, and still hash-checked.** `bash-ci.yml`
+  (shellcheck, shfmt), `tofu-ci.yml` (OpenTofu, tflint) and `arduino-ci.yml`
+  (arduino-cli) cache the downloaded archive with `actions/cache` under the key
+  `tool-<name>-<pinned version>-<runner os>-<runner arch>`. The job then checks
+  the archive on disk against the pinned SHA-256 whether it came from the cache
+  or the network; a cached file that fails is thrown away and fetched again, so
+  the cache can save a download but never lower the bar. `arduino-ci.yml` also
+  caches arduino-cli's download staging directory, keyed on the arduino-cli
+  version and a hash of `cores`, `additional-urls` and `libraries`;
+  arduino-cli verifies each package against its index checksum before installing
+  it. `python-ci.yml` keeps setup-python's pip cache. The publishing workflows
+  cache nothing.
+- **Concurrency belongs to the caller.** A reusable workflow cannot carry it:
+  a called workflow's `github.workflow` is the caller's name, so the same group
+  would cancel the caller itself. Put this in the caller's `ci.yml`, as the
+  sample below and `scripts/new-repo.sh` do: a newer push cancels an older
+  *pull request* run, but a run on the default branch or a tag is never
+  cancelled half way through.
+
+  ```yaml
+  concurrency:
+    group: ${{ github.workflow }}-${{ github.ref }}
+    cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  ```
+
 ### CI
 
 A real caller, trimmed. The comment at the top of each caller says what is
@@ -164,7 +199,7 @@ permissions:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   ci:
@@ -220,11 +255,14 @@ Inputs of `python-ci.yml`:
 | `install-command` | upgrade pip, `pip install -r requirements.txt` | Run before tests on every leg |
 | `test-command` | `pytest` | The test suite |
 | `coverage-file` | `coverage.xml` | Uploaded as an artifact when present |
+| `coverage-threshold` | empty (no check) | Minimum total line coverage as a percentage, e.g. `85`. The `test` job fails below it, judged from the `line-rate` of `coverage-file` (Cobertura XML, as coverage.py and pytest-cov write it) on the leg that uploads it; the test command must write that file |
 | `codecov` | `false` | Also upload to Codecov over GitHub OIDC; no token, the repository just has to be enabled in the Codecov GitHub App |
 | `lint-python-version` | `3.13` | Python for the lint job |
 | `lint-install-command` | `pip install ruff` | Installs the linters |
 | `lint-command` | `ruff check .` | The lint step |
 | `lint-continue-on-error` | `false` | Report lint failures without failing CI. A migration aid; no caller sets it any more |
+| `typecheck-install-command` | empty | Installs the type checker, e.g. `pip install mypy==2.4.0`; empty installs nothing |
+| `typecheck-command` | empty (skips the job) | Type-checks, e.g. `mypy src`; runs as the `Type check` job on `lint-python-version` and is part of the gate |
 | `smoke-command` | empty (skips the job) | Run after installing the project, e.g. `my-cli --version` |
 | `smoke-install-command` | `pip install .` | Installs the project for the smoke test |
 | `docker-build` | `true` | Build the image, single platform, never pushed |
