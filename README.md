@@ -58,6 +58,7 @@ Ten reusable workflows and one composite action:
 | `.github/workflows/arduino-ci.yml` | For firmware built with arduino-cli: compile every sketch for a board with pinned cores and libraries, keep the binaries as an artifact, host-side tests, workflow lint, the same `CI green` gate. Holds no token; the binaries reach a release through `artifact-release.yml` |
 | `.github/workflows/container-release.yml` | Build, test, Trivy-scan, then publish multi-arch to GHCR (and Docker Hub), sign with cosign, attach a syft SBOM, record SLSA provenance. Builds whatever the Dockerfile builds |
 | `.github/workflows/python-docker-release.yml` | The old name of the above: a thin caller that forwards every input, the secret and the outputs through a `./` reference at its own commit, so an existing pin keeps working. New callers use `container-release.yml` |
+| `.github/workflows/verify-published.yml` | Consumer-side verification of a published image: cosign signature, SPDX SBOM attestation and build provenance verified from outside, then each platform pulled and checked. Read-only, no secret, no token beyond the default one |
 | `.github/workflows/python-package-release.yml` | Build the sdist and wheel, `twine check`, refuse a tag that disagrees with the packaged version, smoke-test from the wheel, then publish to PyPI (Trusted Publishing, PEP 740 attestations) and to the GitHub release with SHA256SUMS and build provenance. No secret anywhere |
 | `.github/workflows/artifact-release.yml` | For a file rather than an image (a `.deb`, a firmware binary, a bundle): build it with a command, then publish it to the GitHub release with SHA256SUMS, a keyless cosign signature bundle per file and build provenance. No secret anywhere |
 | `.github/workflows/security.yml` | CodeQL (the `actions` language included by default), gitleaks, a dependency audit (pip-audit, and any other tool by command), dependency review on pull requests, optional Snyk, optional OpenSSF Scorecard |
@@ -544,6 +545,69 @@ Inputs of `container-release.yml`:
 
 Outputs: `digest` and `image` (`ghcr.io/...@sha256:...`) of the published
 index, empty when not pushed.
+
+### Verify published
+
+`verify-published.yml` is consumer-side verification (roadmap item 23). The
+producer, `container-release.yml`, signs the image, attaches an SBOM and records
+provenance; this proves those verify from outside, the way an operator would
+run them. It has no secret, no Doppler and no `id-token`: it reads only.
+
+It runs, in order, and stops at the first failure:
+
+```
+cosign verify <image> \
+  --certificate-identity-regexp '<identity-regexp>' \
+  --certificate-oidc-issuer <oidc-issuer>
+cosign verify-attestation --type spdxjson <image> \
+  --certificate-identity-regexp '<identity-regexp>' \
+  --certificate-oidc-issuer <oidc-issuer>
+gh attestation verify oci://<image> --owner <owner of the image>
+```
+
+then, per platform, `docker pull --platform <platform> <image>` and the
+`test-command`, with `$IMAGE` set. A platform that differs from the runner's
+(arm64 on the x86 runner) runs under QEMU, which is set up only then. A final
+`Verified` job is the gate: it fails unless the verification succeeded.
+
+```yaml
+on:
+  schedule:
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/verify-published.yml@<sha> # vX.Y.Z
+    permissions:
+      contents: read
+      packages: read
+    with:
+      image: ghcr.io/chiefgyk3d/star-daemon:latest
+      test-command: docker run --rm "$IMAGE" --version
+```
+
+The certificate identity of an image published through `container-release.yml`
+is the reusable workflow's ref, so the default `identity-regexp` (any workflow
+in the owner's repositories) matches it. Narrow it to pin one workflow, for
+example `^https://github.com/ChiefGyk3D/git-your-ship-together/\.github/workflows/container-release\.yml@refs/tags/v`.
+
+Inputs of `verify-published.yml`:
+
+| Input | Default | Meaning |
+|---|---|---|
+| `image` | required | Image reference, for example `ghcr.io/chiefgyk3d/star-daemon:latest`; a digest is stronger than a tag |
+| `identity-regexp` | `^https://github.com/ChiefGyk3D/` | Regular expression the certificate identity must match |
+| `oidc-issuer` | `https://token.actions.githubusercontent.com` | OIDC issuer the certificate must name |
+| `verify-sbom` | `true` | `cosign verify-attestation --type spdxjson` |
+| `verify-provenance` | `true` | `gh attestation verify oci://<image> --owner <owner>` |
+| `test-command` | empty | Run once per platform with `$IMAGE` set; empty skips |
+| `platforms` | `linux/amd64,linux/arm64` | Platforms to pull and test |
+| `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `audit`, the list, empty | harden-runner; ships in audit until the list is measured |
+| `timeout-minutes` | `20` | Job timeout |
 
 ### Python package release
 

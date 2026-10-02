@@ -261,7 +261,8 @@ same trusted-refs rule the Doppler gate already enforces, applied to compute.
     locks. Hash checking still verifies every artifact, so the cache changes
     nothing about trust; it removes egress, makes a rebuild possible with the
     WAN down, and gives one place to see what CI actually downloads.
-23. **Consumer-side verification, nightly.** A lab job that does what an
+23. **Consumer-side verification, nightly.** Done: `.github/workflows/verify-published.yml`;
+    see the table above. A lab job that does what an
     operator does: pull each published image from GHCR, `cosign verify` it
     against this repository's identity, verify the SBOM attestation, run the
     import check and the healthcheck. The producer already signs; nothing yet
