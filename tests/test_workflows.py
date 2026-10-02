@@ -204,6 +204,7 @@ ALLOWED_WRITES = {
     ("artifact-release.yml", "publish", "id-token"),
     ("artifact-release.yml", "publish", "attestations"),
     ("security.yml", "codeql", "security-events"),
+    ("security.yml", "semgrep", "security-events"),
     ("security.yml", "snyk", "security-events"),
     ("security.yml", "scorecard", "security-events"),
     # dependency-review's summary comment on the pull request.
@@ -282,8 +283,8 @@ def test_every_reusable_job_starts_with_harden_runner(path):
         first = str(steps[0].get("uses", ""))
         assert first.startswith(HARDEN_RUNNER), f"{path.name}: job {job_name!r} does not start with harden-runner"
         with_ = steps[0].get("with") or {}
-        # The distro job has its own policy input: its hosts are not measured yet.
-        policy = "distro-egress-policy" if job_name == "distro" else "egress-policy"
+        # The distro and semgrep jobs have their own policy input: their hosts are not measured yet.
+        policy = {"distro": "distro-egress-policy", "semgrep": "semgrep-egress-policy"}.get(job_name, "egress-policy")
         assert with_.get("egress-policy") == "${{ inputs." + policy + " }}", (
             f"{path.name}: job {job_name!r} harden-runner ignores the {policy} input"
         )

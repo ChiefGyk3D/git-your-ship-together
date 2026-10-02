@@ -4,7 +4,9 @@
 #   gitleaks           Secret scan over the full history, on top of what Doppler
 #                      already prevents by keeping secrets out of the tree.
 #   pip-audit          Known vulnerabilities in the pinned dependencies.
-#   dependency-review  On pull requests: what a dependency change brings in.
+#   dependency-review  On pull requests: what a dependency change brings in,
+#                      and any dependency under a denied licence.
+#   semgrep            SAST with the registry rules; SARIF to the Security tab.
 #   snyk               Optional; SNYK_TOKEN comes from the Doppler config.
 #   scorecard          Optional; OpenSSF Scorecard on the default branch.
 #
@@ -87,10 +89,34 @@ on:
         description: Fail the review at this severity or above.
         type: string
         default: moderate
+      dependency-review-deny-licenses:
+        description: Comma-separated SPDX identifiers the review fails on when a pull request adds a dependency under one of them. Empty means no licence rule. A dependency whose licence cannot be detected is reported, not failed.
+        type: string
+        default: AGPL-3.0, GPL-3.0, GPL-2.0, LGPL-3.0, SSPL-1.0
       dependency-review-allow-ghsas:
         description: Comma-separated GitHub Advisory IDs the review may not fail on. Each one must have an entry in the shared repository's baseline/risk-register.yaml (the audit checks); an advisory with no fixed release is the usual case.
         type: string
         default: ""
+      semgrep:
+        description: Run Semgrep over the repository and upload the SARIF.
+        type: boolean
+        default: true
+      semgrep-config:
+        description: Space-separated Semgrep configs, each passed as `--config` (registry packs such as `p/python`, or a path in the repository).
+        type: string
+        default: p/python p/github-actions p/secrets
+      semgrep-version:
+        description: Semgrep release installed with pip.
+        type: string
+        default: 1.179.0
+      semgrep-continue-on-error:
+        description: Report findings without failing the job (they still reach the Security tab). A migration aid, not a resting state.
+        type: boolean
+        default: false
+      semgrep-egress-policy:
+        description: harden-runner egress policy for the Semgrep job only. It reaches semgrep.dev for the rule registry, which is unmeasured, so it ships in `audit` and moves to `block` with a measured list later.
+        type: string
+        default: audit
       snyk:
         description: Run Snyk Code and Snyk Open Source. Needs SNYK_TOKEN in the Doppler config.
         type: boolean
@@ -362,7 +388,60 @@ jobs:
         with:
           fail-on-severity: ${{ inputs.dependency-review-severity }}
           allow-ghsas: ${{ inputs.dependency-review-allow-ghsas }}
+          deny-licenses: ${{ inputs.dependency-review-deny-licenses }}
           comment-summary-in-pr: on-failure
+
+  semgrep:
+    name: Semgrep
+    if: inputs.semgrep
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+      security-events: write  # Semgrep SARIF upload
+    steps:
+      # Its own egress input: the registry host (semgrep.dev) has not been
+      # measured, so this job audits while the others may already block.
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: ${{ inputs.semgrep-egress-policy }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          # The agent may only stop reporting to StepSecurity in block mode.
+          disable-telemetry: ${{ inputs.semgrep-egress-policy == 'block' }}
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - name: Install Semgrep
+        env:
+          SEMGREP_VERSION: ${{ inputs.semgrep-version }}
+        run: pip install "semgrep==$SEMGREP_VERSION"
+
+      # --error makes findings exit 1; without it Semgrep exits 0 and only the
+      # SARIF carries them. Metrics are off: nothing about the repository is
+      # sent anywhere but the rule download.
+      - name: Scan (Semgrep)
+        env:
+          CONFIGS: ${{ inputs.semgrep-config }}
+          CONTINUE: ${{ inputs.semgrep-continue-on-error }}
+        run: |
+          set -euo pipefail
+          args=()
+          for config in $CONFIGS; do args+=(--config "$config"); done
+          if [ "$CONTINUE" != "true" ]; then args+=(--error); fi
+          semgrep scan --metrics=off --sarif --output semgrep.sarif "${args[@]}" .
+
+      - name: Upload Semgrep results
+        if: always() && hashFiles('semgrep.sarif') != ''
+        uses: github/codeql-action/upload-sarif@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4.38.1
+        with:
+          sarif_file: semgrep.sarif
+          category: semgrep
 
   snyk:
     name: Snyk

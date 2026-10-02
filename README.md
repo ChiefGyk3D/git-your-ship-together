@@ -60,7 +60,7 @@ Ten reusable workflows and one composite action:
 | `.github/workflows/python-docker-release.yml` | The old name of the above: a thin caller that forwards every input, the secret and the outputs through a `./` reference at its own commit, so an existing pin keeps working. New callers use `container-release.yml` |
 | `.github/workflows/python-package-release.yml` | Build the sdist and wheel, `twine check`, refuse a tag that disagrees with the packaged version, smoke-test from the wheel, then publish to PyPI (Trusted Publishing, PEP 740 attestations) and to the GitHub release with SHA256SUMS and build provenance. No secret anywhere |
 | `.github/workflows/artifact-release.yml` | For a file rather than an image (a `.deb`, a firmware binary, a bundle): build it with a command, then publish it to the GitHub release with SHA256SUMS, a keyless cosign signature bundle per file and build provenance. No secret anywhere |
-| `.github/workflows/security.yml` | CodeQL (the `actions` language included by default), gitleaks, a dependency audit (pip-audit, and any other tool by command), dependency review on pull requests, optional Snyk, optional OpenSSF Scorecard |
+| `.github/workflows/security.yml` | CodeQL (the `actions` language included by default), gitleaks, a dependency audit (pip-audit, and any other tool by command), Semgrep, dependency review on pull requests (with a licence denylist), optional Snyk, optional OpenSSF Scorecard |
 | `.github/workflows/dependabot-auto-merge.yml` | Queues a Dependabot bump to merge itself once the required checks pass, up to a size you choose |
 | `.github/actions/doppler-secrets` | Fetches a Doppler config as masked environment variables, over OIDC or a Service Token. The workflows inline a copy of it (see the design rules); this is the source |
 
@@ -733,6 +733,12 @@ Inputs of `security.yml`:
 | `dependency-review` | `true` | On pull requests only |
 | `dependency-review-severity` | `moderate` | Fail the review at this severity or above |
 | `dependency-review-allow-ghsas` | empty | Comma-separated GHSA IDs the review may not fail on. Each needs an entry in [`baseline/risk-register.yaml`](baseline/risk-register.yaml); the audit checks |
+| `dependency-review-deny-licenses` | `AGPL-3.0, GPL-3.0, GPL-2.0, LGPL-3.0, SSPL-1.0` | Comma-separated SPDX identifiers the review fails on when a pull request adds a dependency under one. Empty means no licence rule. A dependency whose licence cannot be detected is reported, not failed. Passed as the action's `deny-licenses`, which upstream has marked deprecated for a future major release; the action rejects it beside `allow-licenses`, which this workflow does not expose |
+| `semgrep` | `true` | Semgrep over the repository, SARIF uploaded to the Security tab under category `semgrep`. Installed with pip, since `semgrep/*` actions are not in the allowed set |
+| `semgrep-config` | `p/python p/github-actions p/secrets` | Space-separated configs, each passed as `--config`; registry packs or paths in the repository |
+| `semgrep-version` | `1.179.0` | Semgrep release installed with pip |
+| `semgrep-continue-on-error` | `false` | Report findings without failing (they still reach the Security tab). Without it the scan runs with `--error` and a finding fails the job. A migration aid |
+| `semgrep-egress-policy` | `audit` | harden-runner policy for the Semgrep job only. The job reaches `semgrep.dev` for the rule registry, a host nobody has measured yet, so Semgrep ships in `audit` while the other jobs may already `block`; it moves to `block` with a measured list later, like every job before it |
 | `snyk` | `false` | Snyk Code and Snyk Open Source; needs `SNYK_TOKEN` in the Doppler config. Runs only on a trusted ref, never on a pull request |
 | `scorecard` | `false` | OpenSSF Scorecard, published; runs only on the default branch (push or schedule) |
 | `python-version` | `3.13` | Python for pip-audit and Snyk |
