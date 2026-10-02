@@ -209,6 +209,11 @@ Inputs of `python-ci.yml`:
 | Input | Default | Meaning |
 |---|---|---|
 | `python-versions` | `'["3.11", "3.12", "3.13"]'` | JSON array for the test matrix |
+| `runners` | `'["ubuntu-24.04"]'` | JSON array of runner labels for the `test` matrix; the first entry also uploads coverage; `ubuntu-24.04-arm` is native arm64, `macos-15` and `windows-2025` also work (commands run under bash) |
+| `distros` | `'[]'` (skips the job) | JSON array of container images to run the tests in as well, e.g. `'["debian:13", "kalilinux/kali-rolling"]'`; see [Operating systems](#operating-systems) |
+| `distro-runners` | `'["ubuntu-24.04"]'` | Runner labels the `distros` run on; add `ubuntu-24.04-arm` for native arm64 |
+| `distro-setup-command` | install python3, venv, pip, git and ca-certificates with `apt-get`, else `dnf` | Shell run as root in each image before the install command |
+| `distro-egress-policy` | `audit` | harden-runner policy for the `distro` job only. It pulls an image and package mirrors whose hosts are not yet measured, so it stays in `audit` until a measured list ships |
 | `coverage-python-version` | `3.13` | The matrix leg that uploads coverage |
 | `install-command` | upgrade pip, `pip install -r requirements.txt` | Run before tests on every leg |
 | `test-command` | `pytest` | The test suite |
@@ -237,6 +242,34 @@ Every command input (`lint-command`, `test-command`, `smoke-command`,
 `docker-test-command`, the install commands) reaches the shell as an
 environment variable run by `bash -eo pipefail -c`, never by template
 expansion into the script. Multi-line values work as written.
+
+#### Operating systems
+
+GitHub-hosted runners come in four kinds: Ubuntu, Ubuntu on arm64
+(`ubuntu-24.04-arm`), macOS and Windows. List the ones you want in `runners`
+and the `test` job runs every Python version on each. Every other
+distribution is tested inside its official container image, on an Ubuntu
+runner, with `distros` and `distro-runners`; putting `ubuntu-24.04-arm` in
+`distro-runners` runs the same images natively on arm64, with no emulation.
+
+Each image gets the workspace mounted, the install and test commands as
+environment variables and a fresh virtual environment, after
+`distro-setup-command` has installed Python and git with `apt-get` or `dnf`.
+
+| To cover | Use |
+|---|---|
+| Ubuntu, Xubuntu, Kubuntu, Pop!_OS | `ubuntu:24.04`. Xubuntu and Kubuntu share Ubuntu's userland and Pop!_OS is Ubuntu with its own packages on top, so this covers anything that does not need a desktop session |
+| Debian 12, Debian 13 | `debian:12`, `debian:13` |
+| Raspberry Pi OS | Debian 12 or 13 on arm64: `debian:12` or `debian:13` with `ubuntu-24.04-arm` in `distro-runners`. This is the same userland on the same architecture, not a Raspberry Pi |
+| Kali | `kalilinux/kali-rolling` |
+| Parrot | `parrotsec/core` |
+| Qubes | Qubes has no userland of its own; its templates are Debian or Fedora, so `debian:13` and `fedora:42` cover it |
+
+The `distro` job ships in `audit` mode (`distro-egress-policy`). It pulls an
+image and reaches each distribution's package mirrors, and those hosts have
+not been measured the way the other jobs' were, so a block list written now
+would be a guess. It moves to `block` with a measured list in a later
+release, as every job before it did.
 
 ### Bash CI
 
@@ -284,6 +317,11 @@ Inputs of `bash-ci.yml`:
 | `shfmt-args` | `-i 4 -ci` | Style flags. Four-space indent is what seven of nine callers write; Skid-Finder and Hammunition pass `-i 2 -ci` |
 | `shfmt-continue-on-error` | `false` | Report a diff without failing. A migration aid |
 | `test-install-command` | empty | Run before the tests, e.g. `sudo apt-get install -y bats` |
+| `runners` | `'["ubuntu-24.04"]'` | JSON array of runner labels for the `test` job; `ubuntu-24.04-arm` is native arm64, `macos-15` and `windows-2025` also work (commands run under bash) |
+| `distros` | `'[]'` (skips the job) | JSON array of container images to run the tests in as well, e.g. `'["debian:13", "kalilinux/kali-rolling"]'`; see [Operating systems](#operating-systems) |
+| `distro-runners` | `'["ubuntu-24.04"]'` | Runner labels the `distros` run on; add `ubuntu-24.04-arm` for native arm64 |
+| `distro-setup-command` | install bash, git and ca-certificates with `apt-get`, else `dnf` | Shell run as root in each image before the install command |
+| `distro-egress-policy` | `audit` | harden-runner policy for the `distro` job only. It pulls an image and package mirrors whose hosts are not yet measured, so it stays in `audit` until a measured list ships |
 | `test-command` | empty (skips the job) | The shell test suite: `bats tests/`, `./tests/run.sh`, whatever the repository has |
 | `config-lint-install-command` | `pip install yamllint` | Installs the configuration linters, with Python available |
 | `config-lint-command` | empty (skips the job) | Lints the configuration kept beside the scripts: yamllint, ansible-lint |
