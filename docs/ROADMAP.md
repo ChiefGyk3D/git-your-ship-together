@@ -42,6 +42,9 @@ Status as of 2026-09-21.
    Docker Hub and Snyk token still works for anyone who kept a copy. Revoke
    them at the provider, which leaves exactly one live token per provider and
    makes Doppler's log the whole history of who fetched it.
+   The Snyk token in `ci` is a personal access token that expires about
+   2026-12-20; Doppler has no reminder, so the date lives here. Renew it
+   with `scripts/doppler-ci-set.sh SNYK_TOKEN ci` before then.
 
 ## Beyond Python: one pattern for every kind of project
 

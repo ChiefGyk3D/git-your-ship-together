@@ -10,7 +10,11 @@ WORKDIR /app
 COPY pyproject.toml ./
 COPY src ./src
 # No third-party dependencies: --no-deps proves that, and there is nothing to hash.
+# pip is removed after the install: the image never installs anything again,
+# and pip's vendored setuptools and msgpack are what Trivy otherwise reports
+# against an image that ships neither.
 RUN pip install --no-cache-dir --no-deps . \
+    && pip uninstall -y pip \
     && useradd --create-home --uid 1000 app
 USER app
 ENTRYPOINT ["fixture-app"]
