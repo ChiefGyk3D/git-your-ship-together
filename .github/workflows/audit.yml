@@ -34,6 +34,12 @@ on:
 permissions:
   contents: read
 
+# One audit at a time; a dispatch during the Monday run waits rather than
+# cancelling it, so a report is never cut short.
+concurrency:
+  group: audit
+  cancel-in-progress: false
+
 jobs:
   audit:
     name: Audit the baseline
