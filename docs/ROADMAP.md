@@ -28,6 +28,7 @@ Status as of 2026-09-21.
 | `security.yml` with neutral defaults (item 4): the dependency audit takes an `audit-command` for any ecosystem beside its pip-audit default, and CodeQL's default languages include `actions` | `security.yml`, `security-self.yml` runs both audit paths |
 | `arduino-ci.yml` (item 10): arduino-cli pinned by version and hash, cores and libraries pinned by the caller, every sketch compiled and its binaries kept, host tests, the `CI green` gate, no token; the release is `artifact-release.yml` | `.github/workflows/arduino-ci.yml`, `fixture/firmware/` |
 | `tofu-ci.yml` (item 9): fmt, validate without a backend, tflint and a Trivy configuration scan on pull requests; plan on the default branch through the Doppler gate; OpenTofu and tflint pinned by version and hash; nothing applies | `.github/workflows/tofu-ci.yml`, `fixture/tofu/` |
+| The weekly audit (item 15) and the register's issue-opening (half of item 19): `audit_baseline.py` on a Monday schedule with its own token from its own Doppler project, and one issue per register entry expiring within 21 days | `.github/workflows/audit.yml`, `scripts/audit_baseline.py --expiring`, `tests/test_audit_workflow.py` |
 | `artifact-release.yml` (item 8): a caller's build command, then SHA256SUMS, build provenance, a keyless cosign bundle per file and the GitHub release, from a job that checks nothing out | `.github/workflows/artifact-release.yml`, run on a tarball of the fixture |
 | `container-release.yml` (item 7): the release workflow under its honest name; `python-docker-release.yml` stays as a thin caller forwarding every input through a `./` reference, held identical by a test | `.github/workflows/container-release.yml`, `python-docker-release.yml` |
 | `python-package-release.yml` (item 5): build, check, tag-against-version, smoke from the wheel, PyPI Trusted Publishing with PEP 740 attestations, GitHub release with SHA256SUMS and provenance; no secret in it | `.github/workflows/python-package-release.yml`, run on the fixture |
@@ -208,6 +209,10 @@ the one that retires the most copied code.
     a fine-grained read-only token held in its own Doppler project and
     identity, never the shared `ci` config, so drift in any repository's
     settings is a red job rather than a thing somebody remembers to check.
+    **Built 2026-10-02:** `.github/workflows/audit.yml`, documented in the
+    README's "The weekly audit". It runs once the owner has created the
+    Doppler project `audit`, the service account `gha-audit` with its OIDC
+    identity, the repository variable `AUDIT_DOPPLER_IDENTITY_ID` and the PAT.
 
 ## Structural
 
@@ -231,6 +236,9 @@ the one that retires the most copied code.
     shape for the other classes of accepted risk (an unpinned base image, a
     tool kept advisory) so that "we decided to live with this" is always a
     register entry and never a comment in a workflow file.
+    **Issue-opening half built 2026-10-02:** `audit.yml`'s `register-issues`
+    job and `audit_baseline.py --expiring`; the generated page and the other
+    classes of accepted risk are still open.
 
 ## What the lab could carry
 

@@ -219,6 +219,11 @@ ALLOWED_WRITES = {
     ("dependabot-auto-merge.yml", "auto-merge", "pull-requests"),
     ("dependabot-auto-merge-self.yml", "auto-merge", "contents"),
     ("dependabot-auto-merge-self.yml", "auto-merge", "pull-requests"),
+    # The weekly audit (audit.yml, not a reusable workflow): the Doppler
+    # fetch of the audit token over OIDC, and one issue per expiring
+    # risk-register entry in this repository, from a job with no token else.
+    ("audit.yml", "audit", "id-token"),
+    ("audit.yml", "register-issues", "issues"),
     # This repository dogfoods security.yml on itself.
     ("security-self.yml", "security", "security-events"),
     ("security-self.yml", "security", "pull-requests"),

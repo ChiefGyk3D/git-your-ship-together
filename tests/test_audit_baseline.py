@@ -620,3 +620,51 @@ def test_the_shipped_register_parses_as_the_audit_reads_it():
         assert entry.get("id"), f"an entry has no id: {entry}"
         assert entry.get("repos"), f"{entry.get('id')}: no repos"
         assert entry.get("review_by"), f"{entry.get('id')}: no review_by"
+
+
+# --- expiring register entries ----------------------------------------------
+
+D = audit.dt.date
+EXPIRY_REGISTER = [
+    {"id": "GHSA-late", "repos": [REPO_NAME], "review_by": D(2026, 12, 1)},
+    {"id": "GHSA-soon", "repos": [REPO_NAME, "ChiefGyk3D/other"], "review_by": D(2026, 9, 30)},
+    {"id": "GHSA-past", "repos": [REPO_NAME], "review_by": D(2026, 9, 1)},
+    {"id": "GHSA-edge", "repos": [REPO_NAME], "review_by": D(2026, 10, 5)},
+    {"id": "GHSA-nodate", "repos": [REPO_NAME]},
+]
+
+
+def test_expiring_entries_are_those_within_the_window_or_past():
+    due = audit.expiring_entries(EXPIRY_REGISTER, 14, TODAY)
+    assert [e["id"] for e in due] == ["GHSA-past", "GHSA-soon", "GHSA-edge", "GHSA-nodate"]
+    assert [e["days_left"] for e in due] == [-20, 9, 14, None]
+
+
+def test_the_window_edge_is_inclusive_and_an_empty_register_has_nothing_due():
+    assert [e["id"] for e in audit.expiring_entries(EXPIRY_REGISTER, 13, TODAY)] == [
+        "GHSA-past",
+        "GHSA-soon",
+        "GHSA-nodate",
+    ]
+    assert audit.expiring_entries([], 90, TODAY) == []
+
+
+def test_expiring_lines_are_one_tab_separated_record_per_entry():
+    lines = audit.format_expiring(audit.expiring_entries(EXPIRY_REGISTER, 14, TODAY))
+    assert lines[1] == "EXPIRING\tGHSA-soon\t2026-09-30\t9\tChiefGyk3D/example,ChiefGyk3D/other"
+    assert lines[3] == f"EXPIRING\tGHSA-nodate\tunknown\tunknown\t{REPO_NAME}"
+    assert all(line.count("\t") == 4 for line in lines)
+
+
+def test_the_expiring_flag_needs_no_token_and_prints_nothing_for_an_empty_register(monkeypatch, capsys):
+    monkeypatch.setattr(audit, "load_register", lambda: [])
+    monkeypatch.setattr(audit, "find_token", lambda: pytest.fail("--expiring must not read a token"))
+    assert audit.main(["--expiring", "30"]) == 0
+    assert capsys.readouterr().out == ""
+
+
+def test_the_expiring_flag_counts_from_the_date_it_is_given(monkeypatch, capsys):
+    monkeypatch.setattr(audit, "load_register", lambda: EXPIRY_REGISTER)
+    assert audit.main(["--expiring", "0", "--today", "2026-09-30"]) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert [line.split("\t")[1] for line in out] == ["GHSA-past", "GHSA-soon", "GHSA-nodate"]

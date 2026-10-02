@@ -1,0 +1,209 @@
+# This repository's own weekly audit: scripts/audit_baseline.py over every
+# repository in baseline/repos.txt, so drift in any repository's settings is a
+# red job rather than something somebody remembers to check. NOT a reusable
+# workflow; no caller uses it.
+#
+# The token. The audit reads settings only an administrator can read, so it
+# needs a fine-grained personal access token, and that token is not allowed
+# near the shared `ci` Doppler config. It lives in its own Doppler project,
+# `audit`, config `prd`, as the one secret AUDIT_GITHUB_TOKEN, and only this
+# workflow on this repository's main branch can read it.
+#
+# Owner setup, in the dashboards (nothing here can do it for the owner):
+#   1. Doppler: create the project `audit` with the config `prd`, and add the
+#      secret AUDIT_GITHUB_TOKEN (the token and its permissions: README, "The
+#      weekly audit").
+#   2. Doppler: create the service account `gha-audit` with read access to
+#      that one project, and an OIDC identity on it whose subject is
+#      repo:ChiefGyk3D/git-your-ship-together:ref:refs/heads/main
+#   3. GitHub: set the repository variable AUDIT_DOPPLER_IDENTITY_ID to that
+#      identity's UUID.
+# Until all three are done the `audit` job fails at the Doppler step, which is
+# the correct answer to "the audit could not run".
+#
+# The second job holds no token of the audit's: it opens an issue in this
+# repository for each risk-register entry that expires soon, with the
+# workflow's own GITHUB_TOKEN.
+name: Audit
+
+on:
+  schedule:
+    - cron: '0 7 * * 1'  # Monday 07:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One audit at a time; a dispatch during the Monday run waits rather than
+# cancelling it, so a report is never cut short.
+concurrency:
+  group: audit
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    name: Audit the baseline
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write  # the Doppler fetch over OIDC
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: block
+          allowed-endpoints: api.doppler.com:443 api.github.com:443 files.pythonhosted.org:443 github.com:443 pypi.org:443
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      # The script needs the standard library and PyYAML; the hash lock is
+      # the only form this repository installs from, so it is installed whole.
+      - name: Install dependencies
+        run: pip install --require-hashes -r requirements-dev.txt
+
+      # --- Doppler (same steps as .github/actions/doppler-secrets) ---------
+      - name: Decide how to authenticate to Doppler
+        id: doppler
+        env:
+          IDENTITY_ID: ${{ vars.AUDIT_DOPPLER_IDENTITY_ID }}
+          TOKEN: ""
+          PROJECT: audit
+          CONFIG: prd
+          REQUIRED: "true"
+          TRUSTED_ONLY: "true"
+          IS_FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          mode=none
+          skip=""
+          # A trusted ref is one only a push by someone with write access, or the
+          # schedule, can produce: the default branch, a tag, or a scheduled run
+          # (which GitHub always starts from the default branch). A pull request
+          # is never trusted, whichever repository its head is in.
+          trusted=false
+          case "$EVENT" in
+            schedule) trusted=true ;;
+            pull_request|pull_request_target) trusted=false ;;
+            *)
+              if [ -n "$DEFAULT_BRANCH" ] && [ "$REF" = "refs/heads/$DEFAULT_BRANCH" ]; then
+                trusted=true
+              elif [ "${REF#refs/tags/}" != "$REF" ]; then
+                trusted=true
+              fi ;;
+          esac
+          if [ "$IS_FORK" = "true" ]; then
+            # A fork's pull request has no id-token and must never receive a
+            # secret. Silent skip is correct here, whatever `required` says.
+            skip="pull request from a fork"
+          elif [ "$TRUSTED_ONLY" = "true" ] && [ "$trusted" != "true" ]; then
+            skip="$EVENT on $REF is not the default branch, a tag or a schedule (trusted-refs-only)"
+          elif [ -n "$IDENTITY_ID" ]; then
+            mode=oidc
+          elif [ -n "$TOKEN" ]; then
+            mode=token
+          fi
+          if [ -n "$skip" ]; then
+            echo "::notice title=Doppler::$skip - no secrets are fetched"
+          fi
+          if [ "$mode" != "none" ] && { [ -z "$PROJECT" ] || [ -z "$CONFIG" ]; }; then
+            echo "::error title=Doppler::project and config are required when authenticating"
+            exit 1
+          fi
+          if [ "$mode" = "none" ] && [ -z "$skip" ]; then
+            if [ "$REQUIRED" = "true" ]; then
+              echo "::error title=Doppler::no identity-id and no DOPPLER_TOKEN; this job needs one (see README, 'Doppler setup')"
+              exit 1
+            fi
+            echo "::notice title=Doppler::not configured (no identity-id, no DOPPLER_TOKEN) - continuing without CI secrets"
+          fi
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo "Doppler auth mode: $mode"
+      - name: Fetch the audit token from Doppler (OIDC)
+        if: steps.doppler.outputs.mode == 'oidc'
+        uses: dopplerhq/secrets-fetch-action@451892f16195f9ac360e1a5bcbf0b5fd0e957534 # v2.0.0
+        with:
+          auth-method: oidc
+          doppler-identity-id: ${{ vars.AUDIT_DOPPLER_IDENTITY_ID }}
+          doppler-project: audit
+          doppler-config: prd
+          inject-env-vars: true
+      # ---------------------------------------------------------------------
+
+      - name: Audit every repository against BASELINE.md
+        run: |
+          set -euo pipefail
+          : "${AUDIT_GITHUB_TOKEN:?AUDIT_GITHUB_TOKEN was not fetched from Doppler (project audit, config prd); run from main and see the header of this file}"
+          GH_TOKEN="$AUDIT_GITHUB_TOKEN" python scripts/audit_baseline.py | tee audit.txt
+
+      - name: Put the report in the job summary
+        if: always()
+        run: |
+          {
+            echo '### Baseline audit'
+            echo
+            echo '```'
+            cat audit.txt 2>/dev/null || echo 'the audit produced no report; see the step log'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  register-issues:
+    name: Open issues for expiring risk-register entries
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write  # one issue per expiring entry, in this repository only
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: block
+          allowed-endpoints: api.github.com:443 files.pythonhosted.org:443 github.com:443 pypi.org:443
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install --require-hashes -r requirements-dev.txt
+
+      # An entry is due when its review_by is within 21 days or past. One issue
+      # per entry, found by its title prefix so that renewing the date edits
+      # the title instead of opening a second issue.
+      - name: Open or update one issue per expiring entry
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          python scripts/audit_baseline.py --expiring 21 > expiring.txt
+          if [ ! -s expiring.txt ]; then
+            echo "No risk-register entry expires within 21 days."
+            exit 0
+          fi
+          while IFS=$'\t' read -r _ id date days repos; do
+            title="Risk register: $id expires $date"
+            existing="$(gh issue list --state open --search "\"Risk register: $id expires\" in:title" --json number,title \
+              --jq "[.[] | select(.title | startswith(\"Risk register: $id expires\"))][0] | select(. != null) | \"\(.number)\t\(.title)\"")"
+            if [ -z "$existing" ]; then
+              gh issue create --title "$title" --body "The risk-register entry for \`$id\` (repositories: $repos) has a review_by of $date ($days days from this run; negative means past). Renew it in baseline/risk-register.yaml with a reason, or remove the exception and the entry. The audit fails once the date has passed."
+              continue
+            fi
+            number="${existing%%$'\t'*}"
+            if [ "${existing#*$'\t'}" != "$title" ]; then
+              gh issue edit "$number" --title "$title"
+            fi
+            echo "Issue #$number already tracks $id."
+          done < expiring.txt

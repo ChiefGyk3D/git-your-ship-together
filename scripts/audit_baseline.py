@@ -10,6 +10,7 @@ tells them apart.
     python scripts/audit_baseline.py                 # every repo in baseline/repos.txt
     python scripts/audit_baseline.py owner/repo ...  # just these
     python scripts/audit_baseline.py --allow-unknown # exit 0 on unknowns
+    python scripts/audit_baseline.py --expiring 14   # register entries due within 14 days; no token needed
 
 Exit 0: every check passed. Exit 1: at least one FAIL. Exit 2: no FAIL but at
 least one UNKNOWN (unless --allow-unknown). The token comes from GITHUB_TOKEN
@@ -449,6 +450,44 @@ def check_risk_exceptions(
     return Result(repo, "risk-exceptions", PASS, f"{len(exceptions)} registered exception(s), none expired")
 
 
+def expiring_entries(register: list[dict], days: int, today: dt.date) -> list[dict]:
+    """Register entries whose `review_by` is `days` or fewer days away, or already past.
+
+    `today` is a parameter, never read from the clock here, so the answer is
+    the same in a test as in a run. An entry with no usable date is returned
+    too, as already due: a register nobody can read the expiry of is expired.
+    """
+    due = []
+    for entry in register:
+        review_by = entry.get("review_by")
+        if not isinstance(review_by, dt.date):
+            due.append({**entry, "days_left": None})
+            continue
+        left = (review_by - today).days
+        if left <= days:
+            due.append({**entry, "days_left": left})
+    return sorted(due, key=lambda e: (e["days_left"] is None, e["days_left"] or 0, str(e.get("id"))))
+
+
+def format_expiring(entries: list[dict]) -> list[str]:
+    """One tab-separated line per entry: EXPIRING, id, review_by, days left, repos (comma-joined).
+
+    The workflow that opens the issues reads these with `read`, so no field
+    may hold a tab or a newline.
+    """
+    lines = []
+    for e in entries:
+        fields = [
+            "EXPIRING",
+            str(e.get("id", "?")),
+            str(e.get("review_by", "unknown")),
+            "unknown" if e["days_left"] is None else str(e["days_left"]),
+            ",".join(str(r) for r in (e.get("repos") or [])),
+        ]
+        lines.append("\t".join(" ".join(f.split()) for f in fields))
+    return lines
+
+
 def check_dependabot(repo: str, fetch: Fetcher) -> Result:
     code, file = fetch(f"/repos/{repo}/contents/.github/dependabot.yml")
     if code == 404:
@@ -601,8 +640,19 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("repos", nargs="*", help="owner/name; default: every line of baseline/repos.txt")
     parser.add_argument("--allow-unknown", action="store_true", help="exit 0 when checks are UNKNOWN but none FAIL")
+    parser.add_argument(
+        "--expiring",
+        type=int,
+        metavar="DAYS",
+        help="print register entries due within DAYS days or past, tab-separated; no token",
+    )
+    parser.add_argument("--today", type=dt.date.fromisoformat, help="the date --expiring counts from (default: today)")
     parser.add_argument("--list", default=str(Path(__file__).resolve().parent.parent / "baseline" / "repos.txt"))
     args = parser.parse_args(argv)
+    if args.expiring is not None:
+        for line in format_expiring(expiring_entries(load_register(), args.expiring, args.today or dt.date.today())):
+            print(line)
+        return 0
     repos = args.repos or read_repo_list(Path(args.list))
     fetch = github_fetcher(find_token())
     register = load_register()
