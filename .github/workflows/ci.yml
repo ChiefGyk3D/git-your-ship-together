@@ -225,8 +225,8 @@ jobs:
     uses: ./.github/workflows/python-docker-release.yml # zizmor: ignore[self-repository]
     permissions:
       contents: read
-      packages: write  # the release job declares it for the publishing path it never takes here
-      id-token: write  # likewise: cosign keyless signing and provenance, only after a push
+      packages: write  # the build job declares it for the temporary-tag push it never makes here
+      id-token: write  # likewise: the merge job (skipped here) signs and attests, only after a push
       attestations: write  # likewise: the SLSA provenance record
       security-events: write  # the Trivy SARIF upload, which does run
     with:
