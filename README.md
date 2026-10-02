@@ -449,6 +449,15 @@ What a push produces, for every platform in `platforms`:
 4. **SLSA build provenance** as a GitHub Artifact Attestation.
 5. A Trivy scan, uploaded to the Security tab as SARIF (on pull requests too).
 
+Each platform is built and tested natively, on its own runner: `linux/arm64`
+on `ubuntu-24.04-arm`, `linux/amd64` on `ubuntu-24.04`. `docker-test-command`
+and the Trivy scan therefore run against the real arm64 image, not an emulated
+one. QEMU is set up only for a platform with no native runner. When
+publishing, each platform job pushes its image under a temporary tag
+`ghcr.io/<owner>/<repo>:<sha>-<arch>` (for example `<sha>-linux-arm64`), and a
+`merge` job joins them into the index under the real tags. The temporary tags
+stay in GHCR beside the index; delete them when you no longer need them.
+
 On a pull request it builds, tests and scans and stops. Nothing is pushed,
 signed or attested from a pull request, and a test holds that order.
 
@@ -502,7 +511,7 @@ Inputs of `container-release.yml`:
 | `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `audit`, the measured list, empty | harden-runner, as in `python-ci.yml` |
 | `doppler-project`, `doppler-config`, `doppler-identity-id` | empty | See [Doppler setup](#doppler-setup) |
 | `doppler-trusted-refs-only` | `true` | Fetch CI secrets only on the default branch, a tag or a schedule; never on a pull request. See [Doppler setup](#doppler-setup) |
-| `timeout-minutes` | `60` | Job timeout; arm64 builds under QEMU are slow |
+| `timeout-minutes` | `60` | Timeout of each platform's build job; a platform built under QEMU is slow |
 
 Outputs: `digest` and `image` (`ghcr.io/...@sha256:...`) of the published
 index, empty when not pushed.

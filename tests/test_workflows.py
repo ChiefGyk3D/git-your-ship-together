@@ -176,18 +176,19 @@ ALLOWED_WRITES = {
     # over OIDC; Scorecard publishes its result with the same OIDC identity.
     ("python-ci.yml", "coverage", "id-token"),
     ("tofu-ci.yml", "plan", "id-token"),  # the plan's credentials come from Doppler, off pull requests only
-    ("container-release.yml", "release", "id-token"),
+    ("container-release.yml", "merge", "id-token"),
     ("python-docker-release.yml", "release", "id-token"),  # forwarded to container-release.yml
     ("security.yml", "gitleaks", "id-token"),
     ("security.yml", "snyk", "id-token"),
     ("security.yml", "scorecard", "id-token"),
     # Publishing the image, its signature, SBOM attestation and provenance.
-    ("container-release.yml", "release", "packages"),
-    ("container-release.yml", "release", "attestations"),
+    ("container-release.yml", "build", "packages"),  # the per-platform temporary tag
+    ("container-release.yml", "merge", "packages"),
+    ("container-release.yml", "merge", "attestations"),
     ("python-docker-release.yml", "release", "packages"),  # forwarded
     ("python-docker-release.yml", "release", "attestations"),  # forwarded
     # SARIF uploads to the Security tab.
-    ("container-release.yml", "release", "security-events"),
+    ("container-release.yml", "build", "security-events"),
     ("python-docker-release.yml", "release", "security-events"),  # forwarded
     # The package release: PyPI trusts the job's OIDC identity, and the
     # GitHub release is created and its assets uploaded with the job's own
@@ -389,11 +390,10 @@ PR_ID_TOKEN_EXCEPTIONS = {
     # licence it may fetch is for organisation accounts and the Doppler step
     # refuses pull requests anyway.
     ("security.yml", "gitleaks"),
-    # Builds and tests the image on pull requests without pushing. The
-    # Dockerfile's RUN steps and the docker-test-command execute inside
-    # containers that do not carry the runner's OIDC request token, and the
-    # Doppler step refuses pull requests.
-    ("container-release.yml", "release"),
+    # Joins, signs and attests the image; runs only when `push` is true, which
+    # a pull request's caller sets false. It builds nothing and runs no caller
+    # command, and the Doppler step refuses pull requests.
+    ("container-release.yml", "merge"),
     ("python-docker-release.yml", "release"),  # the thin caller of the above
 }
 
@@ -587,9 +587,13 @@ def test_the_fixture_package_never_publishes():
     assert jobs(doc)["fixture-package"]["with"]["publish"] is False
 
 
-def test_release_signs_attests_and_records_provenance_only_after_a_push():
+def release_steps(job_name: str) -> dict:
     doc = load(WORKFLOWS / "container-release.yml")
-    steps = {s.get("name"): s for s in steps_of(jobs(doc)["release"])}
+    return {s.get("name"): s for s in steps_of(jobs(doc)[job_name])}
+
+
+def test_release_signs_attests_and_records_provenance_only_after_a_push():
+    steps = release_steps("merge")
     gated = (
         "Sign the image (keyless)",
         "Generate the SBOM with syft",
@@ -597,22 +601,43 @@ def test_release_signs_attests_and_records_provenance_only_after_a_push():
         "Record build provenance",
     )
     for name in gated:
-        assert name in steps, f"release step {name!r} is missing"
+        assert name in steps, f"merge step {name!r} is missing"
         assert str(steps[name].get("if", "")).startswith("inputs.push"), f"{name!r} must be gated on inputs.push"
-    push = steps["Build and push the multi-arch image"]
+    push = release_steps("build")["Build and push this platform's image"]
     assert push["with"]["provenance"] is False and push["with"]["sbom"] is False, (
         "BuildKit attestations would duplicate the explicit cosign/syft artefacts"
     )
+    assert push["if"] == "inputs.push"
+    assert not set(gated) & set(release_steps("build")), "the build job must not sign or attest"
 
 
 def test_a_publishing_build_never_reads_the_actions_cache():
     """The cache is writable from any pull request; a poisoned layer in a signed release is unrecoverable."""
-    doc = load(WORKFLOWS / "container-release.yml")
-    steps = {s.get("name"): s for s in steps_of(jobs(doc)["release"])}
-    push = steps["Build and push the multi-arch image"]["with"]
+    push = release_steps("build")["Build and push this platform's image"]["with"]
     assert "cache-from" not in push and "cache-to" not in push
-    local = steps["Build for this runner and load it"]["with"]
+    local = release_steps("build")["Build for this platform and load it"]["with"]
     assert "!inputs.push" in local["cache-from"], "the local build may use the cache only when not publishing"
+    assert "!inputs.push" in local["cache-to"]
+    assert all("cache" not in key for step in release_steps("merge").values() for key in step.get("with", {}))
+
+
+def test_the_release_builds_each_platform_natively_and_merges_only_when_publishing():
+    doc = load(WORKFLOWS / "container-release.yml")
+    build, merge = jobs(doc)["build"], jobs(doc)["merge"]
+    assert build["runs-on"] == "${{ matrix.runner }}"
+    assert build["strategy"]["matrix"]["include"] == "${{ fromJSON(needs.plan.outputs.matrix) }}"
+    qemu = [s for s in steps_of(build) if str(s.get("uses", "")).startswith("docker/setup-qemu-action@")]
+    assert len(qemu) == 1, "QEMU belongs in the build job, once"
+    assert qemu[0]["if"] == "matrix.platform != 'linux/amd64' && matrix.platform != 'linux/arm64'"
+    assert not [s for s in steps_of(merge) if str(s.get("uses", "")).startswith("docker/setup-qemu-action@")]
+    plan = "\n".join(s.get("run", "") for s in steps_of(jobs(doc)["plan"]))
+    assert "linux/arm64) runner=ubuntu-24.04-arm" in plan
+    needs = merge["needs"] if isinstance(merge["needs"], list) else [merge["needs"]]
+    assert "build" in needs
+    assert merge["if"] == "inputs.push && github.event_name != 'pull_request'", "merge publishes only when told and never on a pull request"
+    load_step = release_steps("build")["Build for this platform and load it"]["with"]
+    assert load_step["platforms"] == "${{ matrix.platform }}" and load_step["load"] is True
+    assert triggers(doc)["workflow_call"]["outputs"]["digest"]["value"] == "${{ jobs.merge.outputs.digest }}"
 
 
 # --- documentation ----------------------------------------------------------
@@ -692,7 +717,13 @@ def test_the_old_release_name_forwards_everything_to_container_release():
     for name, value in job["with"].items():
         assert value == f"${{{{ inputs.{name} }}}}", f"{name} is not forwarded as-is"
     assert job["secrets"] == {"DOPPLER_TOKEN": "${{ secrets.DOPPLER_TOKEN }}"}
-    assert job["permissions"] == jobs(load(WORKFLOWS / "container-release.yml"))["release"]["permissions"]
+    # The caller's grant must cover every job the called workflow runs: the union of theirs.
+    granted: dict[str, str] = {}
+    for called in jobs(load(WORKFLOWS / "container-release.yml")).values():
+        for scope, level in (called.get("permissions") or {}).items():
+            if level == "write" or scope not in granted:
+                granted[scope] = level
+    assert job["permissions"] == granted
 
 
 def test_every_reusable_workflow_is_run_from_this_repository_at_the_pull_requests_ref():
