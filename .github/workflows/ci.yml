@@ -100,6 +100,9 @@ jobs:
       contents: read
       id-token: write  # what a caller grants for Codecov and Doppler; python-ci keeps it off the test job
     with:
+      runners: '["ubuntu-24.04", "ubuntu-24.04-arm"]'
+      distros: '["debian:12", "debian:13", "ubuntu:24.04", "kalilinux/kali-rolling", "parrotsec/core"]'
+      distro-runners: '["ubuntu-24.04", "ubuntu-24.04-arm"]'
       install-command: |
         python -m pip install --upgrade pip
         pip install --require-hashes -r fixture/requirements.txt
@@ -129,6 +132,9 @@ jobs:
     permissions:
       contents: read
     with:
+      runners: '["ubuntu-24.04", "ubuntu-24.04-arm"]'
+      distros: '["debian:13", "kalilinux/kali-rolling"]'
+      distro-runners: '["ubuntu-24.04", "ubuntu-24.04-arm"]'
       shfmt-args: -i 2 -ci
       test-command: fixture/tests/test_greet.sh
       config-lint-command: |

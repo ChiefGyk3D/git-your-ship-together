@@ -108,8 +108,35 @@ on:
         description: zizmor strictness - `regular`, `pedantic` or `auditor`.
         type: string
         default: regular
+      runners:
+        description: JSON array of runner labels for the `test` matrix, e.g. `["ubuntu-24.04", "ubuntu-24.04-arm", "macos-15", "windows-2025"]`. The first entry also uploads the coverage report. A Windows runner runs the commands under bash.
+        type: string
+        default: '["ubuntu-24.04"]'
+      distros:
+        description: JSON array of container images to run the tests in as well, e.g. `["debian:13", "kalilinux/kali-rolling"]`. GitHub-hosted runners are Ubuntu, macOS and Windows only; another distribution is tested inside its official image on a runner. `[]` skips the job.
+        type: string
+        default: '[]'
+      distro-runners:
+        description: JSON array of runner labels the `distros` run on. Add `ubuntu-24.04-arm` to run the images natively on arm64.
+        type: string
+        default: '["ubuntu-24.04"]'
+      distro-setup-command:
+        description: Shell run as root inside each image before the install command. The default installs python3, python3-venv, python3-pip, git and ca-certificates with apt-get where it exists, else with dnf; non-interactive and quiet. The install and test commands then run in a fresh virtual environment.
+        type: string
+        default: |
+          export DEBIAN_FRONTEND=noninteractive
+          if command -v apt-get >/dev/null 2>&1; then
+            apt-get update -qq
+            apt-get install -y -qq --no-install-recommends python3 python3-venv python3-pip git ca-certificates
+          elif command -v dnf >/dev/null 2>&1; then
+            dnf install -y -q python3 python3-pip git ca-certificates
+          fi
+      distro-egress-policy:
+        description: harden-runner egress policy for the `distro` job. It pulls a distribution image and its package mirrors, whose hosts are not yet measured, so it ships in `audit` and moves to `block` with a measured list in a later release, like every job before it.
+        type: string
+        default: audit
       egress-policy:
-        description: harden-runner egress policy for every job - `audit` logs outbound connections, `block` allows only `allowed-endpoints`.
+        description: harden-runner egress policy for every job except `distro` - `audit` logs outbound connections, `block` allows only `allowed-endpoints`.
         type: string
         default: audit
       allowed-endpoints:
@@ -216,8 +243,8 @@ jobs:
           advanced-security: false
 
   test:
-    name: Test (Python ${{ matrix.python-version }})
-    runs-on: ubuntu-latest
+    name: Test (Python ${{ matrix.python-version }}, ${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read  # no id-token here: this job runs the caller's own code
@@ -225,6 +252,7 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ${{ fromJSON(inputs.python-versions) }}
+        runner: ${{ fromJSON(inputs.runners) }}
     steps:
       - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
         with:
@@ -245,21 +273,61 @@ jobs:
       - name: Install dependencies
         env:
           COMMAND: ${{ inputs.install-command }}
+        shell: bash
         run: bash -eo pipefail -c "$COMMAND"
 
       - name: Run tests
         env:
           COMMAND: ${{ inputs.test-command }}
+        shell: bash
         run: bash -eo pipefail -c "$COMMAND"
 
       - name: Upload coverage report
-        if: matrix.python-version == inputs.coverage-python-version && hashFiles(inputs.coverage-file) != ''
+        if: matrix.python-version == inputs.coverage-python-version && matrix.runner == fromJSON(inputs.runners)[0] && hashFiles(inputs.coverage-file) != ''
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: coverage
           path: ${{ inputs.coverage-file }}
           retention-days: 7
 
+
+  # The same tests inside other distributions' official images, on the
+  # runners that exist (Ubuntu, and Ubuntu on arm64). The image gets the
+  # workspace mounted, the three commands as environment variables and a
+  # fresh virtual environment, so nothing here is interpolated into a script.
+  distro:
+    name: Distro (${{ matrix.image }}, ${{ matrix.runner }})
+    if: inputs.distros != '[]'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read  # no id-token here: this job runs the caller's own code
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ${{ fromJSON(inputs.distros) }}
+        runner: ${{ fromJSON(inputs.distro-runners) }}
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: ${{ inputs.distro-egress-policy }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          # The agent may only stop reporting to StepSecurity in block mode.
+          disable-telemetry: ${{ inputs.distro-egress-policy == 'block' }}
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run the tests in the image
+        env:
+          IMAGE: ${{ matrix.image }}
+          SETUP: ${{ inputs.distro-setup-command }}
+          INSTALL: ${{ inputs.install-command }}
+          TEST: ${{ inputs.test-command }}
+        run: |
+          docker run --rm -v "$GITHUB_WORKSPACE:/src" -w /src -e CI=true -e SETUP -e INSTALL -e TEST "$IMAGE" \
+            bash -eo pipefail -c 'eval "$SETUP"; python3 -m venv /tmp/venv; . /tmp/venv/bin/activate; eval "$INSTALL"; eval "$TEST"'
 
   coverage:
     name: Coverage upload
@@ -460,7 +528,7 @@ jobs:
   ci-green:
     name: CI green
     if: always()
-    needs: [lint, workflow-lint, test, coverage, smoke, docker]
+    needs: [lint, workflow-lint, test, distro, coverage, smoke, docker]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}

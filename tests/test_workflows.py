@@ -282,8 +282,10 @@ def test_every_reusable_job_starts_with_harden_runner(path):
         first = str(steps[0].get("uses", ""))
         assert first.startswith(HARDEN_RUNNER), f"{path.name}: job {job_name!r} does not start with harden-runner"
         with_ = steps[0].get("with") or {}
-        assert with_.get("egress-policy") == "${{ inputs.egress-policy }}", (
-            f"{path.name}: job {job_name!r} harden-runner ignores the egress-policy input"
+        # The distro job has its own policy input: its hosts are not measured yet.
+        policy = "distro-egress-policy" if job_name == "distro" else "egress-policy"
+        assert with_.get("egress-policy") == "${{ inputs." + policy + " }}", (
+            f"{path.name}: job {job_name!r} harden-runner ignores the {policy} input"
         )
 
 
@@ -483,6 +485,26 @@ def test_the_job_running_the_callers_tests_holds_no_oidc_token_in_any_language(p
     if "test" not in jobs(doc):
         pytest.skip(f"{path.name} has no test job")
     assert "id-token" not in (jobs(doc)["test"].get("permissions") or {})
+
+
+@pytest.mark.parametrize("name", ["python-ci.yml", "bash-ci.yml"])
+def test_the_distro_job_is_gated_and_has_its_own_egress_policy(name):
+    """Images and mirrors are unmeasured, so `distro` audits on its own input; the gate must still wait for it."""
+    doc = load(WORKFLOWS / name)
+    assert "distro" in doc_gate_needs(doc), f"{name}: ci-green does not need the distro job"
+    steps = steps_of(jobs(doc)["distro"])
+    assert str(steps[0]["uses"]).startswith(HARDEN_RUNNER)
+    with_ = steps[0]["with"]
+    assert with_["egress-policy"] == "${{ inputs.distro-egress-policy }}"
+    assert "inputs.distro-egress-policy" in with_["disable-telemetry"]
+    spec = triggers(doc)["workflow_call"]["inputs"]["distro-egress-policy"]
+    assert spec["default"] == "audit"
+    assert "inputs.distros != '[]'" in jobs(doc)["distro"]["if"]
+    assert "id-token" not in (jobs(doc)["distro"].get("permissions") or {})
+
+
+def doc_gate_needs(doc: dict) -> list[str]:
+    return jobs(doc)["ci-green"]["needs"]
 
 
 def test_tofu_plans_only_off_pull_requests_and_validates_without_a_backend():

@@ -107,8 +107,35 @@ on:
         description: zizmor strictness - `regular`, `pedantic` or `auditor`.
         type: string
         default: regular
+      runners:
+        description: JSON array of runner labels for the `test` job, e.g. `["ubuntu-24.04", "ubuntu-24.04-arm", "macos-15"]`. `test-install-command` and `test-command` run under bash on each.
+        type: string
+        default: '["ubuntu-24.04"]'
+      distros:
+        description: JSON array of container images to run the tests in as well, e.g. `["debian:13", "kalilinux/kali-rolling"]`. GitHub-hosted runners are Ubuntu, macOS and Windows only; another distribution is tested inside its official image on a runner. `[]` skips the job.
+        type: string
+        default: '[]'
+      distro-runners:
+        description: JSON array of runner labels the `distros` run on. Add `ubuntu-24.04-arm` to run the images natively on arm64.
+        type: string
+        default: '["ubuntu-24.04"]'
+      distro-setup-command:
+        description: Shell run as root inside each image before `test-install-command`. The default installs bash, git and ca-certificates with apt-get where it exists, else with dnf; non-interactive and quiet.
+        type: string
+        default: |
+          export DEBIAN_FRONTEND=noninteractive
+          if command -v apt-get >/dev/null 2>&1; then
+            apt-get update -qq
+            apt-get install -y -qq --no-install-recommends bash git ca-certificates
+          elif command -v dnf >/dev/null 2>&1; then
+            dnf install -y -q bash git ca-certificates
+          fi
+      distro-egress-policy:
+        description: harden-runner egress policy for the `distro` job. It pulls a distribution image and its package mirrors, whose hosts are not yet measured, so it ships in `audit` and moves to `block` with a measured list in a later release, like every job before it.
+        type: string
+        default: audit
       egress-policy:
-        description: harden-runner egress policy for every job - `audit` logs outbound connections, `block` allows only `allowed-endpoints`.
+        description: harden-runner egress policy for every job except `distro` - `audit` logs outbound connections, `block` allows only `allowed-endpoints`.
         type: string
         default: audit
       allowed-endpoints:
@@ -245,12 +272,16 @@ jobs:
           shfmt "${args[@]}" -d "${files[@]}"
 
   test:
-    name: Test
+    name: Test (${{ matrix.runner }})
     if: inputs.test-command != ''
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read  # this job runs the caller's own code; it holds nothing else
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: ${{ fromJSON(inputs.runners) }}
     steps:
       - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
         with:
@@ -267,12 +298,50 @@ jobs:
         if: inputs.test-install-command != ''
         env:
           COMMAND: ${{ inputs.test-install-command }}
+        shell: bash
         run: bash -eo pipefail -c "$COMMAND"
 
       - name: Run tests
         env:
           COMMAND: ${{ inputs.test-command }}
+        shell: bash
         run: bash -eo pipefail -c "$COMMAND"
+
+  # The same tests inside other distributions' official images, on the
+  # runners that exist (Ubuntu, and Ubuntu on arm64).
+  distro:
+    name: Distro (${{ matrix.image }}, ${{ matrix.runner }})
+    if: inputs.distros != '[]' && inputs.test-command != ''
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read  # this job runs the caller's own code; it holds nothing else
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ${{ fromJSON(inputs.distros) }}
+        runner: ${{ fromJSON(inputs.distro-runners) }}
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: ${{ inputs.distro-egress-policy }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          # The agent may only stop reporting to StepSecurity in block mode.
+          disable-telemetry: ${{ inputs.distro-egress-policy == 'block' }}
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run the tests in the image
+        env:
+          IMAGE: ${{ matrix.image }}
+          SETUP: ${{ inputs.distro-setup-command }}
+          INSTALL: ${{ inputs.test-install-command }}
+          TEST: ${{ inputs.test-command }}
+        run: |
+          docker run --rm -v "$GITHUB_WORKSPACE:/src" -w /src -e CI=true -e SETUP -e INSTALL -e TEST "$IMAGE" \
+            bash -eo pipefail -c 'eval "$SETUP"; eval "$INSTALL"; eval "$TEST"'
 
   config-lint:
     name: Config lint
@@ -344,7 +413,7 @@ jobs:
   ci-green:
     name: CI green
     if: always()
-    needs: [shellcheck, shfmt, test, config-lint, workflow-lint]
+    needs: [shellcheck, shfmt, test, distro, config-lint, workflow-lint]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}
