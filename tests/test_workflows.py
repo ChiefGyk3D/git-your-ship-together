@@ -42,6 +42,7 @@ REUSABLE = [
         "artifact-release.yml",
         "security.yml",
         "dependabot-auto-merge.yml",
+        "verify-published.yml",
     )
 ]
 # The subset that fetches CI secrets. The Doppler rules are about those steps,
@@ -59,6 +60,7 @@ DOPPLER = [
         "python-package-release.yml",
         "artifact-release.yml",
         "python-docker-release.yml",
+        "verify-published.yml",
     )
 ]
 # The language CI workflows: each ends in the `CI green` gate branch protection requires.
@@ -98,7 +100,7 @@ def all_steps(path: Path):
 
 
 def test_there_is_something_to_check():
-    assert len(REUSABLE) == 10, "expected the ten callable workflows"
+    assert len(REUSABLE) == 11, "expected the eleven callable workflows"
     assert len(DOPPLER) == 4, "expected four of them to fetch CI secrets"
     assert [p.name for p in LANGUAGE_CI] == ["arduino-ci.yml", "bash-ci.yml", "python-ci.yml", "tofu-ci.yml"]
     assert ACTION_FILES, "no composite actions found"
@@ -442,11 +444,18 @@ def test_reusable_workflows_are_only_callable(path):
 
 @pytest.mark.parametrize("path", REUSABLE, ids=lambda p: p.name)
 def test_every_input_has_a_description_and_a_default(path):
-    """Callers read the description; the default is what makes `with:` optional."""
+    """Callers read the description; the default is what makes `with:` optional.
+
+    A required input has no default by design: actionlint rejects a default
+    that can never be used.
+    """
     inputs = triggers(load(path))["workflow_call"].get("inputs") or {}
     for name, spec in inputs.items():
         assert spec.get("description"), f"{path.name}: input {name!r} has no description"
-        assert "default" in spec, f"{path.name}: input {name!r} has no default"
+        if spec.get("required") is True:
+            assert "default" not in spec, f"{path.name}: input {name!r} is required, so a default is never used"
+        else:
+            assert "default" in spec, f"{path.name}: input {name!r} has no default"
 
 
 @pytest.mark.parametrize("path", REUSABLE, ids=lambda p: p.name)

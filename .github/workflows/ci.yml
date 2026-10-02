@@ -237,10 +237,24 @@ jobs:
         docker run --rm "$IMAGE" --version
         test "$(docker run --rm --entrypoint id "$IMAGE" -u)" != "0"
 
+  # verify-published.yml against the image this account publishes through
+  # container-release.yml: signature, SBOM attestation and provenance verified
+  # from outside, then each platform pulled and its entrypoint checked. The
+  # check is the one star-daemon's own release runs on the built image.
+  fixture-verify:
+    name: fixture verify
+    uses: ./.github/workflows/verify-published.yml # zizmor: ignore[self-repository]
+    permissions:
+      contents: read  # gh attestation verify reads with the workflow's own token
+      packages: read  # pull the public image from GHCR
+    with:
+      image: ghcr.io/chiefgyk3d/star-daemon:latest
+      test-command: docker run --rm "$IMAGE" sh -c "python -m py_compile /app/star-daemon.py /app/star_daemon.py /app/star_announcer.py /app/github_stars.py /app/config.py /app/platforms.py"
+
   ci-green:
     name: CI green
     if: always()
-    needs: [actionlint, zizmor, test, fixture-ci, fixture-bash, fixture-tofu, fixture-arduino, fixture-package, fixture-artifact, fixture-release]
+    needs: [actionlint, zizmor, test, fixture-ci, fixture-bash, fixture-tofu, fixture-arduino, fixture-package, fixture-artifact, fixture-release, fixture-verify]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}
