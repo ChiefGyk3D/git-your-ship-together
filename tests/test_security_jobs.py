@@ -33,7 +33,8 @@ def test_semgrep_inputs_and_defaults():
     assert INPUTS["semgrep"]["type"] == "boolean" and INPUTS["semgrep"]["default"] is True
     assert INPUTS["semgrep-config"]["default"] == ""
     assert INPUTS["semgrep-continue-on-error"]["default"] is False
-    assert INPUTS["semgrep-egress-policy"]["default"] == "audit", "unmeasured registry host: ships in audit"
+    assert INPUTS["semgrep-egress-policy"]["default"] == "block"
+    assert INPUTS["semgrep-allowed-endpoints"]["default"].split(" ")[-1] == "semgrep.dev:443"
     assert INPUTS["semgrep-version"]["default"].count(".") == 2, "pin an exact release"
 
 
@@ -47,7 +48,8 @@ def test_semgrep_uses_its_own_egress_policy():
     first = steps_of(SEMGREP)[0]
     assert first["uses"].startswith("step-security/harden-runner@")
     assert first["with"]["egress-policy"] == "${{ inputs.semgrep-egress-policy }}"
-    assert "inputs.allowed-endpoints" in first["with"]["allowed-endpoints"]
+    assert "inputs.semgrep-allowed-endpoints" in first["with"]["allowed-endpoints"]
+    assert "inputs.extra-allowed-endpoints" in first["with"]["allowed-endpoints"]
     others = [n for n, j in jobs(DOC).items() if n != "semgrep"]
     for name in others:
         policy = steps_of(jobs(DOC)[name])[0]["with"]["egress-policy"]

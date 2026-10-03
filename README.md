@@ -48,7 +48,7 @@ Read in this order. Each one is short.
 
 ## What is in the repository
 
-Ten reusable workflows and one composite action:
+Thirteen reusable workflows and one composite action:
 
 | File | What it does |
 |---|---|
@@ -61,6 +61,8 @@ Ten reusable workflows and one composite action:
 | `.github/workflows/verify-published.yml` | Consumer-side verification of a published image: cosign signature, SPDX SBOM attestation and build provenance verified from outside, then each platform pulled and checked. Read-only, no secret, no token beyond the default one |
 | `.github/workflows/python-package-release.yml` | Build the sdist and wheel, `twine check`, refuse a tag that disagrees with the packaged version, smoke-test from the wheel, then publish to PyPI (Trusted Publishing, PEP 740 attestations) and to the GitHub release with SHA256SUMS and build provenance. No secret anywhere |
 | `.github/workflows/artifact-release.yml` | For a file rather than an image (a `.deb`, a firmware binary, a bundle): build it with a command, then publish it to the GitHub release with SHA256SUMS, a keyless cosign signature bundle per file and build provenance. No secret anywhere |
+| `.github/workflows/docs-pages.yml` | Build a static documentation site with a command you supply (MkDocs strict by default) on every pull request; upload it and deploy it to GitHub Pages from the default branch only. The two Pages writes sit on the deploy job alone |
+| `.github/workflows/wiki-publish.yml` | Run a command that generates a wiki tree, then replace the repository's GitHub wiki with it, as `github-actions[bot]`, only when something changed, from the default branch only. The write token sits on a job that runs none of your code |
 | `.github/workflows/security.yml` | CodeQL (the `actions` language included by default), gitleaks, a dependency audit (pip-audit, and any other tool by command), Semgrep, dependency review on pull requests (with a licence denylist), optional Snyk, optional OpenSSF Scorecard |
 | `.github/workflows/dependabot-auto-merge.yml` | Queues a Dependabot bump to merge itself once the required checks pass, up to a size you choose |
 | `.github/actions/doppler-secrets` | Fetches a Doppler config as masked environment variables, over OIDC or a Service Token. The workflows inline a copy of it (see the design rules); this is the source |
@@ -70,7 +72,7 @@ project before any caller pins them:
 
 | File | What it does |
 |---|---|
-| `.github/workflows/ci.yml` | actionlint, zizmor, the pytest contract, then `python-ci.yml`, `bash-ci.yml`, `tofu-ci.yml`, `arduino-ci.yml`, `python-package-release.yml`, `artifact-release.yml` and `python-docker-release.yml` called at the pull request's own ref against `fixture/` (bash-ci over the whole repository; bash-ci and the package build in block mode), and a `CI green` gate that needs all of it |
+| `.github/workflows/ci.yml` | actionlint, zizmor, the pytest contract, then `python-ci.yml`, `bash-ci.yml`, `tofu-ci.yml`, `arduino-ci.yml`, `python-package-release.yml`, `artifact-release.yml`, `docs-pages.yml`, `wiki-publish.yml` and `python-docker-release.yml` called at the pull request's own ref against `fixture/` (bash-ci over the whole repository; bash-ci and the package build in block mode), and a `CI green` gate that needs all of it |
 | `.github/workflows/security-self.yml` | `security.yml` called the same way, on push, pull request and a Monday schedule |
 | `.github/workflows/dependabot-auto-merge-self.yml` | `dependabot-auto-merge.yml` called the same way, so this repository's own bumps exercise it |
 | `.github/workflows/audit.yml` | The weekly audit: `scripts/audit_baseline.py` over every repository in `baseline/repos.txt` on Monday 07:00 UTC, with its own token from its own Doppler project; and an issue here for each risk-register entry about to expire. Not reusable; see [The weekly audit](#the-weekly-audit) |
@@ -250,7 +252,8 @@ Inputs of `python-ci.yml`:
 | `distros` | `'[]'` (skips the job) | JSON array of container images to run the tests in as well, e.g. `'["debian:13", "kalilinux/kali-rolling"]'`; see [Operating systems](#operating-systems) |
 | `distro-runners` | `'["ubuntu-24.04"]'` | Runner labels the `distros` run on; add `ubuntu-24.04-arm` for native arm64 |
 | `distro-setup-command` | install python3, venv, pip, git and ca-certificates with `apt-get`, else `dnf` | Shell run as root in each image before the install command |
-| `distro-egress-policy` | `audit` | harden-runner policy for the `distro` job only. It pulls an image and package mirrors whose hosts are not yet measured, so it stays in `audit` until a measured list ships |
+| `distro-egress-policy` | `block` | harden-runner policy for the `distro` job only; `audit` for a distribution whose mirrors are not on the list |
+| `distro-allowed-endpoints` | the measured list | The `distro` job's own allow-list, kept apart from `allowed-endpoints`: Docker Hub's image pull, the Debian, Ubuntu, Kali and Parrot mirrors, and PyPI. `extra-allowed-endpoints` is appended to it |
 | `distro-continue-on-error` | `false` | Let a failing distro run leave the gate green, for a suite that assumes a non-root user or a newer Python than the distribution ships. |
 | `coverage-python-version` | `3.13` | The matrix leg that uploads coverage |
 | `install-command` | upgrade pip, `pip install -r requirements.txt` | Run before tests on every leg |
@@ -264,6 +267,8 @@ Inputs of `python-ci.yml`:
 | `lint-continue-on-error` | `false` | Report lint failures without failing CI. A migration aid; no caller sets it any more |
 | `typecheck-install-command` | empty | Installs the type checker, e.g. `pip install mypy==2.4.0`; empty installs nothing |
 | `typecheck-command` | empty (skips the job) | Type-checks, e.g. `mypy src`; runs as the `Type check` job on `lint-python-version` and is part of the gate |
+| `fragment-check-command` | empty (skips the job) | Pull requests only, full history, `BASE` set to the base branch name: the `Changelog fragment` job. See [Pull-request checks](#pull-request-checks) |
+| `commit-claims-command` | empty (skips the job) | Pull requests only, full history, `BASE` and `HEAD` set: the `Commit claims` job. See [Pull-request checks](#pull-request-checks) |
 | `smoke-command` | empty (skips the job) | Run after installing the project, e.g. `my-cli --version` |
 | `smoke-install-command` | `pip install .` | Installs the project for the smoke test |
 | `docker-build` | `true` | Build the image, single platform, never pushed |
@@ -272,7 +277,7 @@ Inputs of `python-ci.yml`:
 | `docker-test-command` | empty (skips the check) | Run against the built image; `$IMAGE` names it |
 | `workflow-lint` | `true` | actionlint and zizmor over the caller's own `.github/workflows` |
 | `zizmor-persona` | `regular` | zizmor strictness: `regular`, `pedantic`, `auditor` |
-| `egress-policy` | `audit` | harden-runner on every job: `audit` logs outbound connections, `block` allows only `allowed-endpoints` |
+| `egress-policy` | `audit` | harden-runner on every job except `distro`: `audit` logs outbound connections, `block` allows only `allowed-endpoints` |
 | `allowed-endpoints` | the measured list | harden-runner allow-list for `block`, space-separated `host:port`; see [Egress](#egress) |
 | `extra-allowed-endpoints` | empty | Appended to the list, for hosts only this repository reaches |
 | `doppler-project`, `doppler-config`, `doppler-identity-id` | empty | See [Doppler setup](#doppler-setup) |
@@ -306,11 +311,23 @@ environment variables and a fresh virtual environment, after
 | Parrot | `parrotsec/core` |
 | Qubes | Qubes has no userland of its own; its templates are Debian or Fedora, so `debian:13` and `fedora:42` cover it |
 
-The `distro` job ships in `audit` mode (`distro-egress-policy`). It pulls an
-image and reaches each distribution's package mirrors, and those hosts have
-not been measured the way the other jobs' were, so a block list written now
-would be a guess. It moves to `block` with a measured list in a later
-release, as every job before it did.
+The `distro` job runs in `block` mode with its own list,
+`distro-allowed-endpoints`: Docker Hub for the image pull and the package
+mirrors of the Debian, Ubuntu (amd64 and arm64), Kali and Parrot images. Fedora
+and anything else that uses `dnf` is not on it, because `dnf` picks its mirror
+from a metalink answer that differs from run to run, so no fixed host list
+stays green. A caller testing `fedora:*` sets `distro-egress-policy: audit`
+for that job, or adds the mirrors it observed to `extra-allowed-endpoints`.
+A distribution's own extra repository goes in `extra-allowed-endpoints` too.
+
+Kali and Parrot are pinned: the default `distro-setup-command` rewrites `http.kali.org`
+in the image's apt sources to `kali.download`, because the official redirector
+answers each request with a different mirror and a block list cannot follow
+that. `kali.download` is the CDN behind it and is one name, on port 80.
+Parrot's package redirector (`director.parrot.sh`) rotates the same way, so
+its `deb.parrot.sh/parrot` sources are rewritten to `deb.parrot.sh/direct/parrot`,
+which serves the packages itself. A
+custom `distro-setup-command` that replaces the default loses the pin.
 
 ### Bash CI
 
@@ -362,12 +379,15 @@ Inputs of `bash-ci.yml`:
 | `distros` | `'[]'` (skips the job) | JSON array of container images to run the tests in as well, e.g. `'["debian:13", "kalilinux/kali-rolling"]'`; see [Operating systems](#operating-systems) |
 | `distro-runners` | `'["ubuntu-24.04"]'` | Runner labels the `distros` run on; add `ubuntu-24.04-arm` for native arm64 |
 | `distro-setup-command` | install bash, git and ca-certificates with `apt-get`, else `dnf` | Shell run as root in each image before the install command |
-| `distro-egress-policy` | `audit` | harden-runner policy for the `distro` job only. It pulls an image and package mirrors whose hosts are not yet measured, so it stays in `audit` until a measured list ships |
+| `distro-egress-policy` | `block` | harden-runner policy for the `distro` job only; `audit` for a distribution whose mirrors are not on the list |
+| `distro-allowed-endpoints` | the measured list | The `distro` job's own allow-list, kept apart from `allowed-endpoints`: Docker Hub's image pull, the Debian, Ubuntu, Kali and Parrot mirrors. `extra-allowed-endpoints` is appended to it |
 | `distro-continue-on-error` | `false` | Let a failing distro run leave the gate green, for a suite that assumes a non-root user or a newer Python than the distribution ships. |
 | `test-command` | empty (skips the job) | The shell test suite: `bats tests/`, `./tests/run.sh`, whatever the repository has |
 | `config-lint-install-command` | `pip install yamllint` | Installs the configuration linters, with Python available |
 | `config-lint-command` | empty (skips the job) | Lints the configuration kept beside the scripts: yamllint, ansible-lint |
 | `config-lint-python-version` | `3.13` | Python for that job |
+| `fragment-check-command` | empty (skips the job) | Pull requests only, full history, `BASE` set to the base branch name: the `Changelog fragment` job. See [Pull-request checks](#pull-request-checks) |
+| `commit-claims-command` | empty (skips the job) | Pull requests only, full history, `BASE` and `HEAD` set: the `Commit claims` job. See [Pull-request checks](#pull-request-checks) |
 | `workflow-lint` | `true` | actionlint and zizmor over the caller's own `.github/workflows`; turn off on one job when another caller job already runs it |
 | `zizmor-persona` | `regular` | zizmor strictness: `regular`, `pedantic`, `auditor` |
 | `egress-policy` | `audit` | harden-runner on every job; see [Egress](#egress) |
@@ -664,7 +684,7 @@ Inputs of `verify-published.yml`:
 | `verify-provenance` | `true` | `gh attestation verify oci://<image> --owner <owner>` |
 | `test-command` | empty | Run once per platform with `$IMAGE` set; empty skips |
 | `platforms` | `linux/amd64,linux/arm64` | Platforms to pull and test |
-| `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `audit`, the list, empty | harden-runner; ships in audit until the list is measured |
+| `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `block`, the measured list, empty | harden-runner; the list covers the GHCR pull, Sigstore, and GitHub's attestation store |
 | `timeout-minutes` | `20` | Job timeout |
 
 ### Python package release
@@ -803,6 +823,155 @@ Inputs of `artifact-release.yml`:
 
 The workflow outputs `version`.
 
+### Pull-request checks
+
+`python-ci.yml` and `bash-ci.yml` each take two optional jobs that run on
+pull requests only. Both default to empty, which skips them; both are part of
+the `CI green` gate when set. Both check out the full history
+(`fetch-depth: 0`) so `origin/$BASE` resolves, hold `contents: read` and
+nothing else, and never run the project's tests. The base branch's name and
+the head commit reach the command as environment variables, never by
+expansion into the script.
+
+```yaml
+    with:
+      fragment-check-command: python3 scripts/changelog.py check-pr --base "origin/$BASE"
+      commit-claims-command: python3 scripts/check_commit_claims.py --range "origin/$BASE..HEAD"
+```
+
+- **`fragment-check-command`** (the `Changelog fragment` job; `BASE` is the pull
+  request's base branch). For a repository that keeps one changelog fragment
+  per change under `changelog.d/<pr-or-branch>.<kind>.md` instead of editing
+  `CHANGELOG.md` in the pull request. Every edit to a shared changelog section
+  conflicts with every other pull request; a file each does not. The command
+  is the repository's own script, and a failing exit is what turns the job red:
+  usually "this change touches `src/` and adds no fragment", or "this change
+  edited the Unreleased section".
+- **`commit-claims-command`** (the `Commit claims` job; `BASE` is the base
+  branch, `HEAD` the pull request's head commit, and git's own `HEAD` in the
+  default merge checkout is the merge commit). For a repository whose commit
+  messages make claims a diff can check: "adds a test", "removes the flag",
+  "no functional change". The command reads each commit in the range and
+  compares what it says with what it changed. A repository wants it after a
+  commit message has once said something the diff did not do.
+
+Neither is worth turning on for a repository that has no such script: the
+command is the whole check, and this repository ships none. The first form
+came from Hammunition's `changelog.d/` and its commit-claims check.
+
+### Docs pages
+
+Builds a static site on every pull request and deploys it to GitHub Pages
+from the default branch. Built for MkDocs (`mkdocs build --strict`, with
+`pip install -e ".[docs]"` first), but both commands are inputs, so anything
+that writes a directory of static files fits: Sphinx, mdBook, a script.
+
+```yaml
+name: Docs
+on:
+  push: { branches: [main] }
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  docs:
+    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/docs-pages.yml@<sha> # vX.Y.Z
+    permissions:
+      contents: read
+      pages: write      # the deploy job only
+      id-token: write   # the deploy job only: Pages verifies it
+```
+
+- The `build` job runs your commands with `contents: read` and no token. A
+  strict build fails the pull request, so a broken link is caught in review,
+  not published as a 404.
+- The `deploy` job runs only on the default branch and never on a pull request.
+  It holds `pages: write` and `id-token: write`, runs none of your commands,
+  and uses the fixed concurrency group `pages`, which queues a deployment
+  behind a running one and never cancels it.
+- **The repository owner sets one thing once:** Settings, Pages, Build and
+  deployment, Source: **GitHub Actions**. Until then `deploy` fails with a
+  message that says so and names the URL; `build` is unaffected. `deploy: false`
+  keeps a repository building only until it has made the setting.
+
+| Input | Default | Meaning |
+|---|---|---|
+| `python-version` | `3.11` | Python the install and build run on |
+| `install-command` | `pip install -e ".[docs]"` | Run before the build |
+| `build-command` | `mkdocs build --strict` | Builds the site; a non-zero exit fails the job |
+| `site-dir` | `site` | The directory the build writes, uploaded as the Pages artifact; an empty or missing one fails with a message |
+| `deploy` | `true` | Upload and deploy on the default branch. `false` builds only |
+| `egress-policy` | `audit` | harden-runner on every job |
+| `allowed-endpoints` | `api.github.com`, `files.pythonhosted.org`, `github.com`, `pypi.org` | The allow-list for `block`; not yet measured against a caller, so the default policy is `audit` |
+| `extra-allowed-endpoints` | empty | Appended to the list; a build that fetches fonts or plugins needs its hosts here |
+| `timeout-minutes` | `30` | Per-job timeout |
+
+It came from Hammunition's `pages.yml`, which published its MkDocs site; the
+project-specific parts (its site, its extra, its nav) stayed there.
+
+### Wiki publish
+
+For a repository whose GitHub wiki is a **generated mirror** of something
+else, usually its docs. Never a place to write: every run replaces every page,
+so a page the generator stops writing disappears from the wiki.
+
+```yaml
+name: Wiki
+on:
+  push: { branches: [main] }
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  wiki:
+    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/wiki-publish.yml@<sha> # vX.Y.Z
+    permissions:
+      contents: write   # the publish job only
+    with:
+      install-command: pip install -e ".[docs]"
+      generate-command: python scripts/gen_wiki.py --out "$OUT_DIR" --commit "$SOURCE_SHA"
+```
+
+- Two jobs. `generate` has `contents: read`, runs `install-command` and
+  `generate-command` and keeps the tree as an artifact; it runs on pull requests
+  too, so a broken generator fails the review. `publish` has `contents: write`,
+  checks nothing out and runs none of your commands, so the write token never
+  sits beside your code. The token reaches git as a one-command header, never
+  in a remote URL.
+- The generator writes pages as flat files into `$OUT_DIR` (the `out-dir`
+  input, inside the repository) and may read `$SOURCE_SHA`. An empty tree is
+  refused, because publishing it would empty the wiki.
+- `publish` runs only from the default branch, whatever started the run, and
+  never from a pull request. The commit is by `github-actions[bot]` and names
+  the source commit. Nothing is pushed when the tree is unchanged. The fixed
+  concurrency group `wiki` runs one publish at a time and never cancels one
+  halfway through a push.
+- **The repository owner does one thing once, and GitHub offers it only in the
+  UI:** a wiki's git repository does not exist until its first page is made.
+  Open `<repository url>/wiki`, create any page, then re-run. Until then
+  `publish` fails with exactly that instruction. The wiki must also be enabled
+  in the repository's settings.
+
+| Input | Default | Meaning |
+|---|---|---|
+| `generate-command` | required | Writes the wiki tree into `$OUT_DIR`; `$SOURCE_SHA` is the commit published |
+| `out-dir` | `wiki-out` | Where the generator writes, relative to the repository root and inside it |
+| `python-version` | `3.11` | Python the install and generate commands run on |
+| `install-command` | empty (installs nothing) | Run before the generator |
+| `publish` | `true` | Push to the wiki. `false` generates and keeps the tree only |
+| `egress-policy` | `audit` | harden-runner on every job |
+| `allowed-endpoints` | `api.github.com`, `files.pythonhosted.org`, `github.com`, `pypi.org` | The allow-list for `block`; not yet measured against a caller |
+| `extra-allowed-endpoints` | empty | Appended to the list |
+| `timeout-minutes` | `30` | Per-job timeout |
+
+It came from Hammunition's `wiki.yml`, split into two jobs so the write token
+is never beside the generator.
+
 ### Security
 
 ```yaml
@@ -860,7 +1029,8 @@ Inputs of `security.yml`:
 | `semgrep-config` | empty (auto-detect) | `p/github-actions p/secrets`, adding `p/python` only when tracked Python files exist. A nonempty value replaces these defaults: space-separated configs, each passed as `--config`; registry packs or paths in the repository. Shell-only repositories use the two base packs; no `p/bash` or `p/shell` registry pack exists, so `bash-ci.yml`'s ShellCheck provides shell coverage |
 | `semgrep-version` | `1.179.0` | Semgrep release installed with pip |
 | `semgrep-continue-on-error` | `false` | Report findings without failing (they still reach the Security tab). Without it the scan runs with `--error` and a finding fails the job. A migration aid |
-| `semgrep-egress-policy` | `audit` | harden-runner policy for the Semgrep job only. The job reaches `semgrep.dev` for the rule registry, a host nobody has measured yet, so Semgrep ships in `audit` while the other jobs may already `block`; it moves to `block` with a measured list later, like every job before it |
+| `semgrep-egress-policy` | `block` | harden-runner policy for the Semgrep job only |
+| `semgrep-allowed-endpoints` | the measured list | The Semgrep job's own allow-list: PyPI for the pip install, `semgrep.dev` for the rule registry, and GitHub for the SARIF upload. `extra-allowed-endpoints` is appended to it, for a private rule registry or a config fetched from another host |
 | `snyk` | `false` | Snyk Code and Snyk Open Source; needs `SNYK_TOKEN` in the Doppler config. Runs only on a trusted ref, never on a pull request |
 | `scorecard` | `false` | OpenSSF Scorecard, published; runs only on the default branch (push or schedule) |
 | `python-version` | `3.13` | Python for pip-audit and Snyk |
@@ -1059,7 +1229,6 @@ All four language CI workflows include the workflow-lint hosts in their
 defaults: `registry.npmjs.org:443` for actionlint's npm install,
 `raw.githubusercontent.com:443` for its downloads, and `ghcr.io:443` plus
 `pkg-containers.githubusercontent.com:443` for zizmor's image and layers.
-The Bash fixture runs workflow lint under `block` without extra endpoints.
 The Semgrep pack contract tests also need access to `semgrep.dev`: they
 resolve every automatically selected registry pack and reject missing or
 empty rule sets.
@@ -1070,6 +1239,18 @@ installer its Dockerfile pulls, goes in `extra-allowed-endpoints` on that
 caller, not in the shared default. A blocked connection shows in the job log
 as `domain not allowed: <host>`, which is also how a new dependency announces
 itself.
+
+The `distro` lists (`distro-allowed-endpoints` in `python-ci.yml` and
+`bash-ci.yml`) were measured in `block` mode on the fixture's Debian 12 and 13,
+Ubuntu 24.04, Kali and Parrot images on both runners:
+[run 37131671587](https://github.com/ChiefGyk3D/git-your-ship-together/actions/runs/37131671587).
+`semgrep-allowed-endpoints` was measured the same way in
+[run 37131671510](https://github.com/ChiefGyk3D/git-your-ship-together/actions/runs/37131671510),
+and `verify-published.yml`'s list (its `fixture verify` job, which refused
+GitHub's attestation store until `tmaproduction.blob.core.windows.net` was
+added) in the CI run above. Fedora was not measured: `dnf` takes its mirror from a
+metalink answer that varies per run, so `fedora:*` needs `distro-egress-policy`
+set to `audit`, or the mirrors it reached in `extra-allowed-endpoints`.
 
 The Snyk hosts in `security.yml`'s default (`api`, `app`, `deeproxy`,
 `downloads` and `static` under `snyk.io`) came from Snyk's documentation

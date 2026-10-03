@@ -371,7 +371,9 @@ def check_workflows(repo: str, fetch: Fetcher) -> tuple[list[Result], bool, set[
         if REUSABLE_PREFIX in text:
             callers += 1
         gates |= expected_gates(text)
-        if "DOPPLER_IDENTITY_ID" in text:
+        # The shared variable, as a whole word: audit.yml reads its own
+        # AUDIT_DOPPLER_IDENTITY_ID, which must not count.
+        if re.search(r"(?<![A-Z_])DOPPLER_IDENTITY_ID", text):
             reads_doppler = True
         exceptions |= exceptions_in(text)
         findings.extend(workflow_findings(name, text))

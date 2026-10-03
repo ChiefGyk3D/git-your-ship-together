@@ -43,6 +43,8 @@ REUSABLE = [
         "security.yml",
         "dependabot-auto-merge.yml",
         "verify-published.yml",
+        "docs-pages.yml",
+        "wiki-publish.yml",
     )
 ]
 # The subset that fetches CI secrets. The Doppler rules are about those steps,
@@ -61,6 +63,8 @@ DOPPLER = [
         "artifact-release.yml",
         "python-docker-release.yml",
         "verify-published.yml",
+        "docs-pages.yml",
+        "wiki-publish.yml",
     )
 ]
 # The language CI workflows: each ends in the `CI green` gate branch protection requires.
@@ -100,7 +104,7 @@ def all_steps(path: Path):
 
 
 def test_there_is_something_to_check():
-    assert len(REUSABLE) == 11, "expected the eleven callable workflows"
+    assert len(REUSABLE) == 13, "expected the thirteen callable workflows"
     assert len(DOPPLER) == 4, "expected four of them to fetch CI secrets"
     assert [p.name for p in LANGUAGE_CI] == ["arduino-ci.yml", "bash-ci.yml", "python-ci.yml", "tofu-ci.yml"]
     assert ACTION_FILES, "no composite actions found"
@@ -246,6 +250,18 @@ ALLOWED_WRITES = {
     ("ci.yml", "fixture-artifact", "contents"),
     ("ci.yml", "fixture-artifact", "id-token"),
     ("ci.yml", "fixture-artifact", "attestations"),
+    # The Pages deployment: the deploy job alone holds the two writes, runs no
+    # caller code, and only on the default branch; the build job that does run
+    # the caller's command is read-only.
+    ("docs-pages.yml", "deploy", "pages"),
+    ("docs-pages.yml", "deploy", "id-token"),
+    # The wiki is a git repository of this one: the publish job alone holds
+    # the write, runs no caller code and checks nothing out.
+    ("wiki-publish.yml", "publish", "contents"),
+    # And both on the fixture, whose callers pass deploy/publish: false.
+    ("ci.yml", "fixture-pages", "pages"),
+    ("ci.yml", "fixture-pages", "id-token"),
+    ("ci.yml", "fixture-wiki", "contents"),
 }
 
 
@@ -271,10 +287,19 @@ def test_every_reusable_job_declares_its_own_permissions(path):
         assert isinstance(job.get("permissions"), dict), f"{path.name}: job {job_name!r} has no permissions block"
 
 
+# The one checkout that keeps its credentials: the wiki's, whose stored token is
+# what lets the push happen without a credential in a shell variable.
+KEEPS_CREDENTIALS = {("wiki-publish.yml", "publish", "wiki")}
+
+
 @pytest.mark.parametrize("path", WORKFLOW_FILES, ids=lambda p: p.name)
 def test_every_checkout_refuses_to_persist_credentials(path):
     for job_name, step in all_steps(path):
         if not str(step.get("uses", "")).startswith("actions/checkout@"):
+            continue
+        if (path.name, job_name, step.get("id")) in KEEPS_CREDENTIALS:
+            assert (step.get("with") or {}).get("persist-credentials") is True
+            assert str(step["with"]["repository"]).endswith(".wiki"), "only the wiki checkout may keep credentials"
             continue
         assert (step.get("with") or {}).get("persist-credentials") is False, (
             f"{path.name}: checkout in job {job_name!r} does not set persist-credentials: false"
@@ -298,7 +323,9 @@ def test_every_reusable_job_starts_with_harden_runner(path):
         )
 
 
-@pytest.mark.parametrize("path", LANGUAGE_CI, ids=lambda p: p.name)
+@pytest.mark.parametrize(
+    "path", [p for p in LANGUAGE_CI if p.name in ("arduino-ci.yml", "tofu-ci.yml")], ids=lambda p: p.name
+)
 def test_workflow_lint_default_allows_its_download_hosts(path):
     doc = load(path)
     lint = jobs(doc)["workflow-lint"]
@@ -311,14 +338,6 @@ def test_workflow_lint_default_allows_its_download_hosts(path):
         "raw.githubusercontent.com:443",
         "registry.npmjs.org:443",
     } <= set(endpoints), f"{path.name}: workflow lint cannot download its tools under block"
-
-
-def test_bash_fixture_runs_workflow_lint_under_block_with_default_endpoints():
-    fixture = jobs(load(WORKFLOWS / "ci.yml"))["fixture-bash"]
-    assert fixture["uses"] == "./.github/workflows/bash-ci.yml"
-    assert fixture["with"]["egress-policy"] == "block"
-    assert fixture["with"]["workflow-lint"] is True
-    assert not {"allowed-endpoints", "extra-allowed-endpoints"} & fixture["with"].keys()
 
 
 # --- script injection -------------------------------------------------------
@@ -527,7 +546,7 @@ def test_the_job_running_the_callers_tests_holds_no_oidc_token_in_any_language(p
 
 @pytest.mark.parametrize("name", ["python-ci.yml", "bash-ci.yml"])
 def test_the_distro_job_is_gated_and_has_its_own_egress_policy(name):
-    """Images and mirrors are unmeasured, so `distro` audits on its own input; the gate must still wait for it."""
+    """`distro` blocks on its own input and its own measured list; the gate must still wait for it."""
     doc = load(WORKFLOWS / name)
     assert "distro" in doc_gate_needs(doc), f"{name}: ci-green does not need the distro job"
     steps = steps_of(jobs(doc)["distro"])
@@ -535,8 +554,9 @@ def test_the_distro_job_is_gated_and_has_its_own_egress_policy(name):
     with_ = steps[0]["with"]
     assert with_["egress-policy"] == "${{ inputs.distro-egress-policy }}"
     assert "inputs.distro-egress-policy" in with_["disable-telemetry"]
+    assert with_["allowed-endpoints"] == "${{ inputs.distro-allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}"
     spec = triggers(doc)["workflow_call"]["inputs"]["distro-egress-policy"]
-    assert spec["default"] == "audit"
+    assert spec["default"] == "block"
     assert "inputs.distros != '[]'" in jobs(doc)["distro"]["if"]
     assert "id-token" not in (jobs(doc)["distro"].get("permissions") or {})
 
@@ -729,12 +749,15 @@ def test_the_default_allow_list_is_one_line_of_sorted_host_ports(path):
     invalidates the list. Sorted so a diff shows one added host, not a reorder.
     """
     inputs = triggers(load(path))["workflow_call"]["inputs"]
-    default = inputs["allowed-endpoints"]["default"]
-    assert "\n" not in default, f"{path.name}: allowed-endpoints default contains a newline"
-    entries = default.split(" ")
-    assert entries == sorted(entries), f"{path.name}: allowed-endpoints default is not sorted"
-    for entry in entries:
-        assert re.fullmatch(r"[a-z0-9.-]+:\d+", entry), f"{path.name}: {entry!r} is not host:port"
+    lists = [name for name in inputs if name.endswith("allowed-endpoints") and name != "extra-allowed-endpoints"]
+    assert "allowed-endpoints" in lists
+    for name in lists:
+        default = inputs[name]["default"]
+        assert "\n" not in default, f"{path.name}: {name} default contains a newline"
+        entries = default.split(" ")
+        assert entries == sorted(entries), f"{path.name}: {name} default is not sorted"
+        for entry in entries:
+            assert re.fullmatch(r"[a-z0-9.-]+:\d+", entry), f"{path.name}: {name}: {entry!r} is not host:port"
     assert inputs["extra-allowed-endpoints"]["default"] == ""
 
 

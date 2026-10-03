@@ -668,3 +668,12 @@ def test_the_expiring_flag_counts_from_the_date_it_is_given(monkeypatch, capsys)
     assert audit.main(["--expiring", "0", "--today", "2026-09-30"]) == 0
     out = capsys.readouterr().out.splitlines()
     assert [line.split("\t")[1] for line in out] == ["GHSA-past", "GHSA-soon", "GHSA-nodate"]
+
+
+def test_a_prefixed_identity_variable_does_not_count_as_the_shared_one():
+    """audit.yml reads AUDIT_DOPPLER_IDENTITY_ID; only vars.DOPPLER_IDENTITY_ID means the shared identity."""
+    import re
+
+    pattern = re.compile(r"(?<![A-Z_])DOPPLER_IDENTITY_ID")
+    assert pattern.search("doppler-identity-id: ${{ vars.DOPPLER_IDENTITY_ID }}")
+    assert not pattern.search("identity: ${{ vars.AUDIT_DOPPLER_IDENTITY_ID }}")

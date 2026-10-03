@@ -88,6 +88,14 @@ on:
         description: Shell that type-checks, e.g. `mypy src`; empty skips the `Type check` job.
         type: string
         default: ""
+      fragment-check-command:
+        description: Shell run on pull requests only, with the full history checked out and `BASE` set to the pull request's base branch name (so `origin/$BASE` resolves); empty skips the `Changelog fragment` job. For a repository that keeps one changelog fragment per change under `changelog.d/`, e.g. `python3 scripts/changelog.py check-pr --base "origin/$BASE"`. Part of the gate when set.
+        type: string
+        default: ""
+      commit-claims-command:
+        description: Shell run on pull requests only, with the full history checked out, `BASE` set to the base branch name and `HEAD` to the pull request's head commit; empty skips the `Commit claims` job. For a repository that checks what each commit message claims against its diff, e.g. `python3 scripts/check_commit_claims.py --range "origin/$BASE..HEAD"`. Part of the gate when set.
+        type: string
+        default: ""
       smoke-command:
         description: Shell run after `smoke-install-command` on `coverage-python-version`; empty skips the job.
         type: string
@@ -138,6 +146,16 @@ on:
         default: |
           export DEBIAN_FRONTEND=noninteractive
           if command -v apt-get >/dev/null 2>&1; then
+            # Kali's redirector hands out a different mirror per request, which
+            # no egress list can follow; the CDN host it fronts is one name.
+            if grep -qx 'ID=kali' /etc/os-release; then
+              sed -i 's|http://http.kali.org|http://kali.download|g' /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources 2>/dev/null || true
+            fi
+            # Parrot's package redirector (director.parrot.sh) does the same;
+            # its /direct path serves the pool from deb.parrot.sh itself.
+            if grep -qx 'ID=parrot' /etc/os-release; then
+              sed -i 's|https://deb.parrot.sh/parrot|https://deb.parrot.sh/direct/parrot|g' /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources 2>/dev/null || true
+            fi
             # A mirror that answers 502 is not retried by apt itself, so the
             # whole step is tried three times with a pause between.
             for attempt in 1 2 3; do
@@ -150,9 +168,13 @@ on:
             dnf install -y -q python3 python3-pip git ca-certificates
           fi
       distro-egress-policy:
-        description: harden-runner egress policy for the `distro` job. It pulls a distribution image and its package mirrors, whose hosts are not yet measured, so it ships in `audit` and moves to `block` with a measured list in a later release, like every job before it.
+        description: harden-runner egress policy for the `distro` job - `audit` logs outbound connections, `block` allows only `distro-allowed-endpoints` and `extra-allowed-endpoints`.
         type: string
-        default: audit
+        default: block
+      distro-allowed-endpoints:
+        description: harden-runner allow-list for the `distro` job in `block`, space-separated host:port entries. The default is Docker Hub's image pull, the package mirrors of the Debian, Ubuntu, Kali and Parrot images, and the PyPI hosts the install command reaches. A distribution not named here (Fedora, whose metalink mirrors vary by run) needs its hosts in `extra-allowed-endpoints`, or `distro-egress-policy` set to `audit`. Wildcards are not supported and a newline-separated list matches nothing.
+        type: string
+        default: "archive.ubuntu.com:80 auth.docker.io:443 deb.debian.org:80 deb.parrot.sh:443 files.pythonhosted.org:443 kali.download:80 ports.ubuntu.com:80 production.cloudfront.docker.com:443 pypi.org:443 registry-1.docker.io:443 security.ubuntu.com:80"
       distro-continue-on-error:
         description: Let a failing distro run leave the gate green. For a suite that assumes a non-root user or a newer Python than the distribution ships; the result stays visible on the job.
         type: boolean
@@ -409,7 +431,7 @@ jobs:
       - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
         with:
           egress-policy: ${{ inputs.distro-egress-policy }}
-          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          allowed-endpoints: ${{ inputs.distro-allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
           disable-sudo: true
           # The agent may only stop reporting to StepSecurity in block mode.
           disable-telemetry: ${{ inputs.distro-egress-policy == 'block' }}
@@ -631,12 +653,70 @@ jobs:
           COMMAND: ${{ inputs.docker-test-command }}
         run: bash -eo pipefail -c "$COMMAND"
 
+  # Two checks that only mean something on a pull request and that a caller
+  # opts into with a command. Neither runs the project's tests or holds a
+  # token; both need the whole history, so the base branch resolves.
+  fragment-check:
+    name: Changelog fragment
+    if: github.event_name == 'pull_request' && inputs.fragment-check-command != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: ${{ inputs.egress-policy }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          disable-sudo: true
+          # The agent may only stop reporting to StepSecurity in block mode.
+          disable-telemetry: ${{ inputs.egress-policy == 'block' }}
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check the changelog fragment
+        env:
+          COMMAND: ${{ inputs.fragment-check-command }}
+          BASE: ${{ github.base_ref }}
+        run: bash -eo pipefail -c "$COMMAND"
+
+  commit-claims:
+    name: Commit claims
+    if: github.event_name == 'pull_request' && inputs.commit-claims-command != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: ${{ inputs.egress-policy }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          disable-sudo: true
+          # The agent may only stop reporting to StepSecurity in block mode.
+          disable-telemetry: ${{ inputs.egress-policy == 'block' }}
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check what each commit claims
+        env:
+          COMMAND: ${{ inputs.commit-claims-command }}
+          BASE: ${{ github.base_ref }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: bash -eo pipefail -c "$COMMAND"
+
   # The one job branch protection should require. `always()` so it runs when
   # a needed job was skipped; the shell then decides what counts as green.
   ci-green:
     name: CI green
     if: always()
-    needs: [lint, typecheck, workflow-lint, test, distro, coverage, smoke, docker]
+    needs: [lint, typecheck, workflow-lint, test, distro, coverage, smoke, docker, fragment-check, commit-claims]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}

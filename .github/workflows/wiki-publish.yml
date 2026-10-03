@@ -1,0 +1,220 @@
+# Reusable publish of a generated GitHub wiki.
+#
+# The wiki is a mirror, never a place to write: the caller's `generate-command`
+# writes a tree of pages, and this workflow replaces every page in the wiki
+# with it, so a page the generator stops writing disappears. It commits as
+# github-actions[bot] with the source commit in the message and pushes only
+# when something changed.
+#
+# Call it from a repository with:
+#
+#   on:
+#     push: { branches: [main] }
+#     workflow_dispatch:
+#   jobs:
+#     wiki:
+#       uses: ChiefGyk3D/git-your-ship-together/.github/workflows/wiki-publish.yml@<sha> # vX.Y.Z
+#       permissions:
+#         contents: write        # the publish job only
+#       with:
+#         install-command: pip install -e ".[docs]"
+#         generate-command: python scripts/gen_wiki.py --out "$OUT_DIR" --commit "$SOURCE_SHA"
+#
+# Two jobs, so the caller's code never runs beside a write token: `generate`
+# has `contents: read`, runs the caller's commands and uploads the tree as an
+# artifact; `publish` has `contents: write`, runs none of the caller's code,
+# and sends the tree to the wiki. The wiki is checked out with
+# actions/checkout, which stores the token for git itself, so the credential
+# never passes through a shell variable, an argument or a URL.
+#
+# It generates on every run, a pull request included, so a broken generator
+# fails the review; it publishes only from a run on the default branch,
+# whatever the trigger, and never from a pull request. One setting precedes the first run, and GitHub
+# offers it only through the UI: a wiki's git repository does not exist until
+# its first page is created. Until then `publish` fails with a message naming
+# that step.
+#
+# Commands a caller supplies reach the shell through an environment variable,
+# never by template expansion into the script, so a value can only be data.
+
+name: Wiki publish (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      generate-command:
+        description: Shell that writes the wiki tree (pages as files, flat, the way a wiki stores them) into `$OUT_DIR`. `$SOURCE_SHA` holds the commit being published. The tree must be non-empty; an empty one is refused rather than published as an empty wiki.
+        type: string
+        required: true
+      out-dir:
+        description: Directory the generator writes, relative to the repository root and inside it. Exported to `generate-command` as `$OUT_DIR`.
+        type: string
+        default: wiki-out
+      python-version:
+        description: Python used by the install and generate commands.
+        type: string
+        default: "3.11"
+      install-command:
+        description: Shell run before `generate-command`, e.g. the project's docs extra; empty installs nothing.
+        type: string
+        default: ""
+      publish:
+        description: Push the tree to the wiki. `false` generates and uploads it without publishing, for a repository that is trying the workflow.
+        type: boolean
+        default: true
+      egress-policy:
+        description: harden-runner egress policy for every job - `audit` logs outbound connections, `block` allows only `allowed-endpoints`.
+        type: string
+        default: audit
+      allowed-endpoints:
+        description: harden-runner allow-list for `block`, space-separated host:port entries. Wildcards are not supported and a newline-separated list matches nothing. The runner's own infrastructure needs no entry.
+        type: string
+        default: "api.github.com:443 files.pythonhosted.org:443 github.com:443 pypi.org:443"
+      extra-allowed-endpoints:
+        description: Appended to `allowed-endpoints`, for hosts only this repository reaches. Same format.
+        type: string
+        default: ""
+      timeout-minutes:
+        description: Per-job timeout.
+        type: number
+        default: 30
+
+permissions:
+  contents: read
+
+jobs:
+  generate:
+    name: Generate the wiki pages
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read  # no write token here: this job runs the caller's own code
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: ${{ inputs.egress-policy }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          disable-sudo: true
+          # The agent may only stop reporting to StepSecurity in block mode.
+          disable-telemetry: ${{ inputs.egress-policy == 'block' }}
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - name: Install
+        if: inputs.install-command != ''
+        env:
+          COMMAND: ${{ inputs.install-command }}
+        run: bash -eo pipefail -c "$COMMAND"
+
+      - name: Generate the wiki pages
+        env:
+          COMMAND: ${{ inputs.generate-command }}
+          OUT_DIR: ${{ inputs.out-dir }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          case "$OUT_DIR" in
+            /* | ".." | ../* | */.. | */../*)
+              echo "::error title=Wiki publish::out-dir must be a directory inside the repository, not '$OUT_DIR'"
+              exit 1 ;;
+          esac
+          bash -eo pipefail -c "$COMMAND"
+          if [ ! -d "$OUT_DIR" ] || [ -z "$(ls -A "$OUT_DIR")" ]; then
+            echo "::error title=Wiki publish::generate-command wrote nothing to '$OUT_DIR'; publishing it would empty the wiki"
+            exit 1
+          fi
+
+      - name: Keep the tree for the publish job
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: wiki-tree
+          path: ${{ inputs.out-dir }}
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish to the wiki
+    if: inputs.publish && github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    needs: generate
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: write  # the wiki is a git repository of this one; no caller code and no checkout here
+    # One publish at a time, and never cancel one halfway through a push.
+    concurrency:
+      group: wiki
+      cancel-in-progress: false
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: ${{ inputs.egress-policy }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          disable-sudo: true
+          # The agent may only stop reporting to StepSecurity in block mode.
+          disable-telemetry: ${{ inputs.egress-policy == 'block' }}
+
+      - name: Download the generated tree
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: wiki-tree
+          path: ${{ runner.temp }}/wiki-tree
+
+      # The wiki is a git repository of this one. The one checkout in this
+      # workflow that keeps its credentials: checkout stores the token in that
+      # clone's own git config and git sends it from there, so no credential
+      # passes through a shell variable or an argument. A wiki with no first
+      # page cannot be cloned; the next step turns that into the instruction.
+      - name: Check out the wiki
+        id: wiki
+        continue-on-error: true
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ github.repository }}.wiki
+          path: wiki
+          token: ${{ github.token }}
+          persist-credentials: true  # deliberate, for this checkout only: the push below needs it
+
+      - name: Check that the wiki exists
+        env:
+          REPO: ${{ github.repository }}
+          SERVER_URL: ${{ github.server_url }}
+        run: |
+          set -euo pipefail
+          # GitHub creates the wiki's git repository only when its first page
+          # is made in the UI, so a failed checkout here means that.
+          if [ ! -d wiki/.git ]; then
+            echo "::error title=Wiki publish::The wiki has no first page yet: open $SERVER_URL/$REPO/wiki, create any page once, then re-run"
+            exit 1
+          fi
+
+      - name: Replace the wiki's contents and push if anything changed
+        env:
+          REPO: ${{ github.repository }}
+          SOURCE_SHA: ${{ github.sha }}
+          TREE: ${{ runner.temp }}/wiki-tree
+        run: |
+          set -euo pipefail
+          if [ -z "$(ls -A "$TREE")" ]; then
+            echo "::error title=Wiki publish::the generated tree is empty; publishing it would empty the wiki"
+            exit 1
+          fi
+          # Remove every tracked page, then write the generated tree: a page
+          # the generator no longer writes disappears from the wiki.
+          git -C wiki rm -rq --ignore-unmatch .
+          cp -a "$TREE"/. wiki/
+          git -C wiki add -A
+          if git -C wiki diff --cached --quiet; then
+            echo "The wiki is already current."
+            exit 0
+          fi
+          git -C wiki -c user.name="github-actions[bot]" \
+            -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit --quiet -m "Regenerate the wiki from $REPO at $SOURCE_SHA"
+          git -C wiki push --quiet origin HEAD

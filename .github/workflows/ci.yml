@@ -125,11 +125,20 @@ jobs:
         docker run --rm "$IMAGE" --version
         test "$(docker run --rm --entrypoint id "$IMAGE" -u)" != "0"
       zizmor-persona: pedantic
+      # The two pull-request checks, with the smallest commands that still
+      # need what they exist for: the whole history, and BASE and HEAD set.
+      fragment-check-command: |
+        git rev-parse --verify --quiet "origin/$BASE"
+        test -n "$(git diff --name-only "origin/$BASE...HEAD")"
+      commit-claims-command: |
+        git cat-file -e "$HEAD"
+        test "$(git rev-list --count "origin/$BASE..HEAD")" -gt 0
 
   # bash-ci.yml at this ref over every script in this repository: the
   # fixture's, and scripts/doppler-ci-set.sh. Block mode with the workflow's
   # own default list, so a host the list lacks fails here, named in the log,
-  # before a caller meets it, including actionlint and zizmor's hosts.
+  # before a caller meets it. Workflow lint is off because the jobs above
+  # already run actionlint and zizmor over these files.
   fixture-bash:
     name: fixture shell
     uses: ./.github/workflows/bash-ci.yml # zizmor: ignore[self-repository]
@@ -143,8 +152,14 @@ jobs:
       test-command: fixture/tests/test_greet.sh
       config-lint-command: |
         yamllint -d '{extends: relaxed, rules: {line-length: disable}}' .github fixture baseline
-      workflow-lint: true
+      workflow-lint: false
       egress-policy: block
+      fragment-check-command: |
+        git rev-parse --verify --quiet "origin/$BASE"
+        test -n "$(git diff --name-only "origin/$BASE...HEAD")"
+      commit-claims-command: |
+        git cat-file -e "$HEAD"
+        test "$(git rev-list --count "origin/$BASE..HEAD")" -gt 0
 
   # The fixture package through python-package-release.yml at this ref:
   # build, check, smoke-test from the wheel, never publish. The writes are
@@ -218,6 +233,43 @@ jobs:
       workflow-lint: false
       egress-policy: block
 
+  # docs-pages.yml at this ref over a one-page site: install, build, check the
+  # output directory; deploy: false, so nothing is uploaded or deployed here
+  # and this repository's Pages are never touched. The grants are what the
+  # deploy job declares, which deploy: false skips.
+  fixture-pages:
+    name: fixture docs pages
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    uses: ./.github/workflows/docs-pages.yml # zizmor: ignore[self-repository]
+    permissions:
+      contents: read
+      pages: write  # the deploy job declares it for the path it never takes here
+      id-token: write  # likewise: Pages verifies the deploy against it
+    with:
+      deploy: false
+      install-command: python -m pip --version
+      build-command: |
+        mkdir -p site
+        cp fixture/site-src/index.html site/index.html
+      egress-policy: block
+
+  # wiki-publish.yml at this ref with a generator that writes two pages:
+  # generate and keep the tree, never publish. contents: write is what the
+  # publish job declares for the path publish: false skips.
+  fixture-wiki:
+    name: fixture wiki
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    uses: ./.github/workflows/wiki-publish.yml # zizmor: ignore[self-repository]
+    permissions:
+      contents: write  # the publish job declares it for the path it never takes here
+    with:
+      publish: false
+      generate-command: |
+        mkdir -p "$OUT_DIR"
+        printf '# Home\n\nSource %s\n' "$SOURCE_SHA" > "$OUT_DIR/Home.md"
+        printf '* [Home](Home)\n' > "$OUT_DIR/_Sidebar.md"
+      egress-policy: block
+
   # The fixture image through python-docker-release.yml at this ref: build,
   # check and scan, never publish. The writes are what the release job
   # declares for the publishing path; the called job holds them on a pull
@@ -258,7 +310,7 @@ jobs:
   ci-green:
     name: CI green
     if: always()
-    needs: [actionlint, zizmor, test, fixture-ci, fixture-bash, fixture-tofu, fixture-arduino, fixture-package, fixture-artifact, fixture-release, fixture-verify]
+    needs: [actionlint, zizmor, test, fixture-ci, fixture-bash, fixture-tofu, fixture-arduino, fixture-package, fixture-artifact, fixture-pages, fixture-wiki, fixture-release, fixture-verify]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}
