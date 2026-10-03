@@ -578,6 +578,14 @@ Inputs of `container-release.yml`:
 | `push` | `false` | Publish. `false` builds, tests and scans only |
 | `tags` | branch, pr, semver ×3, sha, `latest` on the default branch | `docker/metadata-action` tag rules |
 | `docker-test-command` | empty | Run against the locally built image; `$IMAGE` names it |
+| `hadolint` | `true` | Lint the Dockerfile with hadolint before building |
+| `hadolint-version` | `2.15.1` | hadolint release, downloaded as a pinned binary and cached |
+| `hadolint-sha256-amd64`, `hadolint-sha256-arm64` | the hashes of 2.15.1 | SHA-256 of each Linux binary; the one for the runner's architecture is checked on every run. Change them with the version |
+| `hadolint-args` | `--failure-threshold warning` | Arguments before the Dockerfile path |
+| `hadolint-continue-on-error` | `false` | Report findings without failing, while a Dockerfile is being cleaned up |
+| `require-non-root` | `true` | Fail when `docker run --entrypoint id <image> -u` prints `0`. Fix: a `USER` instruction. Turn off for a distroless or scratch image that has no `id` |
+| `probe-read-only` | `false` | Also run the image with `--read-only --tmpfs /tmp` and fail if it breaks. Enable once the image writes only under tmpfs or volumes |
+| `probe-command` | empty | Arguments for that probe, given to the image's own entrypoint: `docker run --rm --read-only --tmpfs /tmp "$IMAGE" <probe-command>`. It must exit by itself, such as `--version`; required when `probe-read-only` is true |
 | `dockerhub` | `false` | Also publish to Docker Hub, credentials from Doppler |
 | `dockerhub-repository` | repository name, lower-cased | Docker Hub repository name |
 | `sign` | `true` | cosign keyless signature |
@@ -585,7 +593,7 @@ Inputs of `container-release.yml`:
 | `provenance` | `true` | GitHub Artifact Attestation (SLSA provenance) |
 | `trivy` | `true` | Scan the image, upload SARIF |
 | `trivy-severity` | `CRITICAL,HIGH` | Severities reported |
-| `trivy-exit-code` | `"0"` | `"1"` makes findings fail the job |
+| `trivy-exit-code` | `"0"` | `"1"` makes findings fail the job. The default stays advisory until each calling repository's image is known clean; a caller flips it in its own pull request once its image is clean |
 | `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `audit`, the measured list, empty | harden-runner, as in `python-ci.yml` |
 | `doppler-project`, `doppler-config`, `doppler-identity-id` | empty | See [Doppler setup](#doppler-setup) |
 | `doppler-trusted-refs-only` | `true` | Fetch CI secrets only on the default branch, a tag or a schedule; never on a pull request. See [Doppler setup](#doppler-setup) |
