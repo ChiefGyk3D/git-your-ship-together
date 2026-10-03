@@ -11,3 +11,8 @@ ChiefGyk3D/jumpcloud-wazuh-bridge
 ChiefGyk3D/yomama-as-a-service
 ChiefGyk3D/penguin-overlord
 ChiefGyk3D/hammunition-bunker
+ChiefGyk3D/mother-ticker
+ChiefGyk3D/hypeman
+ChiefGyk3D/the-great-infocon-recovery
+ChiefGyk3D/hammunition-hill
+ChiefGyk3D/dell-battery-balance
