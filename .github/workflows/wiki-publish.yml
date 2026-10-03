@@ -176,9 +176,9 @@ jobs:
           set -euo pipefail
           url="$SERVER_URL/$REPO"
           creds=$(printf 'x-access-token:%s' "$TOKEN" | base64 -w0)
-          # Not echoed anywhere (no `set -x`, and git never prints a header);
-          # `::add-mask::` is deliberately not used, because a workflow command
-          # can be switched off by whoever can edit the workflow.
+          # Not echoed anywhere (no `set -x`, and git never prints a header).
+          # No log-masking command is used: whoever can edit a workflow can
+          # switch workflow commands off.
           wiki_git() { git -c "http.extraheader=Authorization: Basic $creds" "$@"; }
 
           if [ -z "$(ls -A "$TREE")" ]; then
