@@ -699,13 +699,19 @@ print(text[:start] + text[end:], end="")')
 
 # ---- git and the pull request ---------------------------------------------
 
-commit_and_pr() {
+# The branch is made and the old workflows removed BEFORE the caller files
+# are written: a generated name that matches an old one (ci.yml,
+# security.yml) would otherwise be an overwritten file that `git rm` refuses.
+prepare_branch() {
   local f
   git -C "$path" fetch -q origin
   git -C "$path" checkout -q -B "$BRANCH" "origin/$default_branch"
   for f in "${old_workflows[@]}"; do
-    git -C "$path" rm -q ".github/workflows/$f"
+    git -C "$path" rm -q -- ".github/workflows/$f"
   done
+}
+
+commit_and_pr() {
   git -C "$path" add .github
   if git -C "$path" diff --cached --quiet; then
     echo "nothing to commit: the caller files are already in place"
@@ -779,6 +785,7 @@ if $dry_run; then
 fi
 
 out=$path
+prepare_branch
 write_files
 commit_and_pr
 apply_settings
