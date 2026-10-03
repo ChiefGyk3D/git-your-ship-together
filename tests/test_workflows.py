@@ -504,7 +504,7 @@ def test_the_job_running_the_callers_tests_holds_no_oidc_token_in_any_language(p
 
 @pytest.mark.parametrize("name", ["python-ci.yml", "bash-ci.yml"])
 def test_the_distro_job_is_gated_and_has_its_own_egress_policy(name):
-    """Images and mirrors are unmeasured, so `distro` audits on its own input; the gate must still wait for it."""
+    """`distro` blocks on its own input and its own measured list; the gate must still wait for it."""
     doc = load(WORKFLOWS / name)
     assert "distro" in doc_gate_needs(doc), f"{name}: ci-green does not need the distro job"
     steps = steps_of(jobs(doc)["distro"])
@@ -512,8 +512,9 @@ def test_the_distro_job_is_gated_and_has_its_own_egress_policy(name):
     with_ = steps[0]["with"]
     assert with_["egress-policy"] == "${{ inputs.distro-egress-policy }}"
     assert "inputs.distro-egress-policy" in with_["disable-telemetry"]
+    assert with_["allowed-endpoints"] == "${{ inputs.distro-allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}"
     spec = triggers(doc)["workflow_call"]["inputs"]["distro-egress-policy"]
-    assert spec["default"] == "audit"
+    assert spec["default"] == "block"
     assert "inputs.distros != '[]'" in jobs(doc)["distro"]["if"]
     assert "id-token" not in (jobs(doc)["distro"].get("permissions") or {})
 
@@ -706,12 +707,15 @@ def test_the_default_allow_list_is_one_line_of_sorted_host_ports(path):
     invalidates the list. Sorted so a diff shows one added host, not a reorder.
     """
     inputs = triggers(load(path))["workflow_call"]["inputs"]
-    default = inputs["allowed-endpoints"]["default"]
-    assert "\n" not in default, f"{path.name}: allowed-endpoints default contains a newline"
-    entries = default.split(" ")
-    assert entries == sorted(entries), f"{path.name}: allowed-endpoints default is not sorted"
-    for entry in entries:
-        assert re.fullmatch(r"[a-z0-9.-]+:\d+", entry), f"{path.name}: {entry!r} is not host:port"
+    lists = [name for name in inputs if name.endswith("allowed-endpoints") and name != "extra-allowed-endpoints"]
+    assert "allowed-endpoints" in lists
+    for name in lists:
+        default = inputs[name]["default"]
+        assert "\n" not in default, f"{path.name}: {name} default contains a newline"
+        entries = default.split(" ")
+        assert entries == sorted(entries), f"{path.name}: {name} default is not sorted"
+        for entry in entries:
+            assert re.fullmatch(r"[a-z0-9.-]+:\d+", entry), f"{path.name}: {name}: {entry!r} is not host:port"
     assert inputs["extra-allowed-endpoints"]["default"] == ""
 
 
