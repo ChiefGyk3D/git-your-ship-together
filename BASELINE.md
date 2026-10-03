@@ -152,6 +152,14 @@ documentation, corrected by any `domain not allowed` line. Every job starts from
 `contents: read`, and widens per job with a reason recorded in
 `tests/test_workflows.py`'s `ALLOWED_WRITES`.
 
+**Containers a job starts are outside harden-runner's view.** The `distro`
+job runs a distribution's official image as root in a throwaway container to
+execute the caller's own install and test commands. The container shares the
+job's network namespace, so the egress block still applies to it. Nothing from
+a pull request's fork can reach it, because its inputs are the caller's
+workflow file. StepSecurity's "unmonitored container" finding on these jobs is
+accepted for that reason.
+
 **Commands reach the shell as environment variables**, never by template
 expansion into `run:`.
 

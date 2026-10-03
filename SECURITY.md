@@ -31,8 +31,8 @@ This is a small, community-maintained project. There is no formal SLA, but
 reports are triaged as soon as practical and a fix or mitigation is
 prioritized for anything that could affect a calling repository's secrets,
 supply chain, or CI environment. Target timelines: an
-acknowledgement within 7 days, and public disclosure once a fix is released or
-90 days after the report, whichever comes first, coordinated with the reporter.
+acknowledgement within 14 days, and public disclosure once a fix is released or
+120 days after the report, whichever comes first, coordinated with the reporter.
 Credit is given in the fix's changelog entry
 or commit message unless you ask not to be named.
 

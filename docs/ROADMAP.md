@@ -198,12 +198,14 @@ the one that retires the most copied code.
    Dockerfile (pinned, hash-checked, cached; `hadolint` input), a non-root
    check in the workflow itself (`require-non-root`, default on), and an
    opt-in read-only root filesystem probe (`probe-read-only`, `probe-command`).
-   The fixture enables the probe. The `trivy-exit-code` default stays `"0"`:
-   the fixture's own image failed a `"1"` run with fixable CRITICAL/HIGH
-   findings, so the default is not
-   flippable from here, and flipping it is a caller-by-caller step once that
-   caller's image is clean, one
-   pull request each. Still per-caller work: `read_only: true` and
+   The fixture enables the probe. **Gate on by default (2026-10-03, owner
+   decision):** `trivy-exit-code` now defaults to `"1"`, with
+   `trivy-ignore-unfixed` (default true) so an advisory with no fix does not
+   block, and `trivyignores` for a caller's own `.trivyignore`. A caller with
+   a fixable high or critical goes red until its base image or dependency
+   moves. The fixture carries `fixture/.trivyignore` for CVE-2026-103111
+   (fixed in Debian `deb13u3`, not yet in any `python:3.13-slim`), review
+   2026-11-01. Still per-caller work: `read_only: true` and
    `cap_drop: [ALL]` in the compose files, and the smaller base image.
 13. **`disable-sudo: true` in harden-runner** on jobs that never need it, which
    is most of them. One input per job in the shared workflows.
@@ -232,6 +234,10 @@ the one that retires the most copied code.
     one setting instead of ten repositories times six switches, and the audit
     shrinks to confirming the policy applies. Also the only way to get custom
     secret-scanning patterns for the Doppler and Snyk token shapes.
+    **Status (2026-10-03):** the owner decided to stay under the personal
+    account for the foreseeable future. The audit therefore remains the
+    enforcement across repositories, and runner groups are per repository.
+    The item stays listed as the fallback if that changes.
 17. **Feed GitHub and Doppler security events into the Wazuh stack.** The
     JumpCloud-to-Wazuh bridge already has the shape: poll code-scanning,
     secret-scanning and Dependabot alerts plus Actions failures per

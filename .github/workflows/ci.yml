@@ -292,6 +292,7 @@ jobs:
       docker-test-command: docker run --rm "$IMAGE" --version
       probe-read-only: true
       probe-command: --version
+      trivyignores: fixture/.trivyignore
 
   # verify-published.yml against the image this account publishes through
   # container-release.yml: signature, SBOM attestation and provenance verified

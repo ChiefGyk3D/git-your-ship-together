@@ -159,9 +159,17 @@ on:
         type: string
         default: CRITICAL,HIGH
       trivy-exit-code:
-        description: Trivy exit code when findings exist. "1" makes findings fail the job.
+        description: Trivy exit code when findings exist. "1" (the default) makes findings fail the job; "0" reports only.
         type: string
-        default: "0"
+        default: "1"
+      trivy-ignore-unfixed:
+        description: Skip advisories that have no fix in the distribution, so they do not block the gate.
+        type: boolean
+        default: true
+      trivyignores:
+        description: Path to the caller's .trivyignore file, relative to the repository. Empty means none. Every entry needs a reason and a review date.
+        type: string
+        default: ""
       egress-policy:
         description: harden-runner egress policy - `audit` logs outbound connections, `block` allows only `allowed-endpoints`.
         type: string
@@ -450,7 +458,8 @@ jobs:
           output: trivy-results.sarif
           severity: ${{ inputs.trivy-severity }}
           exit-code: ${{ inputs.trivy-exit-code }}
-          ignore-unfixed: true
+          ignore-unfixed: ${{ inputs.trivy-ignore-unfixed }}
+          trivyignores: ${{ inputs.trivyignores }}
 
       - name: Upload Trivy results to the Security tab
         if: inputs.trivy && always() && hashFiles('trivy-results.sarif') != ''
