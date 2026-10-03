@@ -213,7 +213,10 @@ def test_publish_names_the_one_time_step_when_the_wiki_does_not_exist(wiki_env, 
     run, _, _ = wiki_env
     result = run("abc", url=tmp_path / "no-such.git")
     assert result.returncode != 0
-    expected = "The wiki has no first page yet: open https://example.invalid/owner/repo/wiki, create any page once, then re-run"
+    expected = (
+        "The wiki has no first page yet: open https://example.invalid/owner/repo/wiki, "
+        "create any page once, then re-run"
+    )
     assert expected in result.stdout
     assert "tok-secret" not in result.stdout + result.stderr
 
