@@ -99,6 +99,14 @@ on:
         description: Python for the configuration lint job.
         type: string
         default: "3.13"
+      fragment-check-command:
+        description: Shell run on pull requests only, with the full history checked out and `BASE` set to the pull request's base branch name (so `origin/$BASE` resolves); empty skips the `Changelog fragment` job. For a repository that keeps one changelog fragment per change under `changelog.d/`, e.g. `python3 scripts/changelog.py check-pr --base "origin/$BASE"`. Part of the gate when set.
+        type: string
+        default: ""
+      commit-claims-command:
+        description: Shell run on pull requests only, with the full history checked out, `BASE` set to the base branch name and `HEAD` to the pull request's head commit; empty skips the `Commit claims` job. For a repository that checks what each commit message claims against its diff, e.g. `python3 scripts/check_commit_claims.py --range "origin/$BASE..HEAD"`. Part of the gate when set.
+        type: string
+        default: ""
       workflow-lint:
         description: Run actionlint and zizmor over the caller's own workflow files. Turn off on one caller job when another already runs it.
         type: boolean
@@ -462,12 +470,70 @@ jobs:
           # need security-events: write from every caller for a lint.
           advanced-security: false
 
+  # Two checks that only mean something on a pull request and that a caller
+  # opts into with a command. Neither runs the project's tests or holds a
+  # token; both need the whole history, so the base branch resolves.
+  fragment-check:
+    name: Changelog fragment
+    if: github.event_name == 'pull_request' && inputs.fragment-check-command != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: ${{ inputs.egress-policy }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          disable-sudo: true
+          # The agent may only stop reporting to StepSecurity in block mode.
+          disable-telemetry: ${{ inputs.egress-policy == 'block' }}
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check the changelog fragment
+        env:
+          COMMAND: ${{ inputs.fragment-check-command }}
+          BASE: ${{ github.base_ref }}
+        run: bash -eo pipefail -c "$COMMAND"
+
+  commit-claims:
+    name: Commit claims
+    if: github.event_name == 'pull_request' && inputs.commit-claims-command != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: ${{ inputs.egress-policy }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          disable-sudo: true
+          # The agent may only stop reporting to StepSecurity in block mode.
+          disable-telemetry: ${{ inputs.egress-policy == 'block' }}
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check what each commit claims
+        env:
+          COMMAND: ${{ inputs.commit-claims-command }}
+          BASE: ${{ github.base_ref }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: bash -eo pipefail -c "$COMMAND"
+
   # The one job branch protection should require. `always()` so it runs when
   # a needed job was skipped; the shell then decides what counts as green.
   ci-green:
     name: CI green
     if: always()
-    needs: [shellcheck, shfmt, test, distro, config-lint, workflow-lint]
+    needs: [shellcheck, shfmt, test, distro, config-lint, workflow-lint, fragment-check, commit-claims]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}
