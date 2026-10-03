@@ -250,7 +250,8 @@ Inputs of `python-ci.yml`:
 | `distros` | `'[]'` (skips the job) | JSON array of container images to run the tests in as well, e.g. `'["debian:13", "kalilinux/kali-rolling"]'`; see [Operating systems](#operating-systems) |
 | `distro-runners` | `'["ubuntu-24.04"]'` | Runner labels the `distros` run on; add `ubuntu-24.04-arm` for native arm64 |
 | `distro-setup-command` | install python3, venv, pip, git and ca-certificates with `apt-get`, else `dnf` | Shell run as root in each image before the install command |
-| `distro-egress-policy` | `audit` | harden-runner policy for the `distro` job only. It pulls an image and package mirrors whose hosts are not yet measured, so it stays in `audit` until a measured list ships |
+| `distro-egress-policy` | `block` | harden-runner policy for the `distro` job only; `audit` for a distribution whose mirrors are not on the list |
+| `distro-allowed-endpoints` | the measured list | The `distro` job's own allow-list, kept apart from `allowed-endpoints`: Docker Hub's image pull, the Debian, Ubuntu, Kali and Parrot mirrors, and PyPI. `extra-allowed-endpoints` is appended to it |
 | `coverage-python-version` | `3.13` | The matrix leg that uploads coverage |
 | `install-command` | upgrade pip, `pip install -r requirements.txt` | Run before tests on every leg |
 | `test-command` | `pytest` | The test suite |
@@ -271,7 +272,7 @@ Inputs of `python-ci.yml`:
 | `docker-test-command` | empty (skips the check) | Run against the built image; `$IMAGE` names it |
 | `workflow-lint` | `true` | actionlint and zizmor over the caller's own `.github/workflows` |
 | `zizmor-persona` | `regular` | zizmor strictness: `regular`, `pedantic`, `auditor` |
-| `egress-policy` | `audit` | harden-runner on every job: `audit` logs outbound connections, `block` allows only `allowed-endpoints` |
+| `egress-policy` | `audit` | harden-runner on every job except `distro`: `audit` logs outbound connections, `block` allows only `allowed-endpoints` |
 | `allowed-endpoints` | the measured list | harden-runner allow-list for `block`, space-separated `host:port`; see [Egress](#egress) |
 | `extra-allowed-endpoints` | empty | Appended to the list, for hosts only this repository reaches |
 | `doppler-project`, `doppler-config`, `doppler-identity-id` | empty | See [Doppler setup](#doppler-setup) |
@@ -305,11 +306,14 @@ environment variables and a fresh virtual environment, after
 | Parrot | `parrotsec/core` |
 | Qubes | Qubes has no userland of its own; its templates are Debian or Fedora, so `debian:13` and `fedora:42` cover it |
 
-The `distro` job ships in `audit` mode (`distro-egress-policy`). It pulls an
-image and reaches each distribution's package mirrors, and those hosts have
-not been measured the way the other jobs' were, so a block list written now
-would be a guess. It moves to `block` with a measured list in a later
-release, as every job before it did.
+The `distro` job runs in `block` mode with its own list,
+`distro-allowed-endpoints`: Docker Hub for the image pull and the package
+mirrors of the Debian, Ubuntu (amd64 and arm64), Kali and Parrot images. Fedora
+and anything else that uses `dnf` is not on it, because `dnf` picks its mirror
+from a metalink answer that differs from run to run, so no fixed host list
+stays green. A caller testing `fedora:*` sets `distro-egress-policy: audit`
+for that job, or adds the mirrors it observed to `extra-allowed-endpoints`.
+A distribution's own extra repository goes in `extra-allowed-endpoints` too.
 
 ### Bash CI
 
@@ -361,7 +365,8 @@ Inputs of `bash-ci.yml`:
 | `distros` | `'[]'` (skips the job) | JSON array of container images to run the tests in as well, e.g. `'["debian:13", "kalilinux/kali-rolling"]'`; see [Operating systems](#operating-systems) |
 | `distro-runners` | `'["ubuntu-24.04"]'` | Runner labels the `distros` run on; add `ubuntu-24.04-arm` for native arm64 |
 | `distro-setup-command` | install bash, git and ca-certificates with `apt-get`, else `dnf` | Shell run as root in each image before the install command |
-| `distro-egress-policy` | `audit` | harden-runner policy for the `distro` job only. It pulls an image and package mirrors whose hosts are not yet measured, so it stays in `audit` until a measured list ships |
+| `distro-egress-policy` | `block` | harden-runner policy for the `distro` job only; `audit` for a distribution whose mirrors are not on the list |
+| `distro-allowed-endpoints` | the measured list | The `distro` job's own allow-list, kept apart from `allowed-endpoints`: Docker Hub's image pull, the Debian, Ubuntu, Kali and Parrot mirrors. `extra-allowed-endpoints` is appended to it |
 | `test-command` | empty (skips the job) | The shell test suite: `bats tests/`, `./tests/run.sh`, whatever the repository has |
 | `config-lint-install-command` | `pip install yamllint` | Installs the configuration linters, with Python available |
 | `config-lint-command` | empty (skips the job) | Lints the configuration kept beside the scripts: yamllint, ansible-lint |
@@ -654,7 +659,7 @@ Inputs of `verify-published.yml`:
 | `verify-provenance` | `true` | `gh attestation verify oci://<image> --owner <owner>` |
 | `test-command` | empty | Run once per platform with `$IMAGE` set; empty skips |
 | `platforms` | `linux/amd64,linux/arm64` | Platforms to pull and test |
-| `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `audit`, the list, empty | harden-runner; ships in audit until the list is measured |
+| `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `block`, the measured list, empty | harden-runner; the list covers the GHCR pull, Sigstore, and GitHub's attestation store |
 | `timeout-minutes` | `20` | Job timeout |
 
 ### Python package release
@@ -850,7 +855,8 @@ Inputs of `security.yml`:
 | `semgrep-config` | `p/python p/github-actions p/secrets` | Space-separated configs, each passed as `--config`; registry packs or paths in the repository |
 | `semgrep-version` | `1.179.0` | Semgrep release installed with pip |
 | `semgrep-continue-on-error` | `false` | Report findings without failing (they still reach the Security tab). Without it the scan runs with `--error` and a finding fails the job. A migration aid |
-| `semgrep-egress-policy` | `audit` | harden-runner policy for the Semgrep job only. The job reaches `semgrep.dev` for the rule registry, a host nobody has measured yet, so Semgrep ships in `audit` while the other jobs may already `block`; it moves to `block` with a measured list later, like every job before it |
+| `semgrep-egress-policy` | `block` | harden-runner policy for the Semgrep job only |
+| `semgrep-allowed-endpoints` | the measured list | The Semgrep job's own allow-list: PyPI for the pip install, `semgrep.dev` for the rule registry, and GitHub for the SARIF upload. `extra-allowed-endpoints` is appended to it, for a private rule registry or a config fetched from another host |
 | `snyk` | `false` | Snyk Code and Snyk Open Source; needs `SNYK_TOKEN` in the Doppler config. Runs only on a trusted ref, never on a pull request |
 | `scorecard` | `false` | OpenSSF Scorecard, published; runs only on the default branch (push or schedule) |
 | `python-version` | `3.13` | Python for pip-audit and Snyk |
