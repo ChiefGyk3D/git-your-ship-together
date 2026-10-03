@@ -129,8 +129,7 @@ jobs:
   # bash-ci.yml at this ref over every script in this repository: the
   # fixture's, and scripts/doppler-ci-set.sh. Block mode with the workflow's
   # own default list, so a host the list lacks fails here, named in the log,
-  # before a caller meets it. Workflow lint is off because the jobs above
-  # already run actionlint and zizmor over these files.
+  # before a caller meets it, including actionlint and zizmor's hosts.
   fixture-bash:
     name: fixture shell
     uses: ./.github/workflows/bash-ci.yml # zizmor: ignore[self-repository]
@@ -144,7 +143,7 @@ jobs:
       test-command: fixture/tests/test_greet.sh
       config-lint-command: |
         yamllint -d '{extends: relaxed, rules: {line-length: disable}}' .github fixture baseline
-      workflow-lint: false
+      workflow-lint: true
       egress-policy: block
 
   # The fixture package through python-package-release.yml at this ref:

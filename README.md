@@ -428,7 +428,7 @@ Inputs of `tofu-ci.yml`:
 | `plan-command` | empty (skips the job) | The plan, run only on a push to the default branch with the Doppler config's secrets in the environment |
 | `workflow-lint` | `true` | actionlint and zizmor over the caller's own `.github/workflows`; turn off when another caller job already runs it |
 | `zizmor-persona` | `regular` | zizmor strictness |
-| `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `audit`, the tool downloads and Trivy's checks bundle, empty | harden-runner, as in `python-ci.yml`. A provider registry or a cloud API the plan reaches goes in `extra-allowed-endpoints` |
+| `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `audit`, the tool downloads, Trivy's checks bundle and workflow-lint hosts, empty | harden-runner, as in `python-ci.yml`. A provider registry or a cloud API the plan reaches goes in `extra-allowed-endpoints` |
 | `doppler-project`, `doppler-config`, `doppler-identity-id` | empty | See [Doppler setup](#doppler-setup); only the plan job reads them |
 | `doppler-trusted-refs-only` | `true` | Fetch only on the default branch, a tag or a schedule; never on a pull request |
 | `timeout-minutes` | `20` | Per-job timeout |
@@ -473,7 +473,7 @@ Inputs of `arduino-ci.yml`:
 | `test-command` | empty (skips the job) | The host-side unit tests |
 | `workflow-lint` | `true` | actionlint and zizmor over the caller's own `.github/workflows` |
 | `zizmor-persona` | `regular` | zizmor strictness |
-| `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `audit`, arduino-cli's download and Arduino's index, empty | harden-runner, as in `python-ci.yml`. A core from another index adds its hosts |
+| `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `audit`, arduino-cli's download, Arduino's index and workflow-lint hosts, empty | harden-runner, as in `python-ci.yml`. A core from another index adds its hosts |
 | `timeout-minutes` | `30` | Per-job timeout; a first core install takes minutes |
 
 ### Container release
@@ -857,7 +857,7 @@ Inputs of `security.yml`:
 | `dependency-review-allow-ghsas` | empty | Comma-separated GHSA IDs the review may not fail on. Each needs an entry in [`baseline/risk-register.yaml`](baseline/risk-register.yaml); the audit checks |
 | `dependency-review-deny-licenses` | `AGPL-3.0, GPL-3.0, GPL-2.0, LGPL-3.0, SSPL-1.0` | Comma-separated SPDX identifiers the review fails on when a pull request adds a dependency under one. Empty means no licence rule. A dependency whose licence cannot be detected is reported, not failed. Passed as the action's `deny-licenses`, which upstream has marked deprecated for a future major release; the action rejects it beside `allow-licenses`, which this workflow does not expose |
 | `semgrep` | `true` | Semgrep over the repository, SARIF uploaded to the Security tab under category `semgrep`. Installed with pip, since `semgrep/*` actions are not in the allowed set |
-| `semgrep-config` | `p/python p/github-actions p/secrets` | Space-separated configs, each passed as `--config`; registry packs or paths in the repository |
+| `semgrep-config` | empty (auto-detect) | `p/github-actions p/secrets`, adding `p/python` only when tracked Python files exist. A nonempty value replaces these defaults: space-separated configs, each passed as `--config`; registry packs or paths in the repository. Shell-only repositories use the two base packs; no `p/bash` or `p/shell` registry pack exists, so `bash-ci.yml`'s ShellCheck provides shell coverage |
 | `semgrep-version` | `1.179.0` | Semgrep release installed with pip |
 | `semgrep-continue-on-error` | `false` | Report findings without failing (they still reach the Security tab). Without it the scan runs with `--error` and a finding fails the job. A migration aid |
 | `semgrep-egress-policy` | `audit` | harden-runner policy for the Semgrep job only. The job reaches `semgrep.dev` for the rule registry, a host nobody has measured yet, so Semgrep ships in `audit` while the other jobs may already `block`; it moves to `block` with a measured list later, like every job before it |
@@ -1054,6 +1054,15 @@ caller meets it. A caller turns blocking on with one line:
 with:
   egress-policy: block
 ```
+
+All four language CI workflows include the workflow-lint hosts in their
+defaults: `registry.npmjs.org:443` for actionlint's npm install,
+`raw.githubusercontent.com:443` for its downloads, and `ghcr.io:443` plus
+`pkg-containers.githubusercontent.com:443` for zizmor's image and layers.
+The Bash fixture runs workflow lint under `block` without extra endpoints.
+The Semgrep pack contract tests also need access to `semgrep.dev`: they
+resolve every automatically selected registry pack and reject missing or
+empty rule sets.
 
 Every caller in `baseline/repos.txt` runs `block` on all three workflows.
 A host only one repository reaches, such as an apt repository or an

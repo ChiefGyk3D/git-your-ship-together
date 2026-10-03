@@ -102,9 +102,9 @@ on:
         type: boolean
         default: true
       semgrep-config:
-        description: Space-separated Semgrep configs, each passed as `--config` (registry packs such as `p/python`, or a path in the repository).
+        description: Space-separated Semgrep configs, each passed as `--config` (registry packs or repository paths). Empty selects `p/github-actions p/secrets`, adding `p/python` when tracked Python files exist.
         type: string
-        default: p/python p/github-actions p/secrets
+        default: ""
       semgrep-version:
         description: Semgrep release installed with pip.
         type: string
@@ -431,6 +431,12 @@ jobs:
           CONTINUE: ${{ inputs.semgrep-continue-on-error }}
         run: |
           set -euo pipefail
+          if [ -z "$CONFIGS" ]; then
+            CONFIGS="p/github-actions p/secrets"
+            if [ -n "$(git ls-files -- '*.py')" ]; then
+              CONFIGS="p/python $CONFIGS"
+            fi
+          fi
           args=()
           for config in $CONFIGS; do args+=(--config "$config"); done
           if [ "$CONTINUE" != "true" ]; then args+=(--error); fi
