@@ -323,6 +323,29 @@ def test_every_reusable_job_starts_with_harden_runner(path):
         )
 
 
+@pytest.mark.parametrize("path", LANGUAGE_CI, ids=lambda p: p.name)
+def test_workflow_lint_default_allows_its_download_hosts(path):
+    doc = load(path)
+    lint = jobs(doc)["workflow-lint"]
+    assert any("raven-actions/actionlint@" in s.get("uses", "") for s in steps_of(lint))
+    assert any("zizmorcore/zizmor-action@" in s.get("uses", "") for s in steps_of(lint))
+    endpoints = triggers(doc)["workflow_call"]["inputs"]["allowed-endpoints"]["default"].split()
+    assert {
+        "ghcr.io:443",
+        "pkg-containers.githubusercontent.com:443",
+        "raw.githubusercontent.com:443",
+        "registry.npmjs.org:443",
+    } <= set(endpoints), f"{path.name}: workflow lint cannot download its tools under block"
+
+
+def test_bash_fixture_runs_workflow_lint_under_block_with_default_endpoints():
+    fixture = jobs(load(WORKFLOWS / "ci.yml"))["fixture-bash"]
+    assert fixture["uses"] == "./.github/workflows/bash-ci.yml"
+    assert fixture["with"]["egress-policy"] == "block"
+    assert fixture["with"]["workflow-lint"] is True
+    assert not {"allowed-endpoints", "extra-allowed-endpoints"} & fixture["with"].keys()
+
+
 # --- script injection -------------------------------------------------------
 
 UNTRUSTED = re.compile(r"\$\{\{\s*(github\.event\.|github\.head_ref|github\.ref_name|env\.|inputs\.)")
