@@ -253,6 +253,11 @@ the one that retires the most copied code.
 
 ## What the lab could carry
 
+The templates, the controller and the order of adoption are planned in
+[proxmox-templates](https://github.com/ChiefGyk3D/proxmox-templates/blob/main/docs/ci-runners.md),
+the repository that will hold every lab template; this one keeps the
+workflows the runners execute.
+
 The lab has compute to spare beyond what is planned for it, and CI is where
 that pays. The rule that governs all of it: **a self-hosted runner never runs
 a pull request.** GitHub's own guidance is that self-hosted runners on public
