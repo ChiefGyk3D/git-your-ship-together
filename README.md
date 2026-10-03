@@ -315,10 +315,13 @@ stays green. A caller testing `fedora:*` sets `distro-egress-policy: audit`
 for that job, or adds the mirrors it observed to `extra-allowed-endpoints`.
 A distribution's own extra repository goes in `extra-allowed-endpoints` too.
 
-Kali is pinned: the default `distro-setup-command` rewrites `http.kali.org`
+Kali and Parrot are pinned: the default `distro-setup-command` rewrites `http.kali.org`
 in the image's apt sources to `kali.download`, because the official redirector
 answers each request with a different mirror and a block list cannot follow
-that. `kali.download` is the CDN behind it and is one name, on port 80. A
+that. `kali.download` is the CDN behind it and is one name, on port 80.
+Parrot's package redirector (`director.parrot.sh`) rotates the same way, so
+its `deb.parrot.sh/parrot` sources are rewritten to `deb.parrot.sh/direct/parrot`,
+which serves the packages itself. A
 custom `distro-setup-command` that replaces the default loses the pin.
 
 ### Bash CI

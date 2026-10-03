@@ -130,6 +130,11 @@ on:
             if grep -qx 'ID=kali' /etc/os-release; then
               sed -i 's|http://http.kali.org|http://kali.download|g' /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources 2>/dev/null || true
             fi
+            # Parrot's package redirector (director.parrot.sh) does the same;
+            # its /direct path serves the pool from deb.parrot.sh itself.
+            if grep -qx 'ID=parrot' /etc/os-release; then
+              sed -i 's|https://deb.parrot.sh/parrot|https://deb.parrot.sh/direct/parrot|g' /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources 2>/dev/null || true
+            fi
             # A mirror that answers 502 is not retried by apt itself, so the
             # whole step is tried three times with a pause between.
             for attempt in 1 2 3; do
