@@ -114,9 +114,13 @@ on:
         type: boolean
         default: false
       semgrep-egress-policy:
-        description: harden-runner egress policy for the Semgrep job only. It reaches semgrep.dev for the rule registry, which is unmeasured, so it ships in `audit` and moves to `block` with a measured list later.
+        description: harden-runner egress policy for the Semgrep job only - `audit` logs outbound connections, `block` allows only `semgrep-allowed-endpoints` and `extra-allowed-endpoints`.
         type: string
-        default: audit
+        default: block
+      semgrep-allowed-endpoints:
+        description: harden-runner allow-list for the Semgrep job in `block`, space-separated host:port entries. The default is the pip install of Semgrep, the rule registry, and the SARIF upload. Wildcards are not supported and a newline-separated list matches nothing.
+        type: string
+        default: "api.github.com:443 files.pythonhosted.org:443 github.com:443 pypi.org:443 semgrep.dev:443"
       snyk:
         description: Run Snyk Code and Snyk Open Source. Needs SNYK_TOKEN in the Doppler config.
         type: boolean
@@ -400,12 +404,12 @@ jobs:
       contents: read
       security-events: write  # Semgrep SARIF upload
     steps:
-      # Its own egress input: the registry host (semgrep.dev) has not been
-      # measured, so this job audits while the others may already block.
+      # Its own egress input and list: the rule registry (semgrep.dev) is
+      # reached by this job alone, so it stays out of the shared list.
       - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
         with:
           egress-policy: ${{ inputs.semgrep-egress-policy }}
-          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          allowed-endpoints: ${{ inputs.semgrep-allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
           # The agent may only stop reporting to StepSecurity in block mode.
           disable-telemetry: ${{ inputs.semgrep-egress-policy == 'block' }}
 

@@ -40,7 +40,7 @@ def test_inputs_and_defaults():
     assert inputs["verify-provenance"]["default"] is True
     assert inputs["test-command"]["default"] == ""
     assert inputs["platforms"]["default"] == "linux/amd64,linux/arm64"
-    assert inputs["egress-policy"]["default"] == "audit"
+    assert inputs["egress-policy"]["default"] == "block"
     assert "secrets" not in CALL
 
 
