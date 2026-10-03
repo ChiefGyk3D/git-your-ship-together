@@ -266,27 +266,22 @@ jobs:
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
           echo "build matrix: $matrix"
 
-  # One job per platform, on a runner of that architecture: build, check and
-  # scan the image where it runs. When publishing, the same job pushes the
-  # platform image under a temporary tag, `<sha>-<arch>`, for `merge`.
-  build:
-    name: Build, test, scan (${{ matrix.platform }})
-    needs: plan
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: ${{ inputs.timeout-minutes }}
+  # The Dockerfile lint runs in a job of its own, not inside `build`: it
+  # restores a cache (the pinned hadolint binary), and a job that restores a
+  # cache must not be the one that pushes an image. `build` waits for it.
+  dockerfile-lint:
+    name: Lint the Dockerfile (hadolint)
+    if: inputs.hadolint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
       contents: read
-      packages: write  # push the per-platform image under its temporary tag
-      security-events: write  # Trivy SARIF upload
-    strategy:
-      fail-fast: false
-      matrix:
-        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
     steps:
       - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
         with:
           egress-policy: ${{ inputs.egress-policy }}
           allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          disable-sudo: true
           # The agent may only stop reporting to StepSecurity in block mode.
           disable-telemetry: ${{ inputs.egress-policy == 'block' }}
 
@@ -299,14 +294,12 @@ jobs:
       # the download, and the file on disk is checked against the pinned hash
       # whether it came from the cache or the network.
       - name: Restore the cached hadolint binary
-        if: inputs.hadolint
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/tool-cache/hadolint
           key: tool-hadolint-${{ inputs.hadolint-version }}-${{ runner.os }}-${{ runner.arch }}
 
       - name: Fetch hadolint at the pinned version
-        if: inputs.hadolint
         env:
           VERSION: ${{ inputs.hadolint-version }}
           AMD64_SHA256: ${{ inputs.hadolint-sha256-amd64 }}
@@ -333,7 +326,6 @@ jobs:
           "$CACHE_DIR/hadolint" --version
 
       - name: Lint the Dockerfile (hadolint)
-        if: inputs.hadolint
         continue-on-error: ${{ inputs.hadolint-continue-on-error }}
         env:
           DOCKERFILE: ${{ inputs.dockerfile }}
@@ -343,6 +335,37 @@ jobs:
           set -euo pipefail
           read -r -a args <<< "$ARGS"
           "$HADOLINT" "${args[@]}" "$DOCKERFILE"
+
+  # One job per platform, on a runner of that architecture: build, check and
+  # scan the image where it runs. When publishing, the same job pushes the
+  # platform image under a temporary tag, `<sha>-<arch>`, for `merge`.
+  build:
+    name: Build, test, scan (${{ matrix.platform }})
+    needs: [plan, dockerfile-lint]
+    # A skipped lint (hadolint: false) must not skip the build; a failed or
+    # cancelled one must.
+    if: ${{ !cancelled() && needs.plan.result == 'success' && (needs.dockerfile-lint.result == 'success' || needs.dockerfile-lint.result == 'skipped') }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+      packages: write  # push the per-platform image under its temporary tag
+      security-events: write  # Trivy SARIF upload
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: ${{ inputs.egress-policy }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          # The agent may only stop reporting to StepSecurity in block mode.
+          disable-telemetry: ${{ inputs.egress-policy == 'block' }}
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       # Only a platform with no native runner needs emulation.
       - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0

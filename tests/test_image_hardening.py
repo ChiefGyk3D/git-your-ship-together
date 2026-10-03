@@ -13,8 +13,12 @@ def build_steps() -> dict:
     return {s.get("name"): s for s in steps_of(jobs(load(RELEASE))["build"])}
 
 
+def lint_job() -> dict:
+    return jobs(load(RELEASE))["dockerfile-lint"]
+
+
 def test_hadolint_is_a_cached_download_checked_against_a_pinned_hash_on_disk():
-    steps = list(steps_of(jobs(load(RELEASE))["build"]))
+    steps = list(steps_of(lint_job()))
     names = [s.get("name") for s in steps]
     cache = next(s for s in steps if s.get("name") == "Restore the cached hadolint binary")
     fetch = next(s for s in steps if s.get("name") == "Fetch hadolint at the pinned version")
@@ -50,15 +54,13 @@ def test_the_hadolint_defaults_are_a_real_release_with_a_hash_per_architecture()
     assert inputs["hadolint-continue-on-error"]["default"] is False
 
 
-def test_every_hadolint_step_is_gated_on_its_input_and_the_lint_can_be_made_advisory():
-    steps = build_steps()
-    for name in (
-        "Restore the cached hadolint binary",
-        "Fetch hadolint at the pinned version",
-        "Lint the Dockerfile (hadolint)",
-    ):
-        assert steps[name]["if"] == "inputs.hadolint", name
-    lint = steps["Lint the Dockerfile (hadolint)"]
+def test_the_lint_job_is_gated_on_its_input_and_can_be_made_advisory():
+    job = lint_job()
+    assert job["if"] == "inputs.hadolint"
+    assert job["permissions"] == {"contents": "read"}
+    harden = steps_of(job)[0]
+    assert harden["with"]["disable-sudo"] is True
+    lint = next(s for s in steps_of(job) if s.get("name") == "Lint the Dockerfile (hadolint)")
     assert lint["continue-on-error"] == "${{ inputs.hadolint-continue-on-error }}"
     assert lint["env"]["DOCKERFILE"] == "${{ inputs.dockerfile }}"
     assert "inputs." not in lint["run"], "inputs reach the shell through env, never interpolated"
@@ -89,4 +91,18 @@ def test_the_fixture_exercises_the_hardening():
     with_ = jobs(load(WORKFLOWS / "ci.yml"))["fixture-release"]["with"]
     assert with_["docker-test-command"].strip() == 'docker run --rm "$IMAGE" --version'
     assert with_["probe-read-only"] is True and with_["probe-command"] == "--version"
-    assert with_["trivy-exit-code"] == "1"
+    assert "trivy-exit-code" not in with_, "the fixture image has fixable findings; the default stays advisory"
+
+
+def test_the_cache_is_restored_only_outside_the_job_that_pushes_the_image():
+    doc = load(RELEASE)
+    assert not [s for s in steps_of(jobs(doc)["build"]) if str(s.get("uses", "")).startswith("actions/cache@")]
+    build = jobs(doc)["build"]
+    assert "dockerfile-lint" in build["needs"]
+    condition = build["if"]
+    assert "needs.dockerfile-lint.result == 'skipped'" in condition, "hadolint: false must not skip the build"
+    assert "needs.dockerfile-lint.result == 'success'" in condition and "!cancelled()" in condition
+
+
+def test_the_trivy_exit_code_default_stays_advisory_until_callers_flip_it():
+    assert triggers(load(RELEASE))["workflow_call"]["inputs"]["trivy-exit-code"]["default"] == "0"

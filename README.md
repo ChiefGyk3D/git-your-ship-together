@@ -593,7 +593,7 @@ Inputs of `container-release.yml`:
 | `provenance` | `true` | GitHub Artifact Attestation (SLSA provenance) |
 | `trivy` | `true` | Scan the image, upload SARIF |
 | `trivy-severity` | `CRITICAL,HIGH` | Severities reported |
-| `trivy-exit-code` | `"0"` | `"1"` makes findings fail the job. The default stays advisory until each calling repository's image is known clean; the fixture runs with `"1"`, and a caller flips it in its own pull request |
+| `trivy-exit-code` | `"0"` | `"1"` makes findings fail the job. The default stays advisory until each calling repository's image is known clean; a caller flips it in its own pull request once its image is clean |
 | `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `audit`, the measured list, empty | harden-runner, as in `python-ci.yml` |
 | `doppler-project`, `doppler-config`, `doppler-identity-id` | empty | See [Doppler setup](#doppler-setup) |
 | `doppler-trusted-refs-only` | `true` | Fetch CI secrets only on the default branch, a tag or a schedule; never on a pull request. See [Doppler setup](#doppler-setup) |

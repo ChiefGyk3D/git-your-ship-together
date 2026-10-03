@@ -198,9 +198,11 @@ the one that retires the most copied code.
    Dockerfile (pinned, hash-checked, cached; `hadolint` input), a non-root
    check in the workflow itself (`require-non-root`, default on), and an
    opt-in read-only root filesystem probe (`probe-read-only`, `probe-command`).
-   The fixture enables the probe and runs Trivy with `trivy-exit-code: "1"`.
-   The `trivy-exit-code` default stays `"0"`: nothing here can show the nine
-   callers' images are clean, so flipping it is a caller-by-caller step, one
+   The fixture enables the probe. The `trivy-exit-code` default stays `"0"`:
+   the fixture's own image failed a `"1"` run with fixable CRITICAL/HIGH
+   findings, so the default is not
+   flippable from here, and flipping it is a caller-by-caller step once that
+   caller's image is clean, one
    pull request each. Still per-caller work: `read_only: true` and
    `cap_drop: [ALL]` in the compose files, and the smaller base image.
 13. **`disable-sudo: true` in harden-runner** on jobs that never need it, which
