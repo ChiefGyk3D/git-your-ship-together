@@ -121,9 +121,10 @@ jobs:
         python -m fixture_app ci
       dockerfile: fixture/Dockerfile
       docker-context: fixture
-      docker-test-command: |
-        docker run --rm "$IMAGE" --version
-        test "$(docker run --rm --entrypoint id "$IMAGE" -u)" != "0"
+      docker-test-command: docker run --rm "$IMAGE" --version
+      probe-read-only: true
+      probe-command: --version
+      trivy-exit-code: "1"  # the fixture image is clean: proves the flip before any caller makes it
       zizmor-persona: pedantic
 
   # bash-ci.yml at this ref over every script in this repository: the
@@ -238,9 +239,10 @@ jobs:
       push: false
       dockerfile: fixture/Dockerfile
       context: fixture
-      docker-test-command: |
-        docker run --rm "$IMAGE" --version
-        test "$(docker run --rm --entrypoint id "$IMAGE" -u)" != "0"
+      docker-test-command: docker run --rm "$IMAGE" --version
+      probe-read-only: true
+      probe-command: --version
+      trivy-exit-code: "1"  # the fixture image is clean: proves the flip before any caller makes it
 
   # verify-published.yml against the image this account publishes through
   # container-release.yml: signature, SBOM attestation and provenance verified
