@@ -153,6 +153,10 @@ on:
         description: harden-runner egress policy for the `distro` job. It pulls a distribution image and its package mirrors, whose hosts are not yet measured, so it ships in `audit` and moves to `block` with a measured list in a later release, like every job before it.
         type: string
         default: audit
+      distro-continue-on-error:
+        description: Let a failing distro run leave the gate green. For a suite that assumes a non-root user or a newer Python than the distribution ships; the result stays visible on the job.
+        type: boolean
+        default: false
       egress-policy:
         description: harden-runner egress policy for every job except `distro` - `audit` logs outbound connections, `block` allows only `allowed-endpoints`.
         type: string
@@ -216,7 +220,9 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ inputs.lint-python-version }}
-          cache: pip
+          # pip's cache keys on a manifest; a repository without one (stdlib only)
+          # would fail the step, so caching is skipped there.
+          cache: ${{ hashFiles('**/requirements*.txt', '**/pyproject.toml', '**/setup.py') != '' && 'pip' || '' }}
 
       - name: Install linters
         env:
@@ -252,7 +258,9 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ inputs.lint-python-version }}
-          cache: pip
+          # pip's cache keys on a manifest; a repository without one (stdlib only)
+          # would fail the step, so caching is skipped there.
+          cache: ${{ hashFiles('**/requirements*.txt', '**/pyproject.toml', '**/setup.py') != '' && 'pip' || '' }}
 
       - name: Install the type checker
         if: inputs.typecheck-install-command != ''
@@ -325,7 +333,9 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ matrix.python-version }}
-          cache: pip
+          # pip's cache keys on a manifest; a repository without one (stdlib only)
+          # would fail the step, so caching is skipped there.
+          cache: ${{ hashFiles('**/requirements*.txt', '**/pyproject.toml', '**/setup.py') != '' && 'pip' || '' }}
 
       - name: Install dependencies
         env:
@@ -412,6 +422,7 @@ jobs:
       # so git inside it refuses the directory until it is marked safe; a
       # test that shells out to git (ls-files, describe) would fail with 128.
       - name: Run the tests in the image
+        continue-on-error: ${{ inputs.distro-continue-on-error }}
         env:
           IMAGE: ${{ matrix.image }}
           SETUP: ${{ inputs.distro-setup-command }}
@@ -566,7 +577,9 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ inputs.coverage-python-version }}
-          cache: pip
+          # pip's cache keys on a manifest; a repository without one (stdlib only)
+          # would fail the step, so caching is skipped there.
+          cache: ${{ hashFiles('**/requirements*.txt', '**/pyproject.toml', '**/setup.py') != '' && 'pip' || '' }}
 
       - name: Install the project
         env:

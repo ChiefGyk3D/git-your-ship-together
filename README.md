@@ -251,6 +251,7 @@ Inputs of `python-ci.yml`:
 | `distro-runners` | `'["ubuntu-24.04"]'` | Runner labels the `distros` run on; add `ubuntu-24.04-arm` for native arm64 |
 | `distro-setup-command` | install python3, venv, pip, git and ca-certificates with `apt-get`, else `dnf` | Shell run as root in each image before the install command |
 | `distro-egress-policy` | `audit` | harden-runner policy for the `distro` job only. It pulls an image and package mirrors whose hosts are not yet measured, so it stays in `audit` until a measured list ships |
+| `distro-continue-on-error` | `false` | Let a failing distro run leave the gate green, for a suite that assumes a non-root user or a newer Python than the distribution ships. |
 | `coverage-python-version` | `3.13` | The matrix leg that uploads coverage |
 | `install-command` | upgrade pip, `pip install -r requirements.txt` | Run before tests on every leg |
 | `test-command` | `pytest` | The test suite |
@@ -362,6 +363,7 @@ Inputs of `bash-ci.yml`:
 | `distro-runners` | `'["ubuntu-24.04"]'` | Runner labels the `distros` run on; add `ubuntu-24.04-arm` for native arm64 |
 | `distro-setup-command` | install bash, git and ca-certificates with `apt-get`, else `dnf` | Shell run as root in each image before the install command |
 | `distro-egress-policy` | `audit` | harden-runner policy for the `distro` job only. It pulls an image and package mirrors whose hosts are not yet measured, so it stays in `audit` until a measured list ships |
+| `distro-continue-on-error` | `false` | Let a failing distro run leave the gate green, for a suite that assumes a non-root user or a newer Python than the distribution ships. |
 | `test-command` | empty (skips the job) | The shell test suite: `bats tests/`, `./tests/run.sh`, whatever the repository has |
 | `config-lint-install-command` | `pip install yamllint` | Installs the configuration linters, with Python available |
 | `config-lint-command` | empty (skips the job) | Lints the configuration kept beside the scripts: yamllint, ansible-lint |
