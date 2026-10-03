@@ -43,6 +43,8 @@ REUSABLE = [
         "security.yml",
         "dependabot-auto-merge.yml",
         "verify-published.yml",
+        "docs-pages.yml",
+        "wiki-publish.yml",
     )
 ]
 # The subset that fetches CI secrets. The Doppler rules are about those steps,
@@ -61,6 +63,8 @@ DOPPLER = [
         "artifact-release.yml",
         "python-docker-release.yml",
         "verify-published.yml",
+        "docs-pages.yml",
+        "wiki-publish.yml",
     )
 ]
 # The language CI workflows: each ends in the `CI green` gate branch protection requires.
@@ -100,7 +104,7 @@ def all_steps(path: Path):
 
 
 def test_there_is_something_to_check():
-    assert len(REUSABLE) == 11, "expected the eleven callable workflows"
+    assert len(REUSABLE) == 13, "expected the thirteen callable workflows"
     assert len(DOPPLER) == 4, "expected four of them to fetch CI secrets"
     assert [p.name for p in LANGUAGE_CI] == ["arduino-ci.yml", "bash-ci.yml", "python-ci.yml", "tofu-ci.yml"]
     assert ACTION_FILES, "no composite actions found"
@@ -246,6 +250,18 @@ ALLOWED_WRITES = {
     ("ci.yml", "fixture-artifact", "contents"),
     ("ci.yml", "fixture-artifact", "id-token"),
     ("ci.yml", "fixture-artifact", "attestations"),
+    # The Pages deployment: the deploy job alone holds the two writes, runs no
+    # caller code, and only on the default branch; the build job that does run
+    # the caller's command is read-only.
+    ("docs-pages.yml", "deploy", "pages"),
+    ("docs-pages.yml", "deploy", "id-token"),
+    # The wiki is a git repository of this one: the publish job alone holds
+    # the write, runs no caller code and checks nothing out.
+    ("wiki-publish.yml", "publish", "contents"),
+    # And both on the fixture, whose callers pass deploy/publish: false.
+    ("ci.yml", "fixture-pages", "pages"),
+    ("ci.yml", "fixture-pages", "id-token"),
+    ("ci.yml", "fixture-wiki", "contents"),
 }
 
 

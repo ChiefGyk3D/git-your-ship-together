@@ -1,0 +1,180 @@
+# Reusable build and publish of a static documentation site to GitHub Pages.
+#
+# Call it from a repository with:
+#
+#   on:
+#     push: { branches: [main] }
+#     pull_request:
+#     workflow_dispatch:
+#   jobs:
+#     docs:
+#       uses: ChiefGyk3D/git-your-ship-together/.github/workflows/docs-pages.yml@<sha> # vX.Y.Z
+#       permissions:
+#         contents: read
+#         pages: write           # the deploy job only
+#         id-token: write       # the deploy job only: Pages verifies it
+#       with:
+#         install-command: pip install -e ".[docs]"
+#         build-command: mkdocs build --strict
+#
+# The site is built on every pull request, so a broken link fails the review
+# rather than publishing a 404; it is uploaded and deployed only from a run on
+# the default branch. The job that runs the caller's build holds read-only
+# permissions and no token; `pages: write` and `id-token: write` exist only on
+# the deploy job, which runs no caller command.
+#
+# One setting is the repository owner's, once: Settings -> Pages -> Build and
+# deployment -> Source: "GitHub Actions". Until it is made the deploy job
+# fails with a message naming it, and the build job is unaffected.
+#
+# Commands a caller supplies reach the shell through an environment variable,
+# never by template expansion into the script, so a value can only be data.
+
+name: Docs pages (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      python-version:
+        description: Python used to build the site.
+        type: string
+        default: "3.11"
+      install-command:
+        description: Shell run before the build, e.g. the project's docs extra.
+        type: string
+        default: pip install -e ".[docs]"
+      build-command:
+        description: Shell that builds the site into `site-dir`. A non-zero exit fails the job, so a strict build (broken links, missing pages) fails the pull request.
+        type: string
+        default: mkdocs build --strict
+      site-dir:
+        description: Directory the build writes, relative to the repository root. It is uploaded as the Pages artifact.
+        type: string
+        default: site
+      deploy:
+        description: Upload and deploy on a run of the default branch. `false` only builds, which is what a repository wants while it tries the workflow before it has enabled Pages.
+        type: boolean
+        default: true
+      egress-policy:
+        description: harden-runner egress policy for every job - `audit` logs outbound connections, `block` allows only `allowed-endpoints`.
+        type: string
+        default: audit
+      allowed-endpoints:
+        description: harden-runner allow-list for `block`, space-separated host:port entries. Wildcards are not supported and a newline-separated list matches nothing. The runner's own infrastructure needs no entry; a build that fetches fonts or plugins needs its hosts in `extra-allowed-endpoints`.
+        type: string
+        default: "api.github.com:443 files.pythonhosted.org:443 github.com:443 pypi.org:443"
+      extra-allowed-endpoints:
+        description: Appended to `allowed-endpoints`, for hosts only this repository reaches. Same format.
+        type: string
+        default: ""
+      timeout-minutes:
+        description: Per-job timeout.
+        type: number
+        default: 30
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build the site
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: ${{ inputs.egress-policy }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          disable-sudo: true
+          # The agent may only stop reporting to StepSecurity in block mode.
+          disable-telemetry: ${{ inputs.egress-policy == 'block' }}
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ inputs.python-version }}
+          cache: pip
+
+      - name: Install the documentation dependencies
+        env:
+          COMMAND: ${{ inputs.install-command }}
+        run: bash -eo pipefail -c "$COMMAND"
+
+      - name: Build the site
+        env:
+          COMMAND: ${{ inputs.build-command }}
+        run: bash -eo pipefail -c "$COMMAND"
+
+      - name: Check the build wrote the site directory
+        env:
+          SITE_DIR: ${{ inputs.site-dir }}
+        run: |
+          set -euo pipefail
+          if [ ! -d "$SITE_DIR" ] || [ -z "$(ls -A "$SITE_DIR")" ]; then
+            echo "::error title=Docs pages::build-command did not write anything to '$SITE_DIR'; set site-dir to the directory the build writes"
+            exit 1
+          fi
+
+      # Only a run that will deploy needs the artifact; a pull request stops
+      # at the build.
+      - name: Upload the Pages artifact
+        if: inputs.deploy && github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: ${{ inputs.site-dir }}
+
+  deploy:
+    name: Deploy to GitHub Pages
+    if: inputs.deploy && github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      pages: write
+      id-token: write  # Pages verifies the deploy against the job's OIDC identity; no caller code runs here
+    # One deployment at a time; a newer push supersedes a queued one, but a
+    # deployment already running is allowed to finish. The group is fixed, not
+    # built from github.workflow, because a called workflow's github.workflow
+    # is the caller's.
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: ${{ inputs.egress-policy }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          disable-sudo: true
+          # The agent may only stop reporting to StepSecurity in block mode.
+          disable-telemetry: ${{ inputs.egress-policy == 'block' }}
+
+      # deploy-pages fails on an unconfigured repository with an API error;
+      # this says what to do instead.
+      - name: Check that Pages is set up for GitHub Actions
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SERVER_URL: ${{ github.server_url }}
+        run: |
+          set -uo pipefail
+          fix="open $SERVER_URL/$REPO/settings/pages and set Build and deployment -> Source to GitHub Actions, then re-run"
+          if ! build_type=$(gh api "repos/$REPO/pages" --jq .build_type 2>&1); then
+            echo "$build_type"
+            echo "::error title=Docs pages::GitHub Pages is not enabled for this repository: $fix"
+            exit 1
+          fi
+          if [ "$build_type" != "workflow" ]; then
+            echo "::error title=Docs pages::Pages is enabled but its source is '$build_type', not GitHub Actions: $fix"
+            exit 1
+          fi
+
+      - id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

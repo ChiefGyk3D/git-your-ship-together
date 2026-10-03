@@ -84,13 +84,34 @@ def test_a_job_that_keeps_sudo_runs_a_caller_install_command(name, job_name):
 # --- concurrency ------------------------------------------------------------
 
 
+# The one exception: a job that publishes to a single shared destination names
+# a literal group for it, so two publishes never overlap whichever workflow
+# started them, and never cancels one halfway through. The group is a fixed
+# word, not built from `github.workflow` or the ref, so it cannot collide with
+# the caller's own; a test below holds that.
+FIXED_GROUPS = {
+    ("docs-pages.yml", "deploy"): "pages",
+    ("wiki-publish.yml", "publish"): "wiki",
+}
+
+
 @pytest.mark.parametrize("path", REUSABLE, ids=lambda p: p.name)
 def test_a_reusable_workflow_does_not_declare_concurrency(path):
     """In a called workflow `github.workflow` is the caller's name: the same group would cancel the caller."""
     doc = load(path)
     assert "concurrency" not in doc, f"{path.name}: concurrency belongs to the caller"
     for job_name, job in jobs(doc).items():
+        if (path.name, job_name) in FIXED_GROUPS:
+            continue
         assert "concurrency" not in job, f"{path.name}: job {job_name!r} declares concurrency"
+
+
+@pytest.mark.parametrize(("name", "job_name"), sorted(FIXED_GROUPS))
+def test_a_fixed_concurrency_group_is_a_literal_and_never_cancels(name, job_name):
+    declared = jobs(load(WORKFLOWS / name))[job_name]["concurrency"]
+    assert declared == {"group": FIXED_GROUPS[(name, job_name)], "cancel-in-progress": False}, (
+        f"{name}: job {job_name!r} must use the literal group {FIXED_GROUPS[(name, job_name)]!r} and never cancel"
+    )
 
 
 CONCURRENCY = {
