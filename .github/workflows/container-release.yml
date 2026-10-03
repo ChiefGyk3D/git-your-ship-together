@@ -4,8 +4,10 @@
 # the old name, python-docker-release.yml, reach this file through a thin
 # caller kept under that name.
 #
+#   0. Lint the Dockerfile with hadolint (a pinned, hash-checked binary).
 #   1. Build each platform natively (linux/arm64 on ubuntu-24.04-arm, linux/amd64
-#      on ubuntu-24.04; QEMU only for any other platform), load it, run the
+#      on ubuntu-24.04; QEMU only for any other platform), load it, require a
+#      non-root user, run the
 #      caller's check against it.
 #   2. Scan each with Trivy; results go to the Security tab as SARIF.
 #   3. When `push` is true: push each platform image under a temporary tag
@@ -90,6 +92,42 @@ on:
           type=raw,value=latest,enable={{is_default_branch}}
       docker-test-command:
         description: Shell run against the locally built image; `$IMAGE` names it. Empty skips the check.
+        type: string
+        default: ""
+      hadolint:
+        description: Lint the Dockerfile with hadolint before building.
+        type: boolean
+        default: true
+      hadolint-version:
+        description: hadolint release to download (hadolint/hadolint), without the `v`. Changing it means changing both `hadolint-sha256-*` inputs.
+        type: string
+        default: "2.15.1"
+      hadolint-sha256-amd64:
+        description: SHA-256 of the hadolint-linux-x86_64 binary for that version.
+        type: string
+        default: "c7187db94eeeeca956519a6af171adc31453941a1e777961f6e680f697c8c507"
+      hadolint-sha256-arm64:
+        description: SHA-256 of the hadolint-linux-arm64 binary for that version.
+        type: string
+        default: "f6198ef8090f404dbb771abfee086eb8c48ac177f30da7fd3510aca35b344b5d"
+      hadolint-args:
+        description: Arguments passed to hadolint before the Dockerfile path, split on whitespace.
+        type: string
+        default: "--failure-threshold warning"
+      hadolint-continue-on-error:
+        description: Report hadolint findings without failing the job. For a repository adopting the linter before its Dockerfile is clean.
+        type: boolean
+        default: false
+      require-non-root:
+        description: Fail when the built image runs as root (`id -u` prints 0). The fix is a `USER` instruction in the Dockerfile. Needs an `id` binary in the image; turn it off for a distroless or scratch image.
+        type: boolean
+        default: true
+      probe-read-only:
+        description: Also run the image with a read-only root filesystem (`--read-only --tmpfs /tmp`) and fail if it breaks. Enable once the image is known to write only under tmpfs or volumes.
+        type: boolean
+        default: false
+      probe-command:
+        description: Arguments for the read-only probe, which runs `docker run --rm --read-only --tmpfs /tmp "$IMAGE" <probe-command>` with the image's own entrypoint. Must exit on its own, such as `--version`. Required when `probe-read-only` is true.
         type: string
         default: ""
       dockerhub:
@@ -228,12 +266,85 @@ jobs:
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
           echo "build matrix: $matrix"
 
+  # The Dockerfile lint runs in a job of its own, not inside `build`: it
+  # restores a cache (the pinned hadolint binary), and a job that restores a
+  # cache must not be the one that pushes an image. `build` waits for it.
+  dockerfile-lint:
+    name: Lint the Dockerfile (hadolint)
+    if: inputs.hadolint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: ${{ inputs.egress-policy }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          disable-sudo: true
+          # The agent may only stop reporting to StepSecurity in block mode.
+          disable-telemetry: ${{ inputs.egress-policy == 'block' }}
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # hadolint is not a GitHub-owned action and not on the approved list, so it
+      # is a pinned binary like shellcheck in bash-ci.yml: the cache holds only
+      # the download, and the file on disk is checked against the pinned hash
+      # whether it came from the cache or the network.
+      - name: Restore the cached hadolint binary
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/tool-cache/hadolint
+          key: tool-hadolint-${{ inputs.hadolint-version }}-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Fetch hadolint at the pinned version
+        env:
+          VERSION: ${{ inputs.hadolint-version }}
+          AMD64_SHA256: ${{ inputs.hadolint-sha256-amd64 }}
+          ARM64_SHA256: ${{ inputs.hadolint-sha256-arm64 }}
+          RUNNER_ARCH_NAME: ${{ runner.arch }}
+          CACHE_DIR: ${{ runner.temp }}/tool-cache/hadolint
+        run: |
+          set -euo pipefail
+          case "$RUNNER_ARCH_NAME" in
+            X64) asset=hadolint-linux-x86_64; SHA256="$AMD64_SHA256" ;;
+            ARM64) asset=hadolint-linux-arm64; SHA256="$ARM64_SHA256" ;;
+            *) echo "::error title=hadolint::no hadolint binary for runner architecture $RUNNER_ARCH_NAME"; exit 1 ;;
+          esac
+          mkdir -p "$CACHE_DIR"
+          if [ -f "$CACHE_DIR/hadolint" ] && ! echo "${SHA256}  $CACHE_DIR/hadolint" | sha256sum --status -c -; then
+            echo "cached hadolint binary does not match the pinned hash; fetching it again"
+            rm -f "$CACHE_DIR/hadolint"
+          fi
+          if [ ! -f "$CACHE_DIR/hadolint" ]; then
+            curl -sSfL -o "$CACHE_DIR/hadolint" "https://github.com/hadolint/hadolint/releases/download/v${VERSION}/${asset}"
+          fi
+          echo "${SHA256}  $CACHE_DIR/hadolint" | sha256sum -c -
+          chmod 0755 "$CACHE_DIR/hadolint"
+          "$CACHE_DIR/hadolint" --version
+
+      - name: Lint the Dockerfile (hadolint)
+        continue-on-error: ${{ inputs.hadolint-continue-on-error }}
+        env:
+          DOCKERFILE: ${{ inputs.dockerfile }}
+          ARGS: ${{ inputs.hadolint-args }}
+          HADOLINT: ${{ runner.temp }}/tool-cache/hadolint/hadolint
+        run: |
+          set -euo pipefail
+          read -r -a args <<< "$ARGS"
+          "$HADOLINT" "${args[@]}" "$DOCKERFILE"
+
   # One job per platform, on a runner of that architecture: build, check and
   # scan the image where it runs. When publishing, the same job pushes the
   # platform image under a temporary tag, `<sha>-<arch>`, for `merge`.
   build:
     name: Build, test, scan (${{ matrix.platform }})
-    needs: plan
+    needs: [plan, dockerfile-lint]
+    # A skipped lint (hadolint: false) must not skip the build; a failed or
+    # cancelled one must.
+    if: ${{ !cancelled() && needs.plan.result == 'success' && (needs.dockerfile-lint.result == 'success' || needs.dockerfile-lint.result == 'skipped') }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
@@ -293,12 +404,42 @@ jobs:
           cache-from: ${{ !inputs.push && format('type=gha,scope={0}', matrix.arch) || '' }}
           cache-to: ${{ !inputs.push && format('type=gha,mode=max,scope={0}', matrix.arch) || '' }}
 
+      - name: Require a non-root user
+        if: inputs.require-non-root
+        run: |
+          set -euo pipefail
+          if ! uid="$(docker run --rm --entrypoint id release-candidate:local -u)"; then
+            echo "::error title=non-root::could not run \`id -u\` in the image; add a USER instruction, or set require-non-root: false for an image with no id binary"
+            exit 1
+          fi
+          if [ "$uid" = "0" ]; then
+            echo "::error title=non-root::the image runs as root (uid 0); add a USER instruction to the Dockerfile, or set require-non-root: false"
+            exit 1
+          fi
+          echo "the image runs as uid $uid"
+
       - name: Check the image
         if: inputs.docker-test-command != ''
         env:
           IMAGE: release-candidate:local
           COMMAND: ${{ inputs.docker-test-command }}
         run: bash -eo pipefail -c "$COMMAND"
+
+      - name: Probe with a read-only root filesystem
+        if: inputs.probe-read-only
+        env:
+          PROBE_COMMAND: ${{ inputs.probe-command }}
+        run: |
+          set -euo pipefail
+          if [ -z "$PROBE_COMMAND" ]; then
+            echo "::error title=probe-read-only::probe-command is empty; give it the arguments that make the image exit on its own, such as --version"
+            exit 1
+          fi
+          read -r -a args <<< "$PROBE_COMMAND"
+          if ! docker run --rm --read-only --tmpfs /tmp release-candidate:local "${args[@]}"; then
+            echo "::error title=probe-read-only::the image fails with a read-only root filesystem; it writes outside /tmp. Point its writable paths at a tmpfs or a volume, or leave probe-read-only off"
+            exit 1
+          fi
 
       - name: Scan the image with Trivy
         if: inputs.trivy
@@ -313,7 +454,7 @@ jobs:
 
       - name: Upload Trivy results to the Security tab
         if: inputs.trivy && always() && hashFiles('trivy-results.sarif') != ''
-        uses: github/codeql-action/upload-sarif@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4.38.1
+        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
         with:
           sarif_file: trivy-results.sarif
           category: trivy-image-${{ matrix.arch }}

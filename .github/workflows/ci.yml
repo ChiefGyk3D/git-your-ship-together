@@ -238,9 +238,9 @@ jobs:
       push: false
       dockerfile: fixture/Dockerfile
       context: fixture
-      docker-test-command: |
-        docker run --rm "$IMAGE" --version
-        test "$(docker run --rm --entrypoint id "$IMAGE" -u)" != "0"
+      docker-test-command: docker run --rm "$IMAGE" --version
+      probe-read-only: true
+      probe-command: --version
 
   # verify-published.yml against the image this account publishes through
   # container-release.yml: signature, SBOM attestation and provenance verified

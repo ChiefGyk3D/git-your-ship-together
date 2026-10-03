@@ -154,6 +154,10 @@ on:
         description: harden-runner allow-list for the `distro` job in `block`, space-separated host:port entries. The default is Docker Hub's image pull, the package mirrors of the Debian, Ubuntu, Kali and Parrot images. A distribution not named here (Fedora, whose metalink mirrors vary by run) needs its hosts in `extra-allowed-endpoints`, or `distro-egress-policy` set to `audit`. Wildcards are not supported and a newline-separated list matches nothing.
         type: string
         default: "archive.ubuntu.com:80 auth.docker.io:443 deb.debian.org:80 deb.parrot.sh:443 kali.download:80 ports.ubuntu.com:80 production.cloudfront.docker.com:443 registry-1.docker.io:443 security.ubuntu.com:80"
+      distro-continue-on-error:
+        description: Let a failing distro run leave the gate green. For a suite that assumes a non-root user or a newer Python than the distribution ships; the result stays visible on the job.
+        type: boolean
+        default: false
       egress-policy:
         description: harden-runner egress policy for every job except `distro` - `audit` logs outbound connections, `block` allows only `allowed-endpoints`.
         type: string
@@ -395,6 +399,7 @@ jobs:
       # so git inside it refuses the directory until it is marked safe; a
       # test that shells out to git (ls-files, describe) would fail with 128.
       - name: Run the tests in the image
+        continue-on-error: ${{ inputs.distro-continue-on-error }}
         env:
           IMAGE: ${{ matrix.image }}
           SETUP: ${{ inputs.distro-setup-command }}

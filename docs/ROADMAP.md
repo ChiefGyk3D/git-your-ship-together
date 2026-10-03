@@ -194,6 +194,17 @@ the one that retires the most copied code.
    filesystem and dropped capabilities in the compose files, and a
    `chainguard/python` or distroless base to shrink what Trivy has to report.
    Then `trivy-exit-code: "1"` once the images are clean.
+   **Landed in `container-release.yml` (2026-10-03):** hadolint on the
+   Dockerfile (pinned, hash-checked, cached; `hadolint` input), a non-root
+   check in the workflow itself (`require-non-root`, default on), and an
+   opt-in read-only root filesystem probe (`probe-read-only`, `probe-command`).
+   The fixture enables the probe. The `trivy-exit-code` default stays `"0"`:
+   the fixture's own image failed a `"1"` run with fixable CRITICAL/HIGH
+   findings, so the default is not
+   flippable from here, and flipping it is a caller-by-caller step once that
+   caller's image is clean, one
+   pull request each. Still per-caller work: `read_only: true` and
+   `cap_drop: [ALL]` in the compose files, and the smaller base image.
 13. **`disable-sudo: true` in harden-runner** on jobs that never need it, which
    is most of them. One input per job in the shared workflows.
 14. **Signed commits and tags.** The laptop signs with its SSH key now

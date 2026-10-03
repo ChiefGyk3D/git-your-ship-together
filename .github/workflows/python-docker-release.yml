@@ -47,6 +47,42 @@ on:
         description: Shell run against the locally built image; `$IMAGE` names it. Empty skips the check.
         type: string
         default: ''
+      hadolint:
+        description: Lint the Dockerfile with hadolint before building.
+        type: boolean
+        default: true
+      hadolint-version:
+        description: hadolint release to download (hadolint/hadolint), without the `v`. Changing it means changing both `hadolint-sha256-*` inputs.
+        type: string
+        default: '2.15.1'
+      hadolint-sha256-amd64:
+        description: SHA-256 of the hadolint-linux-x86_64 binary for that version.
+        type: string
+        default: 'c7187db94eeeeca956519a6af171adc31453941a1e777961f6e680f697c8c507'
+      hadolint-sha256-arm64:
+        description: SHA-256 of the hadolint-linux-arm64 binary for that version.
+        type: string
+        default: 'f6198ef8090f404dbb771abfee086eb8c48ac177f30da7fd3510aca35b344b5d'
+      hadolint-args:
+        description: Arguments passed to hadolint before the Dockerfile path, split on whitespace.
+        type: string
+        default: '--failure-threshold warning'
+      hadolint-continue-on-error:
+        description: Report hadolint findings without failing the job. For a repository adopting the linter before its Dockerfile is clean.
+        type: boolean
+        default: false
+      require-non-root:
+        description: Fail when the built image runs as root (`id -u` prints 0). The fix is a `USER` instruction in the Dockerfile. Needs an `id` binary in the image; turn it off for a distroless or scratch image.
+        type: boolean
+        default: true
+      probe-read-only:
+        description: Also run the image with a read-only root filesystem (`--read-only --tmpfs /tmp`) and fail if it breaks. Enable once the image is known to write only under tmpfs or volumes.
+        type: boolean
+        default: false
+      probe-command:
+        description: Arguments for the read-only probe, which runs `docker run --rm --read-only --tmpfs /tmp "$IMAGE" <probe-command>` with the image's own entrypoint. Must exit on its own, such as `--version`. Required when `probe-read-only` is true.
+        type: string
+        default: ''
       dockerhub:
         description: Also publish to Docker Hub when the Doppler config holds DOCKERHUB_USERNAME and DOCKERHUB_TOKEN.
         type: boolean
@@ -145,6 +181,15 @@ jobs:
       push: ${{ inputs.push }}
       tags: ${{ inputs.tags }}
       docker-test-command: ${{ inputs.docker-test-command }}
+      hadolint: ${{ inputs.hadolint }}
+      hadolint-version: ${{ inputs.hadolint-version }}
+      hadolint-sha256-amd64: ${{ inputs.hadolint-sha256-amd64 }}
+      hadolint-sha256-arm64: ${{ inputs.hadolint-sha256-arm64 }}
+      hadolint-args: ${{ inputs.hadolint-args }}
+      hadolint-continue-on-error: ${{ inputs.hadolint-continue-on-error }}
+      require-non-root: ${{ inputs.require-non-root }}
+      probe-read-only: ${{ inputs.probe-read-only }}
+      probe-command: ${{ inputs.probe-command }}
       dockerhub: ${{ inputs.dockerhub }}
       dockerhub-repository: ${{ inputs.dockerhub-repository }}
       sign: ${{ inputs.sign }}
