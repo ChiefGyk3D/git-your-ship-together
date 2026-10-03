@@ -135,7 +135,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
-      pages: write
+      pages: write  # deploy-pages publishes the artifact; no caller code runs in this job
       id-token: write  # Pages verifies the deploy against the job's OIDC identity; no caller code runs here
     # One deployment at a time; a newer push supersedes a queued one, but a
     # deployment already running is allowed to finish. The group is fixed, not
