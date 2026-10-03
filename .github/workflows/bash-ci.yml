@@ -125,6 +125,11 @@ on:
         default: |
           export DEBIAN_FRONTEND=noninteractive
           if command -v apt-get >/dev/null 2>&1; then
+            # Kali's redirector hands out a different mirror per request, which
+            # no egress list can follow; the CDN host it fronts is one name.
+            if grep -qx 'ID=kali' /etc/os-release; then
+              sed -i 's|http://http.kali.org|http://kali.download|g' /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources 2>/dev/null || true
+            fi
             # A mirror that answers 502 is not retried by apt itself, so the
             # whole step is tried three times with a pause between.
             for attempt in 1 2 3; do
@@ -143,7 +148,7 @@ on:
       distro-allowed-endpoints:
         description: harden-runner allow-list for the `distro` job in `block`, space-separated host:port entries. The default is Docker Hub's image pull, the package mirrors of the Debian, Ubuntu, Kali and Parrot images. A distribution not named here (Fedora, whose metalink mirrors vary by run) needs its hosts in `extra-allowed-endpoints`, or `distro-egress-policy` set to `audit`. Wildcards are not supported and a newline-separated list matches nothing.
         type: string
-        default: "archive.ubuntu.com:80 auth.docker.io:443 deb.debian.org:80 deb.parrot.sh:443 http.kali.org:80 kali.download:443 kali.download:80 ports.ubuntu.com:80 production.cloudfront.docker.com:443 registry-1.docker.io:443 security.ubuntu.com:80 us.mirror.ionos.com:443 us.mirror.ionos.com:80"
+        default: "archive.ubuntu.com:80 auth.docker.io:443 deb.debian.org:80 deb.parrot.sh:443 kali.download:80 ports.ubuntu.com:80 production.cloudfront.docker.com:443 registry-1.docker.io:443 security.ubuntu.com:80"
       egress-policy:
         description: harden-runner egress policy for every job except `distro` - `audit` logs outbound connections, `block` allows only `allowed-endpoints`.
         type: string
