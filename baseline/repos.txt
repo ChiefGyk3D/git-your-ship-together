@@ -16,3 +16,7 @@ ChiefGyk3D/hypeman
 ChiefGyk3D/the-great-infocon-recovery
 ChiefGyk3D/hammunition-hill
 ChiefGyk3D/dell-battery-balance
+ChiefGyk3D/Patch-Gremlin
+ChiefGyk3D/pfsense-siem-stack
+ChiefGyk3D/siem-docker-stack
+ChiefGyk3D/Skid-Finder
