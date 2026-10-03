@@ -1,7 +1,7 @@
 # The fixture image: the same shape as the calling repositories' images, so the
 # release workflow's build, check and scan steps run against something real.
 # The base is pinned by digest; Dependabot moves it.
-FROM python:3.13-slim@sha256:8d9d0b8bcf6506481eae4907c18f5e3e7902e629f5f6d684f9e7c32e85e3ddf0
+FROM python:3.13-slim@sha256:bb2988715db2cf7ace7b53f38f3cffbef7c7046a656bee66245eb0ed386e2e81
 
 LABEL org.opencontainers.image.title="fixture-app"
 LABEL org.opencontainers.image.source="https://github.com/ChiefGyk3D/git-your-ship-together"

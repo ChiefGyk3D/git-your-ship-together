@@ -24,3 +24,14 @@ updates:
     cooldown:
       default-days: 7
     labels: [dependencies, python]
+
+  # The fixture image's base is pinned by digest; without this entry the pin
+  # goes stale and Trivy reports the base's OS packages against it.
+  - package-ecosystem: docker
+    directory: /fixture
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7
+    labels: [dependencies, docker]
