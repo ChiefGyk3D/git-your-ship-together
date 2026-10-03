@@ -7,6 +7,7 @@ already cover these jobs; this file pins what is specific to them.
 
 from __future__ import annotations
 
+import io
 import os
 import re
 import subprocess
@@ -113,9 +114,23 @@ def test_semgrep_default_pack_resolves_in_registry(pack):
     with urlopen(request, timeout=60) as response:
         config = yaml.safe_load(response.read())
     if "rule_config" in config:
-        config = yaml.safe_load(config["rule_config"])
+        config = config["rule_config"]
+        if isinstance(config, str):
+            config = yaml.safe_load(config)
     assert config["rules"], f"{pack}: registry returned no rules"
     assert all({"id", "languages", "message", "severity"} <= rule.keys() for rule in config["rules"]), pack
+
+
+@pytest.mark.parametrize("format_", ["yaml", "wrapped-yaml", "wrapped-object"])
+def test_registry_contract_accepts_supported_response_formats(monkeypatch, format_):
+    config = {"rules": [{"id": "example", "languages": ["python"], "message": "example", "severity": "WARNING"}]}
+    if format_ == "wrapped-yaml":
+        config = {"rule_config": yaml.safe_dump(config)}
+    elif format_ == "wrapped-object":
+        config = {"rule_config": config}
+    body = yaml.safe_dump(config).encode()
+    monkeypatch.setattr("test_security_jobs.urlopen", lambda request, timeout: io.BytesIO(body))
+    test_semgrep_default_pack_resolves_in_registry("p/python")
 
 
 def test_semgrep_uploads_sarif_with_its_category_even_after_a_finding():
