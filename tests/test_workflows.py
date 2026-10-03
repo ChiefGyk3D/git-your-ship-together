@@ -323,6 +323,23 @@ def test_every_reusable_job_starts_with_harden_runner(path):
         )
 
 
+@pytest.mark.parametrize(
+    "path", [p for p in LANGUAGE_CI if p.name in ("arduino-ci.yml", "tofu-ci.yml")], ids=lambda p: p.name
+)
+def test_workflow_lint_default_allows_its_download_hosts(path):
+    doc = load(path)
+    lint = jobs(doc)["workflow-lint"]
+    assert any("raven-actions/actionlint@" in s.get("uses", "") for s in steps_of(lint))
+    assert any("zizmorcore/zizmor-action@" in s.get("uses", "") for s in steps_of(lint))
+    endpoints = triggers(doc)["workflow_call"]["inputs"]["allowed-endpoints"]["default"].split()
+    assert {
+        "ghcr.io:443",
+        "pkg-containers.githubusercontent.com:443",
+        "raw.githubusercontent.com:443",
+        "registry.npmjs.org:443",
+    } <= set(endpoints), f"{path.name}: workflow lint cannot download its tools under block"
+
+
 # --- script injection -------------------------------------------------------
 
 UNTRUSTED = re.compile(r"\$\{\{\s*(github\.event\.|github\.head_ref|github\.ref_name|env\.|inputs\.)")

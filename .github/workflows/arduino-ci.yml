@@ -83,7 +83,7 @@ on:
       allowed-endpoints:
         description: harden-runner allow-list for `block`, space-separated host:port entries. The default is arduino-cli's download and Arduino's package index and tools; a core from another index (Espressif's) adds its hosts through `extra-allowed-endpoints`. Wildcards are not supported and a newline-separated list matches nothing.
         type: string
-        default: "api.github.com:443 downloads.arduino.cc:443 github.com:443 objects.githubusercontent.com:443 release-assets.githubusercontent.com:443"
+        default: "api.github.com:443 downloads.arduino.cc:443 ghcr.io:443 github.com:443 objects.githubusercontent.com:443 pkg-containers.githubusercontent.com:443 raw.githubusercontent.com:443 registry.npmjs.org:443 release-assets.githubusercontent.com:443"
       extra-allowed-endpoints:
         description: Appended to `allowed-endpoints`, for the hosts a core or library index reaches. Same format.
         type: string
