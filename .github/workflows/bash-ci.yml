@@ -173,7 +173,7 @@ on:
       allowed-endpoints:
         description: harden-runner allow-list for `block`, space-separated host:port entries. The default is every endpoint this workflow's jobs reach; the runner's own infrastructure needs no entry. Wildcards are not supported and a newline-separated list matches nothing.
         type: string
-        default: "api.github.com:443 files.pythonhosted.org:443 github.com:443 objects.githubusercontent.com:443 pypi.org:443 release-assets.githubusercontent.com:443"
+        default: "api.github.com:443 files.pythonhosted.org:443 ghcr.io:443 github.com:443 objects.githubusercontent.com:443 pkg-containers.githubusercontent.com:443 pypi.org:443 raw.githubusercontent.com:443 registry.npmjs.org:443 release-assets.githubusercontent.com:443"
       extra-allowed-endpoints:
         description: Appended to `allowed-endpoints`, for hosts only this repository reaches, such as an apt repository its test install needs. Same format.
         type: string
