@@ -111,6 +111,10 @@ def test_semgrep_defaults_follow_repository_content(tmp_path, python_file, confi
 
 
 @pytest.mark.parametrize("pack", DEFAULT_PACKS)
+@pytest.mark.skipif(
+    os.environ.get("GYST_TEST_SEMGREP_REGISTRY") != "1",
+    reason="set GYST_TEST_SEMGREP_REGISTRY=1 to resolve default packs against the live registry",
+)
 def test_semgrep_default_pack_resolves_in_registry(pack):
     request = Request(f"https://semgrep.dev/c/{pack}", headers={"Accept": "application/json"})
     with urlopen(request, timeout=60) as response:

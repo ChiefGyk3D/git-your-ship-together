@@ -1229,9 +1229,16 @@ All four language CI workflows include the workflow-lint hosts in their
 defaults: `registry.npmjs.org:443` for actionlint's npm install,
 `raw.githubusercontent.com:443` for its downloads, and `ghcr.io:443` plus
 `pkg-containers.githubusercontent.com:443` for zizmor's image and layers.
-The Semgrep pack contract tests also need access to `semgrep.dev`: they
-resolve every automatically selected registry pack and reject missing or
-empty rule sets.
+The default test run stays hermetic. To resolve every automatically selected
+Semgrep pack against `semgrep.dev` and reject missing or empty rule sets, opt
+in explicitly:
+
+```bash
+GYST_TEST_SEMGREP_REGISTRY=1 pytest tests/test_security_jobs.py -k resolves_in_registry
+```
+
+The offline response-format and repository-content contracts still run by
+default; only live registry resolution requires this opt-in.
 
 Every caller in `baseline/repos.txt` runs `block` on all three workflows.
 A host only one repository reaches, such as an apt repository or an
