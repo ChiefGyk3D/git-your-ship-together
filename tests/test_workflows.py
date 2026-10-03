@@ -287,10 +287,19 @@ def test_every_reusable_job_declares_its_own_permissions(path):
         assert isinstance(job.get("permissions"), dict), f"{path.name}: job {job_name!r} has no permissions block"
 
 
+# The one checkout that keeps its credentials: the wiki's, whose stored token is
+# what lets the push happen without a credential in a shell variable.
+KEEPS_CREDENTIALS = {("wiki-publish.yml", "publish", "wiki")}
+
+
 @pytest.mark.parametrize("path", WORKFLOW_FILES, ids=lambda p: p.name)
 def test_every_checkout_refuses_to_persist_credentials(path):
     for job_name, step in all_steps(path):
         if not str(step.get("uses", "")).startswith("actions/checkout@"):
+            continue
+        if (path.name, job_name, step.get("id")) in KEEPS_CREDENTIALS:
+            assert (step.get("with") or {}).get("persist-credentials") is True
+            assert str(step["with"]["repository"]).endswith(".wiki"), "only the wiki checkout may keep credentials"
             continue
         assert (step.get("with") or {}).get("persist-credentials") is False, (
             f"{path.name}: checkout in job {job_name!r} does not set persist-credentials: false"

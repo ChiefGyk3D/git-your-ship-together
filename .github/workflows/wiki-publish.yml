@@ -23,8 +23,9 @@
 # Two jobs, so the caller's code never runs beside a write token: `generate`
 # has `contents: read`, runs the caller's commands and uploads the tree as an
 # artifact; `publish` has `contents: write`, runs none of the caller's code,
-# and sends the tree to the wiki. The token reaches git as a one-command
-# header, never in a remote URL or a config file.
+# and sends the tree to the wiki. The wiki is checked out with
+# actions/checkout, which stores the token for git itself, so the credential
+# never passes through a shell variable, an argument or a URL.
 #
 # It generates on every run, a pull request included, so a broken generator
 # fails the review; it publishes only from a run on the default branch,
@@ -165,46 +166,55 @@ jobs:
           name: wiki-tree
           path: ${{ runner.temp }}/wiki-tree
 
-      - name: Replace the wiki's contents and push if anything changed
+      # The wiki is a git repository of this one. The one checkout in this
+      # workflow that keeps its credentials: checkout stores the token in that
+      # clone's own git config and git sends it from there, so no credential
+      # passes through a shell variable or an argument. A wiki with no first
+      # page cannot be cloned; the next step turns that into the instruction.
+      - name: Check out the wiki
+        id: wiki
+        continue-on-error: true
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ github.repository }}.wiki
+          path: wiki
+          token: ${{ github.token }}
+          persist-credentials: true  # deliberate, for this checkout only: the push below needs it
+
+      - name: Check that the wiki exists
         env:
-          TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           SERVER_URL: ${{ github.server_url }}
+        run: |
+          set -euo pipefail
+          # GitHub creates the wiki's git repository only when its first page
+          # is made in the UI, so a failed checkout here means that.
+          if [ ! -d wiki/.git ]; then
+            echo "::error title=Wiki publish::The wiki has no first page yet: open $SERVER_URL/$REPO/wiki, create any page once, then re-run"
+            exit 1
+          fi
+
+      - name: Replace the wiki's contents and push if anything changed
+        env:
+          REPO: ${{ github.repository }}
           SOURCE_SHA: ${{ github.sha }}
           TREE: ${{ runner.temp }}/wiki-tree
         run: |
           set -euo pipefail
-          url="$SERVER_URL/$REPO"
-          creds=$(printf 'x-access-token:%s' "$TOKEN" | base64 -w0)
-          # Not echoed anywhere (no `set -x`, and git never prints a header).
-          # No log-masking command is used: whoever can edit a workflow can
-          # switch workflow commands off.
-          wiki_git() { git -c "http.extraheader=Authorization: Basic $creds" "$@"; }
-
           if [ -z "$(ls -A "$TREE")" ]; then
             echo "::error title=Wiki publish::the generated tree is empty; publishing it would empty the wiki"
             exit 1
           fi
-
-          # GitHub creates the wiki's git repository only when its first page
-          # is made in the UI, so a clone that fails here means that.
-          if ! wiki_git clone --quiet "$url.wiki.git" "$RUNNER_TEMP/wiki" 2> "$RUNNER_TEMP/clone.err"; then
-            cat "$RUNNER_TEMP/clone.err"
-            echo "::error title=Wiki publish::The wiki has no first page yet: open $url/wiki, create any page once, then re-run"
-            exit 1
-          fi
-
-          cd "$RUNNER_TEMP/wiki"
           # Remove every tracked page, then write the generated tree: a page
           # the generator no longer writes disappears from the wiki.
-          git rm -rq --ignore-unmatch .
-          cp -a "$TREE"/. .
-          git add -A
-          if git diff --cached --quiet; then
+          git -C wiki rm -rq --ignore-unmatch .
+          cp -a "$TREE"/. wiki/
+          git -C wiki add -A
+          if git -C wiki diff --cached --quiet; then
             echo "The wiki is already current."
             exit 0
           fi
-          git -c user.name="github-actions[bot]" \
+          git -C wiki -c user.name="github-actions[bot]" \
             -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
             commit --quiet -m "Regenerate the wiki from $REPO at $SOURCE_SHA"
-          wiki_git push --quiet origin HEAD
+          git -C wiki push --quiet origin HEAD
