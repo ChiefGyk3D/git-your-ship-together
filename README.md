@@ -1067,6 +1067,18 @@ caller, not in the shared default. A blocked connection shows in the job log
 as `domain not allowed: <host>`, which is also how a new dependency announces
 itself.
 
+The `distro` lists (`distro-allowed-endpoints` in `python-ci.yml` and
+`bash-ci.yml`) were measured in `block` mode on the fixture's Debian 12 and 13,
+Ubuntu 24.04, Kali and Parrot images on both runners:
+[run 37131671587](https://github.com/ChiefGyk3D/git-your-ship-together/actions/runs/37131671587).
+`semgrep-allowed-endpoints` was measured the same way in
+[run 37131671510](https://github.com/ChiefGyk3D/git-your-ship-together/actions/runs/37131671510),
+and `verify-published.yml`'s list (its `fixture verify` job, which refused
+GitHub's attestation store until `tmaproduction.blob.core.windows.net` was
+added) in the CI run above. Fedora was not measured: `dnf` takes its mirror from a
+metalink answer that varies per run, so `fedora:*` needs `distro-egress-policy`
+set to `audit`, or the mirrors it reached in `extra-allowed-endpoints`.
+
 The Snyk hosts in `security.yml`'s default (`api`, `app`, `deeproxy`,
 `downloads` and `static` under `snyk.io`) came from Snyk's documentation
 rather than a measurement, because the first run with a token logged its
