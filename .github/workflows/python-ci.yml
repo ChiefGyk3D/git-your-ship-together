@@ -150,9 +150,13 @@ on:
             dnf install -y -q python3 python3-pip git ca-certificates
           fi
       distro-egress-policy:
-        description: harden-runner egress policy for the `distro` job. It pulls a distribution image and its package mirrors, whose hosts are not yet measured, so it ships in `audit` and moves to `block` with a measured list in a later release, like every job before it.
+        description: harden-runner egress policy for the `distro` job - `audit` logs outbound connections, `block` allows only `distro-allowed-endpoints` and `extra-allowed-endpoints`.
         type: string
-        default: audit
+        default: block
+      distro-allowed-endpoints:
+        description: harden-runner allow-list for the `distro` job in `block`, space-separated host:port entries. The default is Docker Hub's image pull, the package mirrors of the Debian, Ubuntu, Kali and Parrot images, and the PyPI hosts the install command reaches. A distribution not named here (Fedora, whose metalink mirrors vary by run) needs its hosts in `extra-allowed-endpoints`, or `distro-egress-policy: audit`. Wildcards are not supported and a newline-separated list matches nothing.
+        type: string
+        default: "archive.ubuntu.com:80 auth.docker.io:443 deb.debian.org:80 files.pythonhosted.org:443 http.kali.org:80 ports.ubuntu.com:80 production.cloudflare.docker.com:443 pypi.org:443 registry-1.docker.io:443 security.ubuntu.com:80"
       egress-policy:
         description: harden-runner egress policy for every job except `distro` - `audit` logs outbound connections, `block` allows only `allowed-endpoints`.
         type: string
@@ -399,7 +403,7 @@ jobs:
       - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
         with:
           egress-policy: ${{ inputs.distro-egress-policy }}
-          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          allowed-endpoints: ${{ inputs.distro-allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
           disable-sudo: true
           # The agent may only stop reporting to StepSecurity in block mode.
           disable-telemetry: ${{ inputs.distro-egress-policy == 'block' }}
