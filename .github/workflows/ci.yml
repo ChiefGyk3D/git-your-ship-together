@@ -161,6 +161,23 @@ jobs:
         git cat-file -e "$HEAD"
         test "$(git rev-list --count "origin/$BASE..HEAD")" -gt 0
 
+  # python-fuzz.yml at this ref over the fixture's one Atheris target, for five
+  # seconds, in block mode with the workflow's own default list, so a host the
+  # list lacks fails here before a caller meets it. That a crashing target
+  # fails the job is proved by tests/test_fuzz.py, which runs the workflow's
+  # run step against one: a deliberately failing job here would leave every
+  # run red.
+  fixture-fuzz:
+    name: fixture fuzz
+    uses: ./.github/workflows/python-fuzz.yml # zizmor: ignore[self-repository]
+    permissions:
+      contents: read
+    with:
+      fuzz-dir: fixture/fuzz
+      seconds-per-target: 5
+      install-command: pip install --no-deps ./fixture
+      egress-policy: block
+
   # The fixture package through python-package-release.yml at this ref:
   # build, check, smoke-test from the wheel, never publish. The writes are
   # what the two publishing jobs declare; publish is false so both are
@@ -311,7 +328,7 @@ jobs:
   ci-green:
     name: CI green
     if: always()
-    needs: [actionlint, zizmor, test, fixture-ci, fixture-bash, fixture-tofu, fixture-arduino, fixture-package, fixture-artifact, fixture-pages, fixture-wiki, fixture-release, fixture-verify]
+    needs: [actionlint, zizmor, test, fixture-ci, fixture-bash, fixture-fuzz, fixture-tofu, fixture-arduino, fixture-package, fixture-artifact, fixture-pages, fixture-wiki, fixture-release, fixture-verify]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}

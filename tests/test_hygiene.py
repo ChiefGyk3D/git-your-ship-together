@@ -24,6 +24,7 @@ from test_workflows import (
 
 HYGIENE_FILES = [
     "python-ci.yml",
+    "python-fuzz.yml",
     "bash-ci.yml",
     "tofu-ci.yml",
     "arduino-ci.yml",

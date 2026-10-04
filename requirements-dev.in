@@ -5,6 +5,8 @@
 #   pip install pip-tools
 #   pip-compile --generate-hashes --strip-extras --no-header --output-file requirements-dev.txt requirements-dev.in
 #
+# atheris runs the fuzz targets in tests/fuzz_*/ (tests/test_fuzz.py); x86_64 wheels only.
+atheris==3.1.0
 pytest==9.1.1
 PyYAML==6.0.3
 ruff==0.16.9

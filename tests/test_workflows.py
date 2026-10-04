@@ -33,6 +33,7 @@ REUSABLE = [
     if p.name
     in (
         "python-ci.yml",
+        "python-fuzz.yml",
         "bash-ci.yml",
         "tofu-ci.yml",
         "arduino-ci.yml",
@@ -62,6 +63,7 @@ DOPPLER = [
         "python-package-release.yml",
         "artifact-release.yml",
         "python-docker-release.yml",
+        "python-fuzz.yml",
         "verify-published.yml",
         "docs-pages.yml",
         "wiki-publish.yml",
@@ -104,7 +106,7 @@ def all_steps(path: Path):
 
 
 def test_there_is_something_to_check():
-    assert len(REUSABLE) == 13, "expected the thirteen callable workflows"
+    assert len(REUSABLE) == 14, "expected the fourteen callable workflows"
     assert len(DOPPLER) == 4, "expected four of them to fetch CI secrets"
     assert [p.name for p in LANGUAGE_CI] == ["arduino-ci.yml", "bash-ci.yml", "python-ci.yml", "tofu-ci.yml"]
     assert ACTION_FILES, "no composite actions found"
