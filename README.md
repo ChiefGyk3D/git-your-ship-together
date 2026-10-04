@@ -1034,6 +1034,7 @@ Inputs of `security.yml`:
 | `semgrep-egress-policy` | `block` | harden-runner policy for the Semgrep job only |
 | `semgrep-allowed-endpoints` | the measured list | The Semgrep job's own allow-list: PyPI for the pip install, `semgrep.dev` for the rule registry, and GitHub for the SARIF upload. `extra-allowed-endpoints` is appended to it, for a private rule registry or a config fetched from another host |
 | `snyk` | `false` | Snyk Code and Snyk Open Source; needs `SNYK_TOKEN` in the Doppler config. Runs only on a trusted ref, never on a pull request |
+| `snyk-install-command` | empty | For a repository with no lock (`pip-audit-requirements: ""`) that declares its dependencies in `pyproject.toml`: the install Snyk Open Source scans a freeze of, such as `pip install .`. Empty with no lock leaves Snyk's discovery, which reads no PEP 621 `pyproject.toml` and ends in a "nothing to scan" warning |
 | `scorecard` | `false` | OpenSSF Scorecard, published; runs only on the default branch (push or schedule) |
 | `python-version` | `3.13` | Python for pip-audit and Snyk |
 | `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `audit`, the measured list, empty | harden-runner, as in `python-ci.yml` |
@@ -1058,7 +1059,11 @@ Open Source) gets a warning, not a red job. When `pip-audit-requirements` names 
 Open Source scans a `pip freeze` of the environment that lock installed on
 `python-version`, exact versions of everything that actually went in, rather
 than the lock file itself (see the lessons below for why). Alerts attach to
-the lock's path, line 1.
+the lock's path, line 1. A repository with no lock names its install in
+`snyk-install-command` (`pip install .`) and gets the same freeze, written
+over `pyproject.toml`, so its alerts attach to the file that declares the
+dependencies; with neither, Snyk Open Source has nothing it can read and
+warns.
 
 ### Dependabot auto-merge
 

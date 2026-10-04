@@ -125,6 +125,10 @@ on:
         description: Run Snyk Code and Snyk Open Source. Needs SNYK_TOKEN in the Doppler config.
         type: boolean
         default: false
+      snyk-install-command:
+        description: Shell that installs the project's dependencies for Snyk Open Source when `pip-audit-requirements` is empty, for a repository that declares them in `pyproject.toml` and keeps no lock (`pip install .`, `pip install .[all]`). Snyk then scans a freeze of the result, written over `pyproject.toml` in the checkout so the SARIF names the file that declares the dependencies. Empty with an empty `pip-audit-requirements` leaves Snyk's own discovery, which reads no PEP 621 `pyproject.toml` and ends in a "nothing to scan" warning.
+        type: string
+        default: ""
       scorecard:
         description: Run OpenSSF Scorecard and publish the result. Runs only on the default branch (push or schedule).
         type: boolean
@@ -578,15 +582,22 @@ jobs:
         if: steps.token.outputs.present == 'true'
         env:
           REQUIREMENTS: ${{ inputs.pip-audit-requirements }}
+          INSTALL: ${{ inputs.snyk-install-command }}
         run: |
           # A lock with hashes is installed under --require-hashes, the same way
-          # the images install it; a plain pin list is installed as it is.
+          # the images install it; a plain pin list is installed as it is. A
+          # repository with no lock names its own install (`pip install .`):
+          # the project's build runs here, as it already does for pip-audit's
+          # audit-command, on a trusted ref only, with nothing a `pip install
+          # -r` of third-party packages would not run as well.
           if [ -n "$REQUIREMENTS" ]; then
             if grep -q -- '--hash=' "$REQUIREMENTS"; then
               pip install --require-hashes -r "$REQUIREMENTS"
             else
               pip install -r "$REQUIREMENTS"
             fi
+          elif [ -n "$INSTALL" ]; then
+            eval "$INSTALL"
           fi
 
       - uses: snyk/actions/setup@9adf32b1121593767fc3c057af55b55db032dc04 # v1.0.0
@@ -616,6 +627,7 @@ jobs:
         if: steps.token.outputs.present == 'true'
         env:
           REQUIREMENTS: ${{ inputs.pip-audit-requirements }}
+          INSTALL: ${{ inputs.snyk-install-command }}
         run: |
           # Snyk's pip resolver reads the requirements file itself and refuses
           # the whole file when a line names a package that is not installed.
@@ -634,12 +646,23 @@ jobs:
           # because the SARIF names the scanned file: a path outside the
           # checkout comes out absolute and a sibling would name a file the
           # repository does not have, while this way an alert lands on the lock
-          # itself. Nothing after this step reads the file. Without a
-          # requirements file Snyk discovers manifests itself as before.
+          # itself. Nothing after this step reads the file. A repository with
+          # no lock but a snyk-install-command gets the same freeze written over
+          # pyproject.toml, the file that declares what was installed (Snyk
+          # reads it as pip requirements under --package-manager=pip; measured
+          # with the CLI, the SARIF then names pyproject.toml). With neither,
+          # Snyk discovers manifests itself as before.
           if [ -n "$REQUIREMENTS" ]; then
-            pip freeze --exclude-editable > "$REQUIREMENTS"
-            echo "scanning a freeze of the installed environment ($(grep -c . "$REQUIREMENTS") packages) as $REQUIREMENTS"
-            set -- --file="$REQUIREMENTS" --package-manager=pip
+            target=$REQUIREMENTS
+          elif [ -n "$INSTALL" ]; then
+            target=pyproject.toml
+          else
+            target=
+          fi
+          if [ -n "$target" ]; then
+            pip freeze --exclude-editable > "$target"
+            echo "scanning a freeze of the installed environment ($(grep -c . "$target") packages) as $target"
+            set -- --file="$target" --package-manager=pip
           else
             set -- --all-projects --skip-unresolved=true
           fi
