@@ -627,6 +627,10 @@ def test_snyk_open_source_scans_a_freeze_of_the_installed_environment():
     lock installed instead, written over the lock so the SARIF names a real file."""
     doc = load(WORKFLOWS / "security.yml")
     snyk = jobs(doc)["snyk"]
+    assert triggers(doc)["workflow_call"]["inputs"]["snyk-on"]["default"] == "schedule", "Snyk's free plan meters tests"
+    gate = "inputs.snyk-on == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'"
+    assert gate in snyk["if"]
+    assert "github.event_name != 'pull_request'" in snyk["if"]
     step = next(s for s in steps_of(snyk) if s.get("name") == "Snyk Open Source (SCA)")
     assert step["env"]["REQUIREMENTS"] == "${{ inputs.pip-audit-requirements }}"
     assert step["env"]["INSTALL"] == "${{ inputs.snyk-install-command }}"

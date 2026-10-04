@@ -125,6 +125,10 @@ on:
         description: Run Snyk Code and Snyk Open Source. Needs SNYK_TOKEN in the Doppler config.
         type: boolean
         default: false
+      snyk-on:
+        description: When the Snyk job runs. `schedule` (default) runs it on the weekly schedule and on workflow_dispatch only; `push` also runs it on every push to the default branch and every tag. Snyk's free plan meters tests per month (one Snyk Code test and one Snyk Open Source test per run) across every repository on the account, and ten repositories on `push` used the month's Code tests in a day (measured 2026-10-04, 34 runs). Weekly across the same ten is about a tenth of that. Never on a pull request in either mode.
+        type: string
+        default: schedule
       snyk-install-command:
         description: Shell that installs the project's dependencies for Snyk Open Source when `pip-audit-requirements` is empty, for a repository that declares them in `pyproject.toml` and keeps no lock (`pip install .`, `pip install .[all]`). Snyk then scans a freeze of the result, written over `pyproject.toml` in the checkout so the SARIF names the file that declares the dependencies. Empty with an empty `pip-audit-requirements` leaves Snyk's own discovery, which reads no PEP 621 `pyproject.toml` and ends in a "nothing to scan" warning.
         type: string
@@ -461,7 +465,7 @@ jobs:
     name: Snyk
     # Never on a pull request: the job holds an OIDC token for SNYK_TOKEN, and
     # a pull request's code must not run beside one.
-    if: inputs.snyk && github.event_name != 'pull_request'
+    if: inputs.snyk && github.event_name != 'pull_request' && (inputs.snyk-on == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
