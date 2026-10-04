@@ -1186,10 +1186,26 @@ plan. On a Developer plan, use path 2 and skip the identity step below.
 
 3. **Identity.** On the service account, add an Identity of type OIDC:
    - Issuer: `https://token.actions.githubusercontent.com`
-   - Subject: `repo:ChiefGyk3D/<repo>:ref:refs/heads/main` (`master` where
-     that is the default branch), plus `repo:ChiefGyk3D/<repo>:ref:refs/tags/*`
-     where Doppler accepts more than one subject per identity, or a second
-     identity for tags if it does not. The subject must never match
+   - Subject: both forms GitHub can put in the token, each with its tag twin
+     (`master` where that is the default branch):
+     - `repo:ChiefGyk3D/<repo>:ref:refs/heads/main` and
+       `repo:ChiefGyk3D/<repo>:ref:refs/tags/*`
+     - `repo:ChiefGyk3D@19499446/<repo>@<repo-id>:ref:refs/heads/main` and
+       `repo:ChiefGyk3D@19499446/<repo>@<repo-id>:ref:refs/tags/*`, the
+       *immutable subject*, where `<repo-id>` is
+       `gh api repos/ChiefGyk3D/<repo> --jq .id` and `19499446` is the
+       account's id
+
+     Which form a repository sends is its OIDC setting
+     (`gh api repos/ChiefGyk3D/<repo>/actions/oidc/customization/sub`, field
+     `use_immutable_subject`); repositories created from mid-2026 default to
+     the immutable form, older ones to the plain form. Measured 2026-10-03:
+     eight repositories on the immutable default failed every Doppler fetch
+     with `claim "sub" does not match identity auth config` until that form
+     was added. Listing both means a flip of the setting changes nothing.
+     Doppler accepts several subjects per identity and has no update call:
+     to change the list, create a new identity, point the repository variable
+     at it, then delete the old one. The subject must never match
      `repo:ChiefGyk3D/<repo>:pull_request`: the workflows refuse to fetch on a
      pull request, and the identity is the second lock on the same door. The
      broad `repo:ChiefGyk3D/<repo>:*` works but matches pull-request tokens,
@@ -1367,6 +1383,15 @@ nothing.
   everything, including PyPI. Use a folded block (`>`) or one line. Wildcards
   (`*.example.com`) are not supported and invalidate the whole list. A test
   now holds the defaults to one sorted line of `host:port`.
+- **GitHub's immutable OIDC subject is on by default in newer repositories.**
+  A repository created from mid-2026 sends
+  `repo:OWNER@<owner-id>/REPO@<repo-id>:ref:...` as the token's `sub`, and a
+  Doppler identity listing only `repo:OWNER/REPO:ref:...` rejects it with
+  `claim "sub" does not match identity auth config`. Eight repositories were
+  failing every Doppler fetch this way on 2026-10-03, three of them from their
+  first run with Snyk on. The identities now list both forms; the setup steps
+  say to. The audit cannot see Doppler's side, so a new repository's first
+  push to main is the check.
 - **The Actions allow-list needs the subdirectory forms too.** `snyk/actions@*`
   does not cover `snyk/actions/setup`; `github/codeql-action@*` does not cover
   `github/codeql-action/init`. And a composite action's own `uses:` lines
@@ -1482,8 +1507,10 @@ run".
 1. **Doppler:** create the project `audit` with the config `prd` and add the
    secret `AUDIT_GITHUB_TOKEN`.
 2. **Doppler:** create the service account `gha-audit` with read access to
-   that project only, and an OIDC identity on it whose subject is
-   `repo:ChiefGyk3D/git-your-ship-together:ref:refs/heads/main`.
+   that project only, and an OIDC identity on it whose subjects are
+   `repo:ChiefGyk3D/git-your-ship-together:ref:refs/heads/main` and
+   `repo:ChiefGyk3D@19499446/git-your-ship-together@1379819453:ref:refs/heads/main`
+   (this repository sends the immutable form; see "Doppler setup").
 3. **GitHub:** set the repository variable `AUDIT_DOPPLER_IDENTITY_ID` on
    this repository to that identity's UUID.
 4. **GitHub:** create the token as a fine-grained personal access token with

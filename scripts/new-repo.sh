@@ -796,14 +796,21 @@ if ! grep -qx "$repo" "$repos_file"; then
   echo "appended $repo to baseline/repos.txt; commit that here"
 fi
 
+repo_id=$(gh api "repos/$repo" --jq .id 2>/dev/null || echo '<repo-id>')
+owner_id=$(gh api "users/$owner" --jq .id 2>/dev/null || echo '<owner-id>')
 cat <<EOF
 
 Done. What is left is Doppler, made in the dashboard (README, Doppler setup):
   1. Workplace → Team → Service Accounts → create gha-$name, Viewer on
      the ci project's ci environment and nothing else.
   2. On it, add an OIDC identity: issuer https://token.actions.githubusercontent.com,
-     subject repo:$repo:ref:refs/heads/$default_branch (and refs/tags/*),
-     audience https://github.com/$owner. Copy the UUID.
+     audience https://github.com/$owner, and all four subjects (GitHub sends
+     the immutable form from newer repositories, the plain form from older):
+       repo:$repo:ref:refs/heads/$default_branch
+       repo:$repo:ref:refs/tags/*
+       repo:$owner@$owner_id/$name@$repo_id:ref:refs/heads/$default_branch
+       repo:$owner@$owner_id/$name@$repo_id:ref:refs/tags/*
+     Copy the UUID.
   3. scripts/new-repo.sh $repo --path $path --doppler-identity <UUID>
 Then: python scripts/audit_baseline.py $repo
 EOF
