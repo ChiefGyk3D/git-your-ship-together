@@ -592,31 +592,61 @@ jobs:
       - uses: snyk/actions/setup@9adf32b1121593767fc3c057af55b55db032dc04 # v1.0.0
         if: steps.token.outputs.present == 'true'
 
-      # Snyk exits 1 when it finds something and 2 when it could not run at
-      # all, an expired or revoked SNYK_TOKEN included. Findings are reported
-      # through the SARIF upload, not by failing the job; a scan that never
-      # happened fails it, so an expired token shows up as a red job on the
-      # next push or schedule instead of a quietly empty Security tab.
+      # Snyk exits 1 when it finds something, 2 when it could not run at all
+      # (an expired or revoked SNYK_TOKEN included) and 3 when it found
+      # nothing it knows how to scan. Findings are reported through the SARIF
+      # upload, not by failing the job; a scan that never happened fails it,
+      # so an expired token shows up as a red job on the next push or schedule
+      # instead of a quietly empty Security tab. Exit 3 is a warning, not a
+      # failure: a shell-only repository has no files Snyk Code reads
+      # (SNYK-CODE-0006, measured on Patch-Gremlin 2026-10-03) and no manifest
+      # for Snyk Open Source, and that is a fact about the repository, not a
+      # scan that broke.
       - name: Snyk Code (SAST)
         if: steps.token.outputs.present == 'true'
         run: |
           if snyk code test --sarif-file-output=snyk-code.sarif; then rc=0; else rc=$?; fi
           case "$rc" in
             0|1) ;;
+            3) echo "::warning title=Snyk::snyk code test found no files it can analyse (exit 3); nothing scanned" ;;
             *) echo "::error title=Snyk::snyk code test did not run (exit $rc): an expired or revoked SNYK_TOKEN, or a project it could not read"; exit "$rc" ;;
           esac
 
       - name: Snyk Open Source (SCA)
         if: steps.token.outputs.present == 'true'
+        env:
+          REQUIREMENTS: ${{ inputs.pip-audit-requirements }}
         run: |
-          # --skip-unresolved: Snyk's pip resolver matches requirement names to
-          # installed packages and cannot match a requirement with extras
-          # (`name[a,b]>=1`), so it exited 2 on the first real run with
-          # "Missing required packages". The packages are installed and every
-          # other line is still scanned; the one it cannot match is skipped.
-          if snyk test --all-projects --skip-unresolved=true --severity-threshold=high --sarif-file-output=snyk-opensource.sarif; then rc=0; else rc=$?; fi
+          # Snyk's pip resolver reads the requirements file itself and refuses
+          # the whole file when a line names a package that is not installed.
+          # A universal lock (uv pip compile --universal) always has such
+          # lines: pins under markers for other Pythons and platforms, which
+          # pip skips with "Ignoring X: markers ... don't match". Measured
+          # 2026-10-03 on four repositories: exit 2, "Missing required
+          # packages", and --skip-unresolved=true changes nothing. Reproduced
+          # locally with the CLI; a freeze of the installed environment scanned
+          # the same project clean (49 dependencies).
+          #
+          # So when a requirements file was installed, the lock in the checkout
+          # is replaced by a freeze of what it installed on this Python: every
+          # package that actually went in, exact versions, nothing Snyk cannot
+          # resolve. It is written over the input file rather than beside it
+          # because the SARIF names the scanned file: a path outside the
+          # checkout comes out absolute and a sibling would name a file the
+          # repository does not have, while this way an alert lands on the lock
+          # itself. Nothing after this step reads the file. Without a
+          # requirements file Snyk discovers manifests itself as before.
+          if [ -n "$REQUIREMENTS" ]; then
+            pip freeze --exclude-editable > "$REQUIREMENTS"
+            echo "scanning a freeze of the installed environment ($(grep -c . "$REQUIREMENTS") packages) as $REQUIREMENTS"
+            set -- --file="$REQUIREMENTS" --package-manager=pip
+          else
+            set -- --all-projects --skip-unresolved=true
+          fi
+          if snyk test "$@" --severity-threshold=high --sarif-file-output=snyk-opensource.sarif; then rc=0; else rc=$?; fi
           case "$rc" in
             0|1) ;;
+            3) echo "::warning title=Snyk::snyk test found no manifest it can read (exit 3); nothing scanned" ;;
             *) echo "::error title=Snyk::snyk test did not run (exit $rc): an expired or revoked SNYK_TOKEN, or a project it could not read"; exit "$rc" ;;
           esac
 
