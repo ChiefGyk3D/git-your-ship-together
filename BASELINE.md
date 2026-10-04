@@ -107,9 +107,11 @@ placed there would be a CI secret in every repository.
 on the `ci` project's `ci` environment and nothing else; one OIDC identity on
 it, so Doppler's log says which repository fetched. The
 identity's subject must not match a pull request's token (`repo:OWNER/REPO:pull_request`).
-Use `repo:OWNER/REPO:ref:refs/heads/main` (and the tag form,
-`repo:OWNER/REPO:ref:refs/tags/*`, where Doppler accepts more than one subject
-per identity, or a second identity if it does not). The identity's UUID lives
+List `repo:OWNER/REPO:ref:refs/heads/main` and the immutable form
+`repo:OWNER@<owner-id>/REPO@<repo-id>:ref:refs/heads/main`, each with its
+`:ref:refs/tags/*` twin: GitHub sends the immutable form from repositories
+created from mid-2026 and the plain form from older ones (the repository's
+`actions/oidc/customization/sub` setting says which). The identity's UUID lives
 in the repository variable `DOPPLER_IDENTITY_ID`; it is an identifier, not a
 secret.
 
