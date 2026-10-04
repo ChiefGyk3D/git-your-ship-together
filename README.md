@@ -1052,7 +1052,11 @@ nothing else.
 The Snyk job fails only when Snyk did not run: an expired or revoked token
 (exit 2) or a project it could not read. Findings (exit 1) go to the Security
 tab as SARIF and do not fail the job; Snyk is a reporter here, CodeQL and
-pip-audit are the gates.
+pip-audit are the gates. When `pip-audit-requirements` names a lock, Snyk
+Open Source scans a `pip freeze` of the environment that lock installed on
+`python-version`, exact versions of everything that actually went in, rather
+than the lock file itself (see the lessons below for why). Alerts attach to
+the lock's path, line 1.
 
 ### Dependabot auto-merge
 
@@ -1373,11 +1377,19 @@ nothing.
   count: `aquasecurity/trivy-action` calls `aquasecurity/setup-trivy`, and
   without that entry every release job failed at start with no annotation to
   say why. Read an action's `action.yml` for nested `uses:` before listing it.
-- **Snyk's pip resolver cannot read extras.** A requirement like
-  `package[aws,vault]>=0.2` makes `snyk test` exit 2 with "Missing required
-  packages" even when everything is installed. `--skip-unresolved=true` is
-  Snyk's documented answer, and the workflow's failure message now names this
-  case as well as the token.
+- **Snyk's pip resolver refuses a universal lock.** It reads the requirements
+  file itself and exits 2 with "Missing required packages" when any line names
+  a package that is not installed, and a `uv pip compile --universal` lock
+  always has such lines: pins under markers for other Pythons and platforms,
+  which pip skips with "Ignoring X: markers ... don't match". Extras
+  (`package[aws,vault]>=0.2`) trip the same check. `--skip-unresolved=true`
+  is Snyk's documented answer and changed nothing, measured on four
+  repositories on 2026-10-03 and reproduced with the CLI. The workflow now
+  scans a `pip freeze` of the environment the lock installed, written over
+  the lock in the checkout so the SARIF names a file the repository has; a
+  path outside the checkout comes out absolute in the SARIF. The error only
+  surfaces when every manifest fails: a repository with a second, resolvable
+  manifest beside the lock passed with the message buried in its log.
 - **Trivy's setuptools finding may be pip's, not yours.** pip vendors its own
   copies of setuptools and msgpack under `pip/_vendor`, so upgrading
   setuptools in the image clears nothing. `pip uninstall -y pip` as the last
