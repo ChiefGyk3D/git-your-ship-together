@@ -48,11 +48,12 @@ Read in this order. Each one is short.
 
 ## What is in the repository
 
-Thirteen reusable workflows and one composite action:
+Fourteen reusable workflows and one composite action:
 
 | File | What it does |
 |---|---|
 | `.github/workflows/python-ci.yml` | Lint, workflow lint, test matrix, coverage upload, optional CLI smoke test, single-arch container build with a check, one `CI green` gate job |
+| `.github/workflows/python-fuzz.yml` | Runs every Atheris target a repository keeps under `fuzz/` for a fixed time, fails on a crash and uploads the crashing input. The real fuzzing OpenSSF Scorecard's Fuzzing check looks for. Holds no token |
 | `.github/workflows/bash-ci.yml` | shellcheck and shfmt over every tracked script, an optional test command, an optional configuration lint (yamllint, ansible-lint), workflow lint, the same `CI green` gate. Holds no token |
 | `.github/workflows/tofu-ci.yml` | For OpenTofu or Terraform: fmt, validate without a backend, tflint and a Trivy configuration scan on every push and pull request; a plan on the default branch only, with credentials through the Doppler gate; the same `CI green` gate. Nothing applies |
 | `.github/workflows/arduino-ci.yml` | For firmware built with arduino-cli: compile every sketch for a board with pinned cores and libraries, keep the binaries as an artifact, host-side tests, workflow lint, the same `CI green` gate. Holds no token; the binaries reach a release through `artifact-release.yml` |
@@ -394,6 +395,100 @@ Inputs of `bash-ci.yml`:
 | `allowed-endpoints` | the measured list | harden-runner allow-list for `block`, space-separated `host:port` |
 | `extra-allowed-endpoints` | empty | Appended to the list, for hosts only this repository reaches |
 | `timeout-minutes` | `15` | Per-job timeout |
+
+### Fuzzing Python code
+
+OpenSSF Scorecard's Fuzzing check credits a Python repository for one thing
+only: an `import atheris` in a `*.py` file in the tree (or OSS-Fuzz,
+ClusterFuzzLite, OneFuzz). Hypothesis does not count. `python-fuzz.yml` makes
+that credit honest: it runs each Atheris target a repository keeps for a fixed
+time on every call, fails the job on a crash, and uploads the input that
+caused it.
+
+```yaml
+jobs:
+  fuzz:
+    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/python-fuzz.yml@<sha> # vX.Y.Z
+    permissions:
+      contents: read
+    with:
+      seconds-per-target: 60
+      install-command: pip install -e ".[parse]"   # only when the default `pip install -e .` is not enough
+```
+
+Add the job to the caller's `CI green` gate (`needs:`), or run it on a
+schedule, so a crash cannot merge unseen. A caller that opts in without
+targets fails: a missing `fuzz-dir`, or one with nothing matching
+`target-glob`, is a defect, not a skip.
+
+**A target** is a file under `fuzz-dir` matching `target-glob` (default
+`fuzz/fuzz_*.py`, searched recursively), run as
+`python <target> -max_total_time=<seconds> -max_len=<max-len> -artifact_prefix=<dir>/ -print_final_stats=1`. It must:
+
+- `import atheris`, and wrap the imports of the code under test in
+  `atheris.instrument_imports()`, or Atheris sees no coverage and fuzzes blind;
+- define `def TestOneInput(data: bytes) -> None`, drawing typed values from
+  `atheris.FuzzedDataProvider(data)`;
+- call `atheris.Setup(sys.argv, TestOneInput)` then `atheris.Fuzz()` under
+  `if __name__ == "__main__":`;
+- raise only on a real bug. An error the code under test documents (a parser
+  rejecting bad input) is caught inside the target; anything that escapes is
+  reported as a crash.
+
+```python
+import sys
+
+import atheris
+
+with atheris.instrument_imports():
+    from my_pkg.parser import ParseError, parse
+
+
+def TestOneInput(data: bytes) -> None:
+    text = atheris.FuzzedDataProvider(data).ConsumeUnicodeNoSurrogates(1024)
+    try:
+        parse(text)
+    except ParseError:
+        pass  # documented rejection of bad input, not a bug
+
+
+if __name__ == "__main__":
+    atheris.Setup(sys.argv, TestOneInput)
+    atheris.Fuzz()
+```
+
+Every target runs, one after another, even when an earlier one failed; the job
+fails if any did. Each target's result and execution count is one line of the
+job summary. A crash leaves `crash-*` (also `leak-*`, `timeout-*`, `oom-*`)
+files, uploaded as the `fuzz-findings` artifact for 30 days; reproduce one
+with `python fuzz/fuzz_x.py crash-<sha>`.
+
+Atheris is installed from one pinned version under `--require-hashes` with
+`--only-binary`, so nothing is built on the runner. It publishes manylinux
+wheels for x86_64 only, for CPython 3.12, 3.13 and 3.14 (measured with `pip
+download atheris --no-deps --only-binary=:all: --python-version <v>` against
+3.1.0), and no sdist: the default Python is `3.14`, the newest with a wheel,
+and `runner` must be x86_64 Linux. Dependabot bumps `requirements-dev.in`; the
+version and hashes in the workflow move with it by hand, and
+`tests/test_fuzz.py` fails when the two disagree. Scorecard reads the
+repository tree through the GitHub API, so `security.yml` needs no change for
+it to see a caller's `fuzz/` directory.
+
+Inputs of `python-fuzz.yml`:
+
+| Input | Default | Meaning |
+|---|---|---|
+| `python-version` | `3.14` | Python for the job. Atheris 3.1.0 has wheels for 3.12, 3.13 and 3.14; 3.14 is the newest |
+| `fuzz-dir` | `fuzz` | Directory searched recursively for targets; missing is a failure |
+| `target-glob` | `fuzz_*.py` | `find -name` pattern of a target; no match is a failure |
+| `seconds-per-target` | `60` | Seconds each target runs (`-max_total_time`); a fraction is truncated |
+| `max-len` | `4096` | Longest input libFuzzer generates, in bytes |
+| `install-command` | `pip install -e .` | Installs the project under test before Atheris; override for extras |
+| `runner` | `ubuntu-24.04` | Must be x86_64 Linux: Atheris publishes no aarch64 wheel |
+| `egress-policy` | `audit` | harden-runner policy; see [Egress](#egress) |
+| `allowed-endpoints` | the measured list | harden-runner allow-list for `block`: GitHub and PyPI. Measured by this repository's own `fixture fuzz` job in `block` mode |
+| `extra-allowed-endpoints` | empty | Appended to the list, for hosts only this repository reaches |
+| `timeout-minutes` | `30` | Job timeout; targets run one after another, so raise it with `seconds-per-target` |
 
 ### Tofu CI
 
@@ -1473,6 +1568,7 @@ The tests are the contract, one file per thing they hold still:
 | `tests/test_doppler_gate.py` | The decide script, run under bash for every event and ref shape: trusted refs fetch, untrusted refs get a notice and never fail, forks never fetch, the Service Token path is gated the same way |
 | `tests/test_audit_baseline.py` | The audit, fed a passing repository and a broken one per criterion; a 403 comes back UNKNOWN, never PASS; exit codes tell FAIL from UNKNOWN |
 | `tests/test_risk_register.py` | The register's shape, its dates, no duplicate advisory, every repository named is in the baseline list, and no entry has expired |
+| `tests/test_fuzz.py` | `python-fuzz.yml`'s inputs and pin, and its run step executed under bash against tiny targets: a missing directory, no match, a passing target and a crashing one (which must fail the step and leave its `crash-*` input) |
 | `tests/test_fixture.py` | Every fixture requirement carries a hash, every direct dependency is in the lock, the fixture image runs as a non-root user |
 
 Break any one of those and CI names the fix.

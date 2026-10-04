@@ -1,0 +1,199 @@
+# Reusable fuzzing for a Python project: every Atheris target under `fuzz-dir`
+# is run for a fixed time, a crash fails the job, and the crashing input is
+# uploaded. A target is what OpenSSF Scorecard's Fuzzing check looks for in
+# the repository tree (`import atheris` in a *.py file), so a repository that
+# calls this workflow and keeps targets under `fuzz/` is fuzzed for real, not
+# only credited for it.
+#
+# Call it from a repository with:
+#
+#   jobs:
+#     fuzz:
+#       uses: ChiefGyk3D/git-your-ship-together/.github/workflows/python-fuzz.yml@<sha> # vX.Y.Z
+#       permissions:
+#         contents: read
+#       with:
+#         seconds-per-target: 60
+#
+# A caller that opts in without targets fails: a missing `fuzz-dir`, or one with
+# no file matching `target-glob`, is a defect to fix, never a skip. The target
+# contract is in the README ("Fuzzing Python code").
+#
+# Atheris is installed from a pinned version under --require-hashes. It
+# publishes manylinux wheels for x86_64 only (CPython 3.12 to 3.14 at 3.1.0,
+# no sdist), so the job needs an x86_64 runner and a Python in that range.
+#
+# Commands and values a caller supplies reach the shell through an environment
+# variable, never by template expansion into the script, so a value can only
+# ever be data. Nothing here fetches a secret: the job holds no token beyond
+# the read-only default.
+
+name: Python fuzz (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      python-version:
+        description: Python for the job. Atheris 3.1.0 has wheels for CPython 3.12, 3.13 and 3.14 (x86_64 only); 3.14 is the newest.
+        type: string
+        default: "3.14"
+      fuzz-dir:
+        description: Directory searched, recursively, for fuzz targets. A missing directory fails the job.
+        type: string
+        default: fuzz
+      target-glob:
+        description: Filename pattern (find -name) of a fuzz target under `fuzz-dir`. No match fails the job.
+        type: string
+        default: "fuzz_*.py"
+      seconds-per-target:
+        description: Wall-clock seconds each target runs (libFuzzer's -max_total_time; a fraction is truncated).
+        type: number
+        default: 60
+      max-len:
+        description: Longest input libFuzzer generates, in bytes (-max_len).
+        type: number
+        default: 4096
+      install-command:
+        description: Shell that installs the project under test, run before Atheris is installed. Callers that need extras override it, e.g. `pip install -e ".[parse]"`.
+        type: string
+        default: pip install -e .
+      runner:
+        description: Runner label. Must be x86_64 Linux; Atheris publishes no aarch64 wheel and no sdist.
+        type: string
+        default: ubuntu-24.04
+      egress-policy:
+        description: harden-runner egress policy - `audit` logs outbound connections, `block` allows only `allowed-endpoints` and `extra-allowed-endpoints`.
+        type: string
+        default: audit
+      allowed-endpoints:
+        description: harden-runner allow-list for `block`, space-separated host:port entries. The default is every endpoint this workflow reaches; the runner's own infrastructure needs no entry. Wildcards are not supported and a newline-separated list matches nothing.
+        type: string
+        default: "api.github.com:443 files.pythonhosted.org:443 github.com:443 objects.githubusercontent.com:443 pypi.org:443 release-assets.githubusercontent.com:443"
+      extra-allowed-endpoints:
+        description: Appended to `allowed-endpoints`, for hosts only this repository reaches, such as a private index its install command uses. Same format.
+        type: string
+        default: ""
+      timeout-minutes:
+        description: Job timeout. Raise it with `seconds-per-target` when a repository has many targets, since they run one after another.
+        type: number
+        default: 30
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: Fuzz
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read  # this job runs the caller's own code; it holds nothing else
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: ${{ inputs.egress-policy }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          disable-sudo: true
+          # The agent may only stop reporting to StepSecurity in block mode.
+          disable-telemetry: ${{ inputs.egress-policy == 'block' }}
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ inputs.python-version }}
+          # pip's cache keys on a manifest; a repository without one (stdlib only)
+          # would fail the step, so caching is skipped there.
+          cache: ${{ hashFiles('**/requirements*.txt', '**/pyproject.toml', '**/setup.py') != '' && 'pip' || '' }}
+
+      - name: Install the project
+        if: inputs.install-command != ''
+        env:
+          COMMAND: ${{ inputs.install-command }}
+        run: bash -eo pipefail -c "$COMMAND"
+
+      # One pinned version, hash-checked for each wheel it publishes (CPython
+      # 3.12, 3.13 and 3.14, manylinux x86_64); --only-binary keeps pip from
+      # building anything. Bumping it means a new version and its hashes.
+      - name: Install Atheris
+        env:
+          REQUIREMENTS: |
+            atheris==3.1.0 \
+                --hash=sha256:ec5e11f21a4c197fe91f7aea2b2de88e623c73a21fc07b105ac6329a1588457b \
+                --hash=sha256:f8a9f51ce8369026e8eb7b7174835e8c4c85a1a6db5d9add36c15100779d2a39 \
+                --hash=sha256:315a0b5c819852b1ffe1ca72efc389c7724881f2c33e4aacb8c6bcec49bd5011
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$REQUIREMENTS" > "$RUNNER_TEMP/atheris-requirements.txt"
+          python -m pip install --require-hashes --only-binary=:all: -r "$RUNNER_TEMP/atheris-requirements.txt"
+          python -c "import atheris"
+
+      - name: Run the fuzz targets
+        env:
+          FUZZ_DIR: ${{ inputs.fuzz-dir }}
+          TARGET_GLOB: ${{ inputs.target-glob }}
+          SECONDS_PER_TARGET: ${{ inputs.seconds-per-target }}
+          MAX_LEN: ${{ inputs.max-len }}
+          FINDINGS: ${{ runner.temp }}/fuzz-findings
+        run: |
+          set -uo pipefail
+          if [ ! -d "$FUZZ_DIR" ]; then
+            echo "::error::fuzz-dir '$FUZZ_DIR' does not exist. A repository that calls python-fuzz.yml needs Atheris targets: add $FUZZ_DIR/$TARGET_GLOB files (see the README's 'Fuzzing Python code'), or set fuzz-dir to where they are, or remove the call."
+            exit 1
+          fi
+          mapfile -t targets < <(find "$FUZZ_DIR" -type f -name "$TARGET_GLOB" | sort)
+          if [ "${#targets[@]}" -eq 0 ]; then
+            echo "::error::no file matching '$TARGET_GLOB' under '$FUZZ_DIR'. Add a target there, or set target-glob to match the targets' names."
+            exit 1
+          fi
+          seconds="${SECONDS_PER_TARGET%%.*}"
+          max_len="${MAX_LEN%%.*}"
+          mkdir -p "$FINDINGS"
+          {
+            echo "### Fuzz targets"
+            echo
+            echo "| Target | Result | Executions | Seconds |"
+            echo "| --- | --- | --- | --- |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          failed=0
+          for target in "${targets[@]}"; do
+            # One directory per target, so two targets' crash-<sha> files never collide.
+            name="${target//\//__}"
+            outdir="$FINDINGS/$name"
+            log="$FINDINGS/$name.log"
+            mkdir -p "$outdir"
+            echo "::group::$target"
+            start=$SECONDS
+            # The outer timeout is a backstop for a target that hangs libFuzzer itself.
+            timeout --kill-after=10 "$((seconds + 120))" \
+              python "$target" -max_total_time="$seconds" -max_len="$max_len" \
+              -artifact_prefix="$outdir/" -print_final_stats=1 2>&1 | tee "$log"
+            rc="${PIPESTATUS[0]}"
+            echo "::endgroup::"
+            elapsed=$((SECONDS - start))
+            execs=$(sed -n 's/^stat::number_of_executed_units: *//p' "$log" | tail -n 1)
+            if [ "$rc" -eq 0 ]; then
+              result="passed"
+            else
+              result="FAILED (exit $rc)"
+              failed=1
+              echo "::error::$target failed (exit $rc); a crash input, if libFuzzer saved one, is in the fuzz-findings artifact"
+            fi
+            echo "| \`$target\` | $result | ${execs:-n/a} | $elapsed |" >> "$GITHUB_STEP_SUMMARY"
+            echo "$target: $result, ${execs:-n/a} executions, ${elapsed}s"
+          done
+          exit "$failed"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: fuzz-findings
+          path: |
+            ${{ runner.temp }}/fuzz-findings/*/crash-*
+            ${{ runner.temp }}/fuzz-findings/*/leak-*
+            ${{ runner.temp }}/fuzz-findings/*/timeout-*
+            ${{ runner.temp }}/fuzz-findings/*/oom-*
+          if-no-files-found: ignore
+          retention-days: 30
