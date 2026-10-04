@@ -1034,6 +1034,8 @@ Inputs of `security.yml`:
 | `semgrep-egress-policy` | `block` | harden-runner policy for the Semgrep job only |
 | `semgrep-allowed-endpoints` | the measured list | The Semgrep job's own allow-list: PyPI for the pip install, `semgrep.dev` for the rule registry, and GitHub for the SARIF upload. `extra-allowed-endpoints` is appended to it, for a private rule registry or a config fetched from another host |
 | `snyk` | `false` | Snyk Code and Snyk Open Source; needs `SNYK_TOKEN` in the Doppler config. Runs only on a trusted ref, never on a pull request |
+| `snyk-on` | `schedule` | When Snyk runs: `schedule` is the weekly cron and `workflow_dispatch` only; `push` adds every push to the default branch and every tag. Snyk's free plan meters tests per month across the whole account, one Code and one Open Source test per run, and ten repositories on `push` spent a month's Code tests in a day. Never on a pull request |
+| `snyk-install-command` | empty | For a repository with no lock (`pip-audit-requirements: ""`) that declares its dependencies in `pyproject.toml`: the install Snyk Open Source scans a freeze of, such as `pip install .`. Empty with no lock leaves Snyk's discovery, which reads no PEP 621 `pyproject.toml` and ends in a "nothing to scan" warning |
 | `scorecard` | `false` | OpenSSF Scorecard, published; runs only on the default branch (push or schedule) |
 | `python-version` | `3.13` | Python for pip-audit and Snyk |
 | `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `audit`, the measured list, empty | harden-runner, as in `python-ci.yml` |
@@ -1049,7 +1051,12 @@ written in. A shell-only repository therefore calls it with
 `codeql-languages: actions` and `pip-audit-requirements: ""` and changes
 nothing else.
 
-The Snyk job fails only when Snyk did not run: an expired or revoked token
+Snyk runs on the weekly schedule and on `workflow_dispatch` by default
+(`snyk-on: schedule`); the free plan meters tests per month across every
+repository on the account, and a push-triggered run in each of ten
+repositories spent a month's Snyk Code tests in one busy day (2026-10-04,
+34 runs). `snyk-on: push` restores the per-push run for a repository that
+wants it. The Snyk job fails only when Snyk did not run: an expired or revoked token
 (exit 2) or a project it could not read. Findings (exit 1) go to the Security
 tab as SARIF and do not fail the job; Snyk is a reporter here, CodeQL and
 pip-audit are the gates. A repository with nothing Snyk reads (exit 3: a
@@ -1058,7 +1065,11 @@ Open Source) gets a warning, not a red job. When `pip-audit-requirements` names 
 Open Source scans a `pip freeze` of the environment that lock installed on
 `python-version`, exact versions of everything that actually went in, rather
 than the lock file itself (see the lessons below for why). Alerts attach to
-the lock's path, line 1.
+the lock's path, line 1. A repository with no lock names its install in
+`snyk-install-command` (`pip install .`) and gets the same freeze, written
+over `pyproject.toml`, so its alerts attach to the file that declares the
+dependencies; with neither, Snyk Open Source has nothing it can read and
+warns.
 
 ### Dependabot auto-merge
 

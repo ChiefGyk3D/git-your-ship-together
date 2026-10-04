@@ -627,11 +627,17 @@ def test_snyk_open_source_scans_a_freeze_of_the_installed_environment():
     lock installed instead, written over the lock so the SARIF names a real file."""
     doc = load(WORKFLOWS / "security.yml")
     snyk = jobs(doc)["snyk"]
+    assert triggers(doc)["workflow_call"]["inputs"]["snyk-on"]["default"] == "schedule", "Snyk's free plan meters tests"
+    gate = "inputs.snyk-on == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'"
+    assert gate in snyk["if"]
+    assert "github.event_name != 'pull_request'" in snyk["if"]
     step = next(s for s in steps_of(snyk) if s.get("name") == "Snyk Open Source (SCA)")
     assert step["env"]["REQUIREMENTS"] == "${{ inputs.pip-audit-requirements }}"
+    assert step["env"]["INSTALL"] == "${{ inputs.snyk-install-command }}"
     body = step["run"]
-    assert 'pip freeze --exclude-editable > "$REQUIREMENTS"' in body
-    assert '--file="$REQUIREMENTS" --package-manager=pip' in body
+    assert 'pip freeze --exclude-editable > "$target"' in body
+    assert '--file="$target" --package-manager=pip' in body
+    assert "target=pyproject.toml" in body, "a lock-less project is scanned through the file that declares it"
     assert "--all-projects --skip-unresolved=true" in body, "a repository without a lock is still discovered"
     assert "--severity-threshold=high --sarif-file-output=snyk-opensource.sarif" in body
     for name in ("Snyk Code (SAST)", "Snyk Open Source (SCA)"):
@@ -641,6 +647,8 @@ def test_snyk_open_source_scans_a_freeze_of_the_installed_environment():
         )
     install = next(s for s in steps_of(snyk) if s.get("name") == "Install dependencies for Snyk Open Source")
     assert install["env"]["REQUIREMENTS"] == step["env"]["REQUIREMENTS"], "the freeze must come from the same file"
+    assert install["env"]["INSTALL"] == step["env"]["INSTALL"]
+    assert 'eval "$INSTALL"' in install["run"]
 
 
 def test_the_package_release_publishes_only_when_told_and_never_beside_the_tree():
