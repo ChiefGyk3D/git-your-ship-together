@@ -91,7 +91,8 @@ def test_the_fixture_exercises_the_hardening():
     with_ = jobs(load(WORKFLOWS / "ci.yml"))["fixture-release"]["with"]
     assert with_["docker-test-command"].strip() == 'docker run --rm "$IMAGE" --version'
     assert with_["probe-read-only"] is True and with_["probe-command"] == "--version"
-    assert "trivy-exit-code" not in with_, "the fixture image has fixable findings; the default stays advisory"
+    assert "trivy-exit-code" not in with_, "the fixture runs under the default gate"
+    assert with_["trivyignores"] == "fixture/.trivyignore"
 
 
 def test_the_cache_is_restored_only_outside_the_job_that_pushes_the_image():
@@ -104,5 +105,24 @@ def test_the_cache_is_restored_only_outside_the_job_that_pushes_the_image():
     assert "needs.dockerfile-lint.result == 'success'" in condition and "!cancelled()" in condition
 
 
-def test_the_trivy_exit_code_default_stays_advisory_until_callers_flip_it():
-    assert triggers(load(RELEASE))["workflow_call"]["inputs"]["trivy-exit-code"]["default"] == "0"
+def test_the_trivy_gate_is_on_by_default():
+    assert triggers(load(RELEASE))["workflow_call"]["inputs"]["trivy-exit-code"]["default"] == "1"
+
+
+def test_trivy_ignore_unfixed_is_an_input_defaulting_on_and_passed_to_the_action():
+    inputs = triggers(load(RELEASE))["workflow_call"]["inputs"]
+    assert inputs["trivy-ignore-unfixed"]["type"] == "boolean" and inputs["trivy-ignore-unfixed"]["default"] is True
+    step = next(s for s in steps_of(jobs(load(RELEASE))["build"]) if s.get("name") == "Scan the image with Trivy")
+    assert step["with"]["ignore-unfixed"] == "${{ inputs.trivy-ignore-unfixed }}"
+
+
+def test_trivyignores_is_an_input_defaulting_empty_and_passed_to_the_action():
+    inputs = triggers(load(RELEASE))["workflow_call"]["inputs"]
+    assert inputs["trivyignores"]["type"] == "string" and inputs["trivyignores"]["default"] == ""
+    step = next(s for s in steps_of(jobs(load(RELEASE))["build"]) if s.get("name") == "Scan the image with Trivy")
+    assert step["with"]["trivyignores"] == "${{ inputs.trivyignores }}"
+
+
+def test_the_fixture_trivyignore_names_its_reason_and_a_review_date():
+    text = (WORKFLOWS.parents[1] / "fixture" / ".trivyignore").read_text()
+    assert "CVE-2026-103111" in text and "2026-11-01" in text

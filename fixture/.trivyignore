@@ -1,0 +1,5 @@
+# CVE-2026-103111 (libpcre2-8-0): fixed in Debian as deb13u3, but no published
+# python:3.13-slim image ships that package version yet, so the fixture image
+# cannot move off it. Review on 2026-11-01: drop this entry once the base
+# image carries the fix.
+CVE-2026-103111
