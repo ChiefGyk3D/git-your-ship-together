@@ -1052,7 +1052,9 @@ nothing else.
 The Snyk job fails only when Snyk did not run: an expired or revoked token
 (exit 2) or a project it could not read. Findings (exit 1) go to the Security
 tab as SARIF and do not fail the job; Snyk is a reporter here, CodeQL and
-pip-audit are the gates. When `pip-audit-requirements` names a lock, Snyk
+pip-audit are the gates. A repository with nothing Snyk reads (exit 3: a
+shell-only repository has no files for Snyk Code and no manifest for Snyk
+Open Source) gets a warning, not a red job. When `pip-audit-requirements` names a lock, Snyk
 Open Source scans a `pip freeze` of the environment that lock installed on
 `python-version`, exact versions of everything that actually went in, rather
 than the lock file itself (see the lessons below for why). Alerts attach to

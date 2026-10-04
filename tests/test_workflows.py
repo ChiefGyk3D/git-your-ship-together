@@ -634,6 +634,11 @@ def test_snyk_open_source_scans_a_freeze_of_the_installed_environment():
     assert '--file="$REQUIREMENTS" --package-manager=pip' in body
     assert "--all-projects --skip-unresolved=true" in body, "a repository without a lock is still discovered"
     assert "--severity-threshold=high --sarif-file-output=snyk-opensource.sarif" in body
+    for name in ("Snyk Code (SAST)", "Snyk Open Source (SCA)"):
+        run = next(s for s in steps_of(snyk) if s.get("name") == name)["run"]
+        assert "0|1) ;;" in run and '3) echo "::warning' in run and '*) echo "::error' in run, (
+            f"{name}: findings pass, nothing-to-scan warns, anything else fails"
+        )
     install = next(s for s in steps_of(snyk) if s.get("name") == "Install dependencies for Snyk Open Source")
     assert install["env"]["REQUIREMENTS"] == step["env"]["REQUIREMENTS"], "the freeze must come from the same file"
 
