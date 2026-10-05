@@ -23,6 +23,8 @@ scripts/new-repo.sh OWNER/NAME [--path DIR] [--language python|bash]...
 3. **Commits on a branch** (`ci/git-your-ship-together`), pushes over SSH (so the `gh` token needs no `workflow` scope)
    and **opens the pull request**.
 4. **Applies every BASELINE setting** through the API (branch protection, Actions settings, scanning, tag ruleset...).
+   It also writes `.githooks/pre-commit` (the gitleaks hook, [Security Workflow](Security-Workflow)) and, when the README has a
+   Developing section, the `git config core.hooksPath .githooks` line that turns it on.
 5. **Appends the repository to `baseline/repos.txt`** so the weekly audit covers it.
 
 ## What it cannot do

@@ -17,6 +17,16 @@
 
 Results land in the repository's **Security tab** as SARIF.
 
+## The same scan before a commit
+
+`.githooks/pre-commit` runs the gitleaks scan on the *staged* changes, so a secret is caught before it is in history.
+It uses the version and SHA-256 that `security.yml` pins (a test holds the two equal), keeps the verified release under
+`~/.cache/gyst/gitleaks/<version>/`, checks it against the pin on every run, and honours `.gitleaks.toml`. A finding
+refuses the commit and prints the rule, file and line, never the secret. With no cached binary and no network it warns
+and allows. It only protects a checkout that ran `git config core.hooksPath .githooks`; push protection and the CI
+scan are the two that always run. `scripts/new-repo.sh` copies the file byte for byte into an adopted repository and
+adds that one line to its README's Developing section.
+
 ## Language-neutral by design
 
 Only one job is Python-shaped, and only by default: the dependency audit runs
