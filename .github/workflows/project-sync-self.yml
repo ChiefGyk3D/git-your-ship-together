@@ -1,0 +1,37 @@
+# This repository's own board. Its tests forbid pull_request_target, so unlike a
+# caller elsewhere this one has no pull request trigger: issues move on their
+# events, pull requests join and close on the weekly reconcile, and
+# doppler-trusted-refs-only stays at its default (true).
+name: Project sync (self)
+
+on:
+  issues:
+    types: [opened, reopened, closed, edited]
+  schedule:
+    - cron: '17 5 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: project-sync-${{ github.event.issue.number || github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    # The repository's own board, through the workflow it ships (the `./` form, as
+    # security-self.yml does, until actionlint parses `$/`).
+    uses: ./.github/workflows/project-sync.yml # zizmor: ignore[self-repository]
+    permissions:
+      contents: read
+      id-token: write
+    secrets:
+      DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
+    with:
+      project-url: https://github.com/users/ChiefGyk3D/projects/2
+      default-area-field: Area
+      default-area: CI and GYST
+      doppler-project: ci
+      doppler-config: ci
+      doppler-identity-id: ${{ vars.DOPPLER_IDENTITY_ID }}

@@ -236,6 +236,7 @@ ALLOWED_WRITES = {
     ("security-self.yml", "security", "security-events"),
     ("security-self.yml", "security", "pull-requests"),
     ("security-self.yml", "security", "id-token"),
+    ("project-sync-self.yml", "sync", "id-token"),  # the project token comes from Doppler over OIDC
     # And python-ci.yml and python-docker-release.yml on the fixture project:
     # the grants a caller gives, so the called jobs' own permissions blocks
     # are satisfied; the release job never pushes here (push: false).
