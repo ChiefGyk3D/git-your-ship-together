@@ -1,0 +1,76 @@
+{
+  "data": {
+    "user": {
+      "projectV2": {
+        "id": "PVT_kwHOASmJts4BlrFt",
+        "title": "Suite",
+        "fields": {
+          "nodes": [
+            {
+              "__typename": "ProjectV2Field",
+              "id": "PVTF_title",
+              "name": "Title",
+              "dataType": "TITLE"
+            },
+            {
+              "__typename": "ProjectV2SingleSelectField",
+              "id": "PVTSSF_status",
+              "name": "Status",
+              "dataType": "SINGLE_SELECT",
+              "options": [
+                {
+                  "id": "opt_backlog",
+                  "name": "Backlog"
+                },
+                {
+                  "id": "opt_next",
+                  "name": "Next"
+                },
+                {
+                  "id": "opt_prog",
+                  "name": "In progress"
+                },
+                {
+                  "id": "opt_blocked",
+                  "name": "Blocked"
+                },
+                {
+                  "id": "opt_done",
+                  "name": "Done"
+                }
+              ]
+            },
+            {
+              "__typename": "ProjectV2SingleSelectField",
+              "id": "PVTSSF_area",
+              "name": "Area",
+              "dataType": "SINGLE_SELECT",
+              "options": [
+                {
+                  "id": "area_core",
+                  "name": "Core"
+                },
+                {
+                  "id": "area_hill",
+                  "name": "Hill"
+                }
+              ]
+            },
+            {
+              "__typename": "ProjectV2Field",
+              "id": "PVTF_doneon",
+              "name": "Done on",
+              "dataType": "DATE"
+            },
+            {
+              "__typename": "ProjectV2IterationField",
+              "id": "PVTIF_sprint",
+              "name": "Sprint",
+              "dataType": "ITERATION"
+            }
+          ]
+        }
+      }
+    }
+  }
+}

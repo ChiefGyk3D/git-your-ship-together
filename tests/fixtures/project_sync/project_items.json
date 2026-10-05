@@ -1,0 +1,106 @@
+{
+  "data": {
+    "node": {
+      "items": {
+        "pageInfo": {
+          "hasNextPage": false,
+          "endCursor": null
+        },
+        "nodes": [
+          {
+            "id": "PVTI_11",
+            "status": {
+              "name": "Next"
+            },
+            "done": null,
+            "content": {
+              "__typename": "Issue",
+              "id": "I_tracked",
+              "state": "OPEN",
+              "closedAt": null,
+              "repository": {
+                "nameWithOwner": "ChiefGyk3D/Hammunition"
+              }
+            }
+          },
+          {
+            "id": "PVTI_5",
+            "status": {
+              "name": "In progress"
+            },
+            "done": null,
+            "content": {
+              "__typename": "Issue",
+              "id": "I_closed",
+              "state": "CLOSED",
+              "closedAt": "2026-10-01T12:00:00Z",
+              "repository": {
+                "nameWithOwner": "ChiefGyk3D/Hammunition"
+              }
+            }
+          },
+          {
+            "id": "PVTI_6",
+            "status": {
+              "name": "In progress"
+            },
+            "done": null,
+            "content": {
+              "__typename": "PullRequest",
+              "id": "PR_merged",
+              "state": "MERGED",
+              "closedAt": "2026-10-02T09:30:00Z",
+              "repository": {
+                "nameWithOwner": "ChiefGyk3D/Hammunition"
+              },
+              "merged": true,
+              "isDraft": false
+            }
+          },
+          {
+            "id": "PVTI_7",
+            "status": {
+              "name": "Done"
+            },
+            "done": {
+              "date": "2026-09-01"
+            },
+            "content": {
+              "__typename": "Issue",
+              "id": "I_done_ok",
+              "state": "CLOSED",
+              "closedAt": "2026-09-01T00:00:00Z",
+              "repository": {
+                "nameWithOwner": "ChiefGyk3D/Hammunition"
+              }
+            }
+          },
+          {
+            "id": "PVTI_8",
+            "status": {
+              "name": "Backlog"
+            },
+            "done": null,
+            "content": {
+              "__typename": "Issue",
+              "id": "I_elsewhere",
+              "state": "CLOSED",
+              "closedAt": "2026-10-01T00:00:00Z",
+              "repository": {
+                "nameWithOwner": "ChiefGyk3D/other"
+              }
+            }
+          },
+          {
+            "id": "PVTI_9",
+            "status": null,
+            "done": null,
+            "content": {
+              "__typename": "DraftIssue"
+            }
+          }
+        ]
+      }
+    }
+  }
+}

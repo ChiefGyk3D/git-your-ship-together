@@ -1,0 +1,26 @@
+{
+  "data": {
+    "repository": {
+      "issues": {
+        "pageInfo": {
+          "hasNextPage": false,
+          "endCursor": null
+        },
+        "nodes": [
+          {
+            "id": "I_missing",
+            "number": 10,
+            "state": "OPEN",
+            "closedAt": null
+          },
+          {
+            "id": "I_tracked",
+            "number": 11,
+            "state": "OPEN",
+            "closedAt": null
+          }
+        ]
+      }
+    }
+  }
+}

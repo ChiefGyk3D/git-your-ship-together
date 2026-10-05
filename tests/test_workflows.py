@@ -46,6 +46,7 @@ REUSABLE = [
         "verify-published.yml",
         "docs-pages.yml",
         "wiki-publish.yml",
+        "project-sync.yml",
     )
 ]
 # The subset that fetches CI secrets. The Doppler rules are about those steps,
@@ -106,8 +107,8 @@ def all_steps(path: Path):
 
 
 def test_there_is_something_to_check():
-    assert len(REUSABLE) == 14, "expected the fourteen callable workflows"
-    assert len(DOPPLER) == 4, "expected four of them to fetch CI secrets"
+    assert len(REUSABLE) == 15, "expected the fifteen callable workflows"
+    assert len(DOPPLER) == 5, "expected five of them to fetch CI secrets"
     assert [p.name for p in LANGUAGE_CI] == ["arduino-ci.yml", "bash-ci.yml", "python-ci.yml", "tofu-ci.yml"]
     assert ACTION_FILES, "no composite actions found"
 
@@ -189,6 +190,7 @@ ALLOWED_WRITES = {
     ("security.yml", "gitleaks", "id-token"),
     ("security.yml", "snyk", "id-token"),
     ("security.yml", "scorecard", "id-token"),
+    ("project-sync.yml", "sync", "id-token"),  # the project token comes from Doppler over OIDC
     # Publishing the image, its signature, SBOM attestation and provenance.
     ("container-release.yml", "build", "packages"),  # the per-platform temporary tag
     ("container-release.yml", "merge", "packages"),
@@ -263,6 +265,7 @@ ALLOWED_WRITES = {
     # And both on the fixture, whose callers pass deploy/publish: false.
     ("ci.yml", "fixture-pages", "pages"),
     ("ci.yml", "fixture-pages", "id-token"),
+    ("ci.yml", "fixture-project-sync", "id-token"),
     ("ci.yml", "fixture-wiki", "contents"),
 }
 
@@ -383,6 +386,7 @@ def test_the_inlined_doppler_script_matches_the_composite_action():
         "tofu-ci.yml": [composite[0]],
         "container-release.yml": [composite[0]],
         "security.yml": [composite[0]] * 2,
+        "project-sync.yml": [composite[0]],
     }, "an inlined Doppler script differs from .github/actions/doppler-secrets/action.yml"
 
 
@@ -449,6 +453,12 @@ PR_ID_TOKEN_EXCEPTIONS = {
     # command, and the Doppler step refuses pull requests.
     ("container-release.yml", "merge"),
     ("python-docker-release.yml", "release"),  # the thin caller of the above
+    # Called from `pull_request_target`, which runs the caller's base-branch
+    # workflow, so a fork's pull request reaches the board. Nothing from the
+    # pull request is checked out or executed: the one step runs the script
+    # inlined from this repository over the event payload, read as data
+    # (tests/test_project_sync.py pins both halves).
+    ("project-sync.yml", "sync"),
 }
 
 

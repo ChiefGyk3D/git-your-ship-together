@@ -64,6 +64,7 @@ Fourteen reusable workflows and one composite action:
 | `.github/workflows/artifact-release.yml` | For a file rather than an image (a `.deb`, a firmware binary, a bundle): build it with a command, then publish it to the GitHub release with SHA256SUMS, a keyless cosign signature bundle per file and build provenance. No secret anywhere |
 | `.github/workflows/docs-pages.yml` | Build a static documentation site with a command you supply (MkDocs strict by default) on every pull request; upload it and deploy it to GitHub Pages from the default branch only. The two Pages writes sit on the deploy job alone |
 | `.github/workflows/wiki-publish.yml` | Run a command that generates a wiki tree, then replace the repository's GitHub wiki with it, as `github-actions[bot]`, only when something changed, from the default branch only. The write token sits on a job that runs none of your code |
+| `.github/workflows/project-sync.yml` | Keeps a GitHub Projects v2 board current: adds an issue or pull request when it opens, moves it to Done with a date when it closes or merges, and a weekly reconcile repairs what an event missed. The token comes from Doppler over OIDC; nothing from a pull request is checked out. See [Keeping a project current](#keeping-a-project-current) |
 | `.github/workflows/security.yml` | CodeQL (the `actions` language included by default), gitleaks, a dependency audit (pip-audit, and any other tool by command), Semgrep, dependency review on pull requests (with a licence denylist), optional Snyk, optional OpenSSF Scorecard |
 | `.github/workflows/dependabot-auto-merge.yml` | Queues a Dependabot bump to merge itself once the required checks pass, up to a size you choose |
 | `.github/actions/doppler-secrets` | Fetches a Doppler config as masked environment variables, over OIDC or a Service Token. The workflows inline a copy of it (see the design rules); this is the source |
@@ -1213,6 +1214,175 @@ the commits really are Dependabot's before reporting what they change, the job
 is gated on the pull request's author, and GitHub gives a fork's pull request
 a read-only token whatever the workflow asks for. No `pull_request_target`, no
 checkout, no code.
+
+### Keeping a project current
+
+`project-sync.yml` keeps a GitHub Projects v2 board in step with the issues and
+pull requests of the repositories that call it. A user-owned project has no
+"auto-add" built-in (an organisation's does), so each repository carries a small
+caller, and the logic lives here once. The board in the examples is
+`https://github.com/users/ChiefGyk3D/projects/2`.
+
+What it does, per event, never touching a field it was not told about:
+
+| Event | Result |
+|---|---|
+| Issue opened | Added if absent; `status-open-issue` when it has no status |
+| Issue reopened | Back to `status-open-issue` if it was Done (its done date is cleared); any other status is kept |
+| Issue edited | Added if absent, nothing else |
+| Pull request opened, ready for review, reopened | Added if absent; `status-open-pr`, or `status-draft-pr` while a draft |
+| Pull request converted to draft | `status-draft-pr` |
+| Issue or pull request closed, pull request merged | `status-done`, and `done-date-field` set to the close or merge date (UTC) |
+| Weekly schedule, manual run | Reconcile (below) |
+
+An item this workflow adds may also get `default-area-field` = `default-area`
+(so a repository can say `Area = Hill`); an item already on the board keeps its
+Area, Kind, Priority, Epic, Effort and every other value. The script never calls
+`updateProjectV2Field`: that mutation regenerates a field's option ids and wipes
+the values across the board. An option or field name it cannot find is refused,
+before anything is changed, with a sentence naming the field and listing the
+options it does have.
+
+**Reconcile** (`reconcile: true`, on `schedule` and `workflow_dispatch`) walks
+the board once and the repository's open issues and pull requests once, in
+pages of 100, with no query per item. It adds an open issue or pull request the
+board lacks, and moves a closed or merged item to Done with its close date when
+it is not there already. It never reopens an item and never changes the status
+of an open item that has one. It only looks at board items that belong to the
+calling repository.
+
+#### Call it
+
+For a Python repository (and the same job in a repository of any other language;
+nothing here depends on the language), in
+`.github/workflows/project-sync.yml`:
+
+```yaml
+name: Project sync
+
+on:
+  issues:
+    types: [opened, reopened, closed, edited]
+  pull_request_target:
+    types: [opened, reopened, ready_for_review, converted_to_draft, closed]
+  schedule:
+    - cron: '17 5 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: project-sync-${{ github.event.issue.number || github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/project-sync.yml@<sha> # vX.Y.Z
+    permissions:
+      contents: read
+      id-token: write
+    secrets:
+      DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
+    with:
+      project-url: https://github.com/users/ChiefGyk3D/projects/2
+      default-area-field: Area      # optional: the Area this repository's new items get
+      default-area: Hill
+      doppler-project: ci
+      doppler-config: ci
+      doppler-identity-id: ${{ vars.DOPPLER_IDENTITY_ID }}
+      doppler-trusted-refs-only: false   # required for pull_request_target; see below
+```
+
+Inputs of `project-sync.yml`:
+
+| Input | Default | Meaning |
+|---|---|---|
+| `project-url` | empty (the job fails, naming it) | The project: `https://github.com/users/<login>/projects/<n>`, or `/orgs/<login>/projects/<n>` |
+| `status-field` | `Status` | The single-select field holding an item's status |
+| `status-open-issue` | `Backlog` | Given to an issue that opens, or reopens out of Done |
+| `status-open-pr` | `In progress` | Given to a pull request that opens, reopens or is marked ready |
+| `status-draft-pr` | `Backlog` | Given to a draft pull request |
+| `status-done` | `Done` | Given to an item that closes or merges |
+| `done-date-field` | `Done on` | Date field set to the close or merge date; empty disables it |
+| `reconcile` | `true` | Walk the repository and the board on `schedule` and `workflow_dispatch`; `false` makes those a no-op |
+| `default-area-field`, `default-area` | empty | A single-select field and option set on items this workflow adds, and only on those |
+| `dry-run` | `false` | Read the board and print every change instead of making it. With no token it only says so and succeeds, which is how this repository's CI exercises the workflow |
+| `token-secret-name` | `PROJECTS_TOKEN` | The Doppler secret that holds the token |
+| `egress-policy` | `audit` | harden-runner: `audit` or `block` |
+| `allowed-endpoints` | `api.doppler.com:443 api.github.com:443` | The allow-list for `block`; these two are all the job reaches |
+| `extra-allowed-endpoints` | empty | Appended to the list |
+| `doppler-project`, `doppler-config`, `doppler-identity-id` | empty | See [Doppler setup](#doppler-setup) |
+| `doppler-trusted-refs-only` | `true` | Fetch the token only on the default branch, a tag or a schedule. A caller that triggers on `pull_request_target` sets it `false`; see below |
+| `timeout-minutes` | `15` | Job timeout |
+
+##### Why `pull_request_target`
+
+A `pull_request` run from a fork gets a read-only token and no secrets, so a
+fork's pull request could never reach the board. `pull_request_target` runs the
+caller's workflow file from the **base** branch, with secrets. It is dangerous
+only when the job then checks out and runs the pull request's code. This job
+does neither: it has no checkout at all, and its one step is the script inlined
+from this repository (`scripts/project_sync.py`), which reads the event payload
+as JSON data and never expands it into a shell. The pull request's title and
+body are never read. The caller must still pass `doppler-trusted-refs-only:
+false`, because the Doppler rule treats `pull_request_target` as untrusted
+along with every other pull request event, and so would skip the fetch. Do not
+copy that line into a caller that checks out the pull request. Pin the called
+workflow by commit, as every caller does: that pin is what runs.
+
+#### The token the owner creates
+
+One fine-grained personal access token, created by the project's owner at
+GitHub, Settings, Developer settings, Fine-grained tokens:
+
+- **Resource owner**: the user that owns the project.
+- **Repository access**: only the repositories that call the workflow (or all of
+  them).
+- **Repository permissions**: Issues, read; Pull requests, read.
+- **Account permissions**: Projects, read and write. This is what lets it add
+  items and set fields on a user-owned project.
+- A short expiry and a calendar entry to rotate it.
+
+It goes into the Doppler config the caller's `doppler-config` names, under the
+name `PROJECTS_TOKEN` (or whatever `token-secret-name` says), typed at a
+prompt with echo off: `scripts/doppler-ci-set.sh` does that for the shared `ci`
+config. It is never a repository secret pasted into the repository's settings,
+never in a file, and never on a command line. The workflow reads it from the
+job's environment only; the script sends it in one request header and prints
+nothing derived from it.
+
+#### First run, end to end
+
+A real board needs the token, so this is the owner's to do once:
+
+1. Create the token and store it in Doppler as above.
+2. Add the caller to one repository and merge it.
+3. Add `dry-run: true` under `with:` and run it by hand (Actions, Project
+   sync, Run workflow). The log lists each change it would make as
+   `dry run: would SetSelect {...}` and changes nothing.
+4. Remove `dry-run`, run it again: every open issue and pull request of the
+   repository appears on the board; closed ones sit in Done with a date.
+5. Open a test issue: it appears as Backlog within a minute. Close it: Done,
+   with today's date. Open and close a draft pull request the same way.
+6. A wrong option name in a caller (`status-done: Finished`) fails the run on
+   its first line with the field's real options listed; nothing was changed.
+
+#### The project's own workflows, as a belt and braces
+
+GitHub's built-in project workflows exist for user projects too, and the two
+mechanisms complement each other: the built-ins react inside GitHub in seconds
+and cover repositories that do not call this yet, while this sets the done date,
+the area and the draft status, and repairs a missed event. In the project, open
+the menu, **Workflows**, and enable:
+
+- **Item closed**: set Status to Done.
+- **Pull request merged**: set Status to Done.
+- **Item added to project**: set Status to Backlog.
+
+There is no built-in that adds an item from a repository to a user-owned
+project; the caller above is what does that. Both set the same value, so the
+order they run in does not matter.
 
 ## Doppler setup
 
