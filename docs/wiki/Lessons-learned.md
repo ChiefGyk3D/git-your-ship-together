@@ -1,8 +1,8 @@
-# Lessons Learned
+# Lessons learned
 
 Each of these cost at least an afternoon. They are kept in on purpose: **the mistakes are the curriculum.**
 The README's
-[Lessons learned the hard way](https://github.com/ChiefGyk3D/git-your-ship-together/blob/main/README.md#lessons-learned-the-hard-way)
+[Lessons learned the hard way](../../README.md#lessons-learned-the-hard-way)
 is the authoritative list; this page tells them as lessons with the principle underneath.
 
 ## 1. Same-looking identifiers are not interchangeable
