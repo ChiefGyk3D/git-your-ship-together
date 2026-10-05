@@ -13,11 +13,12 @@
 #       uses: ChiefGyk3D/git-your-ship-together/.github/workflows/project-sync.yml@<sha> # vX.Y.Z
 #       permissions:
 #         contents: read
-#         id-token: write        # the Doppler OIDC fetch of the token
+#         id-token: write        # the Doppler OIDC fetch of the App key
 #       secrets:
 #         DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}   # optional fallback
 #       with:
-#         project-url: https://github.com/users/ChiefGyk3D/projects/2
+#         project-url: https://github.com/orgs/<org>/projects/<n>
+#         app-id: ${{ vars.PROJECTS_APP_ID }}
 #         doppler-project: ...
 #         doppler-config: ...
 #         doppler-identity-id: ${{ vars.DOPPLER_IDENTITY_ID }}
@@ -36,9 +37,12 @@
 # tests/test_project_sync.py fails if the copy below drifts;
 # scripts/inline_project_sync.py rewrites it.
 #
-# The token is a fine-grained personal access token (user Projects read/write,
-# repository Issues and Pull requests read) held in Doppler, fetched over the
-# job's OIDC identity exactly as the other workflows fetch theirs.
+# The only credential is a GitHub App installation token. The App's private key
+# (PEM) is held in Doppler and fetched over the job's OIDC identity exactly as
+# the other workflows fetch theirs; actions/create-github-app-token trades it
+# for a token that lives an hour, is limited to the calling repository's
+# installation, and is revoked by the action when the job ends. No personal
+# access token is accepted.
 
 name: Project sync (reusable)
 
@@ -46,7 +50,7 @@ on:
   workflow_call:
     inputs:
       project-url:
-        description: The project, for example `https://github.com/users/ChiefGyk3D/projects/2` (`/orgs/<login>/projects/<n>` for an organisation).
+        description: The organization-owned project, `https://github.com/orgs/<login>/projects/<n>`. A `/users/` URL is refused, because an App has no user-account Projects permission.
         type: string
         default: ""
       status-field:
@@ -89,10 +93,10 @@ on:
         description: Read the board and print every change instead of making it. Without a token, a dry run only says so and succeeds, which is how this repository's own CI exercises the workflow.
         type: boolean
         default: false
-      token-secret-name:
-        description: The name of the Doppler secret that holds the token; it reaches the script as an environment variable of that name.
+      app-id:
+        description: The numeric id of the GitHub App that holds the Projects permission. An identifier, not a secret; callers pass the repository variable `PROJECTS_APP_ID`.
         type: string
-        default: PROJECTS_TOKEN
+        required: true
       egress-policy:
         description: harden-runner egress policy - `audit` logs outbound connections, `block` allows only `allowed-endpoints`.
         type: string
@@ -110,7 +114,7 @@ on:
         type: string
         default: ""
       doppler-config:
-        description: Doppler config slug holding the token.
+        description: Doppler config slug holding the App private key.
         type: string
         default: ""
       doppler-identity-id:
@@ -118,7 +122,7 @@ on:
         type: string
         default: ""
       doppler-trusted-refs-only:
-        description: Fetch the token only on the default branch, a tag or a schedule. A caller that triggers on `pull_request_target` sets this to `false`, because that event is never trusted by this rule yet runs the base branch's workflow and checks out nothing from the pull request; see the README.
+        description: Fetch the key only on the default branch, a tag or a schedule. A caller that triggers on `pull_request_target` sets this to `false`, because that event is never trusted by this rule yet runs the base branch's workflow and checks out nothing from the pull request; see the README.
         type: boolean
         default: true
       timeout-minutes:
@@ -140,7 +144,7 @@ jobs:
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read
-      id-token: write  # Doppler OIDC for the project token
+      id-token: write  # Doppler OIDC for the App private key
     steps:
       - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
         with:
@@ -231,8 +235,29 @@ jobs:
           inject-env-vars: true
       # ---------------------------------------------------------------------
 
+      # The key reaches the action as an input, never a command line. With no
+      # key (a dry run with no Doppler) nothing is minted and the script says so.
+      # The action revokes the token itself when the job ends (its default);
+      # nothing here needs to. The `permission-*` inputs name the token's whole
+      # reach (organization Projects write, Issues and Pull requests read): a
+      # token minted without them would carry every permission the App has,
+      # which zizmor's github-app audit rightly refuses.
+      - name: Mint a one-hour installation token
+        id: app
+        if: ${{ env.PROJECTS_APP_PRIVATE_KEY != '' }}
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ inputs.app-id }}
+          private-key: ${{ env.PROJECTS_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-organization-projects: write
+          permission-issues: read
+          permission-pull-requests: read
+
       - name: Sync the project
         env:
+          PS_TOKEN: ${{ steps.app.outputs.token }}
           PS_PROJECT_URL: ${{ inputs.project-url }}
           PS_STATUS_FIELD: ${{ inputs.status-field }}
           PS_STATUS_OPEN_ISSUE: ${{ inputs.status-open-issue }}
@@ -244,7 +269,6 @@ jobs:
           PS_DEFAULT_AREA_FIELD: ${{ inputs.default-area-field }}
           PS_DEFAULT_AREA: ${{ inputs.default-area }}
           PS_DRY_RUN: ${{ inputs.dry-run }}
-          PS_TOKEN_SECRET_NAME: ${{ inputs.token-secret-name }}
           PS_EVENT_NAME: ${{ github.event_name }}
         run: |
           python3 - <<'PROJECT_SYNC_PY'
@@ -729,19 +753,24 @@ jobs:
               env = os.environ
               cfg = config_from_env(env)
               event_name = env.get("PS_EVENT_NAME", "")
-              secret_name = env.get("PS_TOKEN_SECRET_NAME", "PROJECTS_TOKEN")
-              token = env.get(secret_name, "")
+              # The workflow mints a one-hour GitHub App installation token and hands it over here.
+              token = env.get("PS_TOKEN", "")
               try:
                   if not cfg.project_url:
                       raise SyncError("project-url is empty.")
-                  parse_project_url(cfg.project_url)
+                  if parse_project_url(cfg.project_url)[0] == "user":
+                      raise SyncError(
+                          "GitHub Apps have no user-account Projects permission, so an installation token cannot write to "
+                          "a user-owned project; move the project to an organization or run the sync by hand "
+                          "(https://docs.github.com/en/rest/authentication/permissions-required-for-github-apps)."
+                      )
                   if not token:
                       if cfg.dry_run:
-                          print(f"::notice title=project-sync::dry run with no {secret_name}; nothing to read, nothing sent")
+                          print("::notice title=project-sync::dry run with no installation token; nothing to read, nothing sent")
                           return 0
                       raise SyncError(
-                          f"No token: the environment has no {secret_name}. Put a fine-grained token with user Projects "
-                          "read/write in the Doppler config the doppler-* inputs name, under that name; see the README, "
+                          "No token: PS_TOKEN is empty. The workflow mints it from the GitHub App's private key, which "
+                          "must be in the Doppler config the doppler-* inputs name; see the README, "
                           "'Keeping a project current'."
                       )
                   gql = Client(token, env.get("GITHUB_GRAPHQL_URL", GRAPHQL_URL), dry_run=cfg.dry_run)

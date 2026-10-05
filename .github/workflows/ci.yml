@@ -287,11 +287,11 @@ jobs:
         printf '* [Home](Home)\n' > "$OUT_DIR/_Sidebar.md"
       egress-policy: block
 
-  # project-sync.yml at this ref in a dry run with no token: the workflow's
+  # project-sync.yml at this ref in a dry run with no key: the workflow's
   # structure, the Doppler gate and the inlined script start under block mode
   # with the workflow's own default list. A dry run with no token says so and
   # succeeds; the script's behaviour is tests/test_project_sync.py, and an
-  # end-to-end against a real board needs the maintainer's token (README).
+  # end-to-end against a real board needs the maintainer's App (README).
   fixture-project-sync:
     name: fixture project sync
     uses: ./.github/workflows/project-sync.yml # zizmor: ignore[self-repository]
@@ -299,7 +299,8 @@ jobs:
       contents: read
       id-token: write  # what a caller grants for the Doppler fetch
     with:
-      project-url: https://github.com/users/ChiefGyk3D/projects/2
+      project-url: https://github.com/orgs/N0TST/projects/2
+      app-id: "1"  # a placeholder: a dry run with no key mints nothing
       dry-run: true
       egress-policy: block
 
