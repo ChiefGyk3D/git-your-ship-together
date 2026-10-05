@@ -287,6 +287,22 @@ jobs:
         printf '* [Home](Home)\n' > "$OUT_DIR/_Sidebar.md"
       egress-policy: block
 
+  # project-sync.yml at this ref in a dry run with no token: the workflow's
+  # structure, the Doppler gate and the inlined script start under block mode
+  # with the workflow's own default list. A dry run with no token says so and
+  # succeeds; the script's behaviour is tests/test_project_sync.py, and an
+  # end-to-end against a real board needs the maintainer's token (README).
+  fixture-project-sync:
+    name: fixture project sync
+    uses: ./.github/workflows/project-sync.yml # zizmor: ignore[self-repository]
+    permissions:
+      contents: read
+      id-token: write  # what a caller grants for the Doppler fetch
+    with:
+      project-url: https://github.com/users/ChiefGyk3D/projects/2
+      dry-run: true
+      egress-policy: block
+
   # The fixture image through python-docker-release.yml at this ref: build,
   # check and scan, never publish. The writes are what the release job
   # declares for the publishing path; the called job holds them on a pull
@@ -328,7 +344,7 @@ jobs:
   ci-green:
     name: CI green
     if: always()
-    needs: [actionlint, zizmor, test, fixture-ci, fixture-bash, fixture-fuzz, fixture-tofu, fixture-arduino, fixture-package, fixture-artifact, fixture-pages, fixture-wiki, fixture-release, fixture-verify]
+    needs: [actionlint, zizmor, test, fixture-ci, fixture-bash, fixture-fuzz, fixture-tofu, fixture-arduino, fixture-package, fixture-artifact, fixture-pages, fixture-wiki, fixture-release, fixture-verify, fixture-project-sync]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}

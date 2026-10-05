@@ -1,0 +1,24 @@
+{
+  "data": {
+    "node": {
+      "projectItems": {
+        "pageInfo": {
+          "hasNextPage": false,
+          "endCursor": null
+        },
+        "nodes": [
+          {
+            "id": "PVTI_other",
+            "project": {
+              "id": "PVT_other"
+            },
+            "status": {
+              "name": "Next"
+            },
+            "done": null
+          }
+        ]
+      }
+    }
+  }
+}
