@@ -46,6 +46,13 @@ Read in this order. Each one is short.
 7. [docs/ROADMAP.md](docs/ROADMAP.md): what is done, what is next, and what
    the lab's spare compute could carry.
 
+New to this, or learning from it? The
+[wiki](https://github.com/ChiefGyk3D/git-your-ship-together/wiki) is the guided
+tour: a learning path with exercises, a glossary, why each rule exists, a
+troubleshooting table and the lessons. It is generated from [`wiki/`](wiki/),
+so it changes by pull request, and a test fails when the repository grows
+something the wiki never mentions.
+
 ## What is in the repository
 
 Fourteen reusable workflows and one composite action:
@@ -77,6 +84,7 @@ project before any caller pins them:
 | `.github/workflows/ci.yml` | actionlint, zizmor, the pytest contract, then `python-ci.yml`, `bash-ci.yml`, `tofu-ci.yml`, `arduino-ci.yml`, `python-package-release.yml`, `artifact-release.yml`, `docs-pages.yml`, `wiki-publish.yml` and `python-docker-release.yml` called at the pull request's own ref against `fixture/` (bash-ci over the whole repository; bash-ci and the package build in block mode), and a `CI green` gate that needs all of it |
 | `.github/workflows/security-self.yml` | `security.yml` called the same way, on push, pull request and a Monday schedule |
 | `.github/workflows/dependabot-auto-merge-self.yml` | `dependabot-auto-merge.yml` called the same way, so this repository's own bumps exercise it |
+| `.github/workflows/wiki.yml` | `wiki-publish.yml` called the same way for this repository's own wiki: `wiki/` is the source, `scripts/gen_wiki.py` the generator. A pull request that touches it generates and checks the pages (links, anchors, sidebar); only a run on `main` publishes. See [`wiki/Maintaining-This-Wiki.md`](wiki/Maintaining-This-Wiki.md) |
 | `.github/workflows/audit.yml` | The weekly audit: `scripts/audit_baseline.py` over every repository in `baseline/repos.txt` on Monday 07:00 UTC, with its own token from its own Doppler project; and an issue here for each risk-register entry about to expire. Not reusable; see [The weekly audit](#the-weekly-audit) |
 | `.github/dependabot.yml` | Weekly action and pip bumps with a seven-day cooldown, actions grouped into one pull request |
 | `fixture/` | A package with a console script, one test, a non-root Dockerfile, a hash-pinned `requirements.txt`, and one shell script with its own test: one of everything a job needs. `fixture/README.md` says how to regenerate the lock |
@@ -94,6 +102,8 @@ And what keeps the callers honest:
 | `scripts/audit_baseline.py` | Reads each repository's settings and workflows from the API and reports PASS, FAIL or UNKNOWN per baseline item. Exit 0 only when every check passed |
 | `scripts/new-repo.sh` | Adopts a repository, or starts one: reads what it holds, writes the caller workflows and `dependabot.yml` from that, commits on a branch and opens the pull request, applies every BASELINE setting, appends to `baseline/repos.txt`. `--dry-run` writes the files somewhere else and prints the settings instead; that is what its test runs |
 | `scripts/doppler-ci-set.sh` | Sets one secret in the shared Doppler `ci` config. The value is typed twice with echo off and never reaches a command line, shell history or the terminal |
+| `wiki/` | The source of the [GitHub wiki](https://github.com/ChiefGyk3D/git-your-ship-together/wiki), a generated mirror: edit here, never on github.com. A change that alters what a person would read changes the page in the same pull request |
+| `scripts/gen_wiki.py` | Builds the wiki from `wiki/` and refuses a broken link, a missing anchor or a page not in the sidebar. Standard library only |
 | `docs/DESIGN.md` | The reasoning: the threat model, why Doppler, the products, what the tests enforce |
 | `docs/ROADMAP.md` | What is done, what is next, and what the lab could carry |
 
@@ -1770,6 +1780,7 @@ The tests are the contract, one file per thing they hold still:
 | `tests/test_risk_register.py` | The register's shape, its dates, no duplicate advisory, every repository named is in the baseline list, and no entry has expired |
 | `tests/test_fuzz.py` | `python-fuzz.yml`'s inputs and pin, and its run step executed under bash against tiny targets: a missing directory, no match, a passing target and a crashing one (which must fail the step and leave its `crash-*` input) |
 | `tests/test_security_jobs.py` | The Semgrep job's defaults and its content-driven config; the gitleaks job as a pinned binary: no licence, no Doppler, no `id-token`, the sha256 checked before extraction, full history, SARIF under category `gitleaks`, and a canary step that plants an AWS-shaped key in a scratch repository and requires exit 1 before the real scan runs (the test also fetches the pinned release, checks the hash, and runs that canary for real; it skips only when offline) |
+| `tests/test_wiki.py` | The wiki builds; its links and anchors resolve; every workflow, script, composite action, audit check, test file and baseline file is mentioned in it; the generator refuses a broken wiki; `wiki.yml` generates on a pull request and calls the publisher |
 | `tests/test_fixture.py` | Every fixture requirement carries a hash, every direct dependency is in the lock, the fixture image runs as a non-root user |
 
 Break any one of those and CI names the fix.

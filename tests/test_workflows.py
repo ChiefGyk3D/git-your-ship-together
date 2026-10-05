@@ -267,6 +267,10 @@ ALLOWED_WRITES = {
     ("ci.yml", "fixture-pages", "id-token"),
     ("ci.yml", "fixture-project-sync", "id-token"),
     ("ci.yml", "fixture-wiki", "contents"),
+    # This repository's own wiki (wiki/ is the source, the GitHub wiki a mirror
+    # of it): the grant the caller must give for the publish job, which runs
+    # only from the default branch and never from a pull request.
+    ("wiki.yml", "wiki", "contents"),
 }
 
 

@@ -1,0 +1,42 @@
+# This repository's own wiki, published through the reusable workflow it ships.
+# wiki/ is the source and the GitHub wiki is a mirror of it: a page edited on
+# github.com is overwritten by the next publish. On a pull request the pages
+# are generated and checked (links, anchors, sidebar) and nothing is published;
+# only a run on the default branch pushes. The local `./` reference runs the
+# version on this branch, so a change to wiki-publish.yml is exercised by the
+# next wiki change before any caller pins it.
+name: Wiki
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - wiki/**
+      - scripts/gen_wiki.py
+      - .github/workflows/wiki.yml
+      - .github/workflows/wiki-publish.yml
+  pull_request:
+    paths:
+      - wiki/**
+      - scripts/gen_wiki.py
+      - .github/workflows/wiki.yml
+      - .github/workflows/wiki-publish.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  wiki:
+    # A fork's pull request gets a read-only token, which cannot satisfy the
+    # publish job's grant; it has nothing to publish and the generator runs
+    # in this repository's own pull requests.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    # `$/.github/workflows/...` is the form zizmor asks for; actionlint still
+    # rejects it, so the `./` form stays (see security-self.yml).
+    uses: ./.github/workflows/wiki-publish.yml # zizmor: ignore[self-repository]
+    permissions:
+      contents: write  # the publish job declares it; it never runs from a pull request
+    with:
+      generate-command: python scripts/gen_wiki.py --out "$OUT_DIR" --commit "$SOURCE_SHA"
+      egress-policy: block
