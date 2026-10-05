@@ -329,15 +329,33 @@ def test_main_without_a_token_names_the_secret_and_exits_nonzero(monkeypatch, ca
     for key in list(__import__("os").environ):
         if key.startswith(("INPUT_", "PS_")) or key == "PS_TOKEN":
             monkeypatch.delenv(key)
-    monkeypatch.setenv("PS_PROJECT_URL", URL)
+    monkeypatch.setenv("PS_PROJECT_URL", "https://github.com/orgs/N0TST/projects/2")
     monkeypatch.setenv("PS_EVENT_NAME", "issues")
     assert ps.main() == 1
     assert "PS_TOKEN" in capsys.readouterr().out
 
 
+def test_main_refuses_a_user_owned_project_before_any_api_call(monkeypatch, capsys):
+    monkeypatch.setenv("PS_TOKEN", "x")
+    monkeypatch.setenv("PS_PROJECT_URL", "https://github.com/users/N0CALL/projects/2")
+    monkeypatch.setenv("PS_EVENT_NAME", "issues")
+    monkeypatch.setattr(ps, "Client", lambda *a, **k: pytest.fail("API client built for a user project"))
+    assert ps.main() == 1
+    out = capsys.readouterr().out
+    assert "no user-account Projects permission" in out and "permissions-required-for-github-apps" in out
+
+
+def test_main_accepts_an_organization_project_past_the_check(monkeypatch, capsys):
+    monkeypatch.delenv("PS_TOKEN", raising=False)
+    monkeypatch.setenv("PS_PROJECT_URL", "https://github.com/orgs/N0TST/projects/2")
+    monkeypatch.setenv("PS_EVENT_NAME", "issues")
+    monkeypatch.setenv("PS_DRY_RUN", "true")
+    assert ps.main() == 0
+
+
 def test_main_dry_run_without_a_token_is_a_notice_not_a_failure(monkeypatch, capsys):
     monkeypatch.delenv("PS_TOKEN", raising=False)
-    monkeypatch.setenv("PS_PROJECT_URL", URL)
+    monkeypatch.setenv("PS_PROJECT_URL", "https://github.com/orgs/N0TST/projects/2")
     monkeypatch.setenv("PS_EVENT_NAME", "pull_request")
     monkeypatch.setenv("PS_DRY_RUN", "true")
     assert ps.main() == 0

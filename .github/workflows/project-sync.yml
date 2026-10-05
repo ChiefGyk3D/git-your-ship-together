@@ -17,7 +17,7 @@
 #       secrets:
 #         DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}   # optional fallback
 #       with:
-#         project-url: https://github.com/users/ChiefGyk3D/projects/2
+#         project-url: https://github.com/orgs/<org>/projects/<n>
 #         app-id: ${{ vars.PROJECTS_APP_ID }}
 #         doppler-project: ...
 #         doppler-config: ...
@@ -50,7 +50,7 @@ on:
   workflow_call:
     inputs:
       project-url:
-        description: The project, for example `https://github.com/users/ChiefGyk3D/projects/2` (`/orgs/<login>/projects/<n>` for an organisation).
+        description: The organization-owned project, `https://github.com/orgs/<login>/projects/<n>`. A `/users/` URL is refused, because an App has no user-account Projects permission.
         type: string
         default: ""
       status-field:
@@ -759,7 +759,12 @@ jobs:
               try:
                   if not cfg.project_url:
                       raise SyncError("project-url is empty.")
-                  parse_project_url(cfg.project_url)
+                  if parse_project_url(cfg.project_url)[0] == "user":
+                      raise SyncError(
+                          "GitHub Apps have no user-account Projects permission, so an installation token cannot write to "
+                          "a user-owned project; move the project to an organization or run the sync by hand "
+                          "(https://docs.github.com/en/rest/authentication/permissions-required-for-github-apps)."
+                      )
                   if not token:
                       if cfg.dry_run:
                           print("::notice title=project-sync::dry run with no installation token; nothing to read, nothing sent")

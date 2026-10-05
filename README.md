@@ -1218,10 +1218,15 @@ checkout, no code.
 ### Keeping a project current
 
 `project-sync.yml` keeps a GitHub Projects v2 board in step with the issues and
-pull requests of the repositories that call it. A user-owned project has no
-"auto-add" built-in (an organisation's does), so each repository carries a small
-caller, and the logic lives here once. The board in the examples is
-`https://github.com/users/ChiefGyk3D/projects/2`.
+pull requests of the repositories that call it. **It is for organization-owned
+projects only.** Its one credential is a GitHub App installation token, and
+GitHub Apps have no user-account Projects permission (the Projects permission
+is listed under Organization permissions only, see
+[Permissions required for GitHub Apps](https://docs.github.com/en/rest/authentication/permissions-required-for-github-apps)),
+so a token cannot write to a user-owned project; the script refuses a
+`/users/` project URL before any API call. Move the project to an organization
+or run the sync by hand. Each repository carries a small caller, and the logic
+lives here once.
 
 What it does, per event, never touching a field it was not told about:
 
@@ -1285,7 +1290,7 @@ jobs:
     secrets:
       DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
     with:
-      project-url: https://github.com/users/ChiefGyk3D/projects/2
+      project-url: https://github.com/orgs/<org>/projects/<n>
       app-id: ${{ vars.PROJECTS_APP_ID }}
       default-area-field: Area      # optional: the Area this repository's new items get
       default-area: Hill
@@ -1345,35 +1350,37 @@ and holds nothing a person's account would.
 
 Create it once, by hand:
 
-1. Open <https://github.com/settings/apps/new>. Name it (for example
+1. Open <https://github.com/settings/apps/new> (or the organization's Settings,
+   Developer settings, GitHub Apps, New GitHub App). Name it (for example
    `Hammunition project sync`), set the homepage URL to the repository, and
    **uncheck Webhook, Active**: the App receives no events.
-2. Permissions. **Account permissions**: Projects, read and write. **Repository
+2. Permissions. **Organization permissions**: Projects, read and write. **Repository
    permissions**: Issues, read; Pull requests, read. Metadata, read, is added
    automatically. Nothing else.
 3. Under "Where can this GitHub App be installed?" choose **Only on this
-   account**. Click Create GitHub App.
+   account** (the organization). Click Create GitHub App.
 4. On the App's page, note the **App ID** (a number). It is an identifier, not a
    secret.
 5. Scroll to Private keys and **Generate a private key**; a `.pem` file
    downloads.
-6. Open the App's Install App page, install it on your account, choose **Only
-   select repositories**, and pick only the six suite repositories.
+6. Open the App's Install App page, install it on the **organization**, choose
+   **Only select repositories**, and pick only the repositories that call the
+   workflow.
 7. Store the key in Doppler. The prompt reads one line, which a PEM is not, so
    give the helper the file:
    `scripts/doppler-ci-set.sh --from-file ~/Downloads/<app>.private-key.pem PROJECTS_APP_PRIVATE_KEY`
    (a name other than `PROJECTS_APP_PRIVATE_KEY` goes in `app-key-secret-name`).
    The value goes to the `ci` config, over standard input, and is never
    printed.
-8. On each of the six repositories set the variable the caller reads:
-   `gh variable set PROJECTS_APP_ID --repo ChiefGyk3D/<repo> --body <app id>`
+8. On each calling repository set the variable the caller reads:
+   `gh variable set PROJECTS_APP_ID --repo <org>/<repo> --body <app id>`
 9. Delete the downloaded `.pem`. Doppler holds the only copy.
 
 What it can do: add items to the project and set their fields, and read issues
 and pull requests, only in the six installed repositories. What it cannot do:
 write code, issues or pull requests, read anything else, or act outside the
 installation. To revoke it, delete the key (Private keys on the App's page) or
-uninstall the App from the account; either ends every token it can mint, and a
+uninstall the App from the organization; either ends every token it can mint, and a
 token already minted dies within the hour.
 
 #### First run, end to end

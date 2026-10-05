@@ -299,7 +299,7 @@ jobs:
       contents: read
       id-token: write  # what a caller grants for the Doppler fetch
     with:
-      project-url: https://github.com/users/ChiefGyk3D/projects/2
+      project-url: https://github.com/orgs/N0TST/projects/2
       app-id: "1"  # a placeholder: a dry run with no key mints nothing
       dry-run: true
       egress-policy: block

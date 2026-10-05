@@ -484,7 +484,12 @@ def main() -> int:
     try:
         if not cfg.project_url:
             raise SyncError("project-url is empty.")
-        parse_project_url(cfg.project_url)
+        if parse_project_url(cfg.project_url)[0] == "user":
+            raise SyncError(
+                "GitHub Apps have no user-account Projects permission, so an installation token cannot write to "
+                "a user-owned project; move the project to an organization or run the sync by hand "
+                "(https://docs.github.com/en/rest/authentication/permissions-required-for-github-apps)."
+            )
         if not token:
             if cfg.dry_run:
                 print("::notice title=project-sync::dry run with no installation token; nothing to read, nothing sent")
