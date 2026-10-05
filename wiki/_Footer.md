@@ -1,0 +1,1 @@
+_Generated from [`wiki/`](https://github.com/ChiefGyk3D/git-your-ship-together/tree/main/wiki) at commit [`{{commit_short}}`](https://github.com/ChiefGyk3D/git-your-ship-together/commit/{{commit}}). Do not edit on github.com: open a pull request ([how](Maintaining-This-Wiki))._
