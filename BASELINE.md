@@ -98,7 +98,7 @@ JSON
 **Doppler is the only store.** CI reads the `ci` config of the `ci` project,
 shared by every repository and separate from every runtime project. It holds
 only the names the pipelines use (`DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN`,
-`SNYK_TOKEN`, optionally `GITLEAKS_LICENSE`; Codecov authenticates with the
+`SNYK_TOKEN`; Codecov authenticates with the
 job's own OIDC token and stores nothing) and never a runtime credential.
 Every value in that config is exported into every CI job, so a runtime token
 placed there would be a CI secret in every repository.
@@ -122,8 +122,8 @@ the job says so in a notice. This is `doppler-trusted-refs-only`, on by
 default; a caller that turns it off is choosing to let a pull request's code
 run beside a secret.
 
-**No job that runs on a pull request holds an OIDC token, apart from two whose
-steps are pinned actions only** (gitleaks, and the release job's pull-request
+**No job that runs on a pull request holds an OIDC token, apart from one whose
+steps are pinned actions only** (the release job's pull-request
 build, whose Dockerfile runs inside containers that never see the runner's
 token request). In particular the job that runs the repository's own tests has
 no `id-token`; Codecov uploads happen in a separate job that never runs on a

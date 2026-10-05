@@ -27,10 +27,9 @@
 #       secrets:
 #         DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}   # optional fallback
 #
-# gitleaks-action needs no licence for a personal account. A repository under
-# an organisation needs GITLEAKS_LICENSE, which is read from the Doppler
-# config when one is given. A `.gitleaks.toml` at the caller's root is picked
-# up automatically for allowlisting documented placeholders.
+# gitleaks runs as the pinned MIT binary, so it needs no licence under any
+# account and no secret. A `.gitleaks.toml` at the caller's root is picked up
+# automatically for allowlisting documented placeholders.
 
 name: Security (reusable)
 
@@ -57,6 +56,14 @@ on:
         description: Run gitleaks over the full history.
         type: boolean
         default: true
+      gitleaks-version:
+        description: gitleaks release to download (gitleaks/gitleaks), without the `v`. Changing it means changing `gitleaks-sha256`.
+        type: string
+        default: "8.30.1"
+      gitleaks-sha256:
+        description: SHA-256 of the gitleaks linux_x64 tarball for that version.
+        type: string
+        default: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
       pip-audit-requirements:
         description: Requirements file audited by pip-audit; empty skips that step. With `audit-command` empty too, the job is skipped.
         type: string
@@ -217,7 +224,7 @@ jobs:
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read
-      id-token: write  # Doppler OIDC for an optional GITLEAKS_LICENSE
+      security-events: write  # gitleaks SARIF upload
     steps:
       - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
         with:
@@ -231,93 +238,58 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
-      # --- Doppler (same steps as .github/actions/doppler-secrets) ---------
-      - name: Decide how to authenticate to Doppler
-        id: doppler
-        if: inputs.doppler-project != ''
+      # The gitleaks binary is MIT and needs no licence; gitleaks-action
+      # demands one under an organisation (#90). The release and its hash are
+      # the `gitleaks-version` and `gitleaks-sha256` inputs. To bump: `gh release view -R gitleaks/gitleaks --json
+      # tagName,assets`, `gh release download <tag> -R gitleaks/gitleaks -p
+      # '*_linux_x64.tar.gz'`, then `sha256sum` the downloaded file (it must
+      # also match the release's checksums.txt). Dependabot cannot bump this.
+      # The github.com download redirects to release-assets.githubusercontent.com,
+      # which the shared allow-list already carries.
+      - name: Install gitleaks at the pinned version
         env:
-          IDENTITY_ID: ${{ inputs.doppler-identity-id }}
-          TOKEN: ${{ secrets.DOPPLER_TOKEN }}
-          PROJECT: ${{ inputs.doppler-project }}
-          CONFIG: ${{ inputs.doppler-config }}
-          REQUIRED: "false"
-          TRUSTED_ONLY: ${{ inputs.doppler-trusted-refs-only }}
-          IS_FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
-          EVENT: ${{ github.event_name }}
-          REF: ${{ github.ref }}
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GITLEAKS_VERSION: ${{ inputs.gitleaks-version }}
+          GITLEAKS_SHA256: ${{ inputs.gitleaks-sha256 }}
         run: |
           set -euo pipefail
-          mode=none
-          skip=""
-          # A trusted ref is one only a push by someone with write access, or the
-          # schedule, can produce: the default branch, a tag, or a scheduled run
-          # (which GitHub always starts from the default branch). A pull request
-          # is never trusted, whichever repository its head is in.
-          trusted=false
-          case "$EVENT" in
-            schedule) trusted=true ;;
-            pull_request|pull_request_target) trusted=false ;;
-            *)
-              if [ -n "$DEFAULT_BRANCH" ] && [ "$REF" = "refs/heads/$DEFAULT_BRANCH" ]; then
-                trusted=true
-              elif [ "${REF#refs/tags/}" != "$REF" ]; then
-                trusted=true
-              fi ;;
-          esac
-          if [ "$IS_FORK" = "true" ]; then
-            # A fork's pull request has no id-token and must never receive a
-            # secret. Silent skip is correct here, whatever `required` says.
-            skip="pull request from a fork"
-          elif [ "$TRUSTED_ONLY" = "true" ] && [ "$trusted" != "true" ]; then
-            skip="$EVENT on $REF is not the default branch, a tag or a schedule (trusted-refs-only)"
-          elif [ -n "$IDENTITY_ID" ]; then
-            mode=oidc
-          elif [ -n "$TOKEN" ]; then
-            mode=token
-          fi
-          if [ -n "$skip" ]; then
-            echo "::notice title=Doppler::$skip - no secrets are fetched"
-          fi
-          if [ "$mode" != "none" ] && { [ -z "$PROJECT" ] || [ -z "$CONFIG" ]; }; then
-            echo "::error title=Doppler::project and config are required when authenticating"
+          archive="$RUNNER_TEMP/gitleaks.tar.gz"
+          curl -sSfL -o "$archive" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  ${archive}" | sha256sum -c -
+          mkdir "$RUNNER_TEMP/gitleaks-bin"
+          tar -xzf "$archive" -C "$RUNNER_TEMP/gitleaks-bin" gitleaks
+          sudo install -m 0755 "$RUNNER_TEMP/gitleaks-bin/gitleaks" /usr/local/bin/gitleaks
+          gitleaks version
+
+      # The scan must be able to fail. This plants an AWS-shaped key (built at
+      # run time, so no credential-shaped literal sits in this file) in a
+      # scratch repository and requires the same invocation to exit 1 on it.
+      - name: Check that the scan catches a planted key
+        run: |
+          set -euo pipefail
+          canary="$(mktemp -d)"
+          git init -q "$canary"
+          printf 'aws_access_key_id = %s%s\naws_secret_access_key = %s\n' AKIA IOSFODNN7EXAMPLE 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYzq3x9KpZmQ' > "$canary/planted.txt"
+          git -C "$canary" add planted.txt
+          git -C "$canary" -c user.email=ci@example.invalid -c user.name=ci commit -q -m planted
+          status=0
+          gitleaks git --redact --no-banner --exit-code 1 --log-opts="--all" "$canary" > /dev/null 2>&1 || status=$?
+          if [ "$status" -ne 1 ]; then
+            echo "::error title=gitleaks::the planted key was not caught (exit $status); the secret scan cannot be trusted"
             exit 1
           fi
-          if [ "$mode" = "none" ] && [ -z "$skip" ]; then
-            if [ "$REQUIRED" = "true" ]; then
-              echo "::error title=Doppler::no identity-id and no DOPPLER_TOKEN; this job needs one (see README, 'Doppler setup')"
-              exit 1
-            fi
-            echo "::notice title=Doppler::not configured (no identity-id, no DOPPLER_TOKEN) - continuing without CI secrets"
-          fi
-          echo "mode=$mode" >> "$GITHUB_OUTPUT"
-          echo "Doppler auth mode: $mode"
 
-      - name: Fetch CI secrets from Doppler (OIDC)
-        if: steps.doppler.outputs.mode == 'oidc'
-        uses: dopplerhq/secrets-fetch-action@451892f16195f9ac360e1a5bcbf0b5fd0e957534 # v2.0.0
+      # A `.gitleaks.toml` at the repository root is read automatically (the
+      # target path's config, gitleaks' own order of precedence), so a caller
+      # allowlists documented placeholders there. Full history, as before.
+      - name: Scan the full history (gitleaks)
+        run: gitleaks git --redact --no-banner --exit-code 1 --report-format sarif --report-path gitleaks.sarif --log-opts="--all" .
+
+      - name: Upload gitleaks results
+        if: always() && hashFiles('gitleaks.sarif') != ''
+        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
         with:
-          auth-method: oidc
-          doppler-identity-id: ${{ inputs.doppler-identity-id }}
-          doppler-project: ${{ inputs.doppler-project }}
-          doppler-config: ${{ inputs.doppler-config }}
-          inject-env-vars: true
-
-      - name: Fetch CI secrets from Doppler (Service Token)
-        if: steps.doppler.outputs.mode == 'token'
-        uses: dopplerhq/secrets-fetch-action@451892f16195f9ac360e1a5bcbf0b5fd0e957534 # v2.0.0
-        with:
-          doppler-token: ${{ secrets.DOPPLER_TOKEN }}
-          doppler-project: ${{ inputs.doppler-project }}
-          doppler-config: ${{ inputs.doppler-config }}
-          inject-env-vars: true
-      # ---------------------------------------------------------------------
-
-      - uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITLEAKS_LICENSE: ${{ env.GITLEAKS_LICENSE }}
-          GITLEAKS_ENABLE_COMMENTS: "false"
+          sarif_file: gitleaks.sarif
+          category: gitleaks
 
   dependency-audit:
     name: Dependency audit
