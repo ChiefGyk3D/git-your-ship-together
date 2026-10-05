@@ -395,7 +395,7 @@ def test_inputs_are_the_app_id_and_the_key_secret_name():
     # PyYAML reads the bare key `on` as True.
     inputs = _workflow()[True]["workflow_call"]["inputs"]
     assert inputs["app-id"]["required"] is True
-    assert inputs["app-key-secret-name"]["default"] == "PROJECTS_APP_PRIVATE_KEY"
+    assert "app-key-secret-name" not in inputs  # the secret name is fixed: PROJECTS_APP_PRIVATE_KEY
     assert "token-secret-name" not in inputs
 
 

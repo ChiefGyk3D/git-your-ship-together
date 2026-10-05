@@ -1315,7 +1315,6 @@ Inputs of `project-sync.yml`:
 | `default-area-field`, `default-area` | empty | A single-select field and option set on items this workflow adds, and only on those |
 | `dry-run` | `false` | Read the board and print every change instead of making it. With no token it only says so and succeeds, which is how this repository's CI exercises the workflow |
 | `app-id` | required | The numeric id of the GitHub App; an identifier, not a secret. Callers pass the repository variable `PROJECTS_APP_ID` |
-| `app-key-secret-name` | `PROJECTS_APP_PRIVATE_KEY` | The Doppler secret that holds the App's private key in PEM form |
 | `egress-policy` | `audit` | harden-runner: `audit` or `block` |
 | `allowed-endpoints` | `api.doppler.com:443 api.github.com:443` | The allow-list for `block`; these two are all the job reaches |
 | `extra-allowed-endpoints` | empty | Appended to the list |
@@ -1369,7 +1368,7 @@ Create it once, by hand:
 7. Store the key in Doppler. The prompt reads one line, which a PEM is not, so
    give the helper the file:
    `scripts/doppler-ci-set.sh --from-file ~/Downloads/<app>.private-key.pem PROJECTS_APP_PRIVATE_KEY`
-   (a name other than `PROJECTS_APP_PRIVATE_KEY` goes in `app-key-secret-name`).
+   The name is fixed: the workflow reads `PROJECTS_APP_PRIVATE_KEY` from the Doppler config and nothing else.
    The value goes to the `ci` config, over standard input, and is never
    printed.
 8. On each calling repository set the variable the caller reads:

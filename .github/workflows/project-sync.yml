@@ -97,10 +97,6 @@ on:
         description: The numeric id of the GitHub App that holds the Projects permission. An identifier, not a secret; callers pass the repository variable `PROJECTS_APP_ID`.
         type: string
         required: true
-      app-key-secret-name:
-        description: The name of the Doppler secret that holds the App's private key in PEM form.
-        type: string
-        default: PROJECTS_APP_PRIVATE_KEY
       egress-policy:
         description: harden-runner egress policy - `audit` logs outbound connections, `block` allows only `allowed-endpoints`.
         type: string
@@ -248,11 +244,11 @@ jobs:
       # which zizmor's github-app audit rightly refuses.
       - name: Mint a one-hour installation token
         id: app
-        if: ${{ env[inputs.app-key-secret-name] != '' }}
+        if: ${{ env.PROJECTS_APP_PRIVATE_KEY != '' }}
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           app-id: ${{ inputs.app-id }}
-          private-key: ${{ env[inputs.app-key-secret-name] }}
+          private-key: ${{ env.PROJECTS_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
           repositories: ${{ github.event.repository.name }}
           permission-organization-projects: write
