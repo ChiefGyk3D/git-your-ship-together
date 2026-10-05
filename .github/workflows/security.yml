@@ -257,8 +257,9 @@ jobs:
           echo "${GITLEAKS_SHA256}  ${archive}" | sha256sum -c -
           mkdir "$RUNNER_TEMP/gitleaks-bin"
           tar -xzf "$archive" -C "$RUNNER_TEMP/gitleaks-bin" gitleaks
-          sudo install -m 0755 "$RUNNER_TEMP/gitleaks-bin/gitleaks" /usr/local/bin/gitleaks
-          gitleaks version
+          chmod 0755 "$RUNNER_TEMP/gitleaks-bin/gitleaks"
+          echo "$RUNNER_TEMP/gitleaks-bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/gitleaks-bin/gitleaks" version
 
       # The scan must be able to fail. This plants an AWS-shaped key (built at
       # run time, so no credential-shaped literal sits in this file) in a
