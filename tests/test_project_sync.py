@@ -327,19 +327,17 @@ def test_reconcile_follows_pagination():
 
 def test_main_without_a_token_names_the_secret_and_exits_nonzero(monkeypatch, capsys):
     for key in list(__import__("os").environ):
-        if key.startswith(("INPUT_", "PS_")) or key in ("PROJECTS_TOKEN",):
+        if key.startswith(("INPUT_", "PS_")) or key == "PS_TOKEN":
             monkeypatch.delenv(key)
     monkeypatch.setenv("PS_PROJECT_URL", URL)
-    monkeypatch.setenv("PS_TOKEN_SECRET_NAME", "PROJECTS_TOKEN")
     monkeypatch.setenv("PS_EVENT_NAME", "issues")
     assert ps.main() == 1
-    assert "PROJECTS_TOKEN" in capsys.readouterr().out
+    assert "PS_TOKEN" in capsys.readouterr().out
 
 
 def test_main_dry_run_without_a_token_is_a_notice_not_a_failure(monkeypatch, capsys):
-    monkeypatch.delenv("PROJECTS_TOKEN", raising=False)
+    monkeypatch.delenv("PS_TOKEN", raising=False)
     monkeypatch.setenv("PS_PROJECT_URL", URL)
-    monkeypatch.setenv("PS_TOKEN_SECRET_NAME", "PROJECTS_TOKEN")
     monkeypatch.setenv("PS_EVENT_NAME", "pull_request")
     monkeypatch.setenv("PS_DRY_RUN", "true")
     assert ps.main() == 0
@@ -359,3 +357,61 @@ def test_the_workflow_inlines_exactly_this_script():
     assert inlined == expected, (
         "project-sync.yml's inline script differs from scripts/project_sync.py; run scripts/inline_project_sync.py"
     )
+
+
+# --- the App is the only credential -------------------------------------------
+
+WORKFLOW = REPO / ".github" / "workflows" / "project-sync.yml"
+
+
+def _workflow():
+    return yaml.safe_load(WORKFLOW.read_text())
+
+
+def test_no_personal_access_token_path_remains():
+    text = WORKFLOW.read_text() + SCRIPT.read_text()
+    assert "PROJECTS_TOKEN" not in text and "token-secret-name" not in text and "PS_TOKEN_SECRET_NAME" not in text
+
+
+def test_inputs_are_the_app_id_and_the_key_secret_name():
+    # PyYAML reads the bare key `on` as True.
+    inputs = _workflow()[True]["workflow_call"]["inputs"]
+    assert inputs["app-id"]["required"] is True
+    assert inputs["app-key-secret-name"]["default"] == "PROJECTS_APP_PRIVATE_KEY"
+    assert "token-secret-name" not in inputs
+
+
+def test_the_token_is_minted_by_a_pinned_app_action_scoped_to_the_calling_repository():
+    steps = _workflow()["jobs"]["sync"]["steps"]
+    mint = next(s for s in steps if s.get("id") == "app")
+    assert re.fullmatch(r"actions/create-github-app-token@[0-9a-f]{40}", mint["uses"])
+    assert re.search(r"create-github-app-token@[0-9a-f]{40} # v\d+\.\d+\.\d+", WORKFLOW.read_text())
+    w = mint["with"]
+    assert w["owner"] == "${{ github.repository_owner }}"
+    assert w["repositories"] == "${{ github.event.repository.name }}"
+    assert w["app-id"] == "${{ inputs.app-id }}"
+    assert "skip-token-revoke" not in w  # the action revokes the token at job end
+    sync = next(s for s in steps if s.get("name") == "Sync the project")
+    assert sync["env"]["PS_TOKEN"] == "${{ steps.app.outputs.token }}"
+    # the key never goes into the sync step's environment under its own name
+    assert "private-key" not in sync["env"]
+
+
+def test_doppler_ci_set_reads_a_multiline_value_from_a_file(tmp_path):
+    import os
+    import subprocess
+
+    stub = tmp_path / "doppler"
+    out = tmp_path / "got"
+    stub.write_text(f"#!/bin/sh\ncat > {out}\n")
+    stub.chmod(0o755)
+    pem = tmp_path / "k.pem"
+    pem.write_text("-----BEGIN KEY-----\nabc\ndef\n-----END KEY-----\n")
+    env = {**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}"}
+    r = subprocess.run(
+        ["bash", str(REPO / "scripts" / "doppler-ci-set.sh"), "--from-file", str(pem), "PROJECTS_APP_PRIVATE_KEY"],
+        env=env, capture_output=True, text=True, stdin=subprocess.DEVNULL,
+    )
+    assert r.returncode == 0, r.stderr
+    assert out.read_text() == "-----BEGIN KEY-----\nabc\ndef\n-----END KEY-----"  # trailing newline trimmed by $(...)
+    assert "abc" not in r.stdout + r.stderr

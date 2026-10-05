@@ -1286,6 +1286,7 @@ jobs:
       DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
     with:
       project-url: https://github.com/users/ChiefGyk3D/projects/2
+      app-id: ${{ vars.PROJECTS_APP_ID }}
       default-area-field: Area      # optional: the Area this repository's new items get
       default-area: Hill
       doppler-project: ci
@@ -1308,12 +1309,13 @@ Inputs of `project-sync.yml`:
 | `reconcile` | `true` | Walk the repository and the board on `schedule` and `workflow_dispatch`; `false` makes those a no-op |
 | `default-area-field`, `default-area` | empty | A single-select field and option set on items this workflow adds, and only on those |
 | `dry-run` | `false` | Read the board and print every change instead of making it. With no token it only says so and succeeds, which is how this repository's CI exercises the workflow |
-| `token-secret-name` | `PROJECTS_TOKEN` | The Doppler secret that holds the token |
+| `app-id` | required | The numeric id of the GitHub App; an identifier, not a secret. Callers pass the repository variable `PROJECTS_APP_ID` |
+| `app-key-secret-name` | `PROJECTS_APP_PRIVATE_KEY` | The Doppler secret that holds the App's private key in PEM form |
 | `egress-policy` | `audit` | harden-runner: `audit` or `block` |
 | `allowed-endpoints` | `api.doppler.com:443 api.github.com:443` | The allow-list for `block`; these two are all the job reaches |
 | `extra-allowed-endpoints` | empty | Appended to the list |
 | `doppler-project`, `doppler-config`, `doppler-identity-id` | empty | See [Doppler setup](#doppler-setup) |
-| `doppler-trusted-refs-only` | `true` | Fetch the token only on the default branch, a tag or a schedule. A caller that triggers on `pull_request_target` sets it `false`; see below |
+| `doppler-trusted-refs-only` | `true` | Fetch the App key only on the default branch, a tag or a schedule. A caller that triggers on `pull_request_target` sets it `false`; see below |
 | `timeout-minutes` | `15` | Job timeout |
 
 ##### Why `pull_request_target`
@@ -1331,32 +1333,54 @@ along with every other pull request event, and so would skip the fetch. Do not
 copy that line into a caller that checks out the pull request. Pin the called
 workflow by commit, as every caller does: that pin is what runs.
 
-#### The token the owner creates
+#### The GitHub App the owner creates
 
-One fine-grained personal access token, created by the project's owner at
-GitHub, Settings, Developer settings, Fine-grained tokens:
+The only credential is a GitHub App's installation token. There is no personal
+access token path and no fallback. The workflow fetches the App's private key
+from Doppler over the job's OIDC identity and trades it, with
+`actions/create-github-app-token`, for a token that lives one hour, is scoped
+to the calling repository's installation, and is revoked by the action when the
+job ends. A token like that names the App in the audit log, not the maintainer,
+and holds nothing a person's account would.
 
-- **Resource owner**: the user that owns the project.
-- **Repository access**: only the repositories that call the workflow (or all of
-  them).
-- **Repository permissions**: Issues, read; Pull requests, read.
-- **Account permissions**: Projects, read and write. This is what lets it add
-  items and set fields on a user-owned project.
-- A short expiry and a calendar entry to rotate it.
+Create it once, by hand:
 
-It goes into the Doppler config the caller's `doppler-config` names, under the
-name `PROJECTS_TOKEN` (or whatever `token-secret-name` says), typed at a
-prompt with echo off: `scripts/doppler-ci-set.sh` does that for the shared `ci`
-config. It is never a repository secret pasted into the repository's settings,
-never in a file, and never on a command line. The workflow reads it from the
-job's environment only; the script sends it in one request header and prints
-nothing derived from it.
+1. Open <https://github.com/settings/apps/new>. Name it (for example
+   `Hammunition project sync`), set the homepage URL to the repository, and
+   **uncheck Webhook, Active**: the App receives no events.
+2. Permissions. **Account permissions**: Projects, read and write. **Repository
+   permissions**: Issues, read; Pull requests, read. Metadata, read, is added
+   automatically. Nothing else.
+3. Under "Where can this GitHub App be installed?" choose **Only on this
+   account**. Click Create GitHub App.
+4. On the App's page, note the **App ID** (a number). It is an identifier, not a
+   secret.
+5. Scroll to Private keys and **Generate a private key**; a `.pem` file
+   downloads.
+6. Open the App's Install App page, install it on your account, choose **Only
+   select repositories**, and pick only the six suite repositories.
+7. Store the key in Doppler. The prompt reads one line, which a PEM is not, so
+   give the helper the file:
+   `scripts/doppler-ci-set.sh --from-file ~/Downloads/<app>.private-key.pem PROJECTS_APP_PRIVATE_KEY`
+   (a name other than `PROJECTS_APP_PRIVATE_KEY` goes in `app-key-secret-name`).
+   The value goes to the `ci` config, over standard input, and is never
+   printed.
+8. On each of the six repositories set the variable the caller reads:
+   `gh variable set PROJECTS_APP_ID --repo ChiefGyk3D/<repo> --body <app id>`
+9. Delete the downloaded `.pem`. Doppler holds the only copy.
+
+What it can do: add items to the project and set their fields, and read issues
+and pull requests, only in the six installed repositories. What it cannot do:
+write code, issues or pull requests, read anything else, or act outside the
+installation. To revoke it, delete the key (Private keys on the App's page) or
+uninstall the App from the account; either ends every token it can mint, and a
+token already minted dies within the hour.
 
 #### First run, end to end
 
-A real board needs the token, so this is the owner's to do once:
+A real board needs the App, so this is the owner's to do once:
 
-1. Create the token and store it in Doppler as above.
+1. Create the App, install it and store its key in Doppler as above.
 2. Add the caller to one repository and merge it.
 3. Add `dry-run: true` under `with:` and run it by hand (Actions, Project
    sync, Run workflow). The log lists each change it would make as

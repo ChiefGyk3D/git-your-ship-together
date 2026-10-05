@@ -479,19 +479,19 @@ def main() -> int:
     env = os.environ
     cfg = config_from_env(env)
     event_name = env.get("PS_EVENT_NAME", "")
-    secret_name = env.get("PS_TOKEN_SECRET_NAME", "PROJECTS_TOKEN")
-    token = env.get(secret_name, "")
+    # The workflow mints a one-hour GitHub App installation token and hands it over here.
+    token = env.get("PS_TOKEN", "")
     try:
         if not cfg.project_url:
             raise SyncError("project-url is empty.")
         parse_project_url(cfg.project_url)
         if not token:
             if cfg.dry_run:
-                print(f"::notice title=project-sync::dry run with no {secret_name}; nothing to read, nothing sent")
+                print("::notice title=project-sync::dry run with no installation token; nothing to read, nothing sent")
                 return 0
             raise SyncError(
-                f"No token: the environment has no {secret_name}. Put a fine-grained token with user Projects "
-                "read/write in the Doppler config the doppler-* inputs name, under that name; see the README, "
+                "No token: PS_TOKEN is empty. The workflow mints it from the GitHub App's private key, which "
+                "must be in the Doppler config the doppler-* inputs name; see the README, "
                 "'Keeping a project current'."
             )
         gql = Client(token, env.get("GITHUB_GRAPHQL_URL", GRAPHQL_URL), dry_run=cfg.dry_run)

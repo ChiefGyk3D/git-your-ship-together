@@ -5,13 +5,27 @@
 #
 #   scripts/doppler-ci-set.sh SNYK_TOKEN
 #
+# A multi-line value (a PEM private key) cannot be typed at the prompt, which
+# reads one line. Give the file instead, and delete it afterwards:
+#
+#   scripts/doppler-ci-set.sh --from-file ./key.pem PROJECTS_APP_PRIVATE_KEY
+#
 # Extra arguments name other projects to set the same value in (the default
 # is the `ci` project alone). Set DOPPLER_CI_CONFIG to target a config other
 # than `ci`.
 set -euo pipefail
 
+from_file=""
+if [ "${1:-}" = "--from-file" ]; then
+  if [ $# -lt 3 ]; then
+    echo "usage: $0 [--from-file PATH] NAME [PROJECT...]" >&2
+    exit 2
+  fi
+  from_file=$2
+  shift 2
+fi
 if [ $# -lt 1 ]; then
-  echo "usage: $0 NAME [PROJECT...]" >&2
+  echo "usage: $0 [--from-file PATH] NAME [PROJECT...]" >&2
   exit 2
 fi
 name=$1
@@ -28,17 +42,25 @@ case $name in
 esac
 config=${DOPPLER_CI_CONFIG:-ci}
 
-read -rs -p "$name (input hidden): " value
-echo >&2
-if [ -z "$value" ]; then
-  echo "empty value, nothing set" >&2
-  exit 1
-fi
-read -rs -p "$name again to confirm: " again
-echo >&2
-if [ "$value" != "$again" ]; then
-  echo "values differ, nothing set" >&2
-  exit 1
+if [ -n "$from_file" ]; then
+  if [ ! -f "$from_file" ] || [ ! -s "$from_file" ]; then
+    echo "not a readable, non-empty file: $from_file" >&2
+    exit 1
+  fi
+  value=$(cat "$from_file")
+else
+  read -rs -p "$name (input hidden): " value
+  echo >&2
+  if [ -z "$value" ]; then
+    echo "empty value, nothing set" >&2
+    exit 1
+  fi
+  read -rs -p "$name again to confirm: " again
+  echo >&2
+  if [ "$value" != "$again" ]; then
+    echo "values differ, nothing set" >&2
+    exit 1
+  fi
 fi
 
 status=0
