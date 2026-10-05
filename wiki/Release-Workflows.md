@@ -59,8 +59,10 @@ point: **one identity to trust across every repository that calls it.**
 
 The producer signs; this proves the signature, SBOM attestation and provenance
 verify *from outside*, the way an operator would. Then it pulls each platform and
-runs your `test-command`. It stops at the first failure and ends in a `Verified`
-gate. It reads only: no secret, no Doppler, no `id-token`. Run it on a schedule so
+runs your `test-command`. Set `release-tag` and it verifies a GitHub release the same
+way: every asset against `SHA256SUMS`, build provenance for every file, and (unless
+`verify-release-sbom` is false) the two SBOMs a Python package release carries. It
+stops at the first failure and ends in a `Verified` gate. It reads only: no secret, no Doppler, no `id-token`. Run it on a schedule so
 you notice if a published image stops verifying.
 
 ## python-package-release
@@ -76,6 +78,16 @@ section? a `__version__`?), install the wheel into a fresh venv and run your
 **Publish jobs** (check nothing out): `publish-pypi` uses **Trusted Publishing**,
 meaning PyPI trusts the job's OIDC identity, so **no API token exists**; and
 `github-release` attaches the files, a `SHA256SUMS` and build provenance to the release.
+
+**SBOMs.** The build job also runs [syft](https://github.com/anchore/syft) (pinned by
+version and sha256, the `syft-version` and `syft-sha256` inputs) over the unpacked wheel
+and sdist and writes `sbom.cdx.json` (CycloneDX) and `sbom.spdx.json` (SPDX). They are
+their own artifact, so PyPI never receives them; `github-release` adds them to the
+release, to `SHA256SUMS` and to the same provenance step. `sbom: true` is the default,
+and a pull request writes them too, so a broken SBOM is a red check, not a surprise at
+tag time. They list the package and its metadata, not a resolved dependency tree.
+`artifact-release.yml` does not write them: its files are arbitrary (a `.deb`, a
+firmware blob) and syft would report nothing, which reads as assurance and is not.
 
 One-time setup per project: on PyPI's *Publishing* page add a Trusted Publisher
 naming the owner, the repository, the **caller's** workflow filename and the
