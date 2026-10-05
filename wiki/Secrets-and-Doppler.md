@@ -34,8 +34,8 @@ GitHub's encrypted secrets are fine for one repository. Across many they are:
   It is an identifier; the trust is the claim match.
 
 Codecov needs no stored credential at all: its action verifies the job's OIDC token directly.
-PyPI and cosign likewise use OIDC. The weekly audit's token lives in a **separate** Doppler project,
-because it can read every repository's settings.
+PyPI and cosign likewise use OIDC. The weekly audit's GitHub App key lives in a **separate** Doppler project,
+because the App can read every repository's settings; the audit mints one-hour tokens from it and stores no personal access token.
 
 ## The three paths, in order
 

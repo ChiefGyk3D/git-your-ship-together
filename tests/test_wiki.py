@@ -46,6 +46,10 @@ AUDIT_CHECKS = {
     "dependabot-security-updates",
     "private-vulnerability-reporting",
     "risk-exceptions",
+    "org-2fa-required",
+    "org-new-repo-defaults",
+    "org-actions-policy",
+    "org-owner-collaborators",
 }
 
 

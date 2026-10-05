@@ -30,7 +30,7 @@ reports `PASS`, `FAIL` or `UNKNOWN` per check:
 
 | Check | Verifies |
 |---|---|
-| `collaborators` | Nobody but the owner has push permission |
+| `collaborators` | Nobody but the owner has push permission (under an organization, the owners are its `role=admin` members, so only a direct or outside collaborator with write fails) |
 | `required-check` | Every `CI green` gate derived from the caller's workflows is a required status check |
 | `pull-request-required` | A pull request is required, approval count zero, stale reviews dismissed |
 | `history-protected` | Force pushes and deletion are off |
@@ -49,6 +49,17 @@ reports `PASS`, `FAIL` or `UNKNOWN` per check:
 | `private-vulnerability-reporting` | Enabled (so SECURITY.md's link works) |
 | `risk-exceptions` | Every ignored advisory is registered for *this* repository and unexpired |
 
+Under an organization the audit also reads the organization once per run, under the heading `<org> (organization)`:
+
+| Check | Verifies |
+|---|---|
+| `org-2fa-required` | The organization requires two-factor authentication |
+| `org-new-repo-defaults` | Secret scanning, push protection, Dependabot alerts, Dependabot security updates and the dependency graph are on for new repositories (a transfer applies these over a repository's own settings) |
+| `org-actions-policy` | Allowed actions are `selected` (or `all` only when every audited repository narrows it) and the default `GITHUB_TOKEN` permission is `read` |
+| `org-owner-collaborators` | The organization's owners are readable, and there is at least one |
+
+A repository under a user account has none of these rows.
+
 **`UNKNOWN` is never a pass.** A check the token could not make (a 403, a 404) is reported honestly. Exit codes:
 `0` all passed, `1` at least one FAIL, `2` no FAIL but at least one UNKNOWN.
 
@@ -63,18 +74,18 @@ python scripts/audit_baseline.py --expiring 14   # register entries due soon; no
 `.github/workflows/audit.yml` runs on **Monday 07:00 UTC** and on demand. Two jobs:
 
 - **`audit`** runs the script over every repository and writes the report to the job summary. Red on any FAIL **and
-  on any UNKNOWN**. Its token (`AUDIT_GITHUB_TOKEN`, fine-grained, read-only) lives in a **separate Doppler
-  project** (`audit`), because it can read every repository's settings and the shared `ci` config is read by every
-  caller. It runs only from `main` or the schedule, in `block` mode with five hosts.
+  on any UNKNOWN**. It reads with **GitHub App installation tokens**, one per owner (the user account and the organization), minted
+  for the run and revoked when it ends; no personal access token is used. The App's key (`AUDIT_APP_PRIVATE_KEY`) lives
+  in a **separate Doppler project** (`audit`), because the App can read every repository's settings and the shared `ci`
+  config is read by every caller. It runs only from `main` or the schedule, in `block` mode with five hosts.
 - **`register-issues`** holds only the workflow's own `GITHUB_TOKEN` (`issues: write`). It opens one issue per
   risk-register entry whose `review_by` is within 21 days or past, reusing an open one (and editing its title if the
   date moved) so renewal never opens a second.
 
 **Reading a red run:** open the job summary. A `FAIL` names the setting that drifted; fix the repository (or, if the
-baseline was wrong, change baseline and check in the same PR). An `UNKNOWN` is almost always an expired or
-under-scoped token: fix the token, not the check. A run failing at the Doppler step is a setup problem.
+baseline was wrong, change baseline and check in the same PR). An `UNKNOWN` is almost always a missing App permission or a repository the installation does not include: fix the App, not the check. A run failing at the Doppler step is a setup problem.
 
-The token setup (Doppler project, service account, repository variable, fine-grained PAT permissions) is in the README's
+The App setup (its read-only permissions, the two installations, the Doppler project and service account, the two repository variables) is in the README's
 [The weekly audit](https://github.com/ChiefGyk3D/git-your-ship-together/blob/main/README.md#the-weekly-audit).
 
 ## The risk register

@@ -219,13 +219,17 @@ the one that retires the most copied code.
     keys onto hardware, YubiKeys and Immurok, with subkeys per device so a
     lost token revokes one key, not the identity.
 15. **A weekly audit run in CI.** `audit_baseline.py` on a schedule here, with
-    a fine-grained read-only token held in its own Doppler project and
+    read-only GitHub App installation tokens (one per owner) minted from a key held in its own Doppler project and
     identity, never the shared `ci` config, so drift in any repository's
     settings is a red job rather than a thing somebody remembers to check.
     **Built 2026-10-02:** `.github/workflows/audit.yml`, documented in the
     README's "The weekly audit". It runs once the owner has created the
-    Doppler project `audit`, the service account `gha-audit` with its OIDC
-    identity, the repository variable `AUDIT_DOPPLER_IDENTITY_ID` and the PAT.
+    audit App and installed it on the user account and the organization, the
+    Doppler project `audit` holding its key, the service account `gha-audit`
+    with its OIDC identity, and the repository variables
+    `AUDIT_DOPPLER_IDENTITY_ID` and `AUDIT_APP_CLIENT_ID`. (First built with
+    a fine-grained PAT, which could not read organization repositories;
+    replaced by the App, with the organization checks, in #89, #95 and #98.)
 
 ## Structural
 
@@ -298,7 +302,7 @@ same trusted-refs rule the Doppler gate already enforces, applied to compute.
     import check and the healthcheck. The producer already signs; nothing yet
     proves the signatures verify from outside.
 24. **The weekly audit and the register's issue-opening** (15, 19) run from a
-    lab runner, so the token that reads ten repositories' settings never
+    lab runner, so the key that mints the tokens reading the repositories' settings never
     leaves the lab.
 25. **Wazuh and the mirror** (17, 18) are lab services by nature; the runners
     above give them a CI-side counterpart, so an event in CI and an event in

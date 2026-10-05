@@ -3,23 +3,46 @@
 # red job rather than something somebody remembers to check. NOT a reusable
 # workflow; no caller uses it.
 #
-# The token. The audit reads settings only an administrator can read, so it
-# needs a fine-grained personal access token, and that token is not allowed
-# near the shared `ci` Doppler config. It lives in its own Doppler project,
-# `audit`, config `prd`, as the one secret AUDIT_GITHUB_TOKEN, and only this
-# workflow on this repository's main branch can read it.
+# The credential. The audit reads settings only an administrator can read. It
+# does so with GitHub App installation tokens, one per owner of a repository in
+# baseline/repos.txt (ChiefGyk3D, the user account, and Renegade-Penguin, the
+# organization), each minted by actions/create-github-app-token at the start of
+# the job, valid an hour, revoked when the job ends, and named in the audit log
+# as the App. No personal access token exists. Only the App's private key is
+# stored, in its own Doppler project, `audit`, config `prd`, as the one secret
+# AUDIT_APP_PRIVATE_KEY, and only this workflow on this repository's main
+# branch can read it. It is not allowed near the shared `ci` Doppler config.
+#
+# The App is its own: it is not the project-sync App (that one holds Projects
+# write; this one holds read-only repository and organization settings), so a
+# leak of either key reaches only what that App can do.
 #
 # Owner setup, in the dashboards (nothing here can do it for the owner):
-#   1. Doppler: create the project `audit` with the config `prd`, and add the
-#      secret AUDIT_GITHUB_TOKEN (the token and its permissions: README, "The
-#      weekly audit").
-#   2. Doppler: create the service account `gha-audit` with read access to
+#   1. GitHub: create a GitHub App (Settings, Developer settings) named for the
+#      audit, with no webhook, installable by "Any account" (an App owned by
+#      one account can only be installed on another, here the organization,
+#      with that setting), and ONLY these permissions, all read-only:
+#        Repository:   Administration: read, Contents: read, Metadata: read,
+#                      Variables: read
+#        Organization: Administration: read, Members: read
+#      Generate a private key (a .pem) and note the App's Client ID.
+#   2. GitHub: install the App on the user account ChiefGyk3D (repository
+#      permissions only apply there) selecting the repositories listed in
+#      baseline/repos.txt, and on the organization Renegade-Penguin (the same
+#      for its repositories; approve the organization permissions).
+#   3. Doppler: create the project `audit` with the config `prd`, and add the
+#      secret AUDIT_APP_PRIVATE_KEY (the whole .pem); delete AUDIT_GITHUB_TOKEN
+#      and revoke the old fine-grained token.
+#   4. Doppler: create the service account `gha-audit` with read access to
 #      that one project, and an OIDC identity on it whose subject is
 #      repo:ChiefGyk3D/git-your-ship-together:ref:refs/heads/main
-#   3. GitHub: set the repository variable AUDIT_DOPPLER_IDENTITY_ID to that
-#      identity's UUID.
-# Until all three are done the `audit` job fails at the Doppler step, which is
-# the correct answer to "the audit could not run".
+#   5. GitHub: on this repository set the variables AUDIT_DOPPLER_IDENTITY_ID
+#      (that identity's UUID) and AUDIT_APP_CLIENT_ID (the App's Client ID, an
+#      identifier and not a secret).
+# README, "The weekly audit", has the same steps and the reason for each
+# permission. Until all five are done the `audit` job fails at the Doppler step
+# or at the token step, which is the correct answer to "the audit could not
+# run".
 #
 # The second job holds no token of the audit's: it opens an issue in this
 # repository for each risk-register entry that expires soon, with the
@@ -138,11 +161,45 @@ jobs:
           inject-env-vars: true
       # ---------------------------------------------------------------------
 
+      # One installation token per owner: an installation belongs to one
+      # account, so a token for the user account cannot read the organization's
+      # repositories and the reverse. zizmor's github-app audit is ignored for
+      # this file in .github/zizmor.yml, for two stated reasons. No
+      # `permission-*` input: v3.2.0 has
+      # none for the repository Variables permission the doppler-identity check
+      # reads, and narrowing without it would turn that check UNKNOWN; the App
+      # itself holds read-only permissions only (see the header), which is the
+      # bound. No `repositories` input: the App is installed on the repositories
+      # in baseline/repos.txt only (owner step 2), which is the same scoping, and
+      # a new repository is covered by selecting it there. The action revokes
+      # both tokens when the job ends.
+      - name: Mint a one-hour installation token for the user account
+        id: app-user
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.AUDIT_APP_CLIENT_ID }}
+          private-key: ${{ env.AUDIT_APP_PRIVATE_KEY }}
+          owner: ChiefGyk3D
+      - name: Mint a one-hour installation token for the organization
+        id: app-org
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.AUDIT_APP_CLIENT_ID }}
+          private-key: ${{ env.AUDIT_APP_PRIVATE_KEY }}
+          owner: Renegade-Penguin
+
+      # An owner in baseline/repos.txt with no --owner-token below is UNKNOWN
+      # in the report (tests/test_audit_workflow.py also fails on one), never
+      # read with another owner's token.
       - name: Audit every repository against BASELINE.md
+        env:
+          AUDIT_TOKEN_USER: ${{ steps.app-user.outputs.token }}
+          AUDIT_TOKEN_ORG: ${{ steps.app-org.outputs.token }}
         run: |
           set -euo pipefail
-          : "${AUDIT_GITHUB_TOKEN:?AUDIT_GITHUB_TOKEN was not fetched from Doppler (project audit, config prd); run from main and see the header of this file}"
-          GH_TOKEN="$AUDIT_GITHUB_TOKEN" python scripts/audit_baseline.py | tee audit.txt
+          python scripts/audit_baseline.py \
+            --owner-token ChiefGyk3D=AUDIT_TOKEN_USER \
+            --owner-token Renegade-Penguin=AUDIT_TOKEN_ORG | tee audit.txt
 
       - name: Put the report in the job summary
         if: always()
