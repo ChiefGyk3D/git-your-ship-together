@@ -13,7 +13,6 @@
     "codecov/codecov-action@*",
     "zizmorcore/zizmor-action@*",
     "raven-actions/actionlint@*",
-    "gitleaks/gitleaks-action@*",
     "ossf/scorecard-action@*",
     "snyk/actions@*",
     "aquasecurity/trivy-action@*",

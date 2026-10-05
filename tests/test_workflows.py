@@ -181,13 +181,12 @@ def test_every_workflow_declares_read_only_top_level_permissions(path):
 ALLOWED_WRITES = {
     # Codecov (python-ci's coverage job, never the job that runs the caller's
     # tests) verifies the job's OIDC token directly; Docker Hub credentials
-    # (release), Snyk and the gitleaks licence (security) come from Doppler
+    # (release) and Snyk (security) come from Doppler
     # over OIDC; Scorecard publishes its result with the same OIDC identity.
     ("python-ci.yml", "coverage", "id-token"),
     ("tofu-ci.yml", "plan", "id-token"),  # the plan's credentials come from Doppler, off pull requests only
     ("container-release.yml", "merge", "id-token"),
     ("python-docker-release.yml", "release", "id-token"),  # forwarded to container-release.yml
-    ("security.yml", "gitleaks", "id-token"),
     ("security.yml", "snyk", "id-token"),
     ("security.yml", "scorecard", "id-token"),
     ("project-sync.yml", "sync", "id-token"),  # the project token comes from Doppler over OIDC
@@ -215,6 +214,7 @@ ALLOWED_WRITES = {
     ("artifact-release.yml", "publish", "id-token"),
     ("artifact-release.yml", "publish", "attestations"),
     ("security.yml", "codeql", "security-events"),
+    ("security.yml", "gitleaks", "security-events"),
     ("security.yml", "semgrep", "security-events"),
     ("security.yml", "snyk", "security-events"),
     ("security.yml", "scorecard", "security-events"),
@@ -385,7 +385,7 @@ def test_the_inlined_doppler_script_matches_the_composite_action():
         "python-ci.yml": [composite[0]],
         "tofu-ci.yml": [composite[0]],
         "container-release.yml": [composite[0]],
-        "security.yml": [composite[0]] * 2,
+        "security.yml": [composite[0]],
         "project-sync.yml": [composite[0]],
     }, "an inlined Doppler script differs from .github/actions/doppler-secrets/action.yml"
 
@@ -444,10 +444,6 @@ def test_trusted_refs_only_defaults_on(path):
 # pull request that job runs the pull request's code. Every such job is either
 # kept off pull requests by its `if`, or listed here with why it is acceptable.
 PR_ID_TOKEN_EXCEPTIONS = {
-    # Only pinned actions run here; nothing from the checkout is executed. The
-    # licence it may fetch is for organisation accounts and the Doppler step
-    # refuses pull requests anyway.
-    ("security.yml", "gitleaks"),
     # Joins, signs and attests the image; runs only when `push` is true, which
     # a pull request's caller sets false. It builds nothing and runs no caller
     # command, and the Doppler step refuses pull requests.

@@ -1112,7 +1112,8 @@ Inputs of `security.yml`:
 | `codeql-languages` | `python,actions` | Comma-separated. `actions` scans the workflow files themselves and fits every repository; a repository with no Python passes `actions` alone, since CodeQL fails on a language with no source |
 | `codeql-queries` | `security-extended` | Query suite |
 | `codeql-config` | empty | Inline CodeQL configuration, e.g. `paths-ignore` |
-| `gitleaks` | `true` | Secret scan over the full history. Personal accounts need no licence; an organisation puts `GITLEAKS_LICENSE` in the Doppler config |
+| `gitleaks` | `true` | Secret scan over the full history with the pinned gitleaks binary (MIT; no licence or secret under any account). A `.gitleaks.toml` at the repository root is honoured; findings land in code scanning under the `gitleaks` category |
+| `gitleaks-version`, `gitleaks-sha256` | `8.30.1` and its linux_x64 tarball's hash | The gitleaks release downloaded from gitleaks/gitleaks; the hash is checked with `sha256sum -c` before extraction |
 | `pip-audit-requirements` | `requirements.txt` | File audited with `--strict`; empty skips that step, and the job when `audit-command` is empty too |
 | `pip-audit-continue-on-error` | `false` | Report advisories without failing. A migration aid |
 | `pip-audit-extra-args` | empty | Extra pip-audit flags, e.g. `--ignore-vuln PYSEC-2026-3740` for an advisory with no fix yet; the ID needs an entry in [`baseline/risk-register.yaml`](baseline/risk-register.yaml) |
@@ -1458,7 +1459,6 @@ plan. On a Developer plan, use path 2 and skip the identity step below.
    |---|---|
    | `DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN` | release, when `dockerhub: true` |
    | `SNYK_TOKEN` | security, when `snyk: true` |
-   | `GITLEAKS_LICENSE` | security, organisation accounts only |
 
    Every value in the config is exported into every CI job's environment
    (masked), which is why the runtime secrets do not belong here, and why
@@ -1769,6 +1769,7 @@ The tests are the contract, one file per thing they hold still:
 | `tests/test_audit_baseline.py` | The audit, fed a passing repository and a broken one per criterion; a 403 comes back UNKNOWN, never PASS; exit codes tell FAIL from UNKNOWN |
 | `tests/test_risk_register.py` | The register's shape, its dates, no duplicate advisory, every repository named is in the baseline list, and no entry has expired |
 | `tests/test_fuzz.py` | `python-fuzz.yml`'s inputs and pin, and its run step executed under bash against tiny targets: a missing directory, no match, a passing target and a crashing one (which must fail the step and leave its `crash-*` input) |
+| `tests/test_security_jobs.py` | The Semgrep job's defaults and its content-driven config; the gitleaks job as a pinned binary: no licence, no Doppler, no `id-token`, the sha256 checked before extraction, full history, SARIF under category `gitleaks`, and a canary step that plants an AWS-shaped key in a scratch repository and requires exit 1 before the real scan runs (the test also fetches the pinned release, checks the hash, and runs that canary for real; it skips only when offline) |
 | `tests/test_fixture.py` | Every fixture requirement carries a hash, every direct dependency is in the lock, the fixture image runs as a non-root user |
 
 Break any one of those and CI names the fix.

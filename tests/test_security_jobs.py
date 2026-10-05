@@ -173,3 +173,74 @@ def test_new_inputs_are_in_the_readme():
         "dependency-review-deny-licenses",
     ):
         assert f"| `{name}` |" in text, f"{name} is not documented in the README"
+
+
+GITLEAKS = jobs(DOC)["gitleaks"]
+
+
+def test_gitleaks_is_a_pinned_binary_not_a_licensed_action():
+    # #90: gitleaks-action demands a licence under an organisation.
+    assert not any("gitleaks/gitleaks-action" in str(s.get("uses", "")) for s in steps_of(GITLEAKS))
+    assert "GITLEAKS_LICENSE" not in (WORKFLOWS / "security.yml").read_text()
+    assert "GITLEAKS_LICENSE" not in README.read_text()
+    allowed = WORKFLOWS.parent.parent / "baseline" / "selected-actions.json"
+    assert "gitleaks/gitleaks-action" not in allowed.read_text()
+    # No credential: no OIDC token, no Doppler, no secrets in this job.
+    assert GITLEAKS["permissions"] == {"contents": "read", "security-events": "write"}
+    text = str(GITLEAKS)
+    assert "doppler" not in text.lower() and "secrets." not in text and "id-token" not in text
+    install = next(s for s in steps_of(GITLEAKS) if s.get("name", "").startswith("Install gitleaks"))
+    assert install["env"] == {
+        "GITLEAKS_VERSION": "${{ inputs.gitleaks-version }}",
+        "GITLEAKS_SHA256": "${{ inputs.gitleaks-sha256 }}",
+    }
+    assert re.fullmatch(r"\d+\.\d+\.\d+", INPUTS["gitleaks-version"]["default"])
+    assert re.fullmatch(r"[0-9a-f]{64}", INPUTS["gitleaks-sha256"]["default"])
+    assert "sha256sum -c" in install["run"]
+    assert install["run"].index("sha256sum -c") < install["run"].index("tar ")
+
+
+def test_gitleaks_scans_full_history_and_uploads_sarif():
+    checkout = next(s for s in steps_of(GITLEAKS) if str(s.get("uses", "")).startswith("actions/checkout@"))
+    assert checkout["with"]["fetch-depth"] == 0
+    scan = next(s for s in steps_of(GITLEAKS) if s.get("name", "").startswith("Scan the full history"))
+    assert "--exit-code 1" in scan["run"] and '--log-opts="--all"' in scan["run"]
+    assert "--report-format sarif --report-path gitleaks.sarif" in scan["run"]
+    upload = next(s for s in steps_of(GITLEAKS) if "upload-sarif" in str(s.get("uses", "")))
+    assert upload["with"] == {"sarif_file": "gitleaks.sarif", "category": "gitleaks"}
+    assert upload["if"].startswith("always()")
+
+
+def test_gitleaks_canary_is_wired_before_the_scan():
+    names = [s.get("name", "") for s in steps_of(GITLEAKS)]
+    canary = next(i for i, n in enumerate(names) if "planted key" in n)
+    assert canary < next(i for i, n in enumerate(names) if n.startswith("Scan the full history"))
+    run = steps_of(GITLEAKS)[canary]["run"]
+    assert '"$status" -ne 1' in run
+
+
+def test_gitleaks_pinned_release_catches_a_planted_key(tmp_path):
+    """Falsifiability, run for real: the pinned archive is fetched, checked
+    against the pinned hash, and the canary step's own script must exit 0 (it
+    exits 1 when the planted key is NOT caught). Needs the network."""
+    import hashlib
+
+    version, sha = INPUTS["gitleaks-version"]["default"], INPUTS["gitleaks-sha256"]["default"]
+    url = f"https://github.com/gitleaks/gitleaks/releases/download/v{version}/gitleaks_{version}_linux_x64.tar.gz"
+    try:
+        data = urlopen(Request(url), timeout=60).read()
+    except OSError as err:
+        pytest.skip(f"no network: {err}")
+    assert hashlib.sha256(data).hexdigest() == sha, "the pinned sha256 does not match the release asset"
+    import tarfile
+
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    with tarfile.open(fileobj=io.BytesIO(data)) as tar:
+        member = tar.getmember("gitleaks")
+        (bindir / "gitleaks").write_bytes(tar.extractfile(member).read())  # type: ignore[union-attr]
+    (bindir / "gitleaks").chmod(0o755)
+    canary = next(s for s in steps_of(GITLEAKS) if "planted key" in s.get("name", ""))
+    env = {**os.environ, "PATH": f"{bindir}:{os.environ['PATH']}"}
+    done = subprocess.run(["bash", "-c", canary["run"]], env=env, capture_output=True, text=True)
+    assert done.returncode == 0, done.stdout + done.stderr
