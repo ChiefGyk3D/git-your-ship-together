@@ -157,6 +157,7 @@ OpenTofu config (tofu-ci).
 | **pip-audit** (or `npm audit`, `govulncheck`, `cargo audit`) | Known-vulnerable dependencies |
 | **dependency-review** | New vulnerable or badly licensed dependencies a PR adds |
 | **Semgrep** | Pattern-based code and config issues |
+| **DAST / ZAP** | Dynamic testing: probing a *running* service, here with OWASP ZAP's baseline scan (see `dast.yml`) |
 | **Snyk** | Open Source and Code scanning (optional, token required) |
 | **OpenSSF Scorecard** | An outside score of the repository's practices |
 | **Atheris** | Fuzzing Python code (see `python-fuzz.yml`) |

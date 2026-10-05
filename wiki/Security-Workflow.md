@@ -45,6 +45,34 @@ names otherwise (or both). A shell-only repository calls it with
 - **Every job has `continue-on-error` migration aids** (`*-continue-on-error`) for a
   repository cleaning up findings. They are meant to be removed.
 
+## DAST: `dast.yml`
+
+`security.yml` reads code. [`dast.yml`](https://github.com/ChiefGyk3D/git-your-ship-together/blob/main/README.md#dast-owasp-zap-baseline)
+is the check that talks to a running service: it starts the service your repository
+serves (a dashboard, an API, a docs server) on loopback, runs an OWASP ZAP **baseline** scan
+against it (a spider plus ZAP's passive rules, no attack traffic), and fails the job when a finding
+reaches `fail-on`. Findings go to the Security tab under category `zap`; the HTML, Markdown and JSON
+reports are an artifact. A repository with no service has nothing to call it for.
+
+How it keeps the repository's rules:
+
+- **Two jobs.** `scan` runs *your* service and holds `contents: read` and nothing else, like a test
+  job. `upload` holds `security-events: write`, checks nothing out and runs no shell.
+- **Loopback only.** A `target-url` that is not `127.0.0.1`, `localhost` or `[::1]` is refused
+  before anything starts, so a typo cannot aim a scanner at someone else.
+- **The image, not an action.** `zaproxy/action-baseline` uses the moving tag `stable`, files issues
+  with the job's token and has no SARIF. The workflow runs the same image pinned by **digest**, with no token in
+  the container and `-silent`, so ZAP reaches nothing of its own: under `block` the allow-list is the
+  image pull and GitHub. No action joins the allow-list for it.
+- **`fail-on` is a risk level.** A page with no security headers is Medium (no CSP, no
+  anti-clickjacking header), so the default `high` does not catch it; use `medium` for that.
+  Accept a finding in `.zap/rules.tsv` (`IGNORE` plus a reason), never by raising the threshold.
+
+Proving it can fail is part of the workflow's tests: `fixture/dast/server.py` serves one page with its
+security headers (must pass) and, with `--insecure`, without them (must fail at `medium`, pass at
+`high`). `tests/test_dast.py` runs the job's steps against canned reports, and this repository's
+`dast-live` CI job runs them against the real image.
+
 ## A typical caller
 
 ```yaml

@@ -1,0 +1,429 @@
+# Reusable DAST for a service the caller starts: an OWASP ZAP baseline scan
+# (a spider and ZAP's passive rules; it sends no attack traffic) against a
+# service on loopback, a fail-on threshold, the reports as an artifact, and the
+# findings as SARIF in the Security tab under category `zap`.
+#
+# Call it from a repository with:
+#
+#   jobs:
+#     dast:
+#       uses: ChiefGyk3D/git-your-ship-together/.github/workflows/dast.yml@<sha> # vX.Y.Z
+#       permissions:
+#         contents: read
+#         security-events: write
+#       with:
+#         start-command: python -m myapp serve --port 8080
+#         target-url: http://127.0.0.1:8080
+#         fail-on: medium
+#
+# The caller's service runs in the `scan` job, which holds `contents: read` and
+# nothing else, exactly like a test job. The SARIF upload is a second job that
+# checks nothing out and runs no caller code, because it is the one that holds
+# `security-events: write`. The target must be loopback: the scan refuses any
+# other host, so a mistake cannot aim ZAP at a third party.
+#
+# ZAP is not an action here. `zaproxy/action-baseline` runs the same image but
+# by a moving tag (`stable`), writes issues with the job's token and has no
+# SARIF; this workflow runs the image directly, pinned by digest, with no token
+# in the container and `-silent` so ZAP makes no unsolicited requests (its own
+# update and telemetry hosts were measured: none are reached). ZAP has no
+# SARIF writer in the image, so the report's JSON is converted by the script in
+# the `Report and apply fail-on` step, which is also where `fail-on` is decided.
+#
+# Commands and values a caller supplies reach the shell through an environment
+# variable, never by template expansion into the script, so a value can only
+# ever be data.
+
+name: DAST (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      start-command:
+        description: Shell command that starts the service under test. It may block (it is run in the background by the workflow) or start the service itself and return. It runs after `install-command`, in the repository root, and must serve on `target-url`.
+        type: string
+        required: true
+      target-url:
+        description: Base URL of the service. Must be loopback (127.0.0.1, localhost or [::1]); any other host is refused.
+        type: string
+        default: http://127.0.0.1:8080
+      ready-path:
+        description: Path requested until the service answers 2xx or 3xx, before the scan starts. A service that never answers within `ready-timeout-seconds` fails the job.
+        type: string
+        default: /
+      ready-timeout-seconds:
+        description: How long to wait for `ready-path` to answer.
+        type: number
+        default: 60
+      rules-file:
+        description: Optional ZAP baseline rules file (tab-separated `<rule id>  IGNORE|INFO|WARN|FAIL  <comment>`, usually `.zap/rules.tsv`) for findings the repository accepts. An IGNOREd rule is dropped from the report and the SARIF; a rule set to FAIL fails the job whatever `fail-on` says. Empty uses ZAP's defaults.
+        type: string
+        default: ""
+      fail-on:
+        description: Lowest risk that fails the job - `high`, `medium`, `low`, `informational` or `none` (report only). A page with no security headers is Medium (no CSP, no anti-clickjacking header), so `high` does not catch it; set `medium` to catch it.
+        type: string
+        default: high
+      spider-minutes:
+        description: Longest the spider runs (zap-baseline.py -m). It stops sooner when it has followed every link.
+        type: number
+        default: 1
+      python-version:
+        description: Python to set up before `install-command`. Empty skips the step, for a service that needs none.
+        type: string
+        default: ""
+      install-command:
+        description: Shell command that installs the service under test (and anything it needs), run before `start-command`. Empty skips it.
+        type: string
+        default: ""
+      upload-sarif:
+        description: Upload the findings to the Security tab under category `zap`. Needs the caller to grant the `security-events` write permission, and code scanning to be available (a private repository needs GitHub Advanced Security). Never on a pull request from a fork, whose token cannot write.
+        type: boolean
+        default: true
+      artifact-name:
+        description: Name of the artifact holding the HTML, Markdown, JSON and SARIF reports. Artifact names are unique per run, so a caller that runs this workflow twice in one workflow run names them apart.
+        type: string
+        default: zap-reports
+      egress-policy:
+        description: harden-runner egress policy - `audit` logs outbound connections, `block` allows only `allowed-endpoints` and `extra-allowed-endpoints`.
+        type: string
+        default: audit
+      allowed-endpoints:
+        description: harden-runner allow-list for `block`, space-separated host:port entries. The default is the ZAP image pull (GHCR) and GitHub; ZAP itself reaches nothing. A host the service or its install command reaches goes in `extra-allowed-endpoints`. Wildcards are not supported and a newline-separated list matches nothing.
+        type: string
+        default: "api.github.com:443 ghcr.io:443 github.com:443 pkg-containers.githubusercontent.com:443"
+      extra-allowed-endpoints:
+        description: Appended to `allowed-endpoints`, for hosts only this repository reaches, such as the package index its install command uses. Same format.
+        type: string
+        default: ""
+      timeout-minutes:
+        description: Timeout of the scan job, which covers the install, the service start and the scan.
+        type: number
+        default: 20
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    name: ZAP baseline scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read  # this job runs the caller's own service; it holds nothing else
+    outputs:
+      sarif: ${{ steps.report.outputs.sarif }}
+    env:
+      # One image, by digest: the index of ghcr.io/zaproxy/zaproxy 2.17.0, which is what `stable`
+      # pointed at when this was resolved (2026-10-05). A bump is a new tag and its digest.
+      ZAP_IMAGE: ghcr.io/zaproxy/zaproxy:2.17.0@sha256:781a2bdaea47324e7bab583e2263f21d257b0aee61ed51521a5be45f5f5081ef
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: ${{ inputs.egress-policy }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          disable-sudo: true
+          # The agent may only stop reporting to StepSecurity in block mode.
+          disable-telemetry: ${{ inputs.egress-policy == 'block' }}
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Refuse a bad input before the service starts and the scan spends a minute.
+      - name: Check the inputs
+        env:
+          TARGET_URL: ${{ inputs.target-url }}
+          READY_PATH: ${{ inputs.ready-path }}
+          FAIL_ON: ${{ inputs.fail-on }}
+          RULES_FILE: ${{ inputs.rules-file }}
+          SPIDER_MINUTES: ${{ inputs.spider-minutes }}
+          READY_TIMEOUT: ${{ inputs.ready-timeout-seconds }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$TARGET_URL" | grep -Eq '^https?://(127\.0\.0\.1|localhost|\[::1\])(:[0-9]+)?/?$'; then
+            echo "::error::target-url '$TARGET_URL' is not a loopback base URL (http://127.0.0.1:PORT, http://localhost:PORT or http://[::1]:PORT). This workflow scans a service the job starts, never another host."
+            exit 1
+          fi
+          case "$READY_PATH" in
+            /*) ;;
+            *) echo "::error::ready-path '$READY_PATH' must start with /"; exit 1 ;;
+          esac
+          case "$FAIL_ON" in
+            high | medium | low | informational | none) ;;
+            *) echo "::error::fail-on '$FAIL_ON' is not one of high, medium, low, informational, none"; exit 1 ;;
+          esac
+          printf '%s' "$SPIDER_MINUTES" | grep -Eq '^[0-9]+$' || { echo "::error::spider-minutes '$SPIDER_MINUTES' is not a whole number"; exit 1; }
+          printf '%s' "$READY_TIMEOUT" | grep -Eq '^[0-9]+$' || { echo "::error::ready-timeout-seconds '$READY_TIMEOUT' is not a whole number"; exit 1; }
+          if [ -n "$RULES_FILE" ] && [ ! -f "$RULES_FILE" ]; then
+            echo "::error::rules-file '$RULES_FILE' is not a file in the repository. Create it, or leave rules-file empty to use ZAP's defaults."
+            exit 1
+          fi
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        if: inputs.python-version != ''
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - name: Install the service
+        if: inputs.install-command != ''
+        env:
+          COMMAND: ${{ inputs.install-command }}
+        run: bash -eo pipefail -c "$COMMAND"
+
+      # The command is run here, in the background, with its output in a file
+      # and no stdin, so a service that blocks and one that detaches itself both
+      # work and neither can hold the step open. Readiness is a request for
+      # ready-path; a service that exits non-zero before it answers fails now,
+      # with the tail of its log, rather than after the timeout.
+      - name: Start the service and wait for it
+        env:
+          COMMAND: ${{ inputs.start-command }}
+          TARGET_URL: ${{ inputs.target-url }}
+          READY_PATH: ${{ inputs.ready-path }}
+          READY_TIMEOUT: ${{ inputs.ready-timeout-seconds }}
+          SERVICE_LOG: ${{ runner.temp }}/service.log
+        run: |
+          set -uo pipefail
+          nohup bash -eo pipefail -c "$COMMAND" > "$SERVICE_LOG" 2>&1 < /dev/null &
+          pid=$!
+          alive=1
+          url="${TARGET_URL%/}${READY_PATH}"
+          deadline=$((SECONDS + READY_TIMEOUT))
+          while [ "$SECONDS" -lt "$deadline" ]; do
+            if python3 -c 'import sys, urllib.request; urllib.request.urlopen(sys.argv[1], timeout=3)' "$url" 2> /dev/null; then
+              echo "The service answered at $url after ${SECONDS}s."
+              exit 0
+            fi
+            if [ "$alive" -eq 1 ] && ! kill -0 "$pid" 2> /dev/null; then
+              wait "$pid"
+              rc=$?
+              if [ "$rc" -ne 0 ]; then
+                echo "::error::start-command exited $rc before $url answered. The last of its output:"
+                tail -n 40 "$SERVICE_LOG"
+                exit 1
+              fi
+              # Exit 0: the command started the service and returned. Keep waiting for it.
+              alive=0
+            fi
+            sleep 1
+          done
+          echo "::error::nothing answered at $url within ${READY_TIMEOUT}s. The last of the service's output:"
+          tail -n 40 "$SERVICE_LOG"
+          exit 1
+
+      - name: Run the ZAP baseline scan
+        id: zap
+        env:
+          TARGET_URL: ${{ inputs.target-url }}
+          RULES_FILE: ${{ inputs.rules-file }}
+          SPIDER_MINUTES: ${{ inputs.spider-minutes }}
+          ZAP_DIR: ${{ runner.temp }}/zap
+        run: |
+          set -uo pipefail
+          # The container's user is not the runner's; this scratch directory is the one place it writes.
+          mkdir -p "$ZAP_DIR"
+          chmod 0777 "$ZAP_DIR"
+          args=(-t "${TARGET_URL%/}" -J report.json -r report.html -w report.md -I -m "$SPIDER_MINUTES" -z "-silent")
+          if [ -n "$RULES_FILE" ]; then
+            cp -- "$RULES_FILE" "$ZAP_DIR/rules.tsv"
+            args+=(-c rules.tsv)
+          fi
+          # --network host is how the container reaches the service on the runner's loopback.
+          docker run --rm --network host --volume "$ZAP_DIR:/zap/wrk:rw" "$ZAP_IMAGE" zap-baseline.py "${args[@]}"
+          rc=$?
+          echo "exit=$rc" >> "$GITHUB_OUTPUT"
+          # 0 clean, 1 a rule set to FAIL in the rules file (decided in the next step, after the
+          # reports exist); -I turns warnings into 0, so anything else is ZAP failing to run.
+          if [ "$rc" -gt 1 ] || [ ! -s "$ZAP_DIR/report.json" ]; then
+            echo "::error::zap-baseline.py exited $rc and left no report: the scan did not run. Its output is above."
+            exit 1
+          fi
+
+      - name: Report and apply fail-on
+        id: report
+        env:
+          ZAP_DIR: ${{ runner.temp }}/zap
+          ZAP_EXIT: ${{ steps.zap.outputs.exit }}
+          FAIL_ON: ${{ inputs.fail-on }}
+          TARGET_URL: ${{ inputs.target-url }}
+        run: |
+          python3 - <<'PY'
+          """ZAP's JSON report to SARIF 2.1.0, a job summary, and the fail-on decision."""
+          import hashlib
+          import html
+          import json
+          import os
+          import re
+          import sys
+          from pathlib import Path
+
+          zap_dir = Path(os.environ["ZAP_DIR"])
+          fail_on = os.environ["FAIL_ON"]
+          zap_exit = os.environ.get("ZAP_EXIT", "0")
+          report = json.loads((zap_dir / "report.json").read_text())
+
+          # ZAP's riskcode: 0 informational, 1 low, 2 medium, 3 high.
+          names = {0: "Informational", 1: "Low", 2: "Medium", 3: "High"}
+          threshold = {"high": 3, "medium": 2, "low": 1, "informational": 0, "none": None}[fail_on]
+          levels = {3: "error", 2: "warning", 1: "note", 0: "note"}
+          severity = {3: "8.0", 2: "5.5", 1: "3.0"}  # GitHub's bands: high 7-8.9, medium 4-6.9, low 0.1-3.9
+
+
+          def text(markup: str) -> str:
+              """ZAP writes its prose as <p> fragments."""
+              return html.unescape(re.sub(r"<[^>]+>", " ", markup or "")).strip()
+
+
+          def first_url(markup: str, fallback: str) -> str:
+              found = re.search(r"https?://[^\s<]+", markup or "")
+              return found.group(0) if found else fallback
+
+
+          alerts = []
+          for site in report.get("site", []):
+              alerts.extend(site.get("alerts", []))
+          alerts.sort(key=lambda a: (-int(a["riskcode"]), a["alert"]))
+
+          rules, results = {}, []
+          for alert in alerts:
+              risk = int(alert["riskcode"])
+              rule_id = str(alert["pluginid"])
+              doc_url = f"https://www.zaproxy.org/docs/alerts/{rule_id}/"
+              rule = rules.setdefault(
+                  rule_id,
+                  {
+                      "id": rule_id,
+                      "name": re.sub(r"\W+", "", alert["alert"]) or rule_id,
+                      "shortDescription": {"text": alert["alert"]},
+                      "fullDescription": {"text": text(alert.get("desc")) or alert["alert"]},
+                      "help": {
+                          "text": text(alert.get("solution")) or "See the ZAP alert documentation.",
+                          "markdown": f"{text(alert.get('solution'))}\n\n[ZAP alert {rule_id}]({doc_url})",
+                      },
+                      "helpUri": first_url(alert.get("reference"), doc_url),
+                      "defaultConfiguration": {"level": levels[risk]},
+                      "properties": {"tags": ["security", "dast", "zap"]},
+                  },
+              )
+              if risk in severity:
+                  rule["properties"]["security-severity"] = severity[risk]
+              if alert.get("cweid") not in (None, "", "-1", "0"):
+                  rule["properties"]["tags"].append(f"external/cwe/cwe-{alert['cweid']}")
+              instances = alert.get("instances", [])
+              uris = sorted({i["uri"] for i in instances})
+              message = f"{alert['alert']} ({names[risk]} risk, {len(instances)} instance(s)): " + ", ".join(uris[:5])
+              fingerprint = hashlib.sha256(f"{rule_id}|{alert.get('alertRef', '')}|{uris[0] if uris else ''}".encode())
+              results.append(
+                  {
+                      "ruleId": rule_id,
+                      "level": levels[risk],
+                      "message": {"text": message},
+                      "locations": [
+                          {"physicalLocation": {"artifactLocation": {"uri": u}, "region": {"startLine": 1}}}
+                          for u in uris[:20]
+                      ]
+                      or [
+                          {
+                              "physicalLocation": {
+                                  "artifactLocation": {"uri": os.environ["TARGET_URL"]},
+                                  "region": {"startLine": 1},
+                              }
+                          }
+                      ],
+                      "partialFingerprints": {"zapAlert/v1": fingerprint.hexdigest()},
+                  }
+              )
+
+          sarif = {
+              "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+              "version": "2.1.0",
+              "runs": [
+                  {
+                      "tool": {
+                          "driver": {
+                              "name": "OWASP ZAP",
+                              "version": str(report.get("@version", "")),
+                              "informationUri": "https://www.zaproxy.org/",
+                              "rules": list(rules.values()),
+                          }
+                      },
+                      "results": results,
+                  }
+              ],
+          }
+          (zap_dir / "zap.sarif").write_text(json.dumps(sarif, indent=2))
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write("sarif=true\n")
+
+          failing = [] if threshold is None else [a for a in alerts if int(a["riskcode"]) >= threshold]
+          lines = [
+              "### ZAP baseline scan",
+              "",
+              f"fail-on: `{fail_on}`. {len(alerts)} alert(s), {len(failing)} at or above the threshold.",
+              "",
+          ]
+          if alerts:
+              lines += ["| Risk | Alert | Instances | Rule |", "| --- | --- | --- | --- |"]
+              for a in alerts:
+                  mark = " (fails)" if a in failing else ""
+                  lines.append(f"| {names[int(a['riskcode'])]}{mark} | {a['alert']} | {len(a.get('instances', []))} | {a['pluginid']} |")
+          summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary:
+              with open(summary, "a") as out:
+                  out.write("\n".join(lines) + "\n")
+          print("\n".join(lines))
+
+          problems = 0
+          for a in failing:
+              print(f"::error::ZAP {names[int(a['riskcode'])]}: {a['alert']} (rule {a['pluginid']}, {len(a.get('instances', []))} instance(s)). Fix it, or accept it in the rules file with IGNORE, or raise fail-on.")
+              problems += 1
+          if zap_exit == "1":
+              print("::error::a rule set to FAIL in rules-file matched; ZAP's own output above names it.")
+              problems += 1
+          sys.exit(1 if problems else 0)
+          PY
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: |
+            ${{ runner.temp }}/zap/report.html
+            ${{ runner.temp }}/zap/report.md
+            ${{ runner.temp }}/zap/report.json
+            ${{ runner.temp }}/zap/zap.sarif
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # The only job with a write, and it runs nothing of the caller's and checks
+  # nothing out: it carries one file from the scan job to the Security tab.
+  upload:
+    name: Upload SARIF
+    needs: scan
+    # A fork's pull request gets a read-only token, and the upload would fail on it.
+    if: >-
+      always() && inputs.upload-sarif && needs.scan.outputs.sarif == 'true' &&
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      security-events: write  # the SARIF upload
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: ${{ inputs.egress-policy }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          disable-sudo: true
+          # The agent may only stop reporting to StepSecurity in block mode.
+          disable-telemetry: ${{ inputs.egress-policy == 'block' }}
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: zap-reports
+
+      - uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          sarif_file: zap-reports/zap.sarif
+          category: zap

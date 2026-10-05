@@ -68,6 +68,7 @@ publish).
 | `python-package-release.yml` | [Release](Release-Workflows) | Build, check, publish to PyPI and the GitHub release |
 | `artifact-release.yml` | [Release](Release-Workflows) | Build any file, sign it, attach it to the release |
 | `security.yml` | [Security](Security-Workflow) | CodeQL, gitleaks, audit, dependency review, Semgrep, Snyk, Scorecard |
+| `dast.yml` | [Security](Security-Workflow) | OWASP ZAP baseline against a loopback service the caller starts, SARIF under `zap` |
 | `dependabot-auto-merge.yml` | [Automation](Automation-Workflows) | Auto-merge Dependabot bumps up to a size |
 | `project-sync.yml` | [Automation](Automation-Workflows) | Keep a GitHub Projects v2 board current |
 | `docs-pages.yml` | [Automation](Automation-Workflows) | Build docs, deploy to GitHub Pages |

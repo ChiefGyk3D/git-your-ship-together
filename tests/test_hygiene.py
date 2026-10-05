@@ -30,6 +30,7 @@ HYGIENE_FILES = [
     "arduino-ci.yml",
     "python-package-release.yml",
     "artifact-release.yml",
+    "dast.yml",
 ]
 # Jobs that run a caller's own install command on the host. The documented
 # example of each is `sudo apt-get install ...`, so they cannot lose sudo

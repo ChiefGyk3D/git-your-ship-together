@@ -12,6 +12,7 @@
   * [CI Workflows](CI-Workflows)
   * [Release Workflows](Release-Workflows)
   * [Security Workflow](Security-Workflow)
+    * [DAST (dast.yml)](Security-Workflow#dast-dastyml)
   * [Automation Workflows](Automation-Workflows)
 * [Secrets and Doppler](Secrets-and-Doppler)
 * [Egress Control](Egress-Control)

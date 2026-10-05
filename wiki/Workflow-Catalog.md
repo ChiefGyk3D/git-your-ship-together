@@ -17,6 +17,7 @@ family pages explain *how each works*; the README has the *complete input tables
 | A package for PyPI | `python-package-release.yml` | [Release workflows](Release-Workflows#python-package-release) |
 | Files to publish (`.deb`, firmware, bundles) | `artifact-release.yml` | [Release workflows](Release-Workflows#artifact-release) |
 | Anything (security scanning) | `security.yml` | [Security workflow](Security-Workflow) |
+| A service that serves HTTP (a dashboard, an API) | `dast.yml` | [Security workflow](Security-Workflow#dast-dastyml) |
 | Dependabot | `dependabot-auto-merge.yml` | [Automation workflows](Automation-Workflows#dependabot-auto-merge) |
 | A GitHub Projects v2 board (organization) | `project-sync.yml` | [Automation workflows](Automation-Workflows#project-sync) |
 | A static docs site | `docs-pages.yml` | [Automation workflows](Automation-Workflows#docs-pages) |
@@ -40,6 +41,7 @@ from its own caller job, and requires every gate. See
 | `python-package-release.yml` | Yes, publish jobs only | No (Trusted Publishing) | Builds and checks only | PyPI and GitHub release |
 | `artifact-release.yml` | Yes, publish job only | No | Builds and checks only | GitHub release |
 | `security.yml` | `security-events`, plus `id-token` for Snyk and Scorecard | For `SNYK_TOKEN` | Yes (no Snyk, no secrets) | SARIF to the Security tab |
+| `dast.yml` | `security-events` on the upload job only; the job that runs your service holds `contents: read` | No | Yes (not the upload, from a fork) | SARIF to the Security tab |
 | `dependabot-auto-merge.yml` | `contents`/`pull-requests` write; checks nothing out | No | Dependabot PRs | Merges |
 | `project-sync.yml` | App token via Doppler; checks nothing out | Yes (the App's key) | `pull_request_target` | Board updates |
 | `docs-pages.yml` | `pages`/`id-token` on the deploy job only | No | Builds only | GitHub Pages |
