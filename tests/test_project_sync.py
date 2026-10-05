@@ -428,7 +428,10 @@ def test_doppler_ci_set_reads_a_multiline_value_from_a_file(tmp_path):
     env = {**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}"}
     r = subprocess.run(
         ["bash", str(REPO / "scripts" / "doppler-ci-set.sh"), "--from-file", str(pem), "PROJECTS_APP_PRIVATE_KEY"],
-        env=env, capture_output=True, text=True, stdin=subprocess.DEVNULL,
+        env=env,
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
     )
     assert r.returncode == 0, r.stderr
     assert out.read_text() == "-----BEGIN KEY-----\nabc\ndef\n-----END KEY-----"  # trailing newline trimmed by $(...)

@@ -242,10 +242,10 @@ jobs:
       # The key reaches the action as an input, never a command line. With no
       # key (a dry run with no Doppler) nothing is minted and the script says so.
       # The action revokes the token itself when the job ends (its default);
-      # nothing here needs to. No `permission-*` inputs: the App is created with
-      # exactly Projects, Issues read and Pull requests read, a token can only
-      # be narrower than that, and GitHub offers no input for the account-level
-      # Projects permission.
+      # nothing here needs to. The `permission-*` inputs name the token's whole
+      # reach (organization Projects write, Issues and Pull requests read): a
+      # token minted without them would carry every permission the App has,
+      # which zizmor's github-app audit rightly refuses.
       - name: Mint a one-hour installation token
         id: app
         if: ${{ env[inputs.app-key-secret-name] != '' }}
@@ -255,6 +255,9 @@ jobs:
           private-key: ${{ env[inputs.app-key-secret-name] }}
           owner: ${{ github.repository_owner }}
           repositories: ${{ github.event.repository.name }}
+          permission-organization-projects: write
+          permission-issues: read
+          permission-pull-requests: read
 
       - name: Sync the project
         env:
