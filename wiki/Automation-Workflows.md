@@ -56,9 +56,15 @@ Design points worth studying:
   that reads the event payload as JSON data and never expands it into a shell, and the
   PR title/body are never read. The caller must set `doppler-trusted-refs-only: false`
   because that event counts as untrusted for the Doppler gate. **Do not copy that line into a
-  caller that checks out the pull request.**
-- **The credential is a GitHub App, never a personal token.** The App's private key lives in Doppler
-  (`PROJECTS_APP_PRIVATE_KEY`), is fetched over OIDC and traded for a token that lives one hour,
+  caller that checks out the pull request.** zizmor flags the trigger itself (`dangerous-triggers`),
+  so the caller template carries an inline `# zizmor: ignore[dangerous-triggers]` with its reason.
+  A caller whose identity cannot cover a pull-request subject sets `pull-request-events: false`
+  (the job skips on that event) or drops the trigger.
+- **The credential is a GitHub App, never a personal token.** The App's private key lives in its
+  own Doppler scope, project `projects` config `prd` (`PROJECTS_APP_PRIVATE_KEY`, never the shared
+  `ci` config, whose values reach every CI job), is fetched over OIDC through an identity of its own
+  (`PROJECTS_DOPPLER_IDENTITY_ID`) that may also match `:pull_request`, and is traded, using the
+  App's Client ID (`client-id`; `app-id` is deprecated and accepted for one release), for a token that lives one hour,
   is scoped to the calling repositories, and names the *App* in the audit log. The README has
   the nine-step App setup and a safe first-run procedure using `dry-run: true`.
 - The logic is `scripts/project_sync.py`, standard library only, with recorded API responses in
