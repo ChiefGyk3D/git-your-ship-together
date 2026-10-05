@@ -25,6 +25,18 @@ repository. The container release builds whatever the Dockerfile builds.
 per language behind the same `CI green` gate, so branch protection is one
 rule everywhere.
 
+## Wiki
+
+The [wiki](https://github.com/ChiefGyk3D/git-your-ship-together/wiki) explains what
+this README states: what each workflow is, why it exists (the measured incident
+or threat behind it), how to call it, and what it refuses to do, written for
+someone who has never opened a workflow file. It has a getting-started page, the
+secrets model (Doppler and OIDC) explained from first principles, a page per
+reusable workflow with its inputs table generated from the YAML, and a glossary.
+It is generated from [`docs/wiki/`](docs/wiki) by `scripts/gen_wiki.py` and
+never edited by hand; this README stays the authority, and where the two
+disagree the wiki has a bug.
+
 ## Start here
 
 Read in this order. Each one is short.

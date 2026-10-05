@@ -1,0 +1,40 @@
+# Publishes this repository's GitHub wiki from docs/wiki/ on every push to main.
+# A caller of wiki-publish.yml, the same reusable workflow other repositories call.
+#
+# The wiki is a generated mirror (scripts/gen_wiki.py), never a place to write:
+# each publish replaces every page. The generator copies docs/wiki/, rewrites
+# the links for a flat wiki and renders every reusable workflow's inputs table
+# from its YAML.
+#
+# It needs one thing the repository owner does once, and GitHub offers it only
+# in the UI: a wiki's git remote does not exist until its first page is made.
+# Open the Wiki tab, choose "Create the first page", save anything. Until then
+# the publish job fails with a message naming that step, and nothing else in CI
+# is affected.
+#
+# `uses: ./...` runs the version of wiki-publish.yml on this checkout, like
+# every self-call in ci.yml, so a change to it is exercised by the next push.
+# Python 3.13 because the install is the repository's hash-pinned dev lock,
+# which holds Atheris, and Atheris has no wheel for 3.11.
+name: Wiki
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  wiki:
+    uses: ./.github/workflows/wiki-publish.yml # zizmor: ignore[self-repository]
+    permissions:
+      contents: write  # the publish job only; the generate job holds contents: read
+    with:
+      publish: true
+      python-version: "3.13"
+      install-command: pip install --require-hashes -r requirements-dev.txt
+      generate-command: python scripts/gen_wiki.py --out wiki-out --commit "$GITHUB_SHA"
+      out-dir: wiki-out
+      egress-policy: block
