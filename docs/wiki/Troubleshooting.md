@@ -61,8 +61,8 @@ Symptom, likely cause, fix. Many of these cost an afternoon the first time; the 
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| Audit red with `UNKNOWN` | The token could not ask: expired, or missing a read permission (403/404 in the reason) | Fix the **token**, not the check |
-| Audit fails at the Doppler step | `AUDIT_DOPPLER_IDENTITY_ID`, the `audit` Doppler project or the identity is not set up | Setup steps in the README, "The weekly audit" |
+| Audit red with `UNKNOWN` | The App could not ask: a read permission missing from the App, or a repository (or owner) its installation does not include (403/404 in the reason; an `org-*` line names the permission) | Fix the **App**, not the check |
+| Audit fails at the Doppler step, or at *Mint a one-hour installation token* | `AUDIT_DOPPLER_IDENTITY_ID`, the `audit` Doppler project or the identity is not set up; or `AUDIT_APP_CLIENT_ID` or the key is wrong, or the App is not installed on that owner | Setup steps in the README, "The weekly audit" |
 | `FAIL` names a setting | It drifted | Fix the repository using BASELINE.md's `gh api` command; if the *baseline* was wrong, change the baseline and the check in the same PR |
 
 ## Tests (when you are contributing)

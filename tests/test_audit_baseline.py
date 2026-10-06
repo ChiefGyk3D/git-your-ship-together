@@ -677,3 +677,272 @@ def test_a_prefixed_identity_variable_does_not_count_as_the_shared_one():
     pattern = re.compile(r"(?<![A-Z_])DOPPLER_IDENTITY_ID")
     assert pattern.search("doppler-identity-id: ${{ vars.DOPPLER_IDENTITY_ID }}")
     assert not pattern.search("identity: ${{ vars.AUDIT_DOPPLER_IDENTITY_ID }}")
+
+
+# --- organizations (#95, #98) -------------------------------------------------
+
+ORG = "Example-Org"
+ORG_REPO = f"{ORG}/example"
+ORG_OWNER = "the-owner"
+
+
+def org_answers() -> dict[str, tuple[int, dict | list]]:
+    """A compliant repository under an organization: the owner reaches it through membership only."""
+    r = f"/repos/{ORG_REPO}"
+    answers = {path.replace(REPO_NAME, ORG_REPO): value for path, value in good_answers().items()}
+    answers[r] = (200, {**answers[r][1], "owner": {"login": ORG, "type": "Organization"}})
+    del answers[f"{r}/collaborators?affiliation=all&per_page=100"]
+    answers[f"{r}/collaborators?affiliation=direct&per_page=100"] = (200, [])
+    answers[f"{r}/collaborators?affiliation=outside&per_page=100"] = (200, [])
+    answers[f"/orgs/{ORG}/members?role=admin&per_page=100"] = (200, [{"login": ORG_OWNER}])
+    return answers
+
+
+def org_posture() -> dict[str, tuple[int, dict | list]]:
+    """The organization endpoints, answering the way BASELINE.md "Organizations" wants."""
+    return {
+        f"/orgs/{ORG}": (
+            200,
+            {
+                "login": ORG,
+                "two_factor_requirement_enabled": True,
+                **{k: True for k in audit.NEW_REPO_DEFAULTS},
+            },
+        ),
+        f"/orgs/{ORG}/actions/permissions": (200, {"enabled_repositories": "all", "allowed_actions": "selected"}),
+        f"/orgs/{ORG}/actions/permissions/workflow": (
+            200,
+            {"default_workflow_permissions": "read", "can_approve_pull_request_reviews": False},
+        ),
+        f"/orgs/{ORG}/members?role=admin&per_page=100": (200, [{"login": ORG_OWNER}]),
+    }
+
+
+def run_org(answers, repos=(ORG_REPO,)):
+    """audit_repo for each repository, then audit_org once, the way main() does."""
+    orgs: dict[str, dict] = {}
+    repo_results = []
+    for repo in repos:
+        repo_results += audit.audit_repo(repo, fetcher(answers), orgs=orgs)
+    return repo_results, audit.audit_org(ORG, fetcher(answers), orgs[ORG], repo_results)
+
+
+def test_an_organization_owner_with_no_direct_grant_is_not_an_outsider():
+    """#95: under an organization the owner login is the organization, and its owners are members."""
+    repo_results, _ = run_org({**org_answers(), **org_posture()})
+    status, detail = by_check(repo_results)["collaborators"]
+    assert status == audit.PASS and ORG_OWNER in detail
+
+
+def test_an_organization_owner_who_is_also_a_direct_collaborator_is_still_the_owner():
+    answers = {**org_answers(), **org_posture()}
+    answers[f"/repos/{ORG_REPO}/collaborators?affiliation=direct&per_page=100"] = (
+        200,
+        [{"login": ORG_OWNER, "permissions": {"push": True, "admin": True}}],
+    )
+    assert by_check(run_org(answers)[0])["collaborators"][0] == audit.PASS
+
+
+def test_a_real_outside_collaborator_with_write_still_fails_under_an_organization():
+    answers = {**org_answers(), **org_posture()}
+    answers[f"/repos/{ORG_REPO}/collaborators?affiliation=outside&per_page=100"] = (
+        200,
+        [{"login": "contractor", "permissions": {"push": True}}, {"login": "viewer", "permissions": {"push": False}}],
+    )
+    status, detail = by_check(run_org(answers)[0])["collaborators"]
+    assert status == audit.FAIL and "contractor" in detail and "viewer" not in detail
+    assert ORG_OWNER not in detail
+
+
+def test_a_direct_collaborator_who_is_not_an_owner_fails_under_an_organization():
+    answers = {**org_answers(), **org_posture()}
+    answers[f"/repos/{ORG_REPO}/collaborators?affiliation=direct&per_page=100"] = (
+        200,
+        [{"login": "member", "permissions": {"push": True}}],
+    )
+    status, detail = by_check(run_org(answers)[0])["collaborators"]
+    assert status == audit.FAIL and "member" in detail
+
+
+def test_unreadable_owners_make_the_collaborators_check_unknown_naming_the_permission():
+    answers = {**org_answers(), **org_posture()}
+    answers[f"/orgs/{ORG}/members?role=admin&per_page=100"] = (403, {"message": "Resource not accessible"})
+    status, detail = by_check(run_org(answers)[0])["collaborators"]
+    assert status == audit.UNKNOWN and "Organization Members: read" in detail
+
+
+def test_the_owner_list_is_read_once_per_organization():
+    answers = {**org_answers(), **org_posture()}
+    second = "Example-Org/second"
+    for path, value in list(org_answers().items()):
+        answers[path.replace(ORG_REPO, second)] = value
+    calls = []
+    inner = fetcher(answers)
+
+    def counting(path):
+        calls.append(path)
+        return inner(path)
+
+    orgs: dict[str, dict] = {}
+    for repo in (ORG_REPO, second):
+        audit.audit_repo(repo, counting, orgs=orgs)
+    audit.audit_org(ORG, counting, orgs[ORG], [])
+    assert calls.count(f"/orgs/{ORG}/members?role=admin&per_page=100") == 1
+
+
+def test_a_user_owned_repository_has_no_organization_and_unchanged_collaborator_calls():
+    orgs: dict[str, dict] = {}
+    audit.audit_repo(REPO_NAME, fetcher(good_answers()), orgs=orgs)
+    assert orgs == {}
+
+
+def test_a_compliant_organization_passes_its_four_checks():
+    _, org = run_org({**org_answers(), **org_posture()})
+    assert set(by_check(org)) == {
+        "org-2fa-required",
+        "org-new-repo-defaults",
+        "org-actions-policy",
+        "org-owner-collaborators",
+    }
+    assert {s for s, _ in by_check(org).values()} == {audit.PASS}
+    assert all(r.repo == f"{ORG} (organization)" for r in org)
+
+
+def test_two_factor_off_fails():
+    answers = {**org_answers(), **org_posture()}
+    answers[f"/orgs/{ORG}"] = (200, {**answers[f"/orgs/{ORG}"][1], "two_factor_requirement_enabled": False})
+    assert by_check(run_org(answers)[1])["org-2fa-required"][0] == audit.FAIL
+
+
+def test_each_new_repository_default_that_is_off_fails_and_is_named():
+    for key in audit.NEW_REPO_DEFAULTS:
+        answers = {**org_answers(), **org_posture()}
+        answers[f"/orgs/{ORG}"] = (200, {**answers[f"/orgs/{ORG}"][1], key: False})
+        status, detail = by_check(run_org(answers)[1])["org-new-repo-defaults"]
+        assert status == audit.FAIL and key in detail, key
+
+
+def test_org_fields_the_token_is_not_sent_are_unknown_naming_the_permission_not_a_pass():
+    """A token that is not the owner's gets the public organization body: no two_factor_*, no *_for_new_repositories."""
+    answers = {**org_answers(), **org_posture()}
+    answers[f"/orgs/{ORG}"] = (200, {"login": ORG, "public_repos": 3})
+    org = by_check(run_org(answers)[1])
+    for check in ("org-2fa-required", "org-new-repo-defaults"):
+        assert org[check][0] == audit.UNKNOWN and "Organization administration: read" in org[check][1], check
+
+
+def test_an_unreadable_organization_is_unknown_on_every_field_check():
+    answers = {**org_answers(), **org_posture()}
+    answers[f"/orgs/{ORG}"] = (404, {"message": "Not Found"})
+    org = by_check(run_org(answers)[1])
+    assert org["org-2fa-required"][0] == org["org-new-repo-defaults"][0] == audit.UNKNOWN
+
+
+def test_the_org_actions_policy_is_unknown_on_a_403_naming_the_permission():
+    answers = {**org_answers(), **org_posture()}
+    answers[f"/orgs/{ORG}/actions/permissions"] = (403, {"message": "You must be an org admin"})
+    status, detail = by_check(run_org(answers)[1])["org-actions-policy"]
+    assert status == audit.UNKNOWN and "Organization administration: read" in detail and "HTTP 403" in detail
+    answers = {**org_answers(), **org_posture()}
+    answers[f"/orgs/{ORG}/actions/permissions/workflow"] = (403, {"message": "no"})
+    assert by_check(run_org(answers)[1])["org-actions-policy"][0] == audit.UNKNOWN
+
+
+def test_an_org_that_allows_local_only_or_a_write_default_token_fails():
+    answers = {**org_answers(), **org_posture()}
+    answers[f"/orgs/{ORG}/actions/permissions"] = (200, {"allowed_actions": "local_only"})
+    status, detail = by_check(run_org(answers)[1])["org-actions-policy"]
+    assert status == audit.FAIL and "local_only" in detail
+    answers = {**org_answers(), **org_posture()}
+    answers[f"/orgs/{ORG}/actions/permissions/workflow"] = (200, {"default_workflow_permissions": "write"})
+    status, detail = by_check(run_org(answers)[1])["org-actions-policy"]
+    assert status == audit.FAIL and "write" in detail
+
+
+def test_an_org_that_allows_all_actions_passes_only_when_every_repository_narrows_it():
+    answers = {**org_answers(), **org_posture()}
+    answers[f"/orgs/{ORG}/actions/permissions"] = (200, {"allowed_actions": "all"})
+    status, detail = by_check(run_org(answers)[1])["org-actions-policy"]
+    assert status == audit.PASS and "narrows" in detail
+    # one repository that does not narrow it breaks the exception
+    r = f"/repos/{ORG_REPO}"
+    answers[f"{r}/actions/permissions"] = (200, {"enabled": True, "allowed_actions": "all"})
+    status, detail = by_check(run_org(answers)[1])["org-actions-policy"]
+    assert status == audit.FAIL and "not every audited repository" in detail
+
+
+def test_an_org_with_no_readable_owner_is_unknown_and_one_with_none_fails():
+    answers = {**org_answers(), **org_posture()}
+    answers[f"/orgs/{ORG}/members?role=admin&per_page=100"] = (403, {"message": "no"})
+    status, detail = by_check(run_org(answers)[1])["org-owner-collaborators"]
+    assert status == audit.UNKNOWN and "Organization Members: read" in detail
+    answers[f"/orgs/{ORG}/members?role=admin&per_page=100"] = (200, [])
+    assert by_check(run_org(answers)[1])["org-owner-collaborators"][0] == audit.FAIL
+
+
+# --- one token per owner (#89) ---------------------------------------------------
+
+
+def test_owner_token_pairs_are_parsed_and_malformed_ones_refused():
+    assert audit.parse_owner_tokens([]) is None
+    assert audit.parse_owner_tokens(["Org=A", "Me=B"]) == {"org": "A", "me": "B"}
+    for bad in ("Org", "=A", "Org="):
+        with pytest.raises(SystemExit):
+            audit.parse_owner_tokens([bad])
+
+
+def test_an_owner_with_no_or_an_empty_token_is_unknown_never_read_with_another_owners_token(monkeypatch):
+    monkeypatch.setenv("TOK_ME", "token-me")
+    monkeypatch.setenv("TOK_ORG", "")
+    tokens = {"me": "TOK_ME", "org": "TOK_ORG"}
+    assert audit.fetcher_for("Me", tokens) is not None
+    assert audit.fetcher_for("Org", tokens) is None, "an empty token must not fall back to anything"
+    assert audit.fetcher_for("Stranger", tokens) is None
+    assert "TOK_ORG" in audit.no_token_reason("Org", tokens)
+    assert "--owner-token Stranger=" in audit.no_token_reason("Stranger", tokens)
+
+
+def test_main_reads_each_owner_with_its_own_token_and_audits_the_org_once(monkeypatch, capsys, tmp_path):
+    """The whole run, offline: two owners, two tokens, one organization block."""
+    seen: dict[str, list[str]] = {"me": [], "org": []}
+    answers = {**good_answers(), **org_answers(), **org_posture()}
+
+    def github_fetcher(token):
+        inner = fetcher(answers)
+
+        def fetch(path):
+            seen[token].append(path)
+            return inner(path)
+
+        return fetch
+
+    monkeypatch.setattr(audit, "github_fetcher", github_fetcher)
+    monkeypatch.setattr(audit, "load_register", lambda: [])
+    monkeypatch.setattr(audit, "find_token", lambda: pytest.fail("a per-owner run must not read a default token"))
+    monkeypatch.setenv("TOK_ME", "me")
+    monkeypatch.setenv("TOK_ORG", "org")
+    code = audit.main([REPO_NAME, ORG_REPO, "--owner-token", f"{OWNER}=TOK_ME", "--owner-token", f"{ORG}=TOK_ORG"])
+    out = capsys.readouterr().out
+    assert code == 0, out
+    assert all(f"/repos/{REPO_NAME}" in p or "/orgs/" not in p for p in seen["me"])
+    assert not any(ORG in p for p in seen["me"]), "the user token never touches the organization"
+    assert not any(REPO_NAME in p for p in seen["org"]), "the organization token never touches the user's repository"
+    assert out.count(f"{ORG} (organization)") == 1 and out.count("  PASS    org-") == 4 and "0 FAIL, 0 UNKNOWN" in out
+    assert "1 organization(s)" in out
+
+
+def test_main_reports_a_missing_owner_token_as_unknown_and_exits_2(monkeypatch, capsys):
+    monkeypatch.setattr(audit, "github_fetcher", lambda token: fetcher({**good_answers()}))
+    monkeypatch.setattr(audit, "load_register", lambda: [])
+    monkeypatch.setenv("TOK_ME", "me")
+    monkeypatch.delenv("TOK_ORG", raising=False)
+    code = audit.main([REPO_NAME, ORG_REPO, "--owner-token", f"{OWNER}=TOK_ME", "--owner-token", f"{ORG}=TOK_ORG"])
+    out = capsys.readouterr().out
+    assert code == 2 and "$TOK_ORG is empty" in out
+
+
+def test_an_org_that_allows_all_actions_with_no_repository_audited_does_not_pass_on_an_empty_proof():
+    answers = {**org_answers(), **org_posture()}
+    answers[f"/orgs/{ORG}/actions/permissions"] = (200, {"allowed_actions": "all"})
+    status, _ = by_check(audit.audit_org(ORG, fetcher(answers), {}, []))["org-actions-policy"]
+    assert status == audit.FAIL

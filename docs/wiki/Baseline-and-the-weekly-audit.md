@@ -29,7 +29,7 @@ it can be read back. Each section closes one of those.
 
 | Section | Requirement | Why | Check ids |
 |---|---|---|---|
-| People | Only the owner can push; everyone else contributes from a fork | A fork's run never receives a secret | `collaborators` |
+| People | Only the owner can push (under an organization, the owners are its `role=admin` members, so only a direct or outside collaborator with write fails); everyone else contributes from a fork | A fork's run never receives a secret | `collaborators` |
 | Default branch | Pull request required, stale approvals dismissed, no force push or deletion, and the **`CI green` gate of every shared CI workflow the repository calls** required (`ci / CI green`, `shell / CI green`, ...) | One required name per language; a job added later is covered | `required-check`, `pull-request-required`, `history-protected` |
 | Approval count | **Zero** | GitHub does not let an author approve their own pull request, so one required approval on a single-maintainer repository never produces a review; it only teaches overriding as administrator. Zero keeps the pull request and the green check required | part of `pull-request-required` |
 | Auto-merge | Allowed | A Dependabot bump has cleared cooldown, gate and pull request by the time it is mergeable; the click adds nothing | `auto-merge-enabled` |
@@ -97,32 +97,37 @@ python scripts/audit_baseline.py --expiring 21    # register entries due within 
 ## How the audit itself runs
 
 The `audit` job runs only from `main` or the schedule, with harden-runner in `block` mode and
-five hosts allowed. Its token, `AUDIT_GITHUB_TOKEN`, is fetched from Doppler over OIDC from a
-**separate project** (`audit`), not the shared `ci` config, because it can read the settings of
-every repository and every caller reads `ci`. The `register-issues` job holds only the
+five hosts allowed. It reads with **GitHub App installation tokens**, one per owner (the user
+account and the organization), minted for the run and revoked when it ends; no personal access
+token is used. The App's key, `AUDIT_APP_PRIVATE_KEY`, is fetched from Doppler over OIDC from a
+**separate project** (`audit`), not the shared `ci` config, because the App can read the settings
+of every repository and every caller reads `ci`. An owner with no token is `UNKNOWN`, never read
+with another owner's. The `register-issues` job holds only the
 workflow's own `GITHUB_TOKEN` with `issues: write`. `tests/test_audit_baseline.py` feeds the
 audit a passing repository and a broken one per criterion, so the audit that checks the fleet
 is itself checked.
 
-## The organization-level gaps
+## The organization checks
 
-On 2026-10-05 the Hammunition suite moved to the `Renegade-Penguin` organization, and four
-things surfaced that the audit cannot yet see or gets wrong. All are open issues:
+On 2026-10-05 the Hammunition suite moved to the `Renegade-Penguin` organization, which
+surfaced four gaps (issues #89, #95 and #98, fixed together; #90 is closed). Once per
+organization per run the audit now prints four lines under `<org> (organization)`:
 
-- **#89: the audit cannot read organization repositories.** `AUDIT_GITHUB_TOKEN` is a
-  fine-grained personal token with one resource owner, so a token for the maintainer's account
-  cannot read the organization's repositories. The proposal is a GitHub App with read
-  permissions, its key in the `audit` Doppler project, minted per run, so no personal token
-  remains.
-- **#95: the collaborators check reports an organization's owner as an outsider with write
-  access.** It excludes the repository owner by login, which under an organization is the
-  organization. Measured on all five organization repositories (`FAIL collaborators: others
-  with write access`) after the direct grant was already removed.
-- **#98: nothing audits the organization itself.** Measured the same day: two-factor
-  requirement off, new-repository security defaults off until set by hand (and the transfer
-  had applied those defaults to five repositories), the Actions policy unreadable with a
-  repository-scoped token. Proposed checks: `org-2fa-required`, `org-new-repo-defaults`,
-  `org-actions-policy`, `org-owner-collaborators`.
+| Check | Verifies |
+|---|---|
+| `org-2fa-required` | The organization requires two-factor authentication |
+| `org-new-repo-defaults` | Secret scanning, push protection, Dependabot alerts, Dependabot security updates and the dependency graph are on for new repositories (a transfer applies these over a repository's own settings) |
+| `org-actions-policy` | Allowed actions are `selected` (or `all` only when every audited repository narrows it) and the default `GITHUB_TOKEN` permission is `read` |
+| `org-owner-collaborators` | The organization's owners are readable, and there is at least one |
+
+A repository under a user account has none of these rows. A field the token cannot read is
+`UNKNOWN` and names the permission it needs.
+
+- **#89, the audit reads organization repositories.** A GitHub App (read-only: Repository
+  Administration, Contents, Variables, Metadata; Organization Administration, Members) replaces
+  the personal token. `audit.yml` mints one token per owner with `actions/create-github-app-token`.
+- **#95, owners are not outsiders.** For an organization repository the collaborators check
+  reads direct and outside collaborators and treats `role=admin` members as the owners.
 - **#90, closed:** gitleaks failed on every pull request of an organization-owned repository
   because the action demands a licence for organizations and Doppler is never read on a pull
   request. Fixed by running the MIT binary pinned by sha256 (see
@@ -130,6 +135,6 @@ things surfaced that the audit cannot yet see or gets wrong. All are open issues
 
 ## What this refuses to do
 
-It never counts UNKNOWN as PASS, never writes to a repository (the token is read-only), and
+It never counts UNKNOWN as PASS, never writes to a repository (the tokens are read-only), and
 never covers a repository that is not in `baseline/repos.txt`: the list is the scope, and
 adding to it is how a repository joins.

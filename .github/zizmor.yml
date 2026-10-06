@@ -1,0 +1,13 @@
+# zizmor configuration. Each entry names the rule, the file and the reason.
+rules:
+  github-app:
+    # audit.yml mints two GitHub App installation tokens with no `permission-*`
+    # and no `repositories` input. actions/create-github-app-token v3.2.0 has no
+    # `permission-*` input for the repository Variables permission that the
+    # `doppler-identity` check reads, so narrowing would turn that check
+    # UNKNOWN; the audit App itself holds read-only permissions only, which is
+    # the bound, and its installations are limited to the repositories in
+    # baseline/repos.txt, which is the repository scoping. project-sync.yml
+    # does set `permission-*` and is not listed here.
+    ignore:
+      - audit.yml

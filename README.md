@@ -90,7 +90,7 @@ project before any caller pins them:
 | `.github/workflows/security-self.yml` | `security.yml` called the same way, on push, pull request and a Monday schedule |
 | `.github/workflows/dependabot-auto-merge-self.yml` | `dependabot-auto-merge.yml` called the same way, so this repository's own bumps exercise it |
 | `.github/workflows/wiki.yml` | `wiki-publish.yml` called the same way for this repository's own wiki: `docs/wiki/` is the source and `scripts/gen_wiki.py` the generator, which renders every reusable workflow's inputs table from its YAML. Publishes from `main` only. See [`docs/wiki/Maintaining-this-wiki.md`](docs/wiki/Maintaining-this-wiki.md) |
-| `.github/workflows/audit.yml` | The weekly audit: `scripts/audit_baseline.py` over every repository in `baseline/repos.txt` on Monday 07:00 UTC, with its own token from its own Doppler project; and an issue here for each risk-register entry about to expire. Not reusable; see [The weekly audit](#the-weekly-audit) |
+| `.github/workflows/audit.yml` | The weekly audit: `scripts/audit_baseline.py` over every repository in `baseline/repos.txt` on Monday 07:00 UTC, with GitHub App installation tokens (one per owner) minted from a key in its own Doppler project; and an issue here for each risk-register entry about to expire. Not reusable; see [The weekly audit](#the-weekly-audit) |
 | `.github/dependabot.yml` | Weekly action and pip bumps with a seven-day cooldown, actions grouped into one pull request |
 | `fixture/` | A package with a console script, one test, a non-root Dockerfile, a hash-pinned `requirements.txt`, and one shell script with its own test: one of everything a job needs. `fixture/README.md` says how to regenerate the lock |
 | `tests/` | The contract, as pytest, one file per thing it holds still. See [Developing](#developing) |
@@ -1875,14 +1875,25 @@ it is clean. A repository not in the list is not covered.
 **`audit`** runs `scripts/audit_baseline.py` over every repository in
 `baseline/repos.txt` and puts the report in the job summary. The job is red on
 any FAIL and on any UNKNOWN: a check the token could not make is not a pass.
-The token is `AUDIT_GITHUB_TOKEN`, fetched from Doppler over the job's OIDC
-identity. It lives in a **separate Doppler project**, `audit`, config `prd`,
-holding that one secret, and not in the shared `ci` project: the token can read
-the settings of every repository, and the `ci` config is read by every
-caller's pipeline. The job runs only from `main` or the schedule, and the
-identity is scoped to that ref alone. harden-runner is in `block` mode with
-five hosts: `api.doppler.com`, `api.github.com`, `files.pythonhosted.org`,
-`github.com` and `pypi.org`.
+The credential is a **GitHub App**, never a personal access token. The App's
+private key, `AUDIT_APP_PRIVATE_KEY`, is fetched from Doppler over the job's
+OIDC identity, and `actions/create-github-app-token` trades it for one
+installation token per owner in `baseline/repos.txt`: one for the user account
+(`ChiefGyk3D`) and one for the organization (`Renegade-Penguin`). Each lives an
+hour, is revoked when the job ends, and shows the App in the audit log. An
+installation belongs to one account, which is why there are two tokens; the
+script reads each repository with its owner's token (`--owner-token
+OWNER=ENVVAR`) and an owner with none is `UNKNOWN`, never read with another's.
+When a repository's owner is an organization, the organization is audited once
+as well (the `org-*` checks in [`BASELINE.md`](BASELINE.md), "Organizations").
+The key lives in a **separate Doppler project**, `audit`, config `prd`, holding
+that one secret, and not in the shared `ci` project: the App can read the
+settings of every repository, and the `ci` config is read by every caller's
+pipeline. The App is not the project-sync App; each holds only what its job
+needs. The job runs only from `main` or the schedule, and the identity is
+scoped to that ref alone. harden-runner is in `block` mode with five hosts:
+`api.doppler.com`, `api.github.com`, `files.pythonhosted.org`, `github.com` and
+`pypi.org`.
 
 **`register-issues`** holds no token but the workflow's own `GITHUB_TOKEN`
 (`issues: write`, this repository only). It runs
@@ -1899,29 +1910,60 @@ Nothing in the repository can do these; until they are done the `audit` job
 fails at the Doppler step, which is the right answer to "the audit could not
 run".
 
-1. **Doppler:** create the project `audit` with the config `prd` and add the
-   secret `AUDIT_GITHUB_TOKEN`.
-2. **Doppler:** create the service account `gha-audit` with read access to
+1. **GitHub:** create a GitHub App (Settings, Developer settings, GitHub
+   Apps) for the audit: no webhook, "Where can this GitHub App be installed?"
+   set to **Any account** (an App owned by one account can be installed on
+   another, here the organization, only with that setting; it is not listed
+   anywhere), and **only** these read-only permissions, which are exactly what
+   the script's API calls need (each endpoint was matched to its permission in
+   GitHub's published endpoint table):
+   - Repository **Administration: read**: branch protection, the Actions
+     permission endpoints (`actions/permissions`, `/workflow`,
+     `/fork-pr-contributor-approval`, `/selected-actions`), and the
+     `security_and_analysis` block of the repository itself
+   - Repository **Contents: read**: the workflow files, `dependabot.yml` and
+     the lock files it reads
+   - Repository **Variables: read**: `DOPPLER_IDENTITY_ID` on each repository
+   - Repository **Metadata: read** (always granted): the repository,
+     collaborators, rulesets and private vulnerability reporting
+   - Organization **Administration: read**: `GET /orgs/{org}` (two-factor
+     requirement and new-repository defaults) and the organization's Actions
+     policy endpoints
+   - Organization **Members: read**: the organization's owners
+     (`/orgs/{org}/members?role=admin`)
+
+   Nothing else: no write permission, no Actions, no code scanning alerts, no
+   Secrets. Generate a private key (a `.pem`) and note the App's **Client ID**.
+2. **GitHub:** install the App on the user account `ChiefGyk3D` (only the
+   repository permissions apply there) and on the organization
+   `Renegade-Penguin` (approve the organization permissions), choosing
+   "Only select repositories" and selecting the repositories in
+   `baseline/repos.txt` for each. A repository added to the list later also
+   has to be selected in the installation, or its token cannot see it.
+3. **Doppler:** create the project `audit` with the config `prd` and add the
+   secret `AUDIT_APP_PRIVATE_KEY` (the whole `.pem`, in the dashboard).
+   Delete `AUDIT_GITHUB_TOKEN` there if it exists and revoke the old
+   fine-grained token.
+4. **Doppler:** create the service account `gha-audit` with read access to
    that project only, and an OIDC identity on it whose subjects are
    `repo:ChiefGyk3D/git-your-ship-together:ref:refs/heads/main` and
    `repo:ChiefGyk3D@19499446/git-your-ship-together@1379819453:ref:refs/heads/main`
    (this repository sends the immutable form; see "Doppler setup").
-3. **GitHub:** set the repository variable `AUDIT_DOPPLER_IDENTITY_ID` on
-   this repository to that identity's UUID.
-4. **GitHub:** create the token as a fine-grained personal access token with
-   resource owner `ChiefGyk3D`, access to the repositories in
-   `baseline/repos.txt`, and these read-only repository permissions, which
-   are exactly what the script's API calls need:
-   - **Administration: read** (branch protection, security features,
-     private vulnerability reporting, the Actions permission endpoints, rulesets)
-   - **Contents: read** (the workflow files, `dependabot.yml` and the lock
-     files it reads)
-   - **Variables: read** (`DOPPLER_IDENTITY_ID` on each repository)
-   - **Metadata: read** (added automatically; the repository and collaborator lists)
+5. **GitHub:** set two repository variables on this repository:
+   `AUDIT_DOPPLER_IDENTITY_ID` to that identity's UUID and
+   `AUDIT_APP_CLIENT_ID` to the App's Client ID (an identifier, not a secret;
+   the workflow passes it as `client-id`, the input that replaces the
+   deprecated `app-id`).
 
-   No write permission, and nothing at the account or organization level. Give
-   it the shortest expiry you will keep up with and note the date: an expired
-   token turns the audit red with UNKNOWN, never green.
+The two mint steps are exempt from zizmor's `github-app` audit in
+`.github/zizmor.yml`, for stated reasons:
+`actions/create-github-app-token` v3.2.0 has no `permission-*` input for the
+repository Variables permission, so narrowing would turn the `doppler-identity`
+check UNKNOWN, and the App's own read-only permissions are the bound instead;
+and the `repositories` input is not set because the installation is already
+limited to the listed repositories (step 2). A third owner in
+`baseline/repos.txt` needs a third mint step and `--owner-token`;
+`tests/test_audit_workflow.py` fails until it has them.
 
 ### Reading a red run
 
@@ -1930,9 +1972,10 @@ Open the job summary. Each repository lists its checks as `PASS`, `FAIL` or
 names the setting that drifted; fix it in the repository (see
 [`BASELINE.md`](BASELINE.md) for what each check wants), or, if the baseline
 was wrong, change the baseline in the same pull request that changes the
-check. `UNKNOWN` is a check the token could not make, almost always an
-expired or under-scoped token (a 403 or 404 in the reason): fix the token, not
-the check. A run that fails before the report, at the Doppler step, is a
+check. `UNKNOWN` is a check the token could not make, almost always a missing App
+permission or an installation that does not include the repository (a 403 or
+404 in the reason, and for an organization check the permission it needed):
+fix the App, not the check. A run that fails before the report, at the Doppler step, is a
 setup problem; the notice above it says which input was missing. Run the
 same thing by hand with `python scripts/audit_baseline.py` and your own
 `gh auth login`.

@@ -11,6 +11,14 @@ tells them apart.
     python scripts/audit_baseline.py owner/repo ...  # just these
     python scripts/audit_baseline.py --allow-unknown # exit 0 on unknowns
     python scripts/audit_baseline.py --expiring 14   # register entries due within 14 days; no token needed
+    python scripts/audit_baseline.py --owner-token ChiefGyk3D=TOKEN_A --owner-token Org=TOKEN_B
+
+With `--owner-token OWNER=ENVVAR`, each repository is read with the token held
+in ENVVAR for its owner (the weekly audit mints one GitHub App installation
+token per owner); an owner with no token, or an empty one, is UNKNOWN, never
+read with somebody else's. Without it, one token is used for every owner.
+When a repository's owner is an organization, the organization itself is
+audited once as well (`org-*` checks, see BASELINE.md "Organizations").
 
 Exit 0: every check passed. Exit 1: at least one FAIL. Exit 2: no FAIL but at
 least one UNKNOWN (unless --allow-unknown). The token comes from GITHUB_TOKEN
@@ -112,14 +120,58 @@ def unreadable(code: int, body: dict | list) -> str:
 # --- the checks -------------------------------------------------------------
 
 
-def check_collaborators(repo: str, fetch: Fetcher, owner: str) -> Result:
-    code, body = fetch(f"/repos/{repo}/collaborators?affiliation=all&per_page=100")
-    if code != 200 or not isinstance(body, list):
-        return Result(repo, "collaborators", UNKNOWN, unreadable(code, body))
-    writers = sorted(c["login"] for c in body if c.get("login") != owner and (c.get("permissions") or {}).get("push"))
+def needs(code: int, body: dict | list, permission: str) -> str:
+    """An unreadable answer's reason, with the permission that would have made it readable."""
+    return f"{unreadable(code, body)}; needs {permission}"
+
+
+def org_owners(org: str, fetch: Fetcher, cache: dict) -> tuple[list[str] | None, str]:
+    """The logins of an organization's owners, read once per run into `cache`, or None and why not."""
+    if "owners" not in cache:
+        code, body = fetch(f"/orgs/{org}/members?role=admin&per_page=100")
+        if code == 200 and isinstance(body, list):
+            cache["owners"] = (sorted(m["login"] for m in body if m.get("login")), "")
+        else:
+            cache["owners"] = (None, needs(code, body, "Organization Members: read"))
+    return cache["owners"]
+
+
+def check_collaborators(repo: str, fetch: Fetcher, owner: str, org: bool = False, cache: dict | None = None) -> Result:
+    """Nobody but the owner can push.
+
+    Under a user account the owner is the account, and every affiliation is
+    read. Under an organization the repository's owner login is the
+    organization, which is not a person: the owners are the organization's
+    `role=admin` members, who reach the repository through membership and so
+    never appear as direct collaborators, and the people to look for are the
+    direct and outside collaborators who are not one of them.
+    """
+    if not org:
+        code, body = fetch(f"/repos/{repo}/collaborators?affiliation=all&per_page=100")
+        if code != 200 or not isinstance(body, list):
+            return Result(repo, "collaborators", UNKNOWN, unreadable(code, body))
+        writers = sorted(
+            c["login"] for c in body if c.get("login") != owner and (c.get("permissions") or {}).get("push")
+        )
+        if writers:
+            return Result(repo, "collaborators", FAIL, f"others with write access: {', '.join(writers)}")
+        return Result(repo, "collaborators", PASS, f"only {owner} can push")
+    owners, why = org_owners(owner, fetch, cache if cache is not None else {})
+    if owners is None:
+        return Result(repo, "collaborators", UNKNOWN, f"cannot tell who the organization's owners are: {why}")
+    people: dict[str, dict] = {}
+    for affiliation in ("direct", "outside"):
+        code, body = fetch(f"/repos/{repo}/collaborators?affiliation={affiliation}&per_page=100")
+        if code != 200 or not isinstance(body, list):
+            return Result(repo, "collaborators", UNKNOWN, f"affiliation={affiliation}: {unreadable(code, body)}")
+        for c in body:
+            people[c.get("login")] = c
+    writers = sorted(
+        login for login, c in people.items() if login not in owners and (c.get("permissions") or {}).get("push")
+    )
     if writers:
         return Result(repo, "collaborators", FAIL, f"others with write access: {', '.join(writers)}")
-    return Result(repo, "collaborators", PASS, f"only {owner} can push")
+    return Result(repo, "collaborators", PASS, f"only {owner}'s owners ({', '.join(owners)}) can push")
 
 
 def expected_gates(text: str) -> set[str]:
@@ -581,15 +633,123 @@ def check_doppler_variable(repo: str, fetch: Fetcher, reads_doppler: bool) -> Re
     return Result(repo, "doppler-identity", FAIL, "DOPPLER_IDENTITY_ID is set but is not a UUID")
 
 
-def audit_repo(repo: str, fetch: Fetcher, register: list[dict] | None = None) -> list[Result]:
+# --- organization checks -----------------------------------------------------
+
+# What an organization hands every repository created (or transferred in) after
+# it is set. A transfer into the organization re-applied these over five
+# repositories' own settings, which is why they are audited.
+NEW_REPO_DEFAULTS = (
+    "secret_scanning_enabled_for_new_repositories",
+    "secret_scanning_push_protection_enabled_for_new_repositories",
+    "dependabot_alerts_enabled_for_new_repositories",
+    "dependabot_security_updates_enabled_for_new_repositories",
+    "dependency_graph_enabled_for_new_repositories",
+)
+ORG_ADMIN = "Organization administration: read"
+
+
+def audit_org(org: str, fetch: Fetcher, cache: dict, repo_results: list[Result]) -> list[Result]:
+    """The organization's own posture: the four `org-*` checks, once per organization per run.
+
+    `repo_results` are the results of the organization's audited repositories,
+    which decide the one case where the organization's Actions policy may be
+    `all`: every repository narrows it itself.
+    """
+    name = f"{org} (organization)"
+    results: list[Result] = []
+    code, body = fetch(f"/orgs/{org}")
+    readable = code == 200 and isinstance(body, dict)
+    # Only an organization's owner (or an App with the administration permission)
+    # is sent these fields; their absence is "could not ask", not "off".
+    why = needs(code, body, ORG_ADMIN) if not readable else ""
+    two_fa = body.get("two_factor_requirement_enabled") if readable and isinstance(body, dict) else None
+    if not isinstance(two_fa, bool):
+        detail = why or f"two_factor_requirement_enabled was not returned; needs {ORG_ADMIN}"
+        results.append(Result(name, "org-2fa-required", UNKNOWN, detail))
+    elif two_fa:
+        results.append(Result(name, "org-2fa-required", PASS, "two-factor authentication is required of members"))
+    else:
+        results.append(Result(name, "org-2fa-required", FAIL, "two_factor_requirement_enabled is false"))
+
+    values = {k: body.get(k) for k in NEW_REPO_DEFAULTS} if readable and isinstance(body, dict) else {}
+    unread = sorted(k for k in NEW_REPO_DEFAULTS if not isinstance(values.get(k), bool))
+    off = sorted(k for k in NEW_REPO_DEFAULTS if values.get(k) is False)
+    if unread:
+        detail = why or f"not returned: {', '.join(unread)}; needs {ORG_ADMIN}"
+        results.append(Result(name, "org-new-repo-defaults", UNKNOWN, detail))
+    elif off:
+        results.append(Result(name, "org-new-repo-defaults", FAIL, f"off for new repositories: {', '.join(off)}"))
+    else:
+        results.append(Result(name, "org-new-repo-defaults", PASS, "all five security defaults are on"))
+
+    results.append(check_org_actions_policy(name, org, fetch, repo_results))
+
+    owners, owners_why = org_owners(org, fetch, cache)
+    if owners is None:
+        results.append(Result(name, "org-owner-collaborators", UNKNOWN, owners_why))
+    elif not owners:
+        results.append(Result(name, "org-owner-collaborators", FAIL, "the organization has no owner"))
+    else:
+        results.append(
+            Result(
+                name,
+                "org-owner-collaborators",
+                PASS,
+                f"{len(owners)} owner(s) ({', '.join(owners)}), counted as owners and not as outside collaborators",
+            )
+        )
+    return results
+
+
+def check_org_actions_policy(name: str, org: str, fetch: Fetcher, repo_results: list[Result]) -> Result:
+    check = "org-actions-policy"
+    code, body = fetch(f"/orgs/{org}/actions/permissions")
+    if code != 200 or not isinstance(body, dict):
+        return Result(name, check, UNKNOWN, needs(code, body, ORG_ADMIN))
+    code, wf = fetch(f"/orgs/{org}/actions/permissions/workflow")
+    if code != 200 or not isinstance(wf, dict):
+        return Result(name, check, UNKNOWN, needs(code, wf, ORG_ADMIN))
+    problems = []
+    allowed = body.get("allowed_actions")
+    note = ""
+    if allowed == "selected":
+        note = "allowed_actions is 'selected'"
+    elif allowed == "all":
+        narrowing = [
+            r for r in repo_results if r.check == "actions-allowlist" and r.repo.lower().startswith(f"{org.lower()}/")
+        ]
+        if narrowing and all(r.status == PASS for r in narrowing):
+            note = f"allowed_actions is 'all' and every audited repository ({len(narrowing)}) narrows it itself"
+        else:
+            problems.append("allowed_actions is 'all' and not every audited repository narrows it itself")
+    else:
+        problems.append(f"allowed_actions is {allowed!r}, want 'selected'")
+    default = wf.get("default_workflow_permissions")
+    if default != "read":
+        problems.append(f"default_workflow_permissions is {default!r}, want 'read'")
+    if problems:
+        return Result(name, check, FAIL, "; ".join(problems))
+    return Result(name, check, PASS, f"{note}; GITHUB_TOKEN defaults to read")
+
+
+def audit_repo(
+    repo: str,
+    fetch: Fetcher,
+    register: list[dict] | None = None,
+    orgs: dict[str, dict] | None = None,
+) -> list[Result]:
+    """Every repository check. `orgs` collects the organizations seen and the owners read for them."""
     owner = repo.split("/", 1)[0]
     code, body = fetch(f"/repos/{repo}")
     if code != 200 or not isinstance(body, dict):
         return [Result(repo, "repository", UNKNOWN, unreadable(code, body))]
+    is_org = (body.get("owner") or {}).get("type") == "Organization"
+    if is_org and orgs is not None:
+        orgs.setdefault(owner, {})
     default_branch = body.get("default_branch") or "main"
     # The workflows first: which gates branch protection must require is read from them.
     workflow_results, reads_doppler, exceptions, gates = check_workflows(repo, fetch)
-    results = [check_collaborators(repo, fetch, owner)]
+    results = [check_collaborators(repo, fetch, owner, is_org, orgs.get(owner) if orgs is not None else None)]
     results += check_branch_protection(repo, fetch, default_branch, required_checks_for(repo, gates))
     results += check_security_features(repo, body)
     results.append(check_private_vulnerability_reporting(repo, fetch))
@@ -638,6 +798,31 @@ def exit_code(results: list[Result], allow_unknown: bool) -> int:
     return 0
 
 
+def parse_owner_tokens(specs: list[str]) -> dict[str, str] | None:
+    """`OWNER=ENVVAR` pairs as {owner (lower-case): env var name}; None when none were given."""
+    if not specs:
+        return None
+    out: dict[str, str] = {}
+    for spec in specs:
+        owner, sep, var = spec.partition("=")
+        if not sep or not owner or not var:
+            sys.exit(f"--owner-token wants OWNER=ENVVAR, got {spec!r}")
+        out[owner.lower()] = var
+    return out
+
+
+def fetcher_for(owner: str, tokens: dict[str, str]) -> Fetcher | None:
+    token = os.environ.get(tokens.get(owner.lower(), ""), "")
+    return github_fetcher(token) if token else None
+
+
+def no_token_reason(owner: str, tokens: dict[str, str]) -> str:
+    var = tokens.get(owner.lower())
+    if var is None:
+        return f"no token for owner {owner}: add --owner-token {owner}=ENVVAR (an App installed on {owner})"
+    return f"${var} is empty: the token for {owner} was not minted (is the App installed on {owner}?)"
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("repos", nargs="*", help="owner/name; default: every line of baseline/repos.txt")
@@ -648,6 +833,13 @@ def main(argv: list[str] | None = None) -> int:
         metavar="DAYS",
         help="print register entries due within DAYS days or past, tab-separated; no token",
     )
+    parser.add_argument(
+        "--owner-token",
+        action="append",
+        default=[],
+        metavar="OWNER=ENVVAR",
+        help="read OWNER's repositories (and the organization, if it is one) with the token in ENVVAR; repeatable",
+    )
     parser.add_argument("--today", type=dt.date.fromisoformat, help="the date --expiring counts from (default: today)")
     parser.add_argument("--list", default=str(Path(__file__).resolve().parent.parent / "baseline" / "repos.txt"))
     args = parser.parse_args(argv)
@@ -656,15 +848,32 @@ def main(argv: list[str] | None = None) -> int:
             print(line)
         return 0
     repos = args.repos or read_repo_list(Path(args.list))
-    fetch = github_fetcher(find_token())
+    tokens = parse_owner_tokens(args.owner_token)
+    default = None if tokens is not None else github_fetcher(find_token())
     register = load_register()
     results: list[Result] = []
+    orgs: dict[str, dict] = {}
+    by_org: dict[str, list[Result]] = {}
     for repo in repos:
-        results.extend(audit_repo(repo, fetch, register))
+        owner = repo.split("/", 1)[0]
+        fetch = default or fetcher_for(owner, tokens or {})
+        if fetch is None:
+            results.append(Result(repo, "repository", UNKNOWN, no_token_reason(owner, tokens or {})))
+            continue
+        found = audit_repo(repo, fetch, register, orgs)
+        results.extend(found)
+        by_org.setdefault(owner, []).extend(found)
+    for org, cache in orgs.items():
+        fetch = default or fetcher_for(org, tokens or {})
+        if fetch is None:
+            results.append(Result(f"{org} (organization)", "org-checks", UNKNOWN, no_token_reason(org, tokens or {})))
+            continue
+        results.extend(audit_org(org, fetch, cache, by_org.get(org, [])))
     print(render(results))
     fails = sum(r.status == FAIL for r in results)
     unknowns = sum(r.status == UNKNOWN for r in results)
-    print(f"\n{len(results)} checks over {len(repos)} repositories: {fails} FAIL, {unknowns} UNKNOWN")
+    scope = f"{len(repos)} repositories and {len(orgs)} organization(s)"
+    print(f"\n{len(results)} checks over {scope}: {fails} FAIL, {unknowns} UNKNOWN")
     return exit_code(results, args.allow_unknown)
 
 
