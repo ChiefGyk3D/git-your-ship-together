@@ -18,10 +18,10 @@
 #         DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}   # optional fallback
 #       with:
 #         project-url: https://github.com/orgs/<org>/projects/<n>
-#         app-id: ${{ vars.PROJECTS_APP_ID }}
-#         doppler-project: ...
-#         doppler-config: ...
-#         doppler-identity-id: ${{ vars.DOPPLER_IDENTITY_ID }}
+#         client-id: ${{ vars.PROJECTS_APP_CLIENT_ID }}
+#         doppler-project: projects
+#         doppler-config: prd
+#         doppler-identity-id: ${{ vars.PROJECTS_DOPPLER_IDENTITY_ID }}
 #         doppler-trusted-refs-only: false    # see "Why pull_request_target" in the README
 #
 # Why pull_request_target in the caller: a `pull_request` run from a fork gets a
@@ -93,10 +93,18 @@ on:
         description: Read the board and print every change instead of making it. Without a token, a dry run only says so and succeeds, which is how this repository's own CI exercises the workflow.
         type: boolean
         default: false
-      app-id:
-        description: The numeric id of the GitHub App that holds the Projects permission. An identifier, not a secret; callers pass the repository variable `PROJECTS_APP_ID`.
+      client-id:
+        description: The Client ID of the GitHub App that holds the Projects permission, from the App's settings page. An identifier, not a secret; callers pass the repository variable `PROJECTS_APP_CLIENT_ID`. Set this one or `app-id`.
         type: string
-        required: true
+        default: ""
+      app-id:
+        description: Deprecated, accepted for one release. The numeric id of the same App; actions/create-github-app-token has deprecated it in favour of `client-id`, and a run that passes it prints that warning. Used only when `client-id` is empty.
+        type: string
+        default: ""
+      pull-request-events:
+        description: Act on `pull_request_target` events. `false` makes a run started by that event skip the whole job, so a caller that keeps the trigger without an identity that covers a pull-request subject stays green instead of red; `issues`, `schedule` and `workflow_dispatch` runs are unaffected. See the README.
+        type: boolean
+        default: true
       egress-policy:
         description: harden-runner egress policy - `audit` logs outbound connections, `block` allows only `allowed-endpoints`.
         type: string
@@ -140,6 +148,9 @@ permissions:
 jobs:
   sync:
     name: Sync project
+    # `pull-request-events: false` turns the pull request path off from the
+    # calling side without editing the caller's triggers.
+    if: ${{ inputs.pull-request-events || github.event_name != 'pull_request_target' }}
     runs-on: ubuntu-latest
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
@@ -242,9 +253,28 @@ jobs:
       # reach (organization Projects write, Issues and Pull requests read): a
       # token minted without them would carry every permission the App has,
       # which zizmor's github-app audit rightly refuses.
+      - name: Require an App identifier
+        if: ${{ env.PROJECTS_APP_PRIVATE_KEY != '' && inputs.client-id == '' && inputs.app-id == '' }}
+        run: |
+          echo "::error::project-sync needs the App's Client ID: pass client-id (the PROJECTS_APP_CLIENT_ID repository variable). app-id is accepted for one release but is deprecated."
+          exit 1
+
       - name: Mint a one-hour installation token
         id: app
-        if: ${{ env.PROJECTS_APP_PRIVATE_KEY != '' }}
+        if: ${{ env.PROJECTS_APP_PRIVATE_KEY != '' && inputs.client-id != '' }}
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ inputs.client-id }}
+          private-key: ${{ env.PROJECTS_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-organization-projects: write
+          permission-issues: read
+          permission-pull-requests: read
+
+      - name: Mint a one-hour installation token (deprecated app-id)
+        id: app_legacy
+        if: ${{ env.PROJECTS_APP_PRIVATE_KEY != '' && inputs.client-id == '' && inputs.app-id != '' }}
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           app-id: ${{ inputs.app-id }}
@@ -257,7 +287,7 @@ jobs:
 
       - name: Sync the project
         env:
-          PS_TOKEN: ${{ steps.app.outputs.token }}
+          PS_TOKEN: ${{ steps.app.outputs.token || steps.app_legacy.outputs.token }}
           PS_PROJECT_URL: ${{ inputs.project-url }}
           PS_STATUS_FIELD: ${{ inputs.status-field }}
           PS_STATUS_OPEN_ISSUE: ${{ inputs.status-open-issue }}
