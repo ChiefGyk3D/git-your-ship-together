@@ -29,13 +29,6 @@ Each has a "done when" in its issue.
 - **#95** The collaborators check calls an organization's owner an outsider with write access.
 - **#98** Organization-level checks: two-factor requirement, new-repository defaults, Actions policy.
 
-**project-sync**
-
-- **#93** The App key cannot be fetched on `pull_request_target` with the documented identities, and it must
-  not live in the shared `ci` config.
-- **#91** The README's caller fails the lint this repository ships (zizmor `dangerous-triggers`).
-- **#92** `actions/create-github-app-token` deprecates `app-id`; pass `client-id`.
-
 **Scanning**
 
 - **#83** A Semgrep finding suppressed in source still becomes an open code-scanning alert (not settled; see

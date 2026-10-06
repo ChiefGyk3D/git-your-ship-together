@@ -70,14 +70,15 @@ Two measured consequences, both from the first live callers on 2026-10-05:
 - **zizmor flags the trigger** (`dangerous-triggers`) in the caller itself, which every caller's
   workflow lint then fails on (issue #91). The fix is a `# zizmor: ignore[dangerous-triggers]`
   on that line with the reason beside it.
-- **The Doppler identity refuses it** (issue #93): the subject on that event is
-  `repo:OWNER/REPO:pull_request`, which the `ci` identity must never match. The proposed fix is a
-  separate Doppler project holding only the App key, with its own identity; see
-  [Secrets: Doppler and OIDC](Secrets-Doppler-and-OIDC.md). Both issues were open when this page was
-  written.
+- **The Doppler identity refuses it** (issue #93, fixed in #103): the subject on that event is
+  `repo:OWNER/REPO:pull_request`, which the `ci` identity must never match. The App key now lives in
+  its own Doppler project `projects`, config `prd`, with an identity of its own
+  (`PROJECTS_DOPPLER_IDENTITY_ID`) that may match `:pull_request`; see
+  [Secrets: Doppler and OIDC](Secrets-Doppler-and-OIDC.md). A caller whose identity cannot cover a
+  pull-request subject sets `pull-request-events: false`, or drops the trigger.
 
-A smaller third: `actions/create-github-app-token` deprecates its `app-id` input in favour of
-`client-id`, and the first run printed the warning (issue #92, open).
+`actions/create-github-app-token` deprecated its `app-id` input in favour of `client-id` (issue #92,
+fixed in #103); pass `client-id`. `app-id` is accepted for one release.
 
 ## Setting up the App, once
 
@@ -87,10 +88,10 @@ A smaller third: `actions/create-github-app-token` deprecates its `app-id` input
    read. Metadata read is added automatically. Nothing else.
 3. Install it on the organization, **Only select repositories**, and pick only the repositories that
    call the workflow.
-4. Note the App id (an identifier, not a secret) and generate a private key.
-5. Store the key in Doppler with `scripts/doppler-ci-set.sh --from-file <key.pem> PROJECTS_APP_PRIVATE_KEY`
+4. Note the Client ID (an identifier, not a secret) and generate a private key.
+5. Store the key in Doppler with `scripts/doppler-ci-set.sh --from-file <key.pem> PROJECTS_APP_PRIVATE_KEY` into project `projects`, config `prd`
    (the name is fixed), and delete the downloaded file; Doppler holds the only copy.
-6. On each calling repository set the variable `PROJECTS_APP_ID`.
+6. On each calling repository set the variables `PROJECTS_APP_CLIENT_ID` and `PROJECTS_DOPPLER_IDENTITY_ID`.
 
 Then add the caller to one repository, run it by hand with `dry-run: true`, read the log
 (`dry run: would SetSelect {...}`), remove the flag and run again. The project's own built-in workflows

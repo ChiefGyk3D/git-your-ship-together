@@ -20,6 +20,9 @@ Symptom, likely cause, fix. Many of these cost an afternoon the first time; the 
 | Secret step does nothing, no error | `doppler-identity-id` unset and no `DOPPLER_TOKEN`: path 3 ("nothing") | Set `DOPPLER_IDENTITY_ID` (a repository **variable**) and pass `doppler-identity-id: ${{ vars.DOPPLER_IDENTITY_ID }}` |
 | Snyk job fails with exit 2 | Expired or revoked `SNYK_TOKEN` | Renew it with `scripts/doppler-ci-set.sh SNYK_TOKEN`. The token expires; note the date |
 | `project-sync` needs a fetch on `pull_request_target` but skips | `doppler-trusted-refs-only` is `true` | Set `false` in *that caller only*; never in a caller that checks out the PR |
+| `project-sync` fails on `pull_request_target` with `claim "sub" does not match` | The identity has no `:pull_request` subject, as the `ci` identity must not | Use the `projects`/`prd` scope and its own identity (`PROJECTS_DOPPLER_IDENTITY_ID`), or pass `pull-request-events: false`, or drop the trigger from the caller |
+| zizmor `dangerous-triggers` on a `project-sync` caller | The trigger is the finding | Keep the two `# zizmor: ignore[dangerous-triggers]` lines from the README template, with their reason |
+| `Input 'app-id' has been deprecated` | The caller passes `app-id` | Pass `client-id: ${{ vars.PROJECTS_APP_CLIENT_ID }}` instead |
 
 ## Actions settings and startup
 

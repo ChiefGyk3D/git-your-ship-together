@@ -1284,7 +1284,9 @@ name: Project sync
 on:
   issues:
     types: [opened, reopened, closed, edited]
-  pull_request_target:
+  # zizmor: ignore[dangerous-triggers] -- no checkout, no run step, the inlined
+  # script reads the event payload as JSON and never the pull request's text.
+  pull_request_target: # zizmor: ignore[dangerous-triggers]
     types: [opened, reopened, ready_for_review, converted_to_draft, closed]
   schedule:
     - cron: '17 5 * * 1'
@@ -1307,12 +1309,12 @@ jobs:
       DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
     with:
       project-url: https://github.com/orgs/<org>/projects/<n>
-      app-id: ${{ vars.PROJECTS_APP_ID }}
+      client-id: ${{ vars.PROJECTS_APP_CLIENT_ID }}
       default-area-field: Area      # optional: the Area this repository's new items get
       default-area: Hill
-      doppler-project: ci
-      doppler-config: ci
-      doppler-identity-id: ${{ vars.DOPPLER_IDENTITY_ID }}
+      doppler-project: projects
+      doppler-config: prd
+      doppler-identity-id: ${{ vars.PROJECTS_DOPPLER_IDENTITY_ID }}
       doppler-trusted-refs-only: false   # required for pull_request_target; see below
 ```
 
@@ -1330,7 +1332,9 @@ Inputs of `project-sync.yml`:
 | `reconcile` | `true` | Walk the repository and the board on `schedule` and `workflow_dispatch`; `false` makes those a no-op |
 | `default-area-field`, `default-area` | empty | A single-select field and option set on items this workflow adds, and only on those |
 | `dry-run` | `false` | Read the board and print every change instead of making it. With no token it only says so and succeeds, which is how this repository's CI exercises the workflow |
-| `app-id` | required | The numeric id of the GitHub App; an identifier, not a secret. Callers pass the repository variable `PROJECTS_APP_ID` |
+| `client-id` | empty (set this or `app-id`) | The Client ID of the GitHub App, from its settings page; an identifier, not a secret. Callers pass the repository variable `PROJECTS_APP_CLIENT_ID` |
+| `app-id` | empty | Deprecated, accepted for one release. The numeric App ID; `actions/create-github-app-token` deprecates it and prints a warning when it is passed. Used only when `client-id` is empty |
+| `pull-request-events` | `true` | `false` skips the whole job on a `pull_request_target` run, so a caller that keeps that trigger without a Doppler identity that covers it stays green; see below |
 | `egress-policy` | `audit` | harden-runner: `audit` or `block` |
 | `allowed-endpoints` | `api.doppler.com:443 api.github.com:443` | The allow-list for `block`; these two are all the job reaches |
 | `extra-allowed-endpoints` | empty | Appended to the list |
@@ -1338,7 +1342,17 @@ Inputs of `project-sync.yml`:
 | `doppler-trusted-refs-only` | `true` | Fetch the App key only on the default branch, a tag or a schedule. A caller that triggers on `pull_request_target` sets it `false`; see below |
 | `timeout-minutes` | `15` | Job timeout |
 
-##### Why `pull_request_target`
+##### Why `pull_request_target`, and the lint line
+
+Every caller runs the workflow lint of `python-ci.yml`, and zizmor reports
+`dangerous-triggers` on any `pull_request_target`, which would turn `CI green`
+red. The two `# zizmor: ignore[dangerous-triggers]` lines in the template are
+the answer, and the reasons they hold are written beside them: no checkout, no
+`run:` step, a script that reads the payload as JSON. A caller repository with
+workflow tests of its own (one that forbids `pull_request_target` outright, or
+allow-lists every write permission) needs a narrow exemption for this one file
+that also asserts the file has no `actions/checkout` and no `run:` step, so the
+exemption stays falsifiable.
 
 A `pull_request` run from a fork gets a read-only token and no secrets, so a
 fork's pull request could never reach the board. `pull_request_target` runs the
@@ -1352,6 +1366,46 @@ false`, because the Doppler rule treats `pull_request_target` as untrusted
 along with every other pull request event, and so would skip the fetch. Do not
 copy that line into a caller that checks out the pull request. Pin the called
 workflow by commit, as every caller does: that pin is what runs.
+
+A caller that cannot give the Doppler identity a pull-request subject (see
+[the Doppler scope](#the-project-sync-doppler-scope)) has two choices. Drop the
+`pull_request_target` trigger from the caller and let the weekly reconcile add
+and close pull requests, or keep the trigger and pass
+`pull-request-events: false`, which skips the job on that event instead of
+failing it. Leaving the trigger on with `pull-request-events: true` and no
+matching identity is the red run this paragraph exists to prevent.
+
+##### The project-sync Doppler scope
+
+The App's private key does not live in the shared `ci` config: every value
+there is exported into every CI job of every repository, and the board App's
+key has no business in a lint job. It has its own scope, which is also what
+lets this one workflow accept a pull-request subject without touching `ci`,
+where the identity must never match `:pull_request`:
+
+1. Doppler project `projects`, config `prd`, holding exactly one secret,
+   `PROJECTS_APP_PRIVATE_KEY`.
+2. One service account, `gha-projects`, Viewer on `projects`/`prd` only, with
+   one OIDC identity whose subjects are, per calling repository (or the
+   organization wildcard, acceptable here because the config holds only this
+   key), in both forms GitHub issues:
+   - `repo:<owner>/<repo>:ref:refs/heads/main`
+   - `repo:<owner>/<repo>:pull_request`
+   - `repo:<owner>@<owner-id>/<repo>@<repo-id>:ref:refs/heads/main`
+   - `repo:<owner>@<owner-id>/<repo>@<repo-id>:pull_request`
+
+   The audience is `https://github.com/<owner>`.
+3. Callers pass `doppler-project: projects`, `doppler-config: prd` and
+   `doppler-identity-id: ${{ vars.PROJECTS_DOPPLER_IDENTITY_ID }}`. That
+   repository variable is separate from `DOPPLER_IDENTITY_ID`, so the `ci`
+   identity is untouched.
+
+Why `:pull_request` is acceptable here and nowhere else: the job has no
+checkout and runs no code from the pull request, the config holds one key, and
+that key can only write a board. The blast radius if the path is abused: a
+fork's pull request event can mint a token that writes items and field values
+to the board and reads issues and pull requests in the installed repositories.
+It cannot read any other secret or run any code.
 
 #### The GitHub App the owner creates
 
@@ -1374,8 +1428,9 @@ Create it once, by hand:
    automatically. Nothing else.
 3. Under "Where can this GitHub App be installed?" choose **Only on this
    account** (the organization). Click Create GitHub App.
-4. On the App's page, note the **App ID** (a number). It is an identifier, not a
-   secret.
+4. On the App's page, note the **Client ID** (starts with `Iv`) and, if you
+   still call with the deprecated `app-id`, the **App ID** (a number). Both are
+   identifiers, not secrets.
 5. Scroll to Private keys and **Generate a private key**; a `.pem` file
    downloads.
 6. Open the App's Install App page, install it on the **organization**, choose
@@ -1383,12 +1438,14 @@ Create it once, by hand:
    workflow.
 7. Store the key in Doppler. The prompt reads one line, which a PEM is not, so
    give the helper the file:
-   `scripts/doppler-ci-set.sh --from-file ~/Downloads/<app>.private-key.pem PROJECTS_APP_PRIVATE_KEY`
+   `DOPPLER_CI_CONFIG=prd scripts/doppler-ci-set.sh --from-file ~/Downloads/<app>.private-key.pem PROJECTS_APP_PRIVATE_KEY projects`
    The name is fixed: the workflow reads `PROJECTS_APP_PRIVATE_KEY` from the Doppler config and nothing else.
-   The value goes to the `ci` config, over standard input, and is never
-   printed.
+   The value goes to the `projects`/`prd` config described above, never to
+   `ci`, over standard input, and is never printed.
 8. On each calling repository set the variable the caller reads:
-   `gh variable set PROJECTS_APP_ID --repo <org>/<repo> --body <app id>`
+   `gh variable set PROJECTS_APP_CLIENT_ID --repo <org>/<repo> --body <client id>`
+   and, from the Doppler identity above,
+   `gh variable set PROJECTS_DOPPLER_IDENTITY_ID --repo <org>/<repo> --body <identity uuid>`
 9. Delete the downloaded `.pem`. Doppler holds the only copy.
 
 What it can do: add items to the project and set their fields, and read issues

@@ -175,7 +175,7 @@ failed at the Doppler step with the `claim "sub"` error, while `issues`,
 found the second problem: the board App's private key sat in the shared `ci`
 config, so it was in the environment of every job of every repository.
 
-The proposed fix in issue #93, **open as of this writing**, is a separate Doppler
+The fix for issue #93 (landed in #103) is a separate Doppler
 project `projects`, config `prd`, holding exactly one secret
 (`PROJECTS_APP_PRIVATE_KEY`), its own service account and identity whose subjects
 include the `:pull_request` forms, and a separate repository variable
@@ -184,8 +184,7 @@ because the job has no checkout, the config holds one key, and the key can only
 write a board. The blast radius is stated in the issue: a fork's pull request
 event can mint a token that writes items and field values and reads issues and
 pull requests in the installed repositories; it cannot read any other secret or
-run any code. Until it lands, the README's `ci`-config instructions are what
-exist. See [Keeping a project board current](Keeping-a-project-board-current.md).
+run any code. See [Keeping a project board current](Keeping-a-project-board-current.md).
 
 ## The audit gets its own project
 

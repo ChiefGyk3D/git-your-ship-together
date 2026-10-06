@@ -36,16 +36,15 @@ jobs:
       DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
     with:
       project-url: https://github.com/orgs/<org>/projects/<n>
-      app-id: ${{ vars.PROJECTS_APP_ID }}
-      doppler-project: ci
-      doppler-config: ci
-      doppler-identity-id: ${{ vars.DOPPLER_IDENTITY_ID }}
+      client-id: ${{ vars.PROJECTS_APP_CLIENT_ID }}
+      doppler-project: projects
+      doppler-config: prd
+      doppler-identity-id: ${{ vars.PROJECTS_DOPPLER_IDENTITY_ID }}
       doppler-trusted-refs-only: false   # required for pull_request_target; never copy this beside a checkout
 ```
 
-**Open issues that change this caller:** #93 (a separate Doppler project and identity for the App key, because the `ci` identity
-correctly refuses the `pull_request` subject), #91 (the zizmor ignore comment above), #92 (`client-id` replaces `app-id`).
-First live callers hit all three on 2026-10-05.
+A caller whose identity cannot cover a pull-request subject sets `pull-request-events: false` (the job skips on that event) or drops the trigger.
+`app-id` is deprecated and accepted for one release; pass `client-id`. These were issues #91, #92 and #93, fixed in #103.
 
 <!-- inputs -->
 

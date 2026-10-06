@@ -8,7 +8,9 @@
 # A multi-line value (a PEM private key) cannot be typed at the prompt, which
 # reads one line. Give the file instead, and delete it afterwards:
 #
-#   scripts/doppler-ci-set.sh --from-file ./key.pem PROJECTS_APP_PRIVATE_KEY
+#   DOPPLER_CI_CONFIG=prd scripts/doppler-ci-set.sh --from-file ./key.pem PROJECTS_APP_PRIVATE_KEY projects
+#
+# (the project-sync App key has its own `projects`/`prd` scope, never `ci`).
 #
 # Extra arguments name other projects to set the same value in (the default
 # is the `ci` project alone). Set DOPPLER_CI_CONFIG to target a config other
