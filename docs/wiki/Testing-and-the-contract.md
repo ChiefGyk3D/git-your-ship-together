@@ -37,7 +37,8 @@ lock.
 | `tests/test_fuzz.py` | `python-fuzz.yml`: its pin, and its run step executed against tiny targets (missing dir, no match, passing, crashing) |
 | `tests/test_security_jobs.py` | Semgrep defaults and content-driven config; the gitleaks job as a pinned binary with its canary |
 | `tests/test_image_hardening.py` | The container-release image checks (non-root, read-only probe) |
-| `tests/test_verify_published.py` | `verify-published.yml`'s steps and gate |
+| `tests/test_verify_published.py` | `verify-published.yml`'s steps and gate, image and release halves |
+| `tests/test_sbom.py` | The package release's SBOMs: the one syft pin, the SBOMs kept out of the PyPI upload and into the checksums and provenance; the CycloneDX file validated against its own schema version (the committed sample, or the fixture job's real output) |
 | `tests/test_docs_wiki.py` | `docs-pages.yml` and `wiki-publish.yml`: where the write grants sit, default-branch-only, and the publish script itself run against a local git repository |
 | `tests/test_project_sync.py` | `project-sync.yml` and `scripts/project_sync.py` against recorded API responses |
 | `tests/test_new_repo.py` | `scripts/new-repo.sh --dry-run` over synthetic trees |

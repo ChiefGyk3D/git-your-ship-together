@@ -9,6 +9,13 @@
 #   3. gh attestation verify the SLSA build provenance for the image's owner.
 #   4. For each platform: pull it, then run the caller's check against it.
 #
+# A GitHub release is verified the same way when `release-tag` is set (alone,
+# or beside an image): every asset is downloaded, SHA256SUMS must list every
+# file and match it, `gh attestation verify` must pass for every file for the
+# owner, and, unless `verify-release-sbom` is false, `sbom.cdx.json` and
+# `sbom.spdx.json` must be present, listed and the formats they claim to be.
+# That is what python-package-release.yml publishes.
+#
 # Call it with:
 #
 #   on:
@@ -37,9 +44,21 @@ on:
   workflow_call:
     inputs:
       image:
-        description: Image reference to verify, for example `ghcr.io/chiefgyk3d/star-daemon:latest`. A digest reference is stronger than a tag.
+        description: Image reference to verify, for example `ghcr.io/chiefgyk3d/star-daemon:latest`. A digest reference is stronger than a tag. Empty skips the image checks; set this, `release-tag` or both.
         type: string
-        required: true
+        default: ""
+      release-tag:
+        description: GitHub release tag whose assets are verified (checksums, build provenance and, by default, the SBOMs). Empty skips the release checks.
+        type: string
+        default: ""
+      release-repository:
+        description: owner/name holding the release; empty means the calling repository.
+        type: string
+        default: ""
+      verify-release-sbom:
+        description: Require `sbom.cdx.json` and `sbom.spdx.json` among the release assets, listed in SHA256SUMS and of the format they claim. Turn off for a release made by artifact-release.yml, which does not write them.
+        type: boolean
+        default: true
       identity-regexp:
         description: Regular expression the cosign certificate identity must match. Both cosign commands use it.
         type: string
@@ -87,6 +106,7 @@ permissions:
 jobs:
   verify:
     name: Verify ${{ inputs.image }}
+    if: inputs.image != ''
     runs-on: ubuntu-24.04
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
@@ -185,10 +205,89 @@ jobs:
             echo "::endgroup::"
           done
 
+  verify-release:
+    name: Verify release ${{ inputs.release-tag }}
+    if: inputs.release-tag != ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read  # list and download the release's assets
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: ${{ inputs.egress-policy }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          # The agent may only stop reporting to StepSecurity in block mode.
+          disable-telemetry: ${{ inputs.egress-policy == 'block' }}
+
+      - name: Download the release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.release-tag }}
+          REPO: ${{ inputs.release-repository || github.repository }}
+        run: |
+          set -euo pipefail
+          mkdir release
+          gh release download "$TAG" --repo "$REPO" --dir release
+          ls -l release
+
+      # Every file must be listed, and every listed file must match: a file
+      # added to the release after SHA256SUMS was written is as wrong as one
+      # that changed.
+      - name: Verify the checksums
+        run: |
+          set -euo pipefail
+          cd release
+          test -s SHA256SUMS || { echo "::error::the release has no SHA256SUMS"; exit 1; }
+          sha256sum -c SHA256SUMS
+          listed="$(awk '{print $2}' SHA256SUMS | sed 's#^\./##' | sort)"
+          present="$(find . -maxdepth 1 -type f ! -name SHA256SUMS ! -name '*.sigstore.json' -printf '%f\n' | sort)"
+          if [ "$listed" != "$present" ]; then
+            echo "::error::SHA256SUMS and the release assets disagree"
+            diff <(echo "$listed") <(echo "$present") || true
+            exit 1
+          fi
+          echo "checksums verified: $(wc -l < SHA256SUMS) file(s)"
+
+      - name: Verify the build provenance of every asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ inputs.release-repository || github.repository }}
+        run: |
+          set -euo pipefail
+          owner="${REPO%%/*}"
+          cd release
+          for f in *; do
+            case "$f" in *.sigstore.json) continue ;; esac
+            echo "::group::$f"
+            gh attestation verify "$f" --owner "$owner"
+            echo "::endgroup::"
+          done
+
+      - name: Verify the SBOMs
+        if: inputs.verify-release-sbom
+        run: |
+          set -euo pipefail
+          cd release
+          for f in sbom.cdx.json sbom.spdx.json; do
+            test -f "$f" || { echo "::error::the release has no $f"; exit 1; }
+            grep -q "[ /]$f\$" SHA256SUMS || { echo "::error::SHA256SUMS does not list $f"; exit 1; }
+          done
+          python3 - <<'PY'
+          import json
+          cdx = json.load(open("sbom.cdx.json"))
+          spdx = json.load(open("sbom.spdx.json"))
+          assert cdx.get("bomFormat") == "CycloneDX", "sbom.cdx.json is not CycloneDX"
+          assert cdx.get("components"), "sbom.cdx.json lists no components"
+          assert str(spdx.get("spdxVersion", "")).startswith("SPDX-"), "sbom.spdx.json is not SPDX"
+          assert spdx.get("packages"), "sbom.spdx.json lists no packages"
+          print("SBOMs verified:", cdx["specVersion"], spdx["spdxVersion"])
+          PY
+
   verified:
     name: Verified
     if: always()
-    needs: [verify]
+    needs: [verify, verify-release]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions: {}
@@ -200,11 +299,21 @@ jobs:
           disable-telemetry: ${{ inputs.egress-policy == 'block' }}
       - name: Verification passed
         env:
-          RESULT: ${{ needs.verify.result }}
+          IMAGE_RESULT: ${{ needs.verify.result }}
+          RELEASE_RESULT: ${{ needs.verify-release.result }}
         run: |
           set -euo pipefail
-          echo "verify: $RESULT"
-          if [ "$RESULT" != "success" ]; then
-            echo "::error::the published image did not verify"
+          echo "image: $IMAGE_RESULT"
+          echo "release: $RELEASE_RESULT"
+          # A skipped job is one the caller did not ask for; both skipped is
+          # a call that verified nothing.
+          if [ "$IMAGE_RESULT" = "skipped" ] && [ "$RELEASE_RESULT" = "skipped" ]; then
+            echo "::error::neither image nor release-tag was set, so nothing was verified"
             exit 1
           fi
+          for result in "$IMAGE_RESULT" "$RELEASE_RESULT"; do
+            if [ "$result" != "success" ] && [ "$result" != "skipped" ]; then
+              echo "::error::the published artefact did not verify"
+              exit 1
+            fi
+          done

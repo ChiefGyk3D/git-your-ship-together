@@ -7,6 +7,8 @@
 #
 # atheris runs the fuzz targets in tests/fuzz_*/ (tests/test_fuzz.py); x86_64 wheels only.
 atheris==3.1.0
+# Validates the CycloneDX SBOM python-package-release.yml writes (tests/test_sbom.py); the extra is the JSON-schema checker.
+cyclonedx-python-lib[json-validation]==11.12.0
 pytest==9.1.1
 PyYAML==6.0.3
 ruff==0.16.9

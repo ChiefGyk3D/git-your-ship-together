@@ -16,6 +16,11 @@
 #          SHA256SUMS, to the GitHub release for the tag, creating it from
 #          the notes when it does not exist and uploading to it when it does
 #          (a caller that triggers on `release: published`).
+#   The build job also writes a CycloneDX and an SPDX SBOM (`sbom.cdx.json`,
+#   `sbom.spdx.json`) with syft, pinned by the `syft-version` and `syft-sha256` inputs, over the
+#   unpacked wheel and sdist. They travel in their own artifact, never in
+#   `dist/`, so PyPI is not offered them; the release job adds them to the
+#   release assets, to SHA256SUMS and to the same build-provenance step.
 #
 # Call it with:
 #
@@ -89,13 +94,25 @@ on:
         type: string
         default: pypi
       github-release:
-        description: Attach the distribution files, their SHA256SUMS and build provenance to the GitHub release for the tag.
+        description: Attach the distribution files, their SBOMs, their SHA256SUMS and build provenance to the GitHub release for the tag.
         type: boolean
         default: true
       release-title:
         description: Title of a GitHub release this workflow creates; empty uses the tag.
         type: string
         default: ""
+      sbom:
+        description: Write a CycloneDX and an SPDX SBOM for the built wheel and sdist (syft, pinned) and attach them to the GitHub release with the rest, listed in SHA256SUMS and covered by the same build provenance. They are written whenever the package is built, so a pull request exercises them; they are only published with the release.
+        type: boolean
+        default: true
+      syft-version:
+        description: syft release to download (anchore/syft), without the `v`; the one syft pin in this repository. Changing it means changing `syft-sha256`. To bump - `gh release download v<new> -R anchore/syft -p '*_linux_amd64.tar.gz'`, `sha256sum` it and compare the line in the release's own `*_checksums.txt`.
+        type: string
+        default: "1.54.0"
+      syft-sha256:
+        description: SHA-256 of the syft linux_amd64 tarball for that version.
+        type: string
+        default: 54a87372498168b2d033e876fd41fa4e8035b872699e525a57046e1f2f09c860
       attest:
         description: Record SLSA build provenance for every distribution file through GitHub's attestation API.
         type: boolean
@@ -223,6 +240,70 @@ jobs:
           "$RUNNER_TEMP/smoke/bin/pip" install --disable-pip-version-check dist/*.whl
           PATH="$RUNNER_TEMP/smoke/bin:$PATH" bash -eo pipefail -c "$COMMAND"
 
+      # syft reads metadata and runs nothing. It is pointed at the unpacked
+      # wheel and sdist rather than the archives, because it does not open a
+      # wheel and reports an sdist's files by their extraction path. The
+      # binary is pinned by hash; no action and no new egress host is
+      # involved (github.com redirects to release-assets.githubusercontent.com,
+      # both already on the list).
+      - name: Write the SBOMs with syft
+        if: inputs.sbom
+        env:
+          SYFT_CHECK_FOR_APP_UPDATE: "false"
+          SYFT_VERSION: ${{ inputs.syft-version }}
+          SYFT_SHA256: ${{ inputs.syft-sha256 }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/syft.tar.gz"
+          curl -sSfL -o "$archive" "https://github.com/anchore/syft/releases/download/v${SYFT_VERSION}/syft_${SYFT_VERSION}_linux_amd64.tar.gz"
+          echo "${SYFT_SHA256}  ${archive}" | sha256sum -c -
+          mkdir "$RUNNER_TEMP/syft-bin"
+          tar -xzf "$archive" -C "$RUNNER_TEMP/syft-bin" syft
+          syft="$RUNNER_TEMP/syft-bin/syft"
+          "$syft" --version
+
+          stage="$RUNNER_TEMP/sbom-stage"
+          out="$RUNNER_TEMP/sbom"
+          mkdir -p "$stage/wheel" "$stage/sdist" "$out"
+          for wheel in dist/*.whl; do
+            python -m zipfile -e "$wheel" "$stage/wheel"
+          done
+          tar -xzf dist/*.tar.gz -C "$stage/sdist"
+          stem="$(basename dist/*.tar.gz .tar.gz)"
+          name="${stem%-*}"
+          (
+            cd "$stage"
+            "$syft" scan dir:. --source-name "$name" --source-version "$VERSION" \
+              -o "cyclonedx-json=$out/sbom.cdx.json" -o "spdx-json=$out/sbom.spdx.json"
+          )
+          # The runner's path says nothing about the package.
+          sed -i "s#${stage}/##g; s#${stage}##g" "$out/sbom.cdx.json" "$out/sbom.spdx.json"
+          ls -l "$out"
+
+      # An SBOM that lists nothing is worse than none: it reads as assurance.
+      - name: The SBOMs must name the package
+        if: inputs.sbom
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          python - "$RUNNER_TEMP/sbom" "$VERSION" <<'PY'
+          import json, re, sys
+          out, version = sys.argv[1:]
+          norm = lambda n: re.sub(r"[-_.]+", "-", n).lower()
+          cdx = json.load(open(f"{out}/sbom.cdx.json"))
+          spdx = json.load(open(f"{out}/sbom.spdx.json"))
+          assert cdx.get("bomFormat") == "CycloneDX", "sbom.cdx.json is not CycloneDX"
+          assert str(spdx.get("spdxVersion", "")).startswith("SPDX-"), "sbom.spdx.json is not SPDX"
+          want = norm(cdx["metadata"]["component"]["name"])
+          have = {(norm(c["name"]), c.get("version")) for c in cdx.get("components", []) if c.get("type") == "library"}
+          assert (want, version) in have, f"sbom.cdx.json lists no {want} {version}: {sorted(have)}"
+          have = {(norm(p["name"]), p.get("versionInfo")) for p in spdx.get("packages", [])}
+          assert (want, version) in have, f"sbom.spdx.json lists no {want} {version}: {sorted(have)}"
+          print(f"SBOMs list {want} {version}")
+          PY
+
       - name: Write the release notes
         env:
           COMMAND: ${{ inputs.release-notes-command }}
@@ -241,6 +322,14 @@ jobs:
         with:
           name: dist
           path: ${{ inputs.package-directory }}/dist/
+          if-no-files-found: error
+          retention-days: 7
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: inputs.sbom
+        with:
+          name: sbom
+          path: ${{ runner.temp }}/sbom/
           if-no-files-found: error
           retention-days: 7
 
@@ -302,6 +391,15 @@ jobs:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: dist
+          path: dist/
+
+      # Into dist/ beside the distributions, so the checksums, the provenance
+      # and the upload below treat them as any other asset. The PyPI job
+      # downloads `dist` alone and never sees them.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: inputs.sbom
+        with:
+          name: sbom
           path: dist/
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
