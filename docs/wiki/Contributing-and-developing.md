@@ -15,7 +15,7 @@ zizmor --offline .                                        # workflow security
 python scripts/gen_wiki.py --check                       # the wiki generates cleanly
 ```
 
-(`python scripts/audit_baseline.py` needs a token with admin read on the repositories; you rarely need it.)
+(`python scripts/audit_baseline.py` needs a token with admin read on the repositories, and for an organization's repositories an owner's token or the audit App's; you rarely need it.)
 
 ## Before you open a pull request
 
