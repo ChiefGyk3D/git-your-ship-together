@@ -2,7 +2,9 @@
 
 **What it does.** Verifies a published image from the outside, the way an operator would: `cosign verify` for the signature,
 `cosign verify-attestation --type spdxjson` for the SBOM, `gh attestation verify` for provenance, then each platform pulled and
-your `test-command` run against it. A final `Verified` job is the gate. It stops at the first failure.
+your `test-command` run against it. Set `release-tag` and it verifies a GitHub release the same way: every asset against
+`SHA256SUMS`, build provenance for every file, and (unless `verify-release-sbom` is false) the two SBOMs a Python package release
+carries. A final `Verified` job is the gate. It stops at the first failure.
 
 **Why it exists.** The producer signs, attaches an SBOM and records provenance, and nothing proved those verify from outside. A
 signature nobody checks is a claim. Run it nightly and a release that stops verifying is a red job, not a surprise.

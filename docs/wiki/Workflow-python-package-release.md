@@ -16,6 +16,13 @@ ways. The checks that matter are the ones that catch a release that does not mat
 | `publish-pypi` | `id-token: write` | Checks nothing out. Hands `dist/` to PyPI over the job's OIDC identity from the `pypi` environment |
 | `github-release` | `contents: write`, `id-token: write`, `attestations: write` | Checks nothing out. Records provenance for every file and attaches them with a `SHA256SUMS`; creates the release from the notes or uploads to one that exists |
 
+**SBOMs.** The build job also runs [syft](https://github.com/anchore/syft) (pinned by version and sha256, the `syft-version`
+and `syft-sha256` inputs) over the unpacked wheel and sdist and writes `sbom.cdx.json` (CycloneDX) and `sbom.spdx.json` (SPDX). They
+are their own artifact, so PyPI never receives them; `github-release` adds them to the release, to `SHA256SUMS` and to the same
+provenance step. `sbom: true` is the default, and a pull request writes them too, so a broken SBOM is a red check, not a surprise at
+tag time. They list the package and its metadata, not a resolved dependency tree. `artifact-release.yml` does not write them: its
+files are arbitrary (a `.deb`, a firmware blob) and syft would report nothing, which reads as assurance and is not.
+
 A pull request builds and checks and never publishes, whatever `publish` says. The version is read off the sdist's own name, so a
 static `version =`, a dynamic attribute and a VCS plugin all answer alike.
 

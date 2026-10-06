@@ -342,10 +342,45 @@ jobs:
       image: ghcr.io/chiefgyk3d/star-daemon:latest
       test-command: docker run --rm "$IMAGE" sh -c "python -m py_compile /app/star-daemon.py /app/star_daemon.py /app/star_announcer.py /app/github_stars.py /app/config.py /app/platforms.py"
 
+  # The SBOMs the fixture-package job just wrote, validated against the
+  # CycloneDX schema: the product of the workflow, not a sample of it. The
+  # artifact is in this run, so no token beyond the default is involved.
+  fixture-sbom:
+    name: fixture sbom
+    needs: fixture-package
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+          cache: pip
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: sbom
+          path: ${{ runner.temp }}/sbom/
+      - name: Validate what the package workflow wrote
+        env:
+          SBOM_DIR: ${{ runner.temp }}/sbom
+        run: |
+          set -euo pipefail
+          ls -l "$SBOM_DIR"
+          pip install --require-hashes -r requirements-dev.txt
+          pytest tests/test_sbom.py
+
   ci-green:
     name: CI green
     if: always()
-    needs: [actionlint, zizmor, test, fixture-ci, fixture-bash, fixture-fuzz, fixture-tofu, fixture-arduino, fixture-package, fixture-artifact, fixture-pages, fixture-wiki, fixture-release, fixture-verify, fixture-project-sync]
+    needs: [actionlint, zizmor, test, fixture-ci, fixture-bash, fixture-fuzz, fixture-tofu, fixture-arduino, fixture-package, fixture-sbom, fixture-artifact, fixture-pages, fixture-wiki, fixture-release, fixture-verify, fixture-project-sync]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}
