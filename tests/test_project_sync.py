@@ -391,10 +391,13 @@ def test_no_personal_access_token_path_remains():
     assert "PROJECTS_TOKEN" not in text and "token-secret-name" not in text and "PS_TOKEN_SECRET_NAME" not in text
 
 
-def test_inputs_are_the_app_id_and_the_key_secret_name():
+def test_inputs_are_the_client_id_the_deprecated_app_id_and_no_key_name():
     # PyYAML reads the bare key `on` as True.
     inputs = _workflow()[True]["workflow_call"]["inputs"]
-    assert inputs["app-id"]["required"] is True
+    assert inputs["client-id"]["default"] == "" and "required" not in inputs["client-id"]
+    assert "Deprecated" in inputs["app-id"]["description"]
+    assert inputs["app-id"]["default"] == ""  # no longer required: client-id replaces it
+    assert inputs["pull-request-events"]["default"] is True  # opt out, never a silent change
     assert "app-key-secret-name" not in inputs  # the secret name is fixed: PROJECTS_APP_PRIVATE_KEY
     assert "token-secret-name" not in inputs
 
@@ -407,10 +410,16 @@ def test_the_token_is_minted_by_a_pinned_app_action_scoped_to_the_calling_reposi
     w = mint["with"]
     assert w["owner"] == "${{ github.repository_owner }}"
     assert w["repositories"] == "${{ github.event.repository.name }}"
-    assert w["app-id"] == "${{ inputs.app-id }}"
+    # the Client ID path passes `client-id` and never the deprecated `app-id`: the
+    # runner warns whenever the deprecated input is present, even if empty
+    assert w["client-id"] == "${{ inputs.client-id }}" and "app-id" not in w
+    legacy = next(s for s in steps if s.get("id") == "app_legacy")
+    assert legacy["uses"] == mint["uses"]
+    assert legacy["with"]["app-id"] == "${{ inputs.app-id }}" and "client-id" not in legacy["with"]
+    assert "inputs.client-id == ''" in legacy["if"]  # app-id is a fallback only
     assert "skip-token-revoke" not in w  # the action revokes the token at job end
     sync = next(s for s in steps if s.get("name") == "Sync the project")
-    assert sync["env"]["PS_TOKEN"] == "${{ steps.app.outputs.token }}"
+    assert sync["env"]["PS_TOKEN"] == "${{ steps.app.outputs.token || steps.app_legacy.outputs.token }}"
     # the key never goes into the sync step's environment under its own name
     assert "private-key" not in sync["env"]
 
@@ -436,3 +445,61 @@ def test_doppler_ci_set_reads_a_multiline_value_from_a_file(tmp_path):
     assert r.returncode == 0, r.stderr
     assert out.read_text() == "-----BEGIN KEY-----\nabc\ndef\n-----END KEY-----"  # trailing newline trimmed by $(...)
     assert "abc" not in r.stdout + r.stderr
+
+
+def test_pull_request_events_false_skips_only_the_pull_request_target_event():
+    cond = _workflow()["jobs"]["sync"]["if"]
+    assert cond == "${{ inputs.pull-request-events || github.event_name != 'pull_request_target' }}"
+
+
+def test_a_key_with_no_app_identifier_fails_with_a_message_naming_the_fix():
+    steps = _workflow()["jobs"]["sync"]["steps"]
+    step = next(s for s in steps if s.get("name") == "Require an App identifier")
+    assert "inputs.client-id == ''" in step["if"] and "inputs.app-id == ''" in step["if"]
+    assert "PROJECTS_APP_CLIENT_ID" in step["run"] and "exit 1" in step["run"]
+
+
+# --- the README's caller, held to the workflow and to the lint -----------------
+
+README = (REPO / "README.md").read_text()
+
+
+def _caller_template() -> str:
+    section = README[README.index("#### Call it") :]
+    m = re.search(r"```yaml\n(.*?)```", section, re.S)
+    assert m, "README has no caller template under '#### Call it'"
+    return m.group(1)
+
+
+def test_the_readme_caller_carries_the_zizmor_ignore_on_the_trigger_line():
+    template = _caller_template()
+    assert re.search(r"^  pull_request_target: # zizmor: ignore\[dangerous-triggers\]$", template, re.M), (
+        "the README caller must carry `# zizmor: ignore[dangerous-triggers]` on the pull_request_target line, "
+        "or every copy of it turns the caller's `CI green` red"
+    )
+    assert "no checkout, no run step" in template  # the reason is written beside the ignore
+    assert "actions/checkout" not in template and "run:" not in template
+
+
+def test_the_readme_caller_names_the_projects_scope_and_the_client_id_variable():
+    template = _caller_template()
+    assert "doppler-project: projects" in template and "doppler-config: prd" in template
+    assert "doppler-identity-id: ${{ vars.PROJECTS_DOPPLER_IDENTITY_ID }}" in template
+    assert "client-id: ${{ vars.PROJECTS_APP_CLIENT_ID }}" in template
+    assert "app-id:" not in template and "doppler-project: ci" not in template
+
+
+def test_every_input_the_readme_caller_passes_exists_in_the_workflow():
+    caller = yaml.safe_load(_caller_template())
+    passed = set(caller["jobs"]["sync"]["with"])
+    assert passed <= set(_workflow()[True]["workflow_call"]["inputs"]), passed
+
+
+def test_no_readme_table_or_command_puts_the_app_key_in_ci():
+    for line in README.splitlines():
+        if line.lstrip().startswith("|"):
+            assert "PROJECTS_APP_PRIVATE_KEY" not in line, f"a README table lists the App key: {line!r}"
+        if "doppler-ci-set.sh" in line and "PROJECTS_APP_PRIVATE_KEY" in line:
+            assert "DOPPLER_CI_CONFIG=prd" in line and line.rstrip("`").endswith(" projects"), (
+                f"the App key command must target projects/prd, not ci: {line!r}"
+            )
