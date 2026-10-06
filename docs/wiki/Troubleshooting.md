@@ -1,7 +1,7 @@
 # Troubleshooting
 
 Symptom, likely cause, fix. Many of these cost an afternoon the first time; the stories are in
-[Lessons Learned](Lessons-Learned).
+[Lessons learned](Lessons-learned.md).
 
 ## Network and egress
 
@@ -20,6 +20,9 @@ Symptom, likely cause, fix. Many of these cost an afternoon the first time; the 
 | Secret step does nothing, no error | `doppler-identity-id` unset and no `DOPPLER_TOKEN`: path 3 ("nothing") | Set `DOPPLER_IDENTITY_ID` (a repository **variable**) and pass `doppler-identity-id: ${{ vars.DOPPLER_IDENTITY_ID }}` |
 | Snyk job fails with exit 2 | Expired or revoked `SNYK_TOKEN` | Renew it with `scripts/doppler-ci-set.sh SNYK_TOKEN`. The token expires; note the date |
 | `project-sync` needs a fetch on `pull_request_target` but skips | `doppler-trusted-refs-only` is `true` | Set `false` in *that caller only*; never in a caller that checks out the PR |
+| `project-sync` fails on `pull_request_target` with `claim "sub" does not match` | The identity has no `:pull_request` subject, as the `ci` identity must not | Use the `projects`/`prd` scope and its own identity (`PROJECTS_DOPPLER_IDENTITY_ID`), or pass `pull-request-events: false`, or drop the trigger from the caller |
+| zizmor `dangerous-triggers` on a `project-sync` caller | The trigger is the finding | Keep the two `# zizmor: ignore[dangerous-triggers]` lines from the README template, with their reason |
+| `Input 'app-id' has been deprecated` | The caller passes `app-id` | Pass `client-id: ${{ vars.PROJECTS_APP_CLIENT_ID }}` instead |
 
 ## Actions settings and startup
 
@@ -52,7 +55,7 @@ Symptom, likely cause, fix. Many of these cost an afternoon the first time; the 
 | Cosign verification fails on the identity | You matched the caller's workflow; the certificate names the **reusable** workflow | Use `--certificate-identity-regexp '^https://github.com/ChiefGyk3D/git-your-ship-together/'` |
 | Temporary `<sha>-<arch>` tags clutter GHCR | Each platform job pushes one before the merge job joins them | Delete them when you no longer need them |
 | Docs `deploy` fails with a Pages message | Pages source is not "GitHub Actions" | Settings, Pages, Source: GitHub Actions. `deploy: false` meanwhile |
-| Wiki `publish` fails: "no first page yet" | GitHub only creates a wiki's git repo when a page is made in the UI | Create any page once, re-run ([Maintaining This Wiki](Maintaining-This-Wiki)) |
+| Wiki `publish` fails: "no first page yet" | GitHub only creates a wiki's git repo when a page is made in the UI | Create any page once, re-run ([Maintaining this wiki](Maintaining-this-wiki.md)) |
 
 ## The audit
 
@@ -69,4 +72,4 @@ Symptom, likely cause, fix. Many of these cost an afternoon the first time; the 
 | `...grants id-token: write. If intended, add it to ALLOWED_WRITES` | A new write permission | If genuinely needed, add it to `ALLOWED_WRITES` with a reason |
 | An input is "not documented" | Missing README table row | Add the row |
 | The inlined Doppler script differs from the action | You edited one copy | Edit `.github/actions/doppler-secrets/action.yml` and regenerate/sync every inlined copy |
-| `test_wiki` says a thing is not mentioned | The wiki has not caught up | Add it to the right page ([Maintaining This Wiki](Maintaining-This-Wiki)) |
+| `tests/test_wiki.py` says a thing is not mentioned | The wiki has not caught up | Add it to the right page ([Maintaining this wiki](Maintaining-this-wiki.md)) |
