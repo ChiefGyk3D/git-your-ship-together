@@ -25,6 +25,18 @@ repository. The container release builds whatever the Dockerfile builds.
 per language behind the same `CI green` gate, so branch protection is one
 rule everywhere.
 
+## Wiki
+
+The [wiki](https://github.com/ChiefGyk3D/git-your-ship-together/wiki) explains what
+this README states: what each workflow is, why it exists (the measured incident
+or threat behind it), how to call it, and what it refuses to do, written for
+someone who has never opened a workflow file. It has a getting-started page, the
+secrets model (Doppler and OIDC) explained from first principles, a page per
+reusable workflow with its inputs table generated from the YAML, and a glossary.
+It is generated from [`docs/wiki/`](docs/wiki) by `scripts/gen_wiki.py` and
+never edited by hand; this README stays the authority, and where the two
+disagree the wiki has a bug.
+
 ## Start here
 
 Read in this order. Each one is short.
@@ -45,13 +57,6 @@ Read in this order. Each one is short.
    footprint.
 7. [docs/ROADMAP.md](docs/ROADMAP.md): what is done, what is next, and what
    the lab's spare compute could carry.
-
-New to this, or learning from it? The
-[wiki](https://github.com/ChiefGyk3D/git-your-ship-together/wiki) is the guided
-tour: a learning path with exercises, a glossary, why each rule exists, a
-troubleshooting table and the lessons. It is generated from [`wiki/`](wiki/),
-so it changes by pull request, and a test fails when the repository grows
-something the wiki never mentions.
 
 ## What is in the repository
 
@@ -84,7 +89,7 @@ project before any caller pins them:
 | `.github/workflows/ci.yml` | actionlint, zizmor, the pytest contract, then `python-ci.yml`, `bash-ci.yml`, `tofu-ci.yml`, `arduino-ci.yml`, `python-package-release.yml`, `artifact-release.yml`, `docs-pages.yml`, `wiki-publish.yml` and `python-docker-release.yml` called at the pull request's own ref against `fixture/` (bash-ci over the whole repository; bash-ci and the package build in block mode), and a `CI green` gate that needs all of it |
 | `.github/workflows/security-self.yml` | `security.yml` called the same way, on push, pull request and a Monday schedule |
 | `.github/workflows/dependabot-auto-merge-self.yml` | `dependabot-auto-merge.yml` called the same way, so this repository's own bumps exercise it |
-| `.github/workflows/wiki.yml` | `wiki-publish.yml` called the same way for this repository's own wiki: `wiki/` is the source, `scripts/gen_wiki.py` the generator. A pull request that touches it generates and checks the pages (links, anchors, sidebar); only a run on `main` publishes. See [`wiki/Maintaining-This-Wiki.md`](wiki/Maintaining-This-Wiki.md) |
+| `.github/workflows/wiki.yml` | `wiki-publish.yml` called the same way for this repository's own wiki: `docs/wiki/` is the source and `scripts/gen_wiki.py` the generator, which renders every reusable workflow's inputs table from its YAML. Publishes from `main` only. See [`docs/wiki/Maintaining-this-wiki.md`](docs/wiki/Maintaining-this-wiki.md) |
 | `.github/workflows/audit.yml` | The weekly audit: `scripts/audit_baseline.py` over every repository in `baseline/repos.txt` on Monday 07:00 UTC, with its own token from its own Doppler project; and an issue here for each risk-register entry about to expire. Not reusable; see [The weekly audit](#the-weekly-audit) |
 | `.github/dependabot.yml` | Weekly action and pip bumps with a seven-day cooldown, actions grouped into one pull request |
 | `fixture/` | A package with a console script, one test, a non-root Dockerfile, a hash-pinned `requirements.txt`, and one shell script with its own test: one of everything a job needs. `fixture/README.md` says how to regenerate the lock |
@@ -102,8 +107,8 @@ And what keeps the callers honest:
 | `scripts/audit_baseline.py` | Reads each repository's settings and workflows from the API and reports PASS, FAIL or UNKNOWN per baseline item. Exit 0 only when every check passed |
 | `scripts/new-repo.sh` | Adopts a repository, or starts one: reads what it holds, writes the caller workflows and `dependabot.yml` from that, commits on a branch and opens the pull request, applies every BASELINE setting, appends to `baseline/repos.txt`. `--dry-run` writes the files somewhere else and prints the settings instead; that is what its test runs |
 | `scripts/doppler-ci-set.sh` | Sets one secret in the shared Doppler `ci` config. The value is typed twice with echo off and never reaches a command line, shell history or the terminal |
-| `wiki/` | The source of the [GitHub wiki](https://github.com/ChiefGyk3D/git-your-ship-together/wiki), a generated mirror: edit here, never on github.com. A change that alters what a person would read changes the page in the same pull request |
-| `scripts/gen_wiki.py` | Builds the wiki from `wiki/` and refuses a broken link, a missing anchor or a page not in the sidebar. Standard library only |
+| `docs/wiki/` | The source of the [GitHub wiki](https://github.com/ChiefGyk3D/git-your-ship-together/wiki), a generated mirror: edit here, never on github.com. A change that alters what a person would read changes the page in the same pull request |
+| `scripts/gen_wiki.py` | Builds the wiki from `docs/wiki/`: rewrites links for a flat wiki (a link to nothing is an error) and renders each workflow's inputs, secrets and outputs from its YAML. `--check` writes nothing and goes red on a stale tree |
 | `docs/DESIGN.md` | The reasoning: the threat model, why Doppler, the products, what the tests enforce |
 | `docs/ROADMAP.md` | What is done, what is next, and what the lab could carry |
 
@@ -1290,7 +1295,9 @@ name: Project sync
 on:
   issues:
     types: [opened, reopened, closed, edited]
-  pull_request_target:
+  # zizmor: ignore[dangerous-triggers] -- no checkout, no run step, the inlined
+  # script reads the event payload as JSON and never the pull request's text.
+  pull_request_target: # zizmor: ignore[dangerous-triggers]
     types: [opened, reopened, ready_for_review, converted_to_draft, closed]
   schedule:
     - cron: '17 5 * * 1'
@@ -1313,12 +1320,12 @@ jobs:
       DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
     with:
       project-url: https://github.com/orgs/<org>/projects/<n>
-      app-id: ${{ vars.PROJECTS_APP_ID }}
+      client-id: ${{ vars.PROJECTS_APP_CLIENT_ID }}
       default-area-field: Area      # optional: the Area this repository's new items get
       default-area: Hill
-      doppler-project: ci
-      doppler-config: ci
-      doppler-identity-id: ${{ vars.DOPPLER_IDENTITY_ID }}
+      doppler-project: projects
+      doppler-config: prd
+      doppler-identity-id: ${{ vars.PROJECTS_DOPPLER_IDENTITY_ID }}
       doppler-trusted-refs-only: false   # required for pull_request_target; see below
 ```
 
@@ -1336,7 +1343,9 @@ Inputs of `project-sync.yml`:
 | `reconcile` | `true` | Walk the repository and the board on `schedule` and `workflow_dispatch`; `false` makes those a no-op |
 | `default-area-field`, `default-area` | empty | A single-select field and option set on items this workflow adds, and only on those |
 | `dry-run` | `false` | Read the board and print every change instead of making it. With no token it only says so and succeeds, which is how this repository's CI exercises the workflow |
-| `app-id` | required | The numeric id of the GitHub App; an identifier, not a secret. Callers pass the repository variable `PROJECTS_APP_ID` |
+| `client-id` | empty (set this or `app-id`) | The Client ID of the GitHub App, from its settings page; an identifier, not a secret. Callers pass the repository variable `PROJECTS_APP_CLIENT_ID` |
+| `app-id` | empty | Deprecated, accepted for one release. The numeric App ID; `actions/create-github-app-token` deprecates it and prints a warning when it is passed. Used only when `client-id` is empty |
+| `pull-request-events` | `true` | `false` skips the whole job on a `pull_request_target` run, so a caller that keeps that trigger without a Doppler identity that covers it stays green; see below |
 | `egress-policy` | `audit` | harden-runner: `audit` or `block` |
 | `allowed-endpoints` | `api.doppler.com:443 api.github.com:443` | The allow-list for `block`; these two are all the job reaches |
 | `extra-allowed-endpoints` | empty | Appended to the list |
@@ -1344,7 +1353,17 @@ Inputs of `project-sync.yml`:
 | `doppler-trusted-refs-only` | `true` | Fetch the App key only on the default branch, a tag or a schedule. A caller that triggers on `pull_request_target` sets it `false`; see below |
 | `timeout-minutes` | `15` | Job timeout |
 
-##### Why `pull_request_target`
+##### Why `pull_request_target`, and the lint line
+
+Every caller runs the workflow lint of `python-ci.yml`, and zizmor reports
+`dangerous-triggers` on any `pull_request_target`, which would turn `CI green`
+red. The two `# zizmor: ignore[dangerous-triggers]` lines in the template are
+the answer, and the reasons they hold are written beside them: no checkout, no
+`run:` step, a script that reads the payload as JSON. A caller repository with
+workflow tests of its own (one that forbids `pull_request_target` outright, or
+allow-lists every write permission) needs a narrow exemption for this one file
+that also asserts the file has no `actions/checkout` and no `run:` step, so the
+exemption stays falsifiable.
 
 A `pull_request` run from a fork gets a read-only token and no secrets, so a
 fork's pull request could never reach the board. `pull_request_target` runs the
@@ -1358,6 +1377,46 @@ false`, because the Doppler rule treats `pull_request_target` as untrusted
 along with every other pull request event, and so would skip the fetch. Do not
 copy that line into a caller that checks out the pull request. Pin the called
 workflow by commit, as every caller does: that pin is what runs.
+
+A caller that cannot give the Doppler identity a pull-request subject (see
+[the Doppler scope](#the-project-sync-doppler-scope)) has two choices. Drop the
+`pull_request_target` trigger from the caller and let the weekly reconcile add
+and close pull requests, or keep the trigger and pass
+`pull-request-events: false`, which skips the job on that event instead of
+failing it. Leaving the trigger on with `pull-request-events: true` and no
+matching identity is the red run this paragraph exists to prevent.
+
+##### The project-sync Doppler scope
+
+The App's private key does not live in the shared `ci` config: every value
+there is exported into every CI job of every repository, and the board App's
+key has no business in a lint job. It has its own scope, which is also what
+lets this one workflow accept a pull-request subject without touching `ci`,
+where the identity must never match `:pull_request`:
+
+1. Doppler project `projects`, config `prd`, holding exactly one secret,
+   `PROJECTS_APP_PRIVATE_KEY`.
+2. One service account, `gha-projects`, Viewer on `projects`/`prd` only, with
+   one OIDC identity whose subjects are, per calling repository (or the
+   organization wildcard, acceptable here because the config holds only this
+   key), in both forms GitHub issues:
+   - `repo:<owner>/<repo>:ref:refs/heads/main`
+   - `repo:<owner>/<repo>:pull_request`
+   - `repo:<owner>@<owner-id>/<repo>@<repo-id>:ref:refs/heads/main`
+   - `repo:<owner>@<owner-id>/<repo>@<repo-id>:pull_request`
+
+   The audience is `https://github.com/<owner>`.
+3. Callers pass `doppler-project: projects`, `doppler-config: prd` and
+   `doppler-identity-id: ${{ vars.PROJECTS_DOPPLER_IDENTITY_ID }}`. That
+   repository variable is separate from `DOPPLER_IDENTITY_ID`, so the `ci`
+   identity is untouched.
+
+Why `:pull_request` is acceptable here and nowhere else: the job has no
+checkout and runs no code from the pull request, the config holds one key, and
+that key can only write a board. The blast radius if the path is abused: a
+fork's pull request event can mint a token that writes items and field values
+to the board and reads issues and pull requests in the installed repositories.
+It cannot read any other secret or run any code.
 
 #### The GitHub App the owner creates
 
@@ -1380,8 +1439,9 @@ Create it once, by hand:
    automatically. Nothing else.
 3. Under "Where can this GitHub App be installed?" choose **Only on this
    account** (the organization). Click Create GitHub App.
-4. On the App's page, note the **App ID** (a number). It is an identifier, not a
-   secret.
+4. On the App's page, note the **Client ID** (starts with `Iv`) and, if you
+   still call with the deprecated `app-id`, the **App ID** (a number). Both are
+   identifiers, not secrets.
 5. Scroll to Private keys and **Generate a private key**; a `.pem` file
    downloads.
 6. Open the App's Install App page, install it on the **organization**, choose
@@ -1389,12 +1449,14 @@ Create it once, by hand:
    workflow.
 7. Store the key in Doppler. The prompt reads one line, which a PEM is not, so
    give the helper the file:
-   `scripts/doppler-ci-set.sh --from-file ~/Downloads/<app>.private-key.pem PROJECTS_APP_PRIVATE_KEY`
+   `DOPPLER_CI_CONFIG=prd scripts/doppler-ci-set.sh --from-file ~/Downloads/<app>.private-key.pem PROJECTS_APP_PRIVATE_KEY projects`
    The name is fixed: the workflow reads `PROJECTS_APP_PRIVATE_KEY` from the Doppler config and nothing else.
-   The value goes to the `ci` config, over standard input, and is never
-   printed.
+   The value goes to the `projects`/`prd` config described above, never to
+   `ci`, over standard input, and is never printed.
 8. On each calling repository set the variable the caller reads:
-   `gh variable set PROJECTS_APP_ID --repo <org>/<repo> --body <app id>`
+   `gh variable set PROJECTS_APP_CLIENT_ID --repo <org>/<repo> --body <client id>`
+   and, from the Doppler identity above,
+   `gh variable set PROJECTS_DOPPLER_IDENTITY_ID --repo <org>/<repo> --body <identity uuid>`
 9. Delete the downloaded `.pem`. Doppler holds the only copy.
 
 What it can do: add items to the project and set their fields, and read issues
@@ -1792,7 +1854,7 @@ The tests are the contract, one file per thing they hold still:
 | `tests/test_fuzz.py` | `python-fuzz.yml`'s inputs and pin, and its run step executed under bash against tiny targets: a missing directory, no match, a passing target and a crashing one (which must fail the step and leave its `crash-*` input) |
 | `tests/test_security_jobs.py` | The Semgrep job's defaults and its content-driven config; the gitleaks job as a pinned binary: no licence, no Doppler, no `id-token`, the sha256 checked before extraction, full history, SARIF under category `gitleaks`, and a canary step that plants an AWS-shaped key in a scratch repository and requires exit 1 before the real scan runs (the test also fetches the pinned release, checks the hash, and runs that canary for real; it skips only when offline) |
 | `tests/test_pre_commit_hook.py` | `.githooks/pre-commit` pins the same gitleaks version and sha256 as `security.yml`; run in a scratch repository it refuses a planted AWS-shaped key naming the rule and file but not the secret, passes a clean commit, honours `.gitleaks.toml`, refuses on a broken config or a download that is not the pinned release, and warns and allows offline (the cases that need the binary download it through the hook and skip when offline); `new-repo.sh` writes it byte for byte, executable, and adds the `core.hooksPath` line to a README's Developing section once |
-| `tests/test_wiki.py` | The wiki builds; its links and anchors resolve; every workflow, script, composite action, audit check, test file and baseline file is mentioned in it; the generator refuses a broken wiki; `wiki.yml` generates on a pull request and calls the publisher |
+| `tests/test_wiki.py` | Every reusable workflow has a page and its generated table follows the YAML; regenerating is a no-op and `--check` catches a stale tree; every link resolves and every cited test exists; every workflow, script, composite action, audit check, test file and baseline file is mentioned somewhere in the wiki; `wiki.yml` is the self-call it should be |
 | `tests/test_fixture.py` | Every fixture requirement carries a hash, every direct dependency is in the lock, the fixture image runs as a non-root user |
 
 Break any one of those and CI names the fix.

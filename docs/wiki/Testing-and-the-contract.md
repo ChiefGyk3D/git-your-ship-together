@@ -1,6 +1,6 @@
-# Testing and the Contract
+# Testing and the contract
 
-The tests are the **contract**: every rule in [Design Rules and Why](Design-Rules-and-Why) is a
+The tests are the **contract**: every rule in [Design rules](Design-rules.md) is a
 test, so a pull request that breaks one fails before review. This is most of the repository's value:
 it is what turns "we pin our actions" from a habit into a build failure.
 
@@ -43,7 +43,7 @@ lock.
 | `tests/test_pre_commit_hook.py` | The gitleaks pre-commit hook: same pin as `security.yml`, refuses a planted key without printing it, allows offline with a warning, copied byte for byte by `new-repo.sh` |
 | `tests/test_new_repo.py` | `scripts/new-repo.sh --dry-run` over synthetic trees |
 | `tests/test_fixture.py` | Every fixture requirement carries a hash; direct dependencies are in the lock; the fixture image is non-root |
-| `tests/test_wiki.py` | **This wiki**: it builds, links resolve, and every workflow, script, audit check and test file is mentioned |
+| `tests/test_wiki.py` | **This wiki**: every reusable workflow has a page whose generated table follows its YAML; regenerating is a no-op and a stale tree is caught; links resolve and cited tests exist; and every workflow, script, composite action, audit check, test file and baseline file is mentioned somewhere |
 
 (The exact set of files is whatever is in `tests/`; `test_wiki.py` is what catches a new one the wiki
 has not mentioned.)

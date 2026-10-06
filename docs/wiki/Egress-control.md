@@ -1,12 +1,12 @@
-# Egress Control
+# Egress control
 
 **Egress** is outbound network traffic from the runner. Controlling it limits where a
 compromised step, dependency or action can send data. Full reference:
-[README: Egress](https://github.com/ChiefGyk3D/git-your-ship-together/blob/main/README.md#egress).
+[README: Egress](../../README.md#egress).
 
 ## harden-runner on every job
 
-[`step-security/harden-runner`](Concepts-and-Glossary#harden-runner) is the **first step of every job**
+[`step-security/harden-runner`](Glossary.md) is the **first step of every job**
 (a test checks), so the policy is in place before anything else runs.
 
 | Mode | Behaviour | Used for |
