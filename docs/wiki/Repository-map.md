@@ -1,4 +1,4 @@
-# Architecture Overview
+# Repository map
 
 ## What a push goes through
 
@@ -32,11 +32,11 @@ workflow never leaves it unrequired.
 ## The shape of every workflow
 
 Every reusable workflow follows the same pattern, which is what makes the
-[tests](Testing-and-the-Contract) possible:
+[tests](Testing-and-the-contract.md) possible:
 
 - `permissions: contents: read` at the top, widened per job.
 - Every job: a timeout, its own `permissions:` block, and
-  [harden-runner](Egress-Control) as the **first** step.
+  [harden-runner](Egress-control.md) as the **first** step.
 - Inputs for every command, passed to the shell through environment variables.
 - `egress-policy` / `allowed-endpoints` / `extra-allowed-endpoints` inputs.
 - Doppler credentials fetched only when the workflow genuinely needs them, and
@@ -57,22 +57,22 @@ publish).
 
 | File | Family | One line |
 |---|---|---|
-| `python-ci.yml` | [CI](CI-Workflows) | Lint, type check, test matrix, coverage, smoke test, container build, `CI green` |
-| `bash-ci.yml` | [CI](CI-Workflows) | shellcheck, shfmt, tests, config lint, `CI green` |
-| `tofu-ci.yml` | [CI](CI-Workflows) | fmt, validate, tflint, Trivy config scan, plan on default branch |
-| `arduino-ci.yml` | [CI](CI-Workflows) | Compile every sketch with pinned cores, host tests |
-| `python-fuzz.yml` | [CI](CI-Workflows) | Atheris fuzzing for a fixed time per target |
-| `container-release.yml` | [Release](Release-Workflows) | Build, test, scan, push multi-arch, sign, SBOM, provenance |
-| `python-docker-release.yml` | [Release](Release-Workflows) | Old name of the above; forwards everything |
-| `verify-published.yml` | [Release](Release-Workflows) | Verify a published image from outside |
-| `python-package-release.yml` | [Release](Release-Workflows) | Build, check, publish to PyPI and the GitHub release |
-| `artifact-release.yml` | [Release](Release-Workflows) | Build any file, sign it, attach it to the release |
-| `security.yml` | [Security](Security-Workflow) | CodeQL, gitleaks, audit, dependency review, Semgrep, Snyk, Scorecard |
-| `dast.yml` | [Security](Security-Workflow) | OWASP ZAP baseline against a loopback service the caller starts, SARIF under `zap` |
-| `dependabot-auto-merge.yml` | [Automation](Automation-Workflows) | Auto-merge Dependabot bumps up to a size |
-| `project-sync.yml` | [Automation](Automation-Workflows) | Keep a GitHub Projects v2 board current |
-| `docs-pages.yml` | [Automation](Automation-Workflows) | Build docs, deploy to GitHub Pages |
-| `wiki-publish.yml` | [Automation](Automation-Workflows) | Replace a repository's wiki from a generated tree |
+| `python-ci.yml` | [CI](Which-workflow-do-I-need.md) | Lint, type check, test matrix, coverage, smoke test, container build, `CI green` |
+| `bash-ci.yml` | [CI](Which-workflow-do-I-need.md) | shellcheck, shfmt, tests, config lint, `CI green` |
+| `tofu-ci.yml` | [CI](Which-workflow-do-I-need.md) | fmt, validate, tflint, Trivy config scan, plan on default branch |
+| `arduino-ci.yml` | [CI](Which-workflow-do-I-need.md) | Compile every sketch with pinned cores, host tests |
+| `python-fuzz.yml` | [CI](Which-workflow-do-I-need.md) | Atheris fuzzing for a fixed time per target |
+| `container-release.yml` | [Release](Which-workflow-do-I-need.md) | Build, test, scan, push multi-arch, sign, SBOM, provenance |
+| `python-docker-release.yml` | [Release](Which-workflow-do-I-need.md) | Old name of the above; forwards everything |
+| `verify-published.yml` | [Release](Which-workflow-do-I-need.md) | Verify a published image from outside |
+| `python-package-release.yml` | [Release](Which-workflow-do-I-need.md) | Build, check, publish to PyPI and the GitHub release |
+| `artifact-release.yml` | [Release](Which-workflow-do-I-need.md) | Build any file, sign it, attach it to the release |
+| `security.yml` | [Security](Workflow-security.md) | CodeQL, gitleaks, audit, dependency review, Semgrep, Snyk, Scorecard |
+| `dast.yml` | [dast](Workflow-dast.md) | OWASP ZAP baseline against a loopback service the caller starts, SARIF under `zap` |
+| `dependabot-auto-merge.yml` | [Automation](Which-workflow-do-I-need.md) | Auto-merge Dependabot bumps up to a size |
+| `project-sync.yml` | [Automation](Which-workflow-do-I-need.md) | Keep a GitHub Projects v2 board current |
+| `docs-pages.yml` | [Automation](Which-workflow-do-I-need.md) | Build docs, deploy to GitHub Pages |
+| `wiki-publish.yml` | [Automation](Which-workflow-do-I-need.md) | Replace a repository's wiki from a generated tree |
 
 ### This repository's own pipeline (not reusable)
 
@@ -81,8 +81,8 @@ publish).
 | `ci.yml` | actionlint, zizmor, the pytest contract, then every reusable workflow run against `fixture/` at the PR's ref |
 | `security-self.yml` | `security.yml` run on this repository |
 | `dependabot-auto-merge-self.yml` | `dependabot-auto-merge.yml` run on this repository's own bumps |
-| `audit.yml` | The weekly [baseline audit](Repository-Baseline#the-weekly-audit) and risk-register issues |
-| `wiki.yml` | Publishes this wiki; see [Maintaining This Wiki](Maintaining-This-Wiki) |
+| `audit.yml` | The weekly [baseline audit](Baseline-and-the-weekly-audit.md) and risk-register issues |
+| `wiki.yml` | Publishes this wiki from `main`; see [Maintaining this wiki](Maintaining-this-wiki.md) |
 
 ### Everything else
 
@@ -99,11 +99,11 @@ publish).
 | `scripts/doppler-ci-set.sh` | Set one Doppler secret without the value touching a command line |
 | `scripts/project_sync.py` | The logic inlined into `project-sync.yml` |
 | `scripts/inline_project_sync.py` | Regenerates that inlined copy |
-| `scripts/gen_wiki.py` | Builds this wiki from `wiki/` |
+| `scripts/gen_wiki.py` | Builds this wiki from `docs/wiki/` and renders each workflow's inputs table from its YAML |
 | `fixture/` | The smallest project that exercises every job |
-| `tests/` | The [contract](Testing-and-the-Contract), as pytest |
+| `tests/` | The [contract](Testing-and-the-contract.md), as pytest |
 | `docs/DESIGN.md`, `docs/ROADMAP.md` | The reasoning, and what is done and next |
-| `wiki/` | The source of this wiki |
+| `docs/wiki/` | The source of this wiki |
 
 ## Where each kind of change lives
 

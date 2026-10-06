@@ -267,16 +267,15 @@ ALLOWED_WRITES = {
     # The wiki is a git repository of this one: the publish job alone holds
     # the write, runs no caller code and checks nothing out.
     ("wiki-publish.yml", "publish", "contents"),
+    # This repository's own wiki: the caller of the above, granting what the called
+    # job declares. The generate job it runs holds contents: read.
+    ("wiki.yml", "wiki", "contents"),
     # And both on the fixture, whose callers pass deploy/publish: false.
     ("ci.yml", "fixture-dast", "security-events"),  # dast.yml's SARIF upload, which does run on the fixture
     ("ci.yml", "fixture-pages", "pages"),
     ("ci.yml", "fixture-pages", "id-token"),
     ("ci.yml", "fixture-project-sync", "id-token"),
     ("ci.yml", "fixture-wiki", "contents"),
-    # This repository's own wiki (wiki/ is the source, the GitHub wiki a mirror
-    # of it): the grant the caller must give for the publish job, which runs
-    # only from the default branch and never from a pull request.
-    ("wiki.yml", "wiki", "contents"),
 }
 
 

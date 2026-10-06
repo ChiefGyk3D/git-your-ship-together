@@ -1,6 +1,6 @@
-# Testing and the Contract
+# Testing and the contract
 
-The tests are the **contract**: every rule in [Design Rules and Why](Design-Rules-and-Why) is a
+The tests are the **contract**: every rule in [Design rules](Design-rules.md) is a
 test, so a pull request that breaks one fails before review. This is most of the repository's value:
 it is what turns "we pin our actions" from a habit into a build failure.
 
@@ -36,6 +36,7 @@ lock.
 | `tests/test_risk_register.py` | The register's shape and dates; no duplicates; every repository named is in the baseline list; **no entry has expired** |
 | `tests/test_fuzz.py` | `python-fuzz.yml`: its pin, and its run step executed against tiny targets (missing dir, no match, passing, crashing) |
 | `tests/test_dast.py` | `dast.yml`: the contract (digest-pinned image, a read-only scan job, an upload job with no shell), its steps run under bash (every refusal, a service that blocks, detaches, dies or never answers, the `fail-on` threshold and the SARIF against canned ZAP reports), and, in the `dast-live` CI job only, the real ZAP image against `fixture/dast/server.py`: with its headers it passes, without them it fails at `medium` |
+| `tests/test_dast.py` | `dast.yml`: the contract (digest-pinned image, a read-only scan job, an upload job with no shell), its steps run under bash (every refusal, a service that blocks, detaches, dies or never answers, the `fail-on` threshold and the SARIF against canned ZAP reports), and, in the `dast-live` CI job only, the real ZAP image against `fixture/dast/server.py`: with its headers it passes, without them it fails at `medium` |
 | `tests/test_security_jobs.py` | Semgrep defaults and content-driven config; the gitleaks job as a pinned binary with its canary |
 | `tests/test_image_hardening.py` | The container-release image checks (non-root, read-only probe) |
 | `tests/test_verify_published.py` | `verify-published.yml`'s steps and gate |
@@ -43,7 +44,7 @@ lock.
 | `tests/test_project_sync.py` | `project-sync.yml` and `scripts/project_sync.py` against recorded API responses |
 | `tests/test_new_repo.py` | `scripts/new-repo.sh --dry-run` over synthetic trees |
 | `tests/test_fixture.py` | Every fixture requirement carries a hash; direct dependencies are in the lock; the fixture image is non-root |
-| `tests/test_wiki.py` | **This wiki**: it builds, links resolve, and every workflow, script, audit check and test file is mentioned |
+| `tests/test_wiki.py` | **This wiki**: every reusable workflow has a page whose generated table follows its YAML; regenerating is a no-op and a stale tree is caught; links resolve and cited tests exist; and every workflow, script, composite action, audit check, test file and baseline file is mentioned somewhere |
 
 (The exact set of files is whatever is in `tests/`; `test_wiki.py` is what catches a new one the wiki
 has not mentioned.)

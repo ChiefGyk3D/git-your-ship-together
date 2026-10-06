@@ -1,31 +1,32 @@
-# Workflow Catalog
+# Which workflow do I need?
 
-Every reusable workflow at a glance. Use this page to decide *which* to call; the
-family pages explain *how each works*; the README has the *complete input tables*.
+Every reusable workflow at a glance. Use this page to decide *which* to call. Each
+workflow's own page explains how it works and carries its inputs table, generated from
+the workflow's YAML so it cannot drift; the README is the authority.
 
 ## Which one do I need?
 
 | My repository has... | Call | Page |
 |---|---|---|
-| Python code | `python-ci.yml` | [CI workflows](CI-Workflows#python-ci) |
-| Shell scripts (almost every repo does) | `bash-ci.yml` | [CI workflows](CI-Workflows#bash-ci) |
-| OpenTofu / Terraform | `tofu-ci.yml` | [CI workflows](CI-Workflows#tofu-ci) |
-| Arduino / ESP32 firmware | `arduino-ci.yml` | [CI workflows](CI-Workflows#arduino-ci) |
-| Atheris fuzz targets (or wants Scorecard's Fuzzing credit) | `python-fuzz.yml` | [CI workflows](CI-Workflows#python-fuzz) |
-| A Dockerfile to publish | `container-release.yml` | [Release workflows](Release-Workflows#container-release) |
-| A published image you want checked from outside | `verify-published.yml` | [Release workflows](Release-Workflows#verify-published) |
-| A package for PyPI | `python-package-release.yml` | [Release workflows](Release-Workflows#python-package-release) |
-| Files to publish (`.deb`, firmware, bundles) | `artifact-release.yml` | [Release workflows](Release-Workflows#artifact-release) |
-| Anything (security scanning) | `security.yml` | [Security workflow](Security-Workflow) |
-| A service that serves HTTP (a dashboard, an API) | `dast.yml` | [Security workflow](Security-Workflow#dast-dastyml) |
-| Dependabot | `dependabot-auto-merge.yml` | [Automation workflows](Automation-Workflows#dependabot-auto-merge) |
-| A GitHub Projects v2 board (organization) | `project-sync.yml` | [Automation workflows](Automation-Workflows#project-sync) |
-| A static docs site | `docs-pages.yml` | [Automation workflows](Automation-Workflows#docs-pages) |
-| A wiki generated from docs | `wiki-publish.yml` | [Automation workflows](Automation-Workflows#wiki-publish) |
+| Python code | `python-ci.yml` | [python-ci](Workflow-python-ci.md) |
+| Shell scripts (almost every repo does) | `bash-ci.yml` | [bash-ci](Workflow-bash-ci.md) |
+| OpenTofu / Terraform | `tofu-ci.yml` | [tofu-ci](Workflow-tofu-ci.md) |
+| Arduino / ESP32 firmware | `arduino-ci.yml` | [arduino-ci](Workflow-arduino-ci.md) |
+| Atheris fuzz targets (or wants Scorecard's Fuzzing credit) | `python-fuzz.yml` | [python-fuzz](Workflow-python-fuzz.md) |
+| A Dockerfile to publish | `container-release.yml` | [container-release](Workflow-container-release.md) |
+| A published image you want checked from outside | `verify-published.yml` | [verify-published](Workflow-verify-published.md) |
+| A package for PyPI | `python-package-release.yml` | [python-package-release](Workflow-python-package-release.md) |
+| Files to publish (`.deb`, firmware, bundles) | `artifact-release.yml` | [artifact-release](Workflow-artifact-release.md) |
+| Anything (security scanning) | `security.yml` | [security](Workflow-security.md) |
+| A service that serves HTTP (a dashboard, an API) | `dast.yml` | [dast](Workflow-dast.md) |
+| Dependabot | `dependabot-auto-merge.yml` | [dependabot-auto-merge](Workflow-dependabot-auto-merge.md) |
+| A GitHub Projects v2 board (organization) | `project-sync.yml` | [project-sync](Workflow-project-sync.md) |
+| A static docs site | `docs-pages.yml` | [docs-pages](Workflow-docs-pages.md) |
+| A wiki generated from docs | `wiki-publish.yml` | [wiki-publish](Workflow-wiki-publish.md) |
 
 A repository with several languages calls **one CI workflow per language**, each
 from its own caller job, and requires every gate. See
-[Calling the Workflows](Calling-the-Workflows#5-point-branch-protection-at-the-gate).
+[Getting started](Getting-started.md).
 
 ## At a glance
 
