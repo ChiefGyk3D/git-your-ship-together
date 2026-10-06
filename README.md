@@ -71,7 +71,7 @@ Sixteen reusable workflows and one composite action:
 | `.github/workflows/arduino-ci.yml` | For firmware built with arduino-cli: compile every sketch for a board with pinned cores and libraries, keep the binaries as an artifact, host-side tests, workflow lint, the same `CI green` gate. Holds no token; the binaries reach a release through `artifact-release.yml` |
 | `.github/workflows/container-release.yml` | Build, test, Trivy-scan, then publish multi-arch to GHCR (and Docker Hub), sign with cosign, attach a syft SBOM, record SLSA provenance. Builds whatever the Dockerfile builds |
 | `.github/workflows/python-docker-release.yml` | The old name of the above: a thin caller that forwards every input, the secret and the outputs through a `./` reference at its own commit, so an existing pin keeps working. New callers use `container-release.yml` |
-| `.github/workflows/verify-published.yml` | Consumer-side verification of a published image: cosign signature, SPDX SBOM attestation and build provenance verified from outside, then each platform pulled and checked. Read-only, no secret, no token beyond the default one |
+| `.github/workflows/verify-published.yml` | Consumer-side verification of a published image (cosign signature, SPDX SBOM attestation and build provenance verified from outside, then each platform pulled and checked) or of a GitHub release's assets (checksums, provenance, SBOMs). Read-only, no secret, no token beyond the default one |
 | `.github/workflows/python-package-release.yml` | Build the sdist and wheel, `twine check`, refuse a tag that disagrees with the packaged version, smoke-test from the wheel, then publish to PyPI (Trusted Publishing, PEP 740 attestations) and to the GitHub release with SHA256SUMS and build provenance. No secret anywhere |
 | `.github/workflows/artifact-release.yml` | For a file rather than an image (a `.deb`, a firmware binary, a bundle): build it with a command, then publish it to the GitHub release with SHA256SUMS, a keyless cosign signature bundle per file and build provenance. No secret anywhere |
 | `.github/workflows/docs-pages.yml` | Build a static documentation site with a command you supply (MkDocs strict by default) on every pull request; upload it and deploy it to GitHub Pages from the default branch only. The two Pages writes sit on the deploy job alone |
@@ -851,6 +851,15 @@ then, per platform, `docker pull --platform <platform> <image>` and the
 (arm64 on the x86 runner) runs under QEMU, which is set up only then. A final
 `Verified` job is the gate: it fails unless the verification succeeded.
 
+With `release-tag` set it verifies a GitHub release as well (or instead, with
+no `image`): every asset is downloaded, `sha256sum -c SHA256SUMS` must pass
+and `SHA256SUMS` must list every file, `gh attestation verify <file> --owner
+<owner>` must pass for every file, and, unless `verify-release-sbom` is
+false, `sbom.cdx.json` and `sbom.spdx.json` must be present, listed, and the
+format they claim. That is the release `python-package-release.yml` makes;
+set `verify-release-sbom: false` for an `artifact-release.yml` release, which
+writes none. Neither `image` nor `release-tag` is a failure, not a pass.
+
 ```yaml
 on:
   schedule:
@@ -880,7 +889,10 @@ Inputs of `verify-published.yml`:
 
 | Input | Default | Meaning |
 |---|---|---|
-| `image` | required | Image reference, for example `ghcr.io/chiefgyk3d/star-daemon:latest`; a digest is stronger than a tag |
+| `image` | empty | Image reference, for example `ghcr.io/chiefgyk3d/star-daemon:latest`; a digest is stronger than a tag. Empty skips the image checks |
+| `release-tag` | empty | GitHub release tag whose assets are verified. Empty skips the release checks; set this, `image` or both |
+| `release-repository` | empty (the calling repository) | `owner/name` holding the release |
+| `verify-release-sbom` | `true` | Require the two SBOMs among the release assets, listed in `SHA256SUMS` |
 | `identity-regexp` | `^https://github.com/ChiefGyk3D/` | Regular expression the certificate identity must match |
 | `oidc-issuer` | `https://token.actions.githubusercontent.com` | OIDC issuer the certificate must name |
 | `verify-sbom` | `true` | `cosign verify-attestation --type spdxjson` |
@@ -933,6 +945,23 @@ release for the tag, creating it from the notes when it does not exist and
 uploading to it when it does (a caller that triggers on `release: published`).
 Nothing needs a secret.
 
+Every release also carries `sbom.cdx.json` (CycloneDX) and
+`sbom.spdx.json` (SPDX), written by [syft](https://github.com/anchore/syft)
+over the unpacked wheel and sdist in the build job. syft is downloaded at the
+version and sha256 the `syft-version` and `syft-sha256` inputs pin (the one
+syft pin in this repository; `container-release.yml` uses the SBOM action's
+own syft and keeps its SBOM as a cosign attestation). It reads metadata and
+runs nothing, and needs no host the default allow-list lacks. The SBOMs are
+their own artifact, so PyPI is handed the distributions alone; the release
+job puts them in `dist/` before the checksums, so they are listed in
+`SHA256SUMS`, covered by the same build-provenance record and uploaded like
+any other asset. A pull request writes them too (`sbom: true`) and refuses an
+SBOM that does not name the package. They describe what the artifacts
+declare, the package and its metadata; syft does not resolve the dependency
+tree. A release made by one call holds one pair of files: two package
+directories released into one tag would overwrite each other's SBOMs.
+`verify-published.yml` checks them with `release-tag`.
+
 PyPI setup, once per project: on the project's *Publishing* page add a
 Trusted Publisher naming this owner, the calling repository, the caller's
 workflow file name (not this one's) and the environment `pypi`. That is the
@@ -953,9 +982,12 @@ Inputs of `python-package-release.yml`:
 | `publish` | `false` | Publish. A pull request never publishes whatever this says |
 | `pypi` | `true` | Publish to PyPI |
 | `pypi-environment` | `pypi` | The GitHub environment the PyPI job runs in, which the Trusted Publisher names |
-| `github-release` | `true` | Attach the files, `SHA256SUMS` and provenance to the GitHub release |
+| `github-release` | `true` | Attach the files, their SBOMs, `SHA256SUMS` and provenance to the GitHub release |
 | `release-title` | empty (the tag) | Title of a release this workflow creates |
-| `attest` | `true` | Record SLSA build provenance for every file |
+| `sbom` | `true` | Write `sbom.cdx.json` and `sbom.spdx.json` with syft and attach them to the release, listed in `SHA256SUMS` and attested with the rest |
+| `syft-version` | `1.54.0` | syft release to download, without the `v`. Changing it means changing `syft-sha256` |
+| `syft-sha256` | the 1.54.0 linux_amd64 tarball's | SHA-256 of that tarball |
+| `attest` | `true` | Record SLSA build provenance for every file, SBOMs included |
 | `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `audit`, the measured list, empty | harden-runner, as in `python-ci.yml`. The build's hosts were measured in block mode here; the publishing hosts are PyPI's and Sigstore's documented ones |
 | `timeout-minutes` | `20` | Per-job timeout |
 
