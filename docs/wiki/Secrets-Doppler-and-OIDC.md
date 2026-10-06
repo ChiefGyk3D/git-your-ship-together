@@ -188,11 +188,11 @@ run any code. See [Keeping a project board current](Keeping-a-project-board-curr
 
 ## The audit gets its own project
 
-The weekly audit's token can read the settings of every repository, and the `ci`
-config is read by every caller's pipeline, so the audit's token lives in a separate
+The weekly audit's GitHub App can read the settings of every repository, and the `ci`
+config is read by every caller's pipeline, so the App's key lives in a separate
 Doppler project `audit`, config `prd`, behind its own service account whose
-identity is scoped to `main` of this repository only. Issue #89 proposes replacing
-the personal access token with a GitHub App so no PAT remains. See
+identity is scoped to `main` of this repository only. The audit mints one-hour
+installation tokens from it (one per owner) and stores no personal access token. See
 [The baseline and the weekly audit](Baseline-and-the-weekly-audit.md).
 
 ## What this refuses to do

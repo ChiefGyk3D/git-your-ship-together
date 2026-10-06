@@ -24,6 +24,11 @@ never receives a secret (no OIDC token is minted for it, and the Doppler step
 refuses it regardless).
 
 Checked: `collaborators` lists nobody but the owner with push permission.
+Under an organization the repository's owner is the organization, not a
+person, so the owners are the organization's owners (`role=admin` members),
+who reach the repository through membership; the check looks at the direct and
+outside collaborators and fails on any of them with push who is not one of
+those owners. A real outside collaborator with write still fails.
 
 ## 2. The default branch, and the tags
 
@@ -274,14 +279,50 @@ Checked: `risk-exceptions`.
   sessions and the other machines still commit unsigned, and a rule would
   block them; it goes on when they sign too (roadmap item 14).
 
+## Organizations
+
+When a repository's owner is an organization, three things that decide its
+posture live on the organization, and the audit reads the organization once per
+run (not once per repository), under the heading `<org> (organization)`. A
+repository under a user account has none of these lines.
+
+- **`org-2fa-required`**: the organization requires two-factor authentication
+  of its members (`two_factor_requirement_enabled`). Set under Settings,
+  Authentication security.
+- **`org-new-repo-defaults`**: secret scanning, push protection, Dependabot
+  alerts, Dependabot security updates and the dependency graph are all on for
+  new repositories (the five `*_enabled_for_new_repositories` fields). A
+  repository transferred in takes these over its own settings: the 2026-10-05
+  transfer of five repositories into Renegade-Penguin turned secret scanning
+  and push protection off on all five because the organization's defaults were
+  off. GitHub marks these fields as superseded by code security
+  configurations; while it still returns them the audit reads them, and if it
+  stops, the check goes UNKNOWN rather than quietly passing.
+- **`org-actions-policy`**: the organization allows `selected` actions only (or
+  `all`, but only when every audited repository of that organization narrows it
+  itself, which `actions-allowlist` proves), and its default `GITHUB_TOKEN`
+  permission is `read`.
+- **`org-owner-collaborators`**: the organization's owners can be read, and
+  there is at least one. This is the owner set the `collaborators` check holds
+  the repositories to (see section 1); if it cannot be read, `collaborators` is
+  UNKNOWN too.
+
+A check the token could not read is UNKNOWN and names the permission it
+needed: the organization endpoints need the App's **Organization
+administration: read** (2FA, defaults, Actions policy) and **Members: read**
+(the owner list). See the README, "The weekly audit", for the permission list.
+
 ## How the audit runs
 
 The checks above are read from the GitHub API by `scripts/audit_baseline.py`,
 which `.github/workflows/audit.yml` runs every Monday at 07:00 UTC over every
-repository in `baseline/repos.txt`, using a read-only fine-grained token held in
-its own Doppler project (`audit`), never in the shared `ci` config. A FAIL or an
+repository in `baseline/repos.txt`, with read-only GitHub App installation
+tokens minted for the run, one per owner (the user account and the
+organization). The App's private key is held in its own Doppler project
+(`audit`), never in the shared `ci` config; no personal access token is used.
+Each organization found is audited once as well. A FAIL or an
 UNKNOWN makes the run red, and the same workflow opens an issue here for any
-risk-register entry within 21 days of its `review_by`. Setup and the token's
+risk-register entry within 21 days of its `review_by`. Setup and the App's
 permissions are in the README's "The weekly audit".
 
 ## Adding a repository

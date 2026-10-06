@@ -22,13 +22,6 @@ repository and the issue tracker are right and this page has a bug.
 
 Each has a "done when" in its issue.
 
-**Organizations**
-
-- **#89** The audit cannot read organization-owned repositories; proposed: a GitHub App so no personal
-  token remains.
-- **#95** The collaborators check calls an organization's owner an outsider with write access.
-- **#98** Organization-level checks: two-factor requirement, new-repository defaults, Actions policy.
-
 **Scanning**
 
 - **#83** A Semgrep finding suppressed in source still becomes an open code-scanning alert (not settled; see
