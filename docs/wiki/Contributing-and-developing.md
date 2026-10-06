@@ -1,8 +1,8 @@
-# Contributing and Developing
+# Contributing and developing
 
 Pull requests are welcome; this is a small single-maintainer project with no SLA.
 Security problems go through the private channel in
-[SECURITY.md](https://github.com/ChiefGyk3D/git-your-ship-together/blob/main/SECURITY.md), **not** a public issue.
+[SECURITY.md](../../SECURITY.md), **not** a public issue.
 
 ## The dev loop
 
@@ -12,7 +12,7 @@ pytest                                                    # the contract
 ruff check tests/ scripts/ fixture/ && ruff format --check tests/ fixture/
 actionlint                                                # workflow syntax
 zizmor --offline .                                        # workflow security
-python scripts/gen_wiki.py --out /tmp/wiki-preview       # the wiki builds
+python scripts/gen_wiki.py --check                       # the wiki generates cleanly
 ```
 
 (`python scripts/audit_baseline.py` needs a token with admin read on the repositories; you rarely need it.)
@@ -23,7 +23,7 @@ python scripts/gen_wiki.py --out /tmp/wiki-preview       # the wiki builds
 - [ ] If you **added a reusable workflow**, see the checklist below.
 - [ ] If you **changed an input**, its README table row changed too (a test checks).
 - [ ] If you **changed behaviour a person reads about**, the **wiki page changed in the same PR** (see
-  [Maintaining This Wiki](Maintaining-This-Wiki)).
+  [Maintaining this wiki](Maintaining-this-wiki.md)).
 - [ ] If you **added a third-party action**, `baseline/selected-actions.json` lists it, including any subdirectory form and any
   action *its* `action.yml` calls. Read the action's `action.yml` for nested `uses:`.
 - [ ] If you **added a write permission**, `ALLOWED_WRITES` in `tests/test_workflows.py` lists it with a reason.
@@ -42,7 +42,7 @@ python scripts/gen_wiki.py --out /tmp/wiki-preview       # the wiki builds
 9. **Dogfood it**: call it from `ci.yml` against `fixture/` at `./.github/workflows/<name>.yml`, never publishing.
 10. Add it to the `CI green` gate's `needs:` in `ci.yml`.
 11. Update the README ("What is in the repository"), BASELINE if settings change, the roadmap if it closes an item, and **the wiki**
-    ([Workflow Catalog](Workflow-Catalog), the family page, [Architecture Overview](Architecture-Overview)).
+    ([Which workflow do I need?](Which-workflow-do-I-need.md), that workflow's page, [Repository map](Repository-map.md)).
 
 ## Style that matches the repository
 

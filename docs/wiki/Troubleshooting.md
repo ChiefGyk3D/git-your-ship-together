@@ -1,7 +1,7 @@
 # Troubleshooting
 
 Symptom, likely cause, fix. Many of these cost an afternoon the first time; the stories are in
-[Lessons Learned](Lessons-Learned).
+[Lessons learned](Lessons-learned.md).
 
 ## Network and egress
 
@@ -55,7 +55,7 @@ Symptom, likely cause, fix. Many of these cost an afternoon the first time; the 
 | Cosign verification fails on the identity | You matched the caller's workflow; the certificate names the **reusable** workflow | Use `--certificate-identity-regexp '^https://github.com/ChiefGyk3D/git-your-ship-together/'` |
 | Temporary `<sha>-<arch>` tags clutter GHCR | Each platform job pushes one before the merge job joins them | Delete them when you no longer need them |
 | Docs `deploy` fails with a Pages message | Pages source is not "GitHub Actions" | Settings, Pages, Source: GitHub Actions. `deploy: false` meanwhile |
-| Wiki `publish` fails: "no first page yet" | GitHub only creates a wiki's git repo when a page is made in the UI | Create any page once, re-run ([Maintaining This Wiki](Maintaining-This-Wiki)) |
+| Wiki `publish` fails: "no first page yet" | GitHub only creates a wiki's git repo when a page is made in the UI | Create any page once, re-run ([Maintaining this wiki](Maintaining-this-wiki.md)) |
 
 ## The audit
 
@@ -72,4 +72,4 @@ Symptom, likely cause, fix. Many of these cost an afternoon the first time; the 
 | `...grants id-token: write. If intended, add it to ALLOWED_WRITES` | A new write permission | If genuinely needed, add it to `ALLOWED_WRITES` with a reason |
 | An input is "not documented" | Missing README table row | Add the row |
 | The inlined Doppler script differs from the action | You edited one copy | Edit `.github/actions/doppler-secrets/action.yml` and regenerate/sync every inlined copy |
-| `test_wiki` says a thing is not mentioned | The wiki has not caught up | Add it to the right page ([Maintaining This Wiki](Maintaining-This-Wiki)) |
+| `tests/test_wiki.py` says a thing is not mentioned | The wiki has not caught up | Add it to the right page ([Maintaining this wiki](Maintaining-this-wiki.md)) |
