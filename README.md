@@ -1323,6 +1323,7 @@ Inputs of `security.yml`:
 | `dependency-review-deny-licenses` | `AGPL-3.0, GPL-3.0, GPL-2.0, LGPL-3.0, SSPL-1.0` | Comma-separated SPDX identifiers the review fails on when a pull request adds a dependency under one. Empty means no licence rule. A dependency whose licence cannot be detected is reported, not failed. Passed as the action's `deny-licenses`, which upstream has marked deprecated for a future major release; the action rejects it beside `allow-licenses`, which this workflow does not expose |
 | `semgrep` | `true` | Semgrep over the repository, SARIF uploaded to the Security tab under category `semgrep`. Installed with pip, since `semgrep/*` actions are not in the allowed set, under `--require-hashes` from the lock in `.github/requirements/semgrep.txt`; the version is that file's, not an input (see [Hash-locked tools](#hash-locked-tools-in-securityyml)) |
 | `semgrep-config` | empty (auto-detect) | `p/github-actions p/secrets`, adding `p/python` only when tracked Python files exist. A nonempty value replaces these defaults: space-separated configs, each passed as `--config`; registry packs or paths in the repository. Shell-only repositories use the two base packs; no `p/bash` or `p/shell` registry pack exists, so `bash-ci.yml`'s ShellCheck provides shell coverage |
+| `semgrep-version` | empty | **Deprecated; will be removed.** Semgrep is installed from a hash lock, so the version is the lock's (currently `1.179.0`, in `.github/requirements/semgrep.in`). Leave empty. A value that is not the locked version fails the install step, naming the locked one; the locked version itself is accepted |
 | `semgrep-continue-on-error` | `false` | Report findings without failing (they still reach the Security tab). Without it the scan runs with `--error` and a finding fails the job. A migration aid |
 | `semgrep-egress-policy` | `block` | harden-runner policy for the Semgrep job only |
 | `semgrep-allowed-endpoints` | the measured list | The Semgrep job's own allow-list: PyPI for the pip install, `semgrep.dev` for the rule registry, and GitHub for the SARIF upload. `extra-allowed-endpoints` is appended to it, for a private rule registry or a config fetched from another host |
@@ -1385,13 +1386,13 @@ check out its own commit, so there is no file to read at run time. Scorecard's
 hash, and a workflow every caller pins by commit should not run unchecked
 code in all of them. The source of each is `.github/requirements/<tool>.in`
 (one exact version) and `<tool>.txt` (its lock: universal, so it covers every
-marker, pruned to the x86_64 Linux and CPython 3.10 to 3.14 wheels the jobs
+marker, pruned to the x86_64 and aarch64 Linux and CPython 3.10 to 3.14 wheels the jobs
 use). `python scripts/tool_locks.py` copies the files into `security.yml`,
 `--check` fails on a difference and `--relock` resolves again with `uv` (the
 script's docstring has the throwaway-venv commands). Dependabot watches the
 `.in` files; its bump fails `tests/test_tool_locks.py` until `--relock` puts
-the pruned lock back. `semgrep-version` is gone for the same reason: an input
-cannot change a version the hashes fix.
+the pruned lock back. `semgrep-version` is deprecated for the same reason: an input
+cannot change a version the hashes fix, so it may only restate it.
 
 ### Dependabot auto-merge
 

@@ -89,9 +89,8 @@ def test_the_install_is_hash_checked_binary_only_and_resolves_nothing(tool):
     step = next(s for s in steps_of(jobs(load(WORKFLOWS / "security.yml"))[job]) if s.get("name") == TOOLS[tool])
     run = step["run"]
     assert "--require-hashes" in run and "--no-deps" in run and "--only-binary=:all:" in run
-    assert "inputs." not in run and "inputs." not in str(step["env"]), (
-        "the installed version is the lock's, not an input's"
-    )
+    assert "inputs." not in run, "inputs reach the shell through env, never by expansion"
+    assert "REQUESTED_VERSION" not in str(step["env"].get("REQUIREMENTS")), "the lock is the lock, not an input"
 
 
 @pytest.mark.parametrize("tool", TOOLS)
@@ -144,3 +143,41 @@ def test_snyk_refuses_a_lock_without_hashes_and_installs_nothing(tmp_path):
     assert result.returncode == 1
     assert "has no hashes" in result.stdout and "--generate-hashes" in result.stdout
     assert calls == "", "an unhashed pin list must never reach pip"
+
+
+def semgrep_install_step():
+    semgrep = jobs(load(WORKFLOWS / "security.yml"))["semgrep"]
+    return next(s for s in steps_of(semgrep) if s.get("name") == "Install Semgrep")
+
+
+def run_semgrep_install(tmp_path, requested):
+    """Run the real step under bash with a `python` that records its arguments instead of installing."""
+    stubs = tmp_path / "bin"
+    stubs.mkdir()
+    python = stubs / "python"
+    python.write_text('#!/bin/sh\necho "$@" >> "$PY_LOG"\n')
+    python.chmod(python.stat().st_mode | stat.S_IXUSR)
+    step = semgrep_install_step()
+    log = tmp_path / "python.log"
+    env = {**os.environ, "PATH": f"{stubs}:{os.environ['PATH']}", "PY_LOG": str(log), "RUNNER_TEMP": str(tmp_path)}
+    env.update(REQUIREMENTS=step["env"]["REQUIREMENTS"], REQUESTED_VERSION=requested)
+    result = subprocess.run(["bash", "-e", "-c", step["run"]], env=env, capture_output=True, text=True)
+    return result, log.read_text() if log.exists() else ""
+
+
+def locked_semgrep():
+    return re.search(r"^semgrep==(\S+) ", (REQS / "semgrep.txt").read_text(), re.M)[1]
+
+
+@pytest.mark.parametrize("requested", ["", "LOCKED"])
+def test_semgrep_version_empty_or_the_locked_one_installs(tmp_path, requested):
+    result, calls = run_semgrep_install(tmp_path, locked_semgrep() if requested else "")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "--require-hashes" in calls and "-m pip install" in calls
+
+
+def test_semgrep_version_other_than_the_locked_one_fails_naming_it_and_installs_nothing(tmp_path):
+    result, calls = run_semgrep_install(tmp_path, "0.0.1")
+    assert result.returncode == 1
+    assert locked_semgrep() in result.stdout and "deprecated" in result.stdout and "will be removed" in result.stdout
+    assert calls == ""

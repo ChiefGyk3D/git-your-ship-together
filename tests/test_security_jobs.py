@@ -35,9 +35,8 @@ def test_semgrep_inputs_and_defaults():
     assert INPUTS["semgrep-continue-on-error"]["default"] is False
     assert INPUTS["semgrep-egress-policy"]["default"] == "block"
     assert INPUTS["semgrep-allowed-endpoints"]["default"].split(" ")[-1] == "semgrep.dev:443"
-    assert "semgrep-version" not in INPUTS, (
-        "the version is the hash lock's (.github/requirements/semgrep.in); an input cannot change it"
-    )
+    assert INPUTS["semgrep-version"]["default"] == "", "deprecated: empty means the locked version"
+    assert "eprecated" in INPUTS["semgrep-version"]["description"]
 
 
 def test_semgrep_holds_no_id_token_and_no_doppler():
@@ -67,7 +66,9 @@ def test_semgrep_scan_command():
     assert scan["env"]["CONFIGS"] == "${{ inputs.semgrep-config }}"
     install = next(s for s in steps_of(SEMGREP) if s.get("name") == "Install Semgrep")
     assert "--require-hashes" in install["run"] and "inputs." not in install["run"]
-    assert "inputs." not in str(install["env"]), "Semgrep is installed from the lock, whatever the caller passes"
+    assert install["env"]["REQUESTED_VERSION"] == "${{ inputs.semgrep-version }}", (
+        "the input is only compared with the lock"
+    )
 
 
 @pytest.mark.parametrize("python_file", [None, "app.py", "src/app.py"])
@@ -169,6 +170,7 @@ def test_new_inputs_are_in_the_readme():
     for name in (
         "semgrep",
         "semgrep-config",
+        "semgrep-version",
         "semgrep-continue-on-error",
         "semgrep-egress-policy",
         "dependency-review-deny-licenses",
