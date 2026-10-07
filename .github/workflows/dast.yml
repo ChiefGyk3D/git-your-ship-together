@@ -1,7 +1,21 @@
-# Reusable DAST for a service the caller starts: an OWASP ZAP baseline scan
-# (a spider and ZAP's passive rules; it sends no attack traffic) against a
-# service on loopback, a fail-on threshold, the reports as an artifact, and the
-# findings as SARIF in the Security tab under category `zap`.
+# Reusable DAST for a service the caller starts: one of OWASP ZAP's three
+# packaged scans against a service on loopback, a fail-on threshold, the
+# reports as an artifact, and the findings as SARIF in the Security tab under
+# category `zap`. `scan-type` picks the scan:
+#
+#   baseline  zap-baseline.py: a spider and ZAP's passive rules. Sends no attack
+#             traffic, so it sees what a client sees (headers, cookies, banners)
+#             and nothing the server does with its input. The default.
+#   full      zap-full-scan.py: the baseline's spider and passive rules, then
+#             ZAP's active rules against every URL and parameter it found:
+#             injection, cross-site scripting, path traversal and the rest.
+#             Attack traffic, aimed only at the loopback service this job
+#             started; slower, and `active-scan-minutes` bounds it.
+#   api       zap-api-scan.py: imports an OpenAPI, SOAP or GraphQL definition
+#             (`api-definition`) and runs the active rules of ZAP's API-Minimal
+#             policy against each operation, plus alerts on unexpected status
+#             codes and content types. There is no spider: the definition is
+#             the map, so an API with no links from a page gets covered.
 #
 # Call it from a repository with:
 #
@@ -14,7 +28,12 @@
 #       with:
 #         start-command: python -m myapp serve --port 8080
 #         target-url: http://127.0.0.1:8080
+#         scan-type: full
 #         fail-on: medium
+#
+# Two calls in one run (a full scan of the pages and an api scan of the API)
+# need distinct `artifact-name` and `sarif-category` values, or the second
+# upload replaces the first's alerts in the Security tab.
 #
 # The caller's service runs in the `scan` job, which holds `contents: read` and
 # nothing else, exactly like a test job. The SARIF upload is a second job that
@@ -63,10 +82,30 @@ on:
         description: Lowest risk that fails the job - `high`, `medium`, `low`, `informational` or `none` (report only). A page with no security headers is Medium (no CSP, no anti-clickjacking header), so `high` does not catch it; set `medium` to catch it.
         type: string
         default: high
+      scan-type:
+        description: Which ZAP scan runs - `baseline` (spider and passive rules, no attack traffic), `full` (baseline plus ZAP's active rules against everything the spider found) or `api` (active rules against the operations of `api-definition`; no spider). The full and api scans send attack traffic, which is why the target must be loopback.
+        type: string
+        default: baseline
       spider-minutes:
-        description: Longest the spider runs (zap-baseline.py -m). It stops sooner when it has followed every link.
+        description: Longest the spider runs (-m, for `baseline` and `full`). It stops sooner when it has followed every link. Not used by `api`, which has no spider.
         type: number
         default: 1
+      ajax-spider:
+        description: Also run ZAP's AJAX spider (a headless browser that clicks through the page) after the traditional one, for `baseline` and `full`. A page whose links are built by JavaScript needs it; a server-rendered one does not. Slower, and not used by `api`.
+        type: boolean
+        default: false
+      active-scan-minutes:
+        description: Longest the active scan runs (ZAP's `scanner.maxScanDurationInMins`), for `full` and `api`. `0` is no limit, which on a large service can outlast `timeout-minutes`; set both together.
+        type: number
+        default: 0
+      api-definition:
+        description: For `scan-type` `api` only. For `openapi` and `soap`, the definition - a file in the repository (`openapi/spec.yaml`) or a loopback URL the service serves it at (`http://127.0.0.1:8080/openapi.json`). For `graphql`, the loopback URL of the endpoint, which must answer introspection. The scan refuses anything else and refuses this input with any other `scan-type`.
+        type: string
+        default: ""
+      api-format:
+        description: Format of `api-definition` - `openapi`, `soap` or `graphql`. For `openapi` the definition's `servers` are overridden with `target-url`, so a definition that names the production host still scans the loopback service; `soap` and `graphql` take the definition's own addresses, which must be loopback too.
+        type: string
+        default: openapi
       python-version:
         description: Python to set up before `install-command`. Empty skips the step, for a service that needs none.
         type: string
@@ -76,9 +115,13 @@ on:
         type: string
         default: ""
       upload-sarif:
-        description: Upload the findings to the Security tab under category `zap`. Needs the caller to grant the `security-events` write permission, and code scanning to be available (a private repository needs GitHub Advanced Security). Never on a pull request from a fork, whose token cannot write.
+        description: Upload the findings to the Security tab under `sarif-category`. Needs the caller to grant the `security-events` write permission, and code scanning to be available (a private repository needs GitHub Advanced Security). Never on a pull request from a fork, whose token cannot write.
         type: boolean
         default: true
+      sarif-category:
+        description: Code scanning category of the upload. Alerts from an earlier upload under the same category that the new one lacks are closed, so two scans in one repository (a `full` of the pages and an `api` of the API) need two categories, or each run closes the other's alerts.
+        type: string
+        default: zap
       artifact-name:
         description: Name of the artifact holding the HTML, Markdown, JSON and SARIF reports. Artifact names are unique per run, so a caller that runs this workflow twice in one workflow run names them apart.
         type: string
@@ -137,11 +180,51 @@ jobs:
           FAIL_ON: ${{ inputs.fail-on }}
           RULES_FILE: ${{ inputs.rules-file }}
           SPIDER_MINUTES: ${{ inputs.spider-minutes }}
+          ACTIVE_SCAN_MINUTES: ${{ inputs.active-scan-minutes }}
           READY_TIMEOUT: ${{ inputs.ready-timeout-seconds }}
+          SCAN_TYPE: ${{ inputs.scan-type }}
+          API_DEFINITION: ${{ inputs.api-definition }}
+          API_FORMAT: ${{ inputs.api-format }}
         run: |
           set -euo pipefail
-          if ! printf '%s' "$TARGET_URL" | grep -Eq '^https?://(127\.0\.0\.1|localhost|\[::1\])(:[0-9]+)?/?$'; then
+          loopback='^https?://(127\.0\.0\.1|localhost|\[::1\])(:[0-9]+)?'
+          if ! printf '%s' "$TARGET_URL" | grep -Eq "${loopback}/?\$"; then
             echo "::error::target-url '$TARGET_URL' is not a loopback base URL (http://127.0.0.1:PORT, http://localhost:PORT or http://[::1]:PORT). This workflow scans a service the job starts, never another host."
+            exit 1
+          fi
+          case "$SCAN_TYPE" in
+            baseline | full | api) ;;
+            *) echo "::error::scan-type '$SCAN_TYPE' is not one of baseline, full, api"; exit 1 ;;
+          esac
+          case "$API_FORMAT" in
+            openapi | soap | graphql) ;;
+            *) echo "::error::api-format '$API_FORMAT' is not one of openapi, soap, graphql"; exit 1 ;;
+          esac
+          if [ "$SCAN_TYPE" = api ]; then
+            if [ -z "$API_DEFINITION" ]; then
+              echo "::error::scan-type is api but api-definition is empty. Name the OpenAPI or SOAP definition (a file in the repository, or a loopback URL the service serves it at), or for graphql the loopback URL of the endpoint."
+              exit 1
+            fi
+            case "$API_DEFINITION" in
+              http://* | https://*)
+                if ! printf '%s' "$API_DEFINITION" | grep -Eq "${loopback}(/|\$)"; then
+                  echo "::error::api-definition '$API_DEFINITION' is a URL but not a loopback one. ZAP fetches the definition from, and scans, the service this job starts; a definition on another host is a file in the repository instead."
+                  exit 1
+                fi
+                ;;
+              *)
+                if [ "$API_FORMAT" = graphql ]; then
+                  echo "::error::api-definition '$API_DEFINITION' must be the loopback URL of the GraphQL endpoint (http://127.0.0.1:PORT/graphql) when api-format is graphql; ZAP reads the schema by introspection."
+                  exit 1
+                fi
+                if [ ! -f "$API_DEFINITION" ]; then
+                  echo "::error::api-definition '$API_DEFINITION' is neither a loopback URL nor a file in the repository."
+                  exit 1
+                fi
+                ;;
+            esac
+          elif [ -n "$API_DEFINITION" ]; then
+            echo "::error::api-definition is set but scan-type is '$SCAN_TYPE', which would not read it. Set scan-type: api, or drop api-definition."
             exit 1
           fi
           case "$READY_PATH" in
@@ -153,6 +236,7 @@ jobs:
             *) echo "::error::fail-on '$FAIL_ON' is not one of high, medium, low, informational, none"; exit 1 ;;
           esac
           printf '%s' "$SPIDER_MINUTES" | grep -Eq '^[0-9]+$' || { echo "::error::spider-minutes '$SPIDER_MINUTES' is not a whole number"; exit 1; }
+          printf '%s' "$ACTIVE_SCAN_MINUTES" | grep -Eq '^[0-9]+$' || { echo "::error::active-scan-minutes '$ACTIVE_SCAN_MINUTES' is not a whole number"; exit 1; }
           printf '%s' "$READY_TIMEOUT" | grep -Eq '^[0-9]+$' || { echo "::error::ready-timeout-seconds '$READY_TIMEOUT' is not a whole number"; exit 1; }
           if [ -n "$RULES_FILE" ] && [ ! -f "$RULES_FILE" ]; then
             echo "::error::rules-file '$RULES_FILE' is not a file in the repository. Create it, or leave rules-file empty to use ZAP's defaults."
@@ -211,31 +295,84 @@ jobs:
           tail -n 40 "$SERVICE_LOG"
           exit 1
 
-      - name: Run the ZAP baseline scan
+      # The three packaged scans share their report flags, the rules file, -I
+      # (warnings do not set the exit code; fail-on is decided in the next step)
+      # and -z "-silent" (no check-for-updates, no telemetry, no add-on install).
+      # They differ in the script, in what -t names (the service for baseline and
+      # full, the API definition for api) and in which of the spider and active
+      # scan options they take.
+      - name: Run the ZAP scan
         id: zap
         env:
+          SCAN_TYPE: ${{ inputs.scan-type }}
           TARGET_URL: ${{ inputs.target-url }}
           RULES_FILE: ${{ inputs.rules-file }}
           SPIDER_MINUTES: ${{ inputs.spider-minutes }}
+          AJAX_SPIDER: ${{ inputs.ajax-spider }}
+          ACTIVE_SCAN_MINUTES: ${{ inputs.active-scan-minutes }}
+          API_DEFINITION: ${{ inputs.api-definition }}
+          API_FORMAT: ${{ inputs.api-format }}
           ZAP_DIR: ${{ runner.temp }}/zap
         run: |
           set -uo pipefail
           # The container's user is not the runner's; this scratch directory is the one place it writes.
           mkdir -p "$ZAP_DIR"
           chmod 0777 "$ZAP_DIR"
-          args=(-t "${TARGET_URL%/}" -J report.json -r report.html -w report.md -I -m "$SPIDER_MINUTES" -z "-silent")
+          target="${TARGET_URL%/}"
+          zap_options="-silent"
+          case "$SCAN_TYPE" in
+            baseline)
+              script=zap-baseline.py
+              args=(-t "$target" -m "$SPIDER_MINUTES")
+              [ "$AJAX_SPIDER" = true ] && args+=(-j --ajax-spider)
+              ;;
+            full)
+              script=zap-full-scan.py
+              args=(-t "$target" -m "$SPIDER_MINUTES")
+              [ "$AJAX_SPIDER" = true ] && args+=(-j --ajax-spider)
+              [ "$ACTIVE_SCAN_MINUTES" -gt 0 ] && zap_options="$zap_options -config scanner.maxScanDurationInMins=$ACTIVE_SCAN_MINUTES"
+              ;;
+            api)
+              script=zap-api-scan.py
+              case "$API_DEFINITION" in
+                http://* | https://*)
+                  args=(-t "$API_DEFINITION")
+                  ;;
+                *)
+                  # A file is read from the mounted directory; its extension is kept for the importer.
+                  name="$(basename -- "$API_DEFINITION")"
+                  case "$name" in
+                    *.*) definition="definition.${name##*.}" ;;
+                    *) definition="definition" ;;
+                  esac
+                  cp -- "$API_DEFINITION" "$ZAP_DIR/$definition"
+                  args=(-t "$definition")
+                  ;;
+              esac
+              args+=(-f "$API_FORMAT")
+              # The definition's servers may name production; the scan goes to the loopback service.
+              [ "$API_FORMAT" = openapi ] && args+=(-O "$target")
+              [ "$ACTIVE_SCAN_MINUTES" -gt 0 ] && zap_options="$zap_options -config scanner.maxScanDurationInMins=$ACTIVE_SCAN_MINUTES"
+              ;;
+            *)
+              echo "::error::scan-type '$SCAN_TYPE' is not one of baseline, full, api"
+              exit 1
+              ;;
+          esac
+          args+=(-J report.json -r report.html -w report.md -I -z "$zap_options")
           if [ -n "$RULES_FILE" ]; then
             cp -- "$RULES_FILE" "$ZAP_DIR/rules.tsv"
             args+=(-c rules.tsv)
           fi
+          echo "$script ${args[*]}"
           # --network host is how the container reaches the service on the runner's loopback.
-          docker run --rm --network host --volume "$ZAP_DIR:/zap/wrk:rw" "$ZAP_IMAGE" zap-baseline.py "${args[@]}"
+          docker run --rm --network host --volume "$ZAP_DIR:/zap/wrk:rw" "$ZAP_IMAGE" "$script" "${args[@]}"
           rc=$?
           echo "exit=$rc" >> "$GITHUB_OUTPUT"
           # 0 clean, 1 a rule set to FAIL in the rules file (decided in the next step, after the
           # reports exist); -I turns warnings into 0, so anything else is ZAP failing to run.
           if [ "$rc" -gt 1 ] || [ ! -s "$ZAP_DIR/report.json" ]; then
-            echo "::error::zap-baseline.py exited $rc and left no report: the scan did not run. Its output is above."
+            echo "::error::$script exited $rc and left no report: the scan did not run. Its output is above."
             exit 1
           fi
 
@@ -246,6 +383,7 @@ jobs:
           ZAP_EXIT: ${{ steps.zap.outputs.exit }}
           FAIL_ON: ${{ inputs.fail-on }}
           TARGET_URL: ${{ inputs.target-url }}
+          SCAN_TYPE: ${{ inputs.scan-type }}
         run: |
           python3 - <<'PY'
           """ZAP's JSON report to SARIF 2.1.0, a job summary, and the fail-on decision."""
@@ -259,6 +397,7 @@ jobs:
 
           zap_dir = Path(os.environ["ZAP_DIR"])
           fail_on = os.environ["FAIL_ON"]
+          scan_type = os.environ.get("SCAN_TYPE", "baseline")
           zap_exit = os.environ.get("ZAP_EXIT", "0")
           report = json.loads((zap_dir / "report.json").read_text())
 
@@ -302,7 +441,7 @@ jobs:
                       },
                       "helpUri": first_url(alert.get("reference"), doc_url),
                       "defaultConfiguration": {"level": levels[risk]},
-                      "properties": {"tags": ["security", "dast", "zap"]},
+                      "properties": {"tags": ["security", "dast", "zap", f"zap-{scan_type}"]},
                   },
               )
               if risk in severity:
@@ -357,7 +496,7 @@ jobs:
 
           failing = [] if threshold is None else [a for a in alerts if int(a["riskcode"]) >= threshold]
           lines = [
-              "### ZAP baseline scan",
+              f"### ZAP {scan_type} scan",
               "",
               f"fail-on: `{fail_on}`. {len(alerts)} alert(s), {len(failing)} at or above the threshold.",
               "",
@@ -426,4 +565,4 @@ jobs:
       - uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
         with:
           sarif_file: zap-reports/zap.sarif
-          category: zap
+          category: ${{ inputs.sarif-category }}

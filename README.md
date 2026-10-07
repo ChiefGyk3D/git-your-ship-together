@@ -77,7 +77,7 @@ Sixteen reusable workflows and one composite action:
 | `.github/workflows/docs-pages.yml` | Build a static documentation site with a command you supply (MkDocs strict by default) on every pull request; upload it and deploy it to GitHub Pages from the default branch only. The two Pages writes sit on the deploy job alone |
 | `.github/workflows/wiki-publish.yml` | Run a command that generates a wiki tree, then replace the repository's GitHub wiki with it, as `github-actions[bot]`, only when something changed, from the default branch only. The write token sits on a job that runs none of your code |
 | `.github/workflows/project-sync.yml` | Keeps a GitHub Projects v2 board current: adds an issue or pull request when it opens, moves it to Done with a date when it closes or merges, and a weekly reconcile repairs what an event missed. The token comes from Doppler over OIDC; nothing from a pull request is checked out. See [Keeping a project current](#keeping-a-project-current) |
-| `.github/workflows/dast.yml` | An OWASP ZAP baseline scan (spider and passive rules, no attack traffic) of a loopback service the caller starts, with a `fail-on` threshold; reports kept as an artifact, findings uploaded as SARIF under category `zap`. The caller's service runs in a job that holds only `contents: read`; the upload is a second job that runs none of it. See [DAST](#dast-owasp-zap-baseline) |
+| `.github/workflows/dast.yml` | OWASP ZAP against a loopback service the caller starts: the `baseline` scan (spider and passive rules, no attack traffic), the `full` scan (the active rules too: injection, cross-site scripting, traversal) or the `api` scan (the active rules over an OpenAPI, SOAP or GraphQL definition), with a `fail-on` threshold; reports kept as an artifact, findings uploaded as SARIF under category `zap`. The caller's service runs in a job that holds only `contents: read`; the upload is a second job that runs none of it. See [DAST](#dast-owasp-zap) |
 | `.github/workflows/security.yml` | CodeQL (the `actions` language included by default), gitleaks, a dependency audit (pip-audit, and any other tool by command), Semgrep, dependency review on pull requests (with a licence denylist), optional Snyk, optional OpenSSF Scorecard |
 | `.github/workflows/dependabot-auto-merge.yml` | Queues a Dependabot bump to merge itself once the required checks pass, up to a size you choose |
 | `.github/actions/doppler-secrets` | Fetches a Doppler config as masked environment variables, over OIDC or a Service Token. The workflows inline a copy of it (see the design rules); this is the source |
@@ -508,14 +508,20 @@ Inputs of `python-fuzz.yml`:
 | `extra-allowed-endpoints` | empty | Appended to the list, for hosts only this repository reaches |
 | `timeout-minutes` | `30` | Job timeout; targets run one after another, so raise it with `seconds-per-target` |
 
-### DAST (OWASP ZAP baseline)
+### DAST (OWASP ZAP)
 
 Everything else in `security.yml` reads code. `dast.yml` is the one check that
 talks to a running service: it starts the caller's service on loopback, points
-an [OWASP ZAP](https://www.zaproxy.org/) baseline scan at it (a spider and ZAP's
-passive rules; the baseline sends no attack traffic), and fails the job when a
-finding reaches `fail-on`. It fits a repository that serves HTTP (a dashboard, an
-API, a docs server) and only that; a repository with no service has nothing to call.
+[OWASP ZAP](https://www.zaproxy.org/) at it, and fails the job when a finding
+reaches `fail-on`. It fits a repository that serves HTTP (a dashboard, an API, a
+docs server) and only that; a repository with no service has nothing to call.
+`scan-type` picks one of ZAP's three packaged scans:
+
+| `scan-type` | What ZAP does | Finds | Cannot find | Time on the fixture |
+|---|---|---|---|---|
+| `baseline` (default) | Spiders the service, runs the passive rules over every response. Sends no attack traffic | Missing or weak security headers, cookies without flags, server banners, information in responses | Anything the server does with its input: an injection, a reflected script, a traversal | about 1 minute |
+| `full` | The baseline, then the active rules against every URL and parameter the spider found | The passive findings, plus reflected and persistent XSS, SQL and command injection, path traversal, remote file inclusion, and the rest of ZAP's active rules | Operations no link reaches (an API with no page linking to it); anything behind a login without a context file | several minutes |
+| `api` | Imports `api-definition`, sends each operation with the parameters it declares, runs the active rules of ZAP's API-Minimal policy, and alerts on unexpected status codes and content types | The same classes of hole in an API, including operations no page links to, since the definition is the map | Operations the definition leaves out; a page | a few minutes |
 
 ```yaml
 jobs:
@@ -529,41 +535,82 @@ jobs:
       install-command: pip install .              # whatever the service needs
       start-command: myapp serve --port 8080      # blocks or detaches; both work
       target-url: http://127.0.0.1:8080
+      scan-type: full                             # baseline, full or api
       fail-on: medium
 ```
 
-Add the job to the caller's `CI green` gate (`needs:`). What it does, in order:
-refuses a bad input (a `target-url` that is not loopback, an unknown `fail-on`, a
-missing `rules-file`); runs `install-command`, then `start-command` in the
-background with its output in a file; waits for `ready-path` to answer 2xx or 3xx
-(a service that exits non-zero before then fails at once with the tail of its log);
-runs the ZAP image; converts ZAP's JSON report to SARIF; writes a job summary
-table; and fails when an alert is at or above `fail-on`. HTML, Markdown, JSON and
-SARIF reports are the `zap-reports` artifact for 14 days, whether the scan passed
-or not.
+An API gets a second call, with a second artifact name and category so the two
+uploads do not close each other's alerts:
 
+```yaml
+  dast-api:
+    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/dast.yml@<sha> # vX.Y.Z
+    permissions:
+      contents: read
+      security-events: write
+    with:
+      start-command: myapp serve --port 8080
+      target-url: http://127.0.0.1:8080
+      scan-type: api
+      api-definition: openapi/myapp.yaml          # a file in the repository, or http://127.0.0.1:8080/openapi.json
+      fail-on: medium
+      artifact-name: zap-api-reports
+      sarif-category: zap-api
+```
+
+Add the jobs to the caller's `CI green` gate (`needs:`). What a call does, in
+order: refuses a bad input (a `target-url` that is not loopback, an unknown
+`fail-on` or `scan-type`, a missing `rules-file`, an `api-definition` that is
+neither a repository file nor a loopback URL, or one given without `scan-type:
+api`); runs `install-command`, then `start-command` in the background with its
+output in a file; waits for `ready-path` to answer 2xx or 3xx (a service that
+exits non-zero before then fails at once with the tail of its log); runs the ZAP
+image with the script `scan-type` names; converts ZAP's JSON report to SARIF;
+writes a job summary table; and fails when an alert is at or above `fail-on`.
+HTML, Markdown, JSON and SARIF reports are the `zap-reports` artifact for 14
+days, whether the scan passed or not.
+
+- **Start with `baseline`, move to `full`.** The baseline is fast and its
+  findings are the ones a reverse proxy fixes in an afternoon. Once it passes
+  at `medium`, switch to `full`: it is the scan that finds what the code does
+  with input, and the one with no static-analysis substitute. Bound it with
+  `active-scan-minutes` and raise `timeout-minutes` to match; `0` is no limit,
+  and ZAP's active rules against a large service can run for a long time.
 - **`fail-on` is a risk level, not a count.** ZAP rates each alert High, Medium,
   Low or Informational. A page with no security headers has Medium alerts (no
   Content-Security-Policy, no anti-clickjacking header) and Low ones, so the
   default `high` does not catch it: set `medium` to catch missing headers, `low`
-  or `informational` to be stricter, `none` to report without failing. The
-  SARIF carries every alert whatever the threshold.
+  or `informational` to be stricter, `none` to report without failing. A
+  reflected cross-site scripting hole is High, so the default catches that in a
+  `full` or `api` scan. The SARIF carries every alert whatever the threshold,
+  tagged `zap-<scan-type>` so the Security tab says which scan found it.
 - **Accepting a finding** goes in `rules-file`, ZAP's own format, usually
   `.zap/rules.tsv`: tab-separated `<rule id>`, `IGNORE`, and a comment saying why.
-  An `IGNORE`d rule is dropped from the report and the SARIF. A rule set to `FAIL`
-  fails the job whatever `fail-on` says. Rule ids are in each report and at
+  An `IGNORE`d rule is dropped from the report and the SARIF, and for a `full` or
+  `api` scan the active rule is not run. A rule set to `FAIL` fails the job
+  whatever `fail-on` says. Rule ids are in each report and at
   `https://www.zaproxy.org/docs/alerts/<id>/`.
-- **Loopback only, by design.** The scan refuses any other host, and the
-  container shares the runner's network only to reach the service. The service
-  is whatever the caller starts, so give it a recorded dataset and no outbound
-  dependency, and `block` mode's allow-list stays the image pull and GitHub.
-- **The image is pinned by digest, not by action.** `zaproxy/action-baseline`
-  runs the same image by the moving tag `stable`, files issues with the job's
-  token and has no SARIF output; the workflow runs
-  `ghcr.io/zaproxy/zaproxy:2.17.0@sha256:...` directly, with no token in the
-  container and `-silent` so ZAP makes no unsolicited requests (measured: with no
-  network at all the scan completes, and without `-silent` it tries
-  `cfu.zaproxy.org` and `tel.zaproxy.org`). No action joins
+- **Loopback only, by design, and it matters more for the active scans.** The
+  `full` and `api` scans send attack payloads. The workflow refuses any
+  `target-url` or `api-definition` URL that is not `127.0.0.1`, `localhost` or
+  `[::1]`, and the container shares the runner's network only to reach the
+  service, so a typo cannot aim an attack at a third party. For `openapi` the
+  definition's `servers` are overridden with `target-url`, so a definition that
+  names the production host still scans the loopback service; `soap` and
+  `graphql` take the addresses the definition carries, which must be loopback
+  too. The service is whatever the caller starts, so give it a recorded dataset
+  and no outbound dependency, and `block` mode's allow-list stays the image pull
+  and GitHub.
+- **The AJAX spider** (`ajax-spider: true`) adds a headless browser that clicks
+  through the page, for a front end whose links are built by JavaScript. A
+  server-rendered page does not need it, and it is slower.
+- **The image is pinned by digest, not by action.** `zaproxy/action-baseline`,
+  `action-full-scan` and `action-api-scan` run the same image by the moving tag
+  `stable`, file issues with the job's token and have no SARIF output; the
+  workflow runs `ghcr.io/zaproxy/zaproxy:2.17.0@sha256:...` directly, with no
+  token in the container and `-silent` so ZAP makes no unsolicited requests
+  (measured: with no network at all the scan completes, and without `-silent` it
+  tries `cfu.zaproxy.org` and `tel.zaproxy.org`). No action joins
   `baseline/selected-actions.json`. A bump is a new tag and its digest in the
   workflow's `ZAP_IMAGE`.
 - **Two jobs.** `scan` runs the caller's code with `contents: read` and no
@@ -571,11 +618,17 @@ or not.
   no shell; it is skipped on a pull request from a fork, whose token cannot write,
   and with `upload-sarif: false` (a private repository without GitHub Advanced
   Security cannot take SARIF at all).
-- **Proved to fail.** `tests/test_dast.py` runs the job's steps against canned
-  reports (the threshold, the SARIF, every refusal) and, in this repository's
-  `dast-live` job, against the real image and `fixture/dast/server.py`: the
-  fixture with its headers passes at `low`, the same page without them fails at
-  `medium` and passes at `high`.
+- **Proved to fail, per scan type.** `tests/test_dast.py` runs the job's steps
+  against canned reports (the threshold, the SARIF, every refusal), runs the scan
+  step against a fake `docker` to check which ZAP script and flags each
+  `scan-type` produces, and, in this repository's `dast-live` job, runs the real
+  image against `fixture/dast/server.py`: the fixture with its headers passes the
+  baseline at `low` and the same page without them fails at `medium`; the page
+  that reflects its query unescaped (`--vulnerable`) passes the baseline, because
+  nothing in its headers is wrong, and fails the full scan at `high` naming the
+  cross-site scripting; the escaping page passes the full scan at `medium`; and
+  the api scan imports `fixture/dast/openapi.json`, whose server is a host that
+  does not exist, and still scans the loopback service.
 
 Inputs of `dast.yml`:
 
@@ -587,15 +640,21 @@ Inputs of `dast.yml`:
 | `ready-timeout-seconds` | `60` | How long to wait for `ready-path` |
 | `rules-file` | empty | ZAP rules file for accepted findings, e.g. `.zap/rules.tsv` |
 | `fail-on` | `high` | Lowest risk that fails the job: `high`, `medium`, `low`, `informational`, `none` |
-| `spider-minutes` | `1` | Longest the spider runs; it stops sooner when it has followed every link |
+| `scan-type` | `baseline` | Which ZAP scan: `baseline` (passive), `full` (active rules over what the spider found) or `api` (active rules over `api-definition`) |
+| `spider-minutes` | `1` | Longest the spider runs (`baseline`, `full`); it stops sooner when it has followed every link |
+| `ajax-spider` | `false` | Also run the AJAX spider, a headless browser, for pages whose links JavaScript builds (`baseline`, `full`) |
+| `active-scan-minutes` | `0` | Longest the active scan runs (`full`, `api`); `0` is no limit, so set it with `timeout-minutes` |
+| `api-definition` | empty | For `api`: an OpenAPI or SOAP definition as a repository file or a loopback URL, or the loopback URL of a GraphQL endpoint |
+| `api-format` | `openapi` | Format of `api-definition`: `openapi` (its `servers` are overridden with `target-url`), `soap` or `graphql` |
 | `python-version` | empty | Python to set up first; empty skips it |
 | `install-command` | empty | Installs the service, run before `start-command` |
-| `upload-sarif` | `true` | Upload the findings under category `zap`; needs `security-events: write` |
+| `upload-sarif` | `true` | Upload the findings under `sarif-category`; needs `security-events: write` |
+| `sarif-category` | `zap` | Code scanning category; two scans in one repository need two, or each closes the other's alerts |
 | `artifact-name` | `zap-reports` | Name of the reports artifact; name two calls in one run apart |
 | `egress-policy` | `audit` | harden-runner policy; see [Egress](#egress) |
 | `allowed-endpoints` | the measured list | harden-runner allow-list for `block`: GitHub and GHCR (the ZAP image). Measured by this repository's own `fixture dast` job in `block` mode |
 | `extra-allowed-endpoints` | empty | Appended to the list, for hosts the service or its install command reaches |
-| `timeout-minutes` | `20` | Timeout of the scan job (install, service start and scan) |
+| `timeout-minutes` | `20` | Timeout of the scan job (install, service start and scan); raise it for a `full` scan of a large service |
 
 ### Tofu CI
 
@@ -1991,7 +2050,7 @@ The tests are the contract, one file per thing they hold still:
 | `tests/test_doppler_gate.py` | The decide script, run under bash for every event and ref shape: trusted refs fetch, untrusted refs get a notice and never fail, forks never fetch, the Service Token path is gated the same way |
 | `tests/test_audit_baseline.py` | The audit, fed a passing repository and a broken one per criterion; a 403 comes back UNKNOWN, never PASS; exit codes tell FAIL from UNKNOWN |
 | `tests/test_risk_register.py` | The register's shape, its dates, no duplicate advisory, every repository named is in the baseline list, and no entry has expired |
-| `tests/test_dast.py` | `dast.yml`'s contract, its steps run under bash (refusals, a service that blocks, detaches, dies or never answers; the `fail-on` threshold and the SARIF against canned ZAP reports), and, in the `dast-live` CI job, the real ZAP image against `fixture/dast/server.py` with and without its headers |
+| `tests/test_dast.py` | `dast.yml`'s contract, its steps run under bash (refusals, a service that blocks, detaches, dies or never answers; the `fail-on` threshold and the SARIF against canned ZAP reports; the scan step against a fake `docker`, so each `scan-type` is shown to run its ZAP script with its flags), and, in the `dast-live` CI job, the real ZAP image against `fixture/dast/server.py`: the baseline with and without its headers, the full scan against a page that reflects its query and one that escapes it, the api scan against its OpenAPI definition |
 | `tests/test_fuzz.py` | `python-fuzz.yml`'s inputs and pin, and its run step executed under bash against tiny targets: a missing directory, no match, a passing target and a crashing one (which must fail the step and leave its `crash-*` input) |
 | `tests/test_tool_locks.py` | No `run:` step of any workflow or composite action runs a `pip install` without `--require-hashes`; `security.yml` carries `.github/requirements/*.txt` verbatim; every lock line has a hash; the Snyk install step, run under bash with a recording `pip`, installs a hashed lock under `--require-hashes` and refuses an unhashed one without calling pip |
 | `tests/test_security_jobs.py` | The Semgrep job's defaults and its content-driven config; the gitleaks job as a pinned binary: no licence, no Doppler, no `id-token`, the sha256 checked before extraction, full history, SARIF under category `gitleaks`, and a canary step that plants an AWS-shaped key in a scratch repository and requires exit 1 before the real scan runs (the test also fetches the pinned release, checks the hash, and runs that canary for real; it skips only when offline) |
