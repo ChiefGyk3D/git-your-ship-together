@@ -36,7 +36,7 @@ concurrency:
 
 jobs:
   ci:
-    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/python-ci.yml@<sha> # v1.12.0
+    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/python-ci.yml@a5b834a6e03e0bf7187eeebfa84685498d73b139 # v1.14.0
     permissions:
       contents: read
       id-token: write       # the coverage job asks for it; see the note below
@@ -48,7 +48,7 @@ jobs:
 
 Three things to notice.
 
-- **`@<sha> # v1.12.0`** is a **pin**: the exact commit of GYST that runs,
+- **`@<sha> # v1.14.0`** is a **pin**: the exact commit of GYST that runs,
   with the version beside it for humans. A tag can be moved, a commit cannot.
   Dependabot opens a pull request to move the pin when a new version is tagged.
 - **`with:`** holds inputs. Every workflow page lists every input, its default

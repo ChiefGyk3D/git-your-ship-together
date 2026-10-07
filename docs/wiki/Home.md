@@ -7,8 +7,8 @@ files that say what is specific to it, and calls the shared workflows for the
 rest. A bug fixed in a shared workflow is fixed in every project on its next
 pin bump. The projects that call it today are the Python daemons, the
 Hammunition suite, a firmware project and a few lab repositories;
-[`baseline/repos.txt`](../../baseline/repos.txt) is the list, 23 repositories
-as of 2026-10-05.
+[`baseline/repos.txt`](../../baseline/repos.txt) is the list, 24 repositories
+as of 2026-10-07.
 
 It is also written to be read. Every rule in it came from something that
 broke or something that was measured, and the wiki says which. If you have

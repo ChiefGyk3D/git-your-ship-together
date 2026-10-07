@@ -2,7 +2,7 @@
 
 **What this is.** What is done, what is open as a measured issue, and what is only an idea,
 grouped. The sources are [docs/ROADMAP.md](../ROADMAP.md) (the long-form plan, status of
-2026-09-21 plus later notes) and the open issues of 2026-10-05. Where they disagree, the
+2026-09-21 plus later notes) and the open issues of 2026-10-07. Where they disagree, the
 repository and the issue tracker are right and this page has a bug.
 
 ## Done
@@ -18,6 +18,23 @@ repository and the issue tracker are right and this page has a bug.
 - The gitleaks binary pinned by sha256 in place of the licence-gated action (#90, closed), after the
   Hammunition suite moved into an organization.
 
+Merged to `main` on 2026-10-06 and 2026-10-07, after the v1.14.0 tag and so not yet in a release:
+
+- `dast.yml` ([dast](Workflow-dast.md)): ZAP's full (active) and api scans beside the baseline, each proved to fail
+  on the fixture (#109, after the baseline scan in #107).
+- A CycloneDX and an SPDX SBOM attached to every release of `python-package-release.yml`, signed with the rest
+  (#99, in #106).
+- The gitleaks pre-commit hook, written into an adopted repository by `scripts/new-repo.sh` (#96, in #104), and the
+  audit's `pre-commit-hook` check that reads it (#112). Rolling it out to the repositories that already exist is #126, below.
+- The weekly audit's organization checks: a GitHub App token per owner, and organization owners are not counted as
+  outsiders (#105).
+- A per-input libFuzzer timeout, `timeout-per-input`, so a hang fails the step and leaves a `timeout-*` file (#113).
+- The reusable-workflow permission startup failure documented where it bites, with a test that the README caller
+  grants every permission the workflow declares (#111, closing #74).
+- The shared `SECURITY.md` template in `baseline/` (#110, closing #79).
+- `security.yml` installs pip-audit, Semgrep and Snyk's lock under `--require-hashes`, which clears the Scorecard
+  pinned-dependencies alert (#114, closing #87).
+
 ## Open, measured issues
 
 Each has a "done when" in its issue.
@@ -26,14 +43,27 @@ Each has a "done when" in its issue.
 
 - **#83** A Semgrep finding suppressed in source still becomes an open code-scanning alert (not settled; see
   [Security scanning explained](Security-scanning-explained.md)).
-- **#87** Scorecard: a `pip install` in `security.yml` is not pinned by hash.
 - **#97** A `dast.yml` workflow: OWASP ZAP against a service the caller starts (first caller:
-  hammunition-hill). The workflow shipped with the baseline scan and then grew the full (active) and api
-  scans, each proved to fail on the fixture; what stays open is the first caller.
+  hammunition-hill). The baseline, full and api scans have shipped; what stays open is the first caller.
 
-**Supply chain and baseline**
+## Open: the hardening backlog
 
-- **#99** Attach a CycloneDX and an SPDX SBOM to every package and artifact release, signed with the rest.
+Filed 2026-10-07 after #109, as epic **#115** (nine items, in order), each to close on GitHub-hosted runners only.
+
+- **#116** Authenticated DAST: ZAP context and user for the full and api scans.
+- **#117** Post-release vulnerability rescans in `verify-published.yml`.
+- **#118** Semgrep pack selection by content: Dockerfile, Terraform, OWASP Top Ten.
+- **#119** Licence audit of the whole dependency tree in `security.yml`.
+- **#120** Fuzz corpus persistence outside anything a pull request can write.
+- **#121** Block-mode egress for this repository's own CI jobs.
+- **#122** OpenVEX generated from the risk register, attached to releases, consumed by Trivy.
+- **#123** Image hardening probes: `cap-drop ALL`, `no-new-privileges`, reproducible build.
+- **#124** Docs hygiene: `SECURITY.md` releases, a lychee link check, badges.
+
+Two baseline follow-ups filed with it:
+
+- **#125** Baseline audit: a security-policy check that every repository carries `SECURITY.md`.
+- **#126** Roll the gitleaks pre-commit hook out to every repository in `baseline/repos.txt`.
 
 ## What needs the lab: gaps GitHub-hosted runners cannot close
 
@@ -49,7 +79,7 @@ Ephemeral, segmented, no secret beyond the job's identity, selected only by trus
 | **DAST against a deployed environment.** `dast.yml` scans a loopback service the job starts, with no login and no real integrations, because attack traffic at anything else from a shared runner is a liability | A staging deploy needs a network only the lab controls, real credentials for an authenticated ZAP context, and the right to be attacked | A staging namespace in the lab, started from each new image, scanned with a ZAP context file and a user; the staging deploy and the healthcheck below are the same runner |
 | **Hardware-in-the-loop for firmware.** `arduino-ci.yml` compiles every sketch and runs host tests; nothing flashes a board | There is no board on a GitHub runner | A runner with the boards on USB, flashing each build and running the on-device tests, on `push` and tags only |
 | **Continuous fuzzing with a kept corpus.** `python-fuzz.yml` runs each target for a fixed time from an empty corpus every time | A corpus that grows for weeks needs storage and compute that outlast one job; GitHub's cache is writable from any pull request, so it cannot hold the corpus | A fuzzing runner that keeps the corpus on the NAS and runs the targets nightly, reporting a crash as an issue |
-| **A findings aggregator.** Code scanning on a private repository needs GitHub Advanced Security; the ZAP, Trivy, Semgrep and gitleaks SARIF has nowhere to land there, and nothing today reads findings across 23 repositories at once | GitHub's view is per repository and paid for private ones | OWASP DefectDojo (or an equivalent) in the lab taking every SARIF upload, with the dedup and the SLAs per severity in one place |
+| **A findings aggregator.** Code scanning on a private repository needs GitHub Advanced Security; the ZAP, Trivy, Semgrep and gitleaks SARIF has nowhere to land there, and nothing today reads findings across 24 repositories at once | GitHub's view is per repository and paid for private ones | OWASP DefectDojo (or an equivalent) in the lab taking every SARIF upload, with the dedup and the SLAs per severity in one place |
 | **SBOMs that someone reads.** Every release carries a CycloneDX and an SPDX SBOM, signed; nothing watches them after the release for an advisory published later | A new CVE against a shipped dependency is found today only when the next build's audit runs | OWASP Dependency-Track in the lab, fed each release's SBOM, alerting on a new advisory against anything shipped |
 | **Runtime egress of the published images.** harden-runner measures what CI reaches; nothing measures what a daemon reaches once it runs | A runner cannot hold an image in a segmented network for an hour and log its connections | The staging deploy's network with egress logging, the product-side counterpart of the `block` allow-lists |
 | **Native arm64 builds and tests.** GitHub's hosted arm64 runners now cover the public repositories; a private one still builds arm64 under QEMU | Hosted arm64 is a paid tier for private repositories, and QEMU never runs the image check on real arm64 | An ARM box in the lab as a buildx node, for the private repositories |
