@@ -100,6 +100,10 @@ on:
         description: Comma-separated SPDX identifiers the review fails on when a pull request adds a dependency under one of them. Empty means no licence rule. A dependency whose licence cannot be detected is reported, not failed.
         type: string
         default: AGPL-3.0, GPL-3.0, GPL-2.0, LGPL-3.0, SSPL-1.0
+      dependency-review-allow-dependencies-licenses:
+        description: Comma-separated package URLs (`pkg:pypi/semgrep`) the licence rule does not apply to. For a tool the repository runs but does not link or ship, such as a CLI under LGPL whose hash lock is a manifest the review reads. Empty exempts nothing. Licence only; advisories still fail the review.
+        type: string
+        default: ""
       dependency-review-allow-ghsas:
         description: Comma-separated GitHub Advisory IDs the review may not fail on. Each one must have an entry in the shared repository's baseline/risk-register.yaml (the audit checks); an advisory with no fixed release is the usual case.
         type: string
@@ -474,6 +478,7 @@ jobs:
           fail-on-severity: ${{ inputs.dependency-review-severity }}
           allow-ghsas: ${{ inputs.dependency-review-allow-ghsas }}
           deny-licenses: ${{ inputs.dependency-review-deny-licenses }}
+          allow-dependencies-licenses: ${{ inputs.dependency-review-allow-dependencies-licenses }}
           comment-summary-in-pr: on-failure
 
   semgrep:

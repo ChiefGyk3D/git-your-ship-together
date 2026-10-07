@@ -162,6 +162,8 @@ def test_dependency_review_carries_the_licence_denylist():
     step = next(s for s in steps_of(jobs(DOC)["dependency-review"]) if "dependency-review-action" in str(s.get("uses")))
     assert step["with"]["deny-licenses"] == "${{ inputs.dependency-review-deny-licenses }}"
     assert step["with"]["allow-ghsas"] == "${{ inputs.dependency-review-allow-ghsas }}"
+    assert step["with"]["allow-dependencies-licenses"] == "${{ inputs.dependency-review-allow-dependencies-licenses }}"
+    assert INPUTS["dependency-review-allow-dependencies-licenses"]["default"] == "", "exempt nothing by default"
     assert "allow-licenses" not in step["with"], "the action rejects allow-licenses beside deny-licenses"
 
 
@@ -174,6 +176,7 @@ def test_new_inputs_are_in_the_readme():
         "semgrep-continue-on-error",
         "semgrep-egress-policy",
         "dependency-review-deny-licenses",
+        "dependency-review-allow-dependencies-licenses",
     ):
         assert f"| `{name}` |" in text, f"{name} is not documented in the README"
 
