@@ -47,9 +47,11 @@ if __name__ == "__main__":
   is wrong, and a silent pass would be the thing Scorecard was trying not to credit.
 - Every target runs even when an earlier one failed; the job fails if any did. A crash leaves `crash-*` (also `leak-*`,
   `timeout-*`, `oom-*`) files, uploaded as `fuzz-findings` for 30 days. Reproduce with `python fuzz/fuzz_x.py crash-<sha>`.
-- **A hang looks different from a crash.** The first hang found (a TLE whose epoch made an SGP4 C routine never return) surfaced
-  only as the outer per-target backstop killing the process, with no artifact, because no libFuzzer `-timeout` is passed
-  (issue #82, open: a `timeout-per-input` input).
+- **A hang fails the step too, and leaves its input.** libFuzzer is run with `-timeout`, set by `timeout-per-input` (25 seconds by
+  default), so an input that never returns is reported as a timeout, fails the target and is saved as a `timeout-*` file in
+  `fuzz-findings`. The first hang found (a TLE whose epoch made an SGP4 C routine never return) had surfaced only as the
+  outer per-target backstop killing the process, with no artifact (issue #82). The failure message tells you to look for
+  `timeout-*` first for a hang and `crash-*` for a crash. The backstop still exists, for a target that hangs libFuzzer itself.
 - Atheris is installed from one pinned version under `--require-hashes` with `--only-binary`, so nothing is built on the
   runner. It publishes x86_64 manylinux wheels for CPython 3.12 to 3.14 only, so the default Python is `3.14` and `runner`
   must be x86_64 Linux. A test fails when the workflow's pin and `requirements-dev.in` disagree.

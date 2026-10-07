@@ -1,5 +1,5 @@
 # Reusable fuzzing for a Python project: every Atheris target under `fuzz-dir`
-# is run for a fixed time, a crash fails the job, and the crashing input is
+# is run for a fixed time, a crash or hang fails the job, and the input is
 # uploaded. A target is what OpenSSF Scorecard's Fuzzing check looks for in
 # the repository tree (`import atheris` in a *.py file), so a repository that
 # calls this workflow and keeps targets under `fuzz/` is fuzzed for real, not
@@ -49,6 +49,10 @@ on:
         description: Wall-clock seconds each target runs (libFuzzer's -max_total_time; a fraction is truncated).
         type: number
         default: 60
+      timeout-per-input:
+        description: Seconds libFuzzer allows one input before reporting a timeout (a fraction is truncated).
+        type: number
+        default: 25
       max-len:
         description: Longest input libFuzzer generates, in bytes (-max_len).
         type: number
@@ -135,6 +139,7 @@ jobs:
           FUZZ_DIR: ${{ inputs.fuzz-dir }}
           TARGET_GLOB: ${{ inputs.target-glob }}
           SECONDS_PER_TARGET: ${{ inputs.seconds-per-target }}
+          TIMEOUT_PER_INPUT: ${{ inputs.timeout-per-input }}
           MAX_LEN: ${{ inputs.max-len }}
           FINDINGS: ${{ runner.temp }}/fuzz-findings
         run: |
@@ -149,6 +154,7 @@ jobs:
             exit 1
           fi
           seconds="${SECONDS_PER_TARGET%%.*}"
+          timeout_per_input="${TIMEOUT_PER_INPUT%%.*}"
           max_len="${MAX_LEN%%.*}"
           mkdir -p "$FINDINGS"
           {
@@ -168,7 +174,7 @@ jobs:
             start=$SECONDS
             # The outer timeout is a backstop for a target that hangs libFuzzer itself.
             timeout --kill-after=10 "$((seconds + 120))" \
-              python "$target" -max_total_time="$seconds" -max_len="$max_len" \
+              python "$target" -max_total_time="$seconds" -timeout="$timeout_per_input" -max_len="$max_len" \
               -artifact_prefix="$outdir/" -print_final_stats=1 2>&1 | tee "$log"
             rc="${PIPESTATUS[0]}"
             echo "::endgroup::"
@@ -179,7 +185,7 @@ jobs:
             else
               result="FAILED (exit $rc)"
               failed=1
-              echo "::error::$target failed (exit $rc); a crash input, if libFuzzer saved one, is in the fuzz-findings artifact"
+              echo "::error::$target failed (exit $rc); look for a timeout-* artefact first for a hang, or crash-* for a crash, in the fuzz-findings artifact"
             fi
             echo "| \`$target\` | $result | ${execs:-n/a} | $elapsed |" >> "$GITHUB_STEP_SUMMARY"
             echo "$target: $result, ${execs:-n/a} executions, ${elapsed}s"
