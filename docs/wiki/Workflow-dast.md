@@ -73,16 +73,22 @@ references and entities hide a URL from a pattern over the text (an earlier vers
   script, browser-based and auto-detect authentication can sign in at hosts or run code the guard cannot read, so they are
   refused rather than let through, as is session management other than cookies. These are the type numbers of ZAP 2.17.0,
   read from an export of each;
-- every `incregexes` entry is a loopback origin and a port of digits, ending there or continuing with a slash and then only plain
-  path characters, with `.*` allowed (`http://127\.0\.0\.1:8080` and `http://127\.0\.0\.1:8080/.*`; ZAP matches the whole URL,
-  read from `Context.isInContext` in the 2.17.0 jar), so the spider cannot follow a link to another host. A prefix is not enough:
-  `:8080.*` also matches `http://127.0.0.1:8080@evil.example/`, and `...|https?://evil\.example/.*` is a second scope. After the
-  slash there is no `|`, group, `@`, bracket or backslash;
+- every `incregexes` entry fits a whitelist grammar, because Java matches the whole URL against it (`Context.isInContext` in the
+  2.17.0 jar) and anything loose is a second scope: an escaped loopback origin (dots as `\.`, IPv6 as `\[::1\]`; an unescaped
+  dot is a wildcard, so `http://127.0.0.1:8080/.*` matches `http://127505051:8080/x`, and an unescaped `[::1]` is a character
+  class), an optional port of digits, then the end or a literal `/`, literal path characters (letters, digits, `-`, `_`, `~`,
+  `/`, `\.`) and at most one trailing `.*` or `$`. `http://127\.0\.0\.1:8080` and `http://127\.0\.0\.1:8080/.*` pass. Anything
+  else is refused as a form the guard cannot prove safe, and the message says so and shows the form to use. `/?.*` and `/*.*`
+  make the slash optional, so they match `http://127.0.0.1:8080@evil.example/x`, as does `:8080.*`; ZAP's own default
+  `\Q...\E.*` is refused too. No other quantifier, group, class or alternation;
 - when `context-user` is set, the context holds a user of that name. A context with no users at all is refused.
 
 The bytes the guard validated are the bytes ZAP is given: the guard copies them to the runner's temporary directory with their
 SHA-256, and the scan step copies and checks that file, never the path in the workspace, which the install and start commands
-run after the guard and could have rewritten.
+run after the guard and could have rewritten. This is not a lock: the start command runs with access to the context, so treat its
+credentials as visible to it. A background process of the caller can still swap the file between the digest check and the copy
+(measured: a loop writer got 28 of 300 hand-offs through), and such a process could read the throwaway credentials directly, so
+the swap adds no exposure. It closes the install and start commands rewriting the file, not hostile concurrent caller code.
 
 An error names the element and the rule and never prints the value it refused, because the value may be the credential.
 
@@ -94,7 +100,9 @@ so a password that contains `%0A` is masked as itself and not as a newline; a cr
 `report.md` and the SARIF before the report step builds the summary and before the artifact upload, and deletes the copy of the
 context file from the work directory. If it cannot redact and check, it deletes the reports instead of uploading them. The JSON reports
 are redacted by value after parsing and never by key, so a password that equals a report key (`alerts`) cannot rename the key
-and turn the `fail-on` gate green; a report that does not parse is deleted. A value
+and turn the `fail-on` gate green; a report that does not parse is deleted. A credential
+that is a slice of the `[redacted]` placeholder (`redacted`) is redacted in one pass and checked with the placeholder removed, so
+it does not fail the job. A value
 under four characters cannot be redacted without mangling the reports, so such a context is refused. The summary says a scan
 was signed in, not as whom.
 

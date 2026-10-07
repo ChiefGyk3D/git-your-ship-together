@@ -952,6 +952,15 @@ OFF_HOST = [
     # The review's two: an alternation is a second scope, and `:8080.*` also matches http://127.0.0.1:8080@evil/.
     ("scope alternation", SCOPE_OK, "http://127\\.0\\.0\\.1:8080/.*|https?://evil\\.example/.*", "", "<incregexes>"),
     ("scope prefix form", SCOPE_OK, "http://127\\.0\\.0\\.1:8080.*", "", "<incregexes>"),
+    # Round 2 of the review: a quantifier on the slash makes it optional, and Java matches the whole URL.
+    ("scope optional slash", SCOPE_OK, "http://127\\.0\\.0\\.1:8080/?.*", "", "cannot prove safe"),
+    ("scope starred slash", SCOPE_OK, "http://127\\.0\\.0\\.1:8080/*.*", "", "cannot prove safe"),
+    ("scope plus slash", SCOPE_OK, "http://127\\.0\\.0\\.1:8080/+.*", "", "cannot prove safe"),
+    # Unescaped dots are wildcards (http://127505051:8080/x), and an unescaped [::1] is a character class.
+    ("scope unescaped dots", SCOPE_OK, "http://127.0.0.1:8080/.*", "", "cannot prove safe"),
+    ("scope unescaped IPv6", SCOPE_OK, "http://[::1]:8080/.*", "", "cannot prove safe"),
+    ("scope quoted default", SCOPE_OK, "\\Qhttp://127.0.0.1:8080\\E.*", "", "cannot prove safe"),
+    ("scope class", SCOPE_OK, "http://127\\.0\\.0\\.1:8080/[a-z]+", "", "cannot prove safe"),
     ("scope userinfo", SCOPE_OK, "http://127\\.0\\.0\\.1:8080/@evil\\.example/.*", "", "<incregexes>"),
     ("scope group", SCOPE_OK, "(http://127\\.0\\.0\\.1:8080/|https://evil\\.example/).*", "", "<incregexes>"),
     (
@@ -1002,6 +1011,8 @@ ACCEPTED = [
     ("a harmless query", LOGIN, "<loginurl>http://127.0.0.1:8080/login?next=/account</loginurl>"),
     ("scope: the bare origin", SCOPE_OK, "http://127\\.0\\.0\\.1:8080"),
     ("scope: a path", SCOPE_OK, "^http://localhost:8080/app/v1/.*"),
+    ("scope: escaped IPv6", SCOPE_OK, "http://\\[::1\\]:8080/.*"),
+    ("scope: escaped dots in the path and an end anchor", SCOPE_OK, "http://localhost:8080/a\\.b/c$"),
     ("a poll url on loopback", UNITS, UNITS + "<pollurl>http://localhost:8080/account</pollurl>"),
 ]
 
@@ -1204,6 +1215,25 @@ def test_a_credential_equal_to_a_key_of_the_report_cannot_blind_the_gate(job, tm
     code, out = j.run("Report and apply fail-on")
     assert code != 0 and "Content Security Policy" in out, "the Medium alerts must still fail the gate\n" + out
     assert password not in "".join(report["site"][0]["alerts"][0]["instances"][0].values())
+
+
+@pytest.mark.parametrize("password", ["redacted", "reda", "[redacted]"])
+def test_a_credential_that_is_a_slice_of_the_placeholder_is_still_redacted_and_does_not_fail_the_job(
+    job, tmp_path, password
+):
+    user = "scan-user"
+    j = job(
+        context_file=context_file(tmp_path, USER_ENTRY, user_entry(user, password)), context_user=user, fail_on="none"
+    )
+    assert j.run("Check the context file", REPO_ROOT=str(REPO))[0] == 0
+    zap = planted_reports(j, [password, user])
+    code, out = j.run("Remove the context's credentials")
+    assert code == 0, out
+    report = (zap / "report.json").read_text()
+    assert json.loads(report) and "[redacted]" in report
+    instance = json.loads(report)["site"][0]["alerts"][0]["instances"][0]
+    assert instance["evidence"] == '<input value="[redacted]">', instance
+    assert j.run("Report and apply fail-on")[0] == 0
 
 
 def test_when_the_credentials_cannot_be_removed_the_reports_are_deleted_not_uploaded(job, tmp_path):

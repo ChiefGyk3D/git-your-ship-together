@@ -653,21 +653,28 @@ days, whether the scan passed or not.
     run code the check cannot read, so they are refused, as is any element of
     the authentication section it does not know, and session management other
     than cookies;
-  - every `incregexes` entry is a loopback origin and a port of digits, ending
-    there or continuing with a slash and then only plain path characters, with
-    `.*` allowed (`http://127\.0\.0\.1:8080` and `http://127\.0\.0\.1:8080/.*`; ZAP
-    matches the whole URL, read from `Context.isInContext` in the 2.17.0 jar), so
-    the spider cannot follow links to another host. A prefix is not enough:
-    `:8080.*` also matches `http://127.0.0.1:8080@evil.example/`, and
-    `...|https?://evil\.example/.*` is a second scope. No `|`, group, `@`,
-    bracket or backslash after the slash;
+  - every `incregexes` entry fits a whitelist grammar, because Java matches the
+    whole URL against it (`Context.isInContext` in the 2.17.0 jar) and anything
+    loose is a second scope: an escaped loopback origin (dots as `\.`, IPv6 as
+    `\[::1\]`; an unescaped dot is a wildcard and an unescaped `[::1]` a
+    character class), an optional port of digits, then the end or a literal `/`,
+    literal path characters (letters, digits, `-`, `_`, `~`, `/`, `\.`) and at
+    most one trailing `.*` or `$`. `http://127\.0\.0\.1:8080` and
+    `http://127\.0\.0\.1:8080/.*` pass. Anything else is refused as a form the
+    check cannot prove safe, and the message says so and shows the form to use:
+    `/?.*` and `/*.*` make the slash optional, so they match
+    `http://127.0.0.1:8080@evil.example/x`, as does `:8080.*`; ZAP's default
+    `\Q...\E.*` is refused too. No other quantifier, group, class or alternation;
   - when `context-user` is set, the context holds a user of that name (a
     context with no users at all is refused too).
 
   The bytes the check validated are the bytes ZAP gets: it copies them to the
   runner's temporary directory with their SHA-256, and the scan step copies and
   checks that file, not the workspace path, which `install-command` and
-  `start-command` run after the check and could have rewritten.
+  `start-command` run after the check and could have rewritten. The start
+  command runs with access to the context, so treat its credentials as visible
+  to it: a background process of the caller can still swap the file between the
+  digest check and the copy, and could read the throwaway credentials anyway.
 
   An error names the element and the rule and never prints the value it
   refused, because the value may be the credential.

@@ -27,6 +27,8 @@
 # credentials to the URLs the context names, the file is parsed as XML and
 # refused unless each of them is loopback (see `Check the context file`); the
 # credentials are masked in the log and redacted from every uploaded report.
+# The install and start commands run with access to the context file, so treat its
+# credentials as visible to them.
 #
 # Call it from a repository with:
 #
@@ -118,7 +120,7 @@ on:
         type: string
         default: openapi
       context-file:
-        description: Optional ZAP context file in the repository (an export from ZAP's desktop or API, usually `.zap/app.context`), loaded before the scan with ZAP's `-n`. It names the URLs in scope, the login method and the users, so the scan can sign in. For all three scan types. It is parsed as XML and refused unless every URL ZAP could sign in at (login, login page, poll) is loopback after decoding and normalising, none carries user information, a credential or a token, the authentication is manual, form-based or JSON-based, and its include regexes start at a loopback origin. The credentials in it are those of a throwaway account of the service this job starts, never a real one, because the file is committed; they are masked in the log and redacted from the reports. Empty scans anonymously.
+        description: Optional ZAP context file in the repository (an export from ZAP's desktop or API, usually `.zap/app.context`), loaded before the scan with ZAP's `-n`. It names the URLs in scope, the login method and the users, so the scan can sign in. For all three scan types. It is parsed as XML and refused unless every URL ZAP could sign in at (login, login page, poll) is loopback after decoding and normalising, none carries user information, a credential or a token, the authentication is manual, form-based or JSON-based, and its include regexes start at a loopback origin. The credentials in it are those of a throwaway account of the service this job starts, never a real one, because the file is committed; they are masked in the log and redacted from the reports. The install and start commands run with access to the file, so treat its credentials as visible to them. Empty scans anonymously.
         type: string
         default: ""
       context-user:
@@ -310,14 +312,16 @@ jobs:
           FORM_ELEMENTS = {"loginurl", "loginbody", "loginpageurl"}  # JSON-based authentication is exported as a <form> too
           URL_ELEMENTS = {"loginurl", "loginpageurl", "pollurl"}
           CREDENTIAL_NAME = re.compile(r"pass|pwd|secret|token|key|auth|user|login|credential|session|sid", re.I)
-          # An include regex is a loopback origin and a port of digits, either ending there (ZAP matches the whole URL, so
-          # that is exactly the origin, which is what a target-url with no trailing slash is) or continuing with a slash
-          # and then only plain path characters (and `.*`).
-          # No `|`, `(`, `)`, `@`, brackets or backslash after the slash: an alternation is a second scope, and `@` makes
-          # the "host" a username. A prefix match was not enough: `...:8080.*` also matches `http://127.0.0.1:8080@evil/`.
+          # An include regex is matched against the WHOLE url by Java (ZAP's Context.isInContext uses Matcher.matches), so
+          # anything loose in it is a second scope. Whitelist grammar, checked on the regex text as written (no \Q..\E):
+          #   an escaped loopback origin (dots written \. , IPv6 written \[::1\] : unescaped dots are wildcards and an
+          #   unescaped [::1] is a character class), an optional port of digits, and then either the end or a literal /
+          #   followed by literal path characters (letters, digits, - _ ~ / and \.) and at most one trailing .* or $.
+          # No other quantifier, group, class or alternation anywhere: `/?.*` and `/*.*` make the slash optional, and
+          # `:8080.*` also matches http://127.0.0.1:8080@evil.example/x (the "host" becomes a username).
           SCOPE = re.compile(
-              r"\^?https?://(?:127\.0\.0\.1|localhost|\[::1\])(?::(?:[0-9]{1,5}|\[0-9\]\+|\\d\+))?(?:/[A-Za-z0-9._~/%:=,+*?&$-]*)?",
-              re.I,
+              r"\^?https?://(?:127\\\.0\\\.0\\\.1|localhost|\\\[::1\\\])(?::[0-9]{1,5})?"
+              r"(?:/(?:[A-Za-z0-9_~/-]|\\\.)*(?:\.\*|\$)?)?"
           )
           MIN_SECRET = 4
 
@@ -525,9 +529,13 @@ jobs:
                   if element.tag in URL_ELEMENTS:
                       check_url(element.tag, text_of(element), secrets)
               for element in context.findall("incregexes"):
-                  if not SCOPE.fullmatch(re.sub(r"\\[QE]", "", text_of(element)).replace("\\.", ".")):
-                      refuse("an <incregexes> entry does not start with a loopback origin (http://127.0.0.1:PORT, "
-                             "http://localhost:PORT or http://[::1]:PORT), so the spider could follow links to another host.")
+                  if not SCOPE.fullmatch(text_of(element)):
+                      refuse("an <incregexes> entry must be an escaped loopback origin (http://127\\.0\\.0\\.1:PORT, "
+                             "http://localhost:PORT or http://\\[::1\\]:PORT), ending there or followed by '/', literal path "
+                             "characters and at most a trailing '.*' or '$'. This one is a form the check cannot prove safe "
+                             "(ZAP's default \\Q...\\E.*, ':PORT.*' without a slash, an unescaped dot or '[::1]', '/?', '/*', a "
+                             "group or an alternation are such forms), so the spider could be sent to another host. "
+                             "Write http://127\\.0\\.0\\.1:PORT/.* instead.")
               # Validated: keep these bytes. The install and start commands run after this step, in a workspace they
               # can write; the ZAP step copies this file, never the path in the workspace, and checks the digest.
               copy_fd = os.open(os.environ["CONTEXT_COPY"], os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -710,6 +718,7 @@ jobs:
           Fails closed: if the redaction cannot be done and checked, the reports are deleted, so the artifact step finds nothing."""
           import json
           import os
+          import re
           import sys
           from pathlib import Path
 
@@ -726,10 +735,17 @@ jobs:
           try:
               values = [v for v in json.loads(redact_file.read_text()) if v]
 
+              PLACEHOLDER = "[redacted]"
+              # One pass, longest alternative first: a form that contains a shorter one goes whole, and the placeholder
+              # is never scanned again, so a credential that is a slice of it ("redacted") cannot trip the check below.
+              pattern = re.compile("|".join(re.escape(v) for v in sorted(values, key=len, reverse=True))) if values else None
+
               def clean_text(text: str) -> str:
-                  for value in values:  # longest first: a form that contains a shorter one goes whole
-                      text = text.replace(value, "[redacted]")
-                  return text
+                  return pattern.sub(PLACEHOLDER, text) if pattern else text
+
+              def survives(text: str) -> bool:
+                  leftover = text.replace(PLACEHOLDER, "")
+                  return any(value in leftover for value in values)
 
               def clean_json(node):
                   """Values only, never keys: a credential equal to a key name ("alerts") must not rename the key and
@@ -760,12 +776,12 @@ jobs:
                   text = path.read_text(encoding="utf-8", errors="replace")
                   if name.endswith((".json", ".sarif")):
                       data = clean_json(json.loads(text))  # unparseable: fail closed, below
-                      if any(value in found for found in strings(data) for value in values):
+                      if any(survives(found) for found in strings(data)):
                           raise ValueError("a credential survived the redaction")
                       text = json.dumps(data, ensure_ascii=False)
                   else:
                       text = clean_text(text)
-                      if any(value in text for value in values):
+                      if survives(text):
                           raise ValueError("a credential survived the redaction")
                   # The container's user owns the report and the directory is the runner's: replace the file, which
                   # needs the directory's write permission, not the file's.
