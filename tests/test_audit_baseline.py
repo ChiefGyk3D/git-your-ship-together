@@ -47,6 +47,13 @@ def encoded(text: str) -> dict:
     return {"content": base64.b64encode(text.encode()).decode(), "encoding": "base64"}
 
 
+def wrapped(text: str) -> dict:
+    """The contents API as GitHub sends it: base64 wrapped at 60 columns with newlines in it."""
+    content = base64.encodebytes(text.encode()).decode()
+    assert "\n" in content.rstrip("\n"), "the fixture must be long enough to wrap, or it proves nothing"
+    return {"content": content, "encoding": "base64"}
+
+
 def good_answers() -> dict[str, tuple[int, dict | list]]:
     """Every endpoint answering the way BASELINE.md wants."""
     r = f"/repos/{REPO_NAME}"
@@ -102,6 +109,10 @@ def good_answers() -> dict[str, tuple[int, dict | list]]:
             200,
             encoded("version: 2\nupdates:\n  - package-ecosystem: pip\n    cooldown:\n      default-days: 7\n"),
         ),
+        f"{r}/contents/.githooks/pre-commit": (
+            200,
+            wrapped((REPO / ".githooks" / "pre-commit").read_text()),
+        ),
         f"{r}/contents/requirements.txt": (404, {"message": "Not Found"}),
         f"{r}/contents/requirements-dev.txt": (404, {"message": "Not Found"}),
         f"{r}/rulesets": (200, [{"id": 7, "target": "tag", "enforcement": "active"}]),
@@ -156,9 +167,32 @@ def test_a_compliant_repository_passes_every_check():
         "dependabot-config",
         "dependabot-ecosystem",
         "doppler-identity",
+        "pre-commit-hook",
         "auto-merge-enabled",
         "tag-ruleset",
     }
+
+
+def test_a_missing_or_different_pre_commit_hook_fails():
+    answers = good_answers()
+    answers[f"/repos/{REPO_NAME}/contents/.githooks/pre-commit"] = (404, {"message": "Not Found"})
+    status, detail = by_check(audit.audit_repo(REPO_NAME, fetcher(answers)))["pre-commit-hook"]
+    assert status == audit.FAIL and ".githooks/pre-commit" in detail
+
+    answers = good_answers()
+    answers[f"/repos/{REPO_NAME}/contents/.githooks/pre-commit"] = (200, encoded("#!/bin/sh\n"))
+    status, detail = by_check(audit.audit_repo(REPO_NAME, fetcher(answers)))["pre-commit-hook"]
+    assert status == audit.FAIL and "does not match" in detail
+
+
+def test_an_unreadable_pre_commit_hook_is_unknown_not_pass():
+    answers = good_answers()
+    answers[f"/repos/{REPO_NAME}/contents/.githooks/pre-commit"] = (
+        403,
+        {"message": "Resource not accessible by integration"},
+    )
+    status, detail = by_check(audit.audit_repo(REPO_NAME, fetcher(answers)))["pre-commit-hook"]
+    assert status == audit.UNKNOWN and "403" in detail
 
 
 def test_auto_merge_disabled_fails():
