@@ -16,6 +16,7 @@ from __future__ import annotations
 import importlib.util
 import os
 import re
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -128,6 +129,23 @@ def test_the_fixture_ships_a_target_the_workflow_will_find():
 # --- the run step, executed -------------------------------------------------
 
 
+def kill_tree(pid: int) -> None:
+    """SIGKILL a process and everything below it, whatever process group each moved into."""
+    parent_of = {}
+    for line in subprocess.run(["ps", "-eo", "pid=,ppid="], capture_output=True, text=True).stdout.splitlines():
+        child, parent = map(int, line.split())
+        parent_of[child] = parent
+    doomed, frontier = [pid], [pid]
+    while frontier:
+        frontier = [c for c, p in parent_of.items() if p in frontier and c not in doomed]
+        doomed += frontier
+    for victim in reversed(doomed):
+        try:
+            os.kill(victim, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
 def run_step(
     tmp_path: Path,
     fuzz_dir: Path | str,
@@ -160,14 +178,30 @@ def run_step(
         "FINDINGS": str(findings),
         "GITHUB_STEP_SUMMARY": str(summary),
     }
-    done = subprocess.run(
+    # Its own session, so a stray can be told from the test runner. `timeout` moves itself into a
+    # process group of its own, so killing the step's group would leave the target running:
+    # kill the whole tree instead, or a target that outlives the test spins a core indefinitely.
+    proc = subprocess.Popen(
         ["bash", "-c", str(step_named("Run the fuzz targets")["run"])],
         cwd=tmp_path,
         env=env,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        timeout=process_timeout,
+        start_new_session=True,
     )
+    try:
+        stdout, stderr = proc.communicate(timeout=process_timeout)
+    except subprocess.TimeoutExpired:
+        kill_tree(proc.pid)
+        proc.communicate()
+        pytest.fail(
+            f"the run step did not finish within {process_timeout}s: libFuzzer's -timeout should have stopped "
+            "a hanging input and failed the target, so a step that hangs on is the bug"
+        )
+    finally:
+        kill_tree(proc.pid)  # a target still running when the step has ended
+    done = subprocess.CompletedProcess(proc.args, proc.returncode, stdout, stderr)
     return done, (summary.read_text() if summary.exists() else ""), findings
 
 
@@ -201,9 +235,7 @@ def test_a_crashing_target_fails_the_step_and_leaves_its_input(tmp_path):
 
 
 def test_a_timed_out_input_fails_the_step_and_leaves_its_input(tmp_path):
-    done, summary, findings = run_step(
-        tmp_path, TIMEOUT_DIR, seconds=5, timeout_per_input=1, process_timeout=20
-    )
+    done, summary, findings = run_step(tmp_path, TIMEOUT_DIR, seconds=5, timeout_per_input=1, process_timeout=20)
     assert done.returncode != 0, "a hanging input did not fail the step"
     assert "FAILED" in summary, summary
     assert list(findings.glob("*/timeout-*")), f"no timeout-* input saved under {findings}"

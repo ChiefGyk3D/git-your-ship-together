@@ -27,7 +27,6 @@ Each has a "done when" in its issue.
 - **#83** A Semgrep finding suppressed in source still becomes an open code-scanning alert (not settled; see
   [Security scanning explained](Security-scanning-explained.md)).
 - **#87** Scorecard: a `pip install` in `security.yml` is not pinned by hash.
-- **#82** `python-fuzz` should pass a libFuzzer `-timeout` so a hang leaves a `timeout-*` artifact.
 - **#97** A `dast.yml` workflow: OWASP ZAP against a service the caller starts (first caller:
   hammunition-hill). The workflow shipped with the baseline scan and then grew the full (active) and api
   scans, each proved to fail on the fixture; what stays open is the first caller.
