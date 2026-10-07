@@ -89,7 +89,7 @@ publish).
 | Path | What it is |
 |---|---|
 | `.github/actions/doppler-secrets/` | Composite action: fetch a Doppler config as masked env vars. The source of the inlined copies |
-| `.github/dependabot.yml` | Weekly action, pip and docker bumps with a seven-day cooldown |
+| `.github/dependabot.yml` | Weekly action, pip (the repository root and `.github/requirements/`) and docker bumps with a seven-day cooldown |
 | `BASELINE.md` | The settings every repository must meet, with the `gh api` command for each |
 | `baseline/repos.txt` | Which repositories the baseline covers |
 | `baseline/selected-actions.json` | The Actions allow-list every repository sets |
@@ -101,6 +101,8 @@ publish).
 | `scripts/doppler-ci-set.sh` | Set one Doppler secret without the value touching a command line |
 | `scripts/project_sync.py` | The logic inlined into `project-sync.yml` |
 | `scripts/inline_project_sync.py` | Regenerates that inlined copy |
+| `.github/requirements/` | `pip-audit` and `semgrep`: the one-line `.in` and the hash lock `security.yml` carries inline |
+| `scripts/tool_locks.py` | Resolves those locks (`--relock`) and copies them into `security.yml`; `--check` fails on a difference |
 | `scripts/gen_wiki.py` | Builds this wiki from `docs/wiki/` and renders each workflow's inputs table from its YAML |
 | `fixture/` | The smallest project that exercises every job |
 | `tests/` | The [contract](Testing-and-the-contract.md), as pytest |

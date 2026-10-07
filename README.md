@@ -95,6 +95,7 @@ project before any caller pins them:
 | `.github/dependabot.yml` | Weekly action and pip bumps with a seven-day cooldown, actions grouped into one pull request |
 | `fixture/` | A package with a console script, one test, a non-root Dockerfile, a hash-pinned `requirements.txt`, and one shell script with its own test: one of everything a job needs. `fixture/README.md` says how to regenerate the lock |
 | `tests/` | The contract, as pytest, one file per thing it holds still. See [Developing](#developing) |
+| `.github/requirements/`, `scripts/tool_locks.py` | The hash locks of pip-audit and Semgrep that `security.yml` carries inline, and the script that resolves them and copies them in |
 | `pyproject.toml`, `requirements-dev.txt` | ruff and pytest configuration, and the three pinned tools the tests need |
 
 And what keeps the callers honest:
@@ -1310,7 +1311,7 @@ Inputs of `security.yml`:
 | `codeql-config` | empty | Inline CodeQL configuration, e.g. `paths-ignore` |
 | `gitleaks` | `true` | Secret scan over the full history with the pinned gitleaks binary (MIT; no licence or secret under any account). A `.gitleaks.toml` at the repository root is honoured; findings land in code scanning under the `gitleaks` category |
 | `gitleaks-version`, `gitleaks-sha256` | `8.30.1` and its linux_x64 tarball's hash | The gitleaks release downloaded from gitleaks/gitleaks; the hash is checked with `sha256sum -c` before extraction |
-| `pip-audit-requirements` | `requirements.txt` | File audited with `--strict`; empty skips that step, and the job when `audit-command` is empty too |
+| `pip-audit-requirements` | `requirements.txt` | File audited with `--strict`; empty skips that step, and the job when `audit-command` is empty too. With `snyk: true` it must carry hashes (`--generate-hashes`): Snyk installs it under `--require-hashes`, and a file without any fails the job with a message rather than installing unchecked |
 | `pip-audit-continue-on-error` | `false` | Report advisories without failing. A migration aid |
 | `pip-audit-extra-args` | empty | Extra pip-audit flags, e.g. `--ignore-vuln PYSEC-2026-3740` for an advisory with no fix yet; the ID needs an entry in [`baseline/risk-register.yaml`](baseline/risk-register.yaml) |
 | `audit-install-command` | empty | Run before `audit-command`, e.g. `npm ci --ignore-scripts`; Python is available |
@@ -1318,11 +1319,12 @@ Inputs of `security.yml`:
 | `audit-continue-on-error` | `false` | Report `audit-command` findings without failing. A migration aid |
 | `dependency-review` | `true` | On pull requests only |
 | `dependency-review-severity` | `moderate` | Fail the review at this severity or above |
+| `dependency-review-allow-dependencies-licenses` | empty | Comma-separated package URLs (`pkg:pypi/semgrep`) exempt from the licence rule only; advisories still fail the review. For a tool the repository runs but does not link or ship, such as an LGPL CLI whose hash lock the review reads as a manifest. This repository exempts Semgrep this way |
 | `dependency-review-allow-ghsas` | empty | Comma-separated GHSA IDs the review may not fail on. Each needs an entry in [`baseline/risk-register.yaml`](baseline/risk-register.yaml); the audit checks |
 | `dependency-review-deny-licenses` | `AGPL-3.0, GPL-3.0, GPL-2.0, LGPL-3.0, SSPL-1.0` | Comma-separated SPDX identifiers the review fails on when a pull request adds a dependency under one. Empty means no licence rule. A dependency whose licence cannot be detected is reported, not failed. Passed as the action's `deny-licenses`, which upstream has marked deprecated for a future major release; the action rejects it beside `allow-licenses`, which this workflow does not expose |
-| `semgrep` | `true` | Semgrep over the repository, SARIF uploaded to the Security tab under category `semgrep`. Installed with pip, since `semgrep/*` actions are not in the allowed set |
+| `semgrep` | `true` | Semgrep over the repository, SARIF uploaded to the Security tab under category `semgrep`. Installed with pip, since `semgrep/*` actions are not in the allowed set, under `--require-hashes` from the lock in `.github/requirements/semgrep.txt`; the version is that file's, not an input (see [Hash-locked tools](#hash-locked-tools-in-securityyml)) |
 | `semgrep-config` | empty (auto-detect) | `p/github-actions p/secrets`, adding `p/python` only when tracked Python files exist. A nonempty value replaces these defaults: space-separated configs, each passed as `--config`; registry packs or paths in the repository. Shell-only repositories use the two base packs; no `p/bash` or `p/shell` registry pack exists, so `bash-ci.yml`'s ShellCheck provides shell coverage |
-| `semgrep-version` | `1.179.0` | Semgrep release installed with pip |
+| `semgrep-version` | empty | **Deprecated; will be removed.** Semgrep is installed from a hash lock, so the version is the lock's (currently `1.179.0`, in `.github/requirements/semgrep.in`). Leave empty. A value that is not the locked version fails the install step, naming the locked one; the locked version itself is accepted |
 | `semgrep-continue-on-error` | `false` | Report findings without failing (they still reach the Security tab). Without it the scan runs with `--error` and a finding fails the job. A migration aid |
 | `semgrep-egress-policy` | `block` | harden-runner policy for the Semgrep job only |
 | `semgrep-allowed-endpoints` | the measured list | The Semgrep job's own allow-list: PyPI for the pip install, `semgrep.dev` for the rule registry, and GitHub for the SARIF upload. `extra-allowed-endpoints` is appended to it, for a private rule registry or a config fetched from another host |
@@ -1330,7 +1332,7 @@ Inputs of `security.yml`:
 | `snyk-on` | `schedule` | When Snyk runs: `schedule` is the weekly cron and `workflow_dispatch` only; `push` adds every push to the default branch and every tag. Snyk's free plan meters tests per month across the whole account, one Code and one Open Source test per run, and ten repositories on `push` spent a month's Code tests in a day. Never on a pull request |
 | `snyk-install-command` | empty | For a repository with no lock (`pip-audit-requirements: ""`) that declares its dependencies in `pyproject.toml`: the install Snyk Open Source scans a freeze of, such as `pip install .`. Empty with no lock leaves Snyk's discovery, which reads no PEP 621 `pyproject.toml` and ends in a "nothing to scan" warning |
 | `scorecard` | `false` | OpenSSF Scorecard, published; runs only on the default branch (push or schedule) |
-| `python-version` | `3.13` | Python for pip-audit and Snyk |
+| `python-version` | `3.13` | Python for pip-audit, Semgrep and Snyk. The tool locks cover CPython 3.10 through 3.14 |
 | `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `audit`, the measured list, empty | harden-runner, as in `python-ci.yml` |
 | `doppler-project`, `doppler-config`, `doppler-identity-id` | empty | See [Doppler setup](#doppler-setup) |
 | `doppler-trusted-refs-only` | `true` | Fetch CI secrets only on the default branch, a tag or a schedule; never on a pull request. See [Doppler setup](#doppler-setup) |
@@ -1374,6 +1376,24 @@ the lock's path, line 1. A repository with no lock names its install in
 over `pyproject.toml`, so its alerts attach to the file that declares the
 dependencies; with neither, Snyk Open Source has nothing it can read and
 warns.
+
+#### Hash-locked tools in `security.yml`
+
+pip-audit and Semgrep are installed with `pip install --require-hashes
+--no-deps --only-binary=:all:` from locks that travel inside the workflow
+file, the way Atheris's does in `python-fuzz.yml`: a reusable workflow cannot
+check out its own commit, so there is no file to read at run time. Scorecard's
+`PinnedDependencies` check (issue #87) flags a `pip install` not pinned by
+hash, and a workflow every caller pins by commit should not run unchecked
+code in all of them. The source of each is `.github/requirements/<tool>.in`
+(one exact version) and `<tool>.txt` (its lock: universal, so it covers every
+marker, pruned to the x86_64 and aarch64 Linux and CPython 3.10 to 3.14 wheels the jobs
+use). `python scripts/tool_locks.py` copies the files into `security.yml`,
+`--check` fails on a difference and `--relock` resolves again with `uv` (the
+script's docstring has the throwaway-venv commands). Dependabot watches the
+`.in` files; its bump fails `tests/test_tool_locks.py` until `--relock` puts
+the pruned lock back. `semgrep-version` is deprecated for the same reason: an input
+cannot change a version the hashes fix, so it may only restate it.
 
 ### Dependabot auto-merge
 
@@ -2034,6 +2054,7 @@ The tests are the contract, one file per thing they hold still:
 | `tests/test_risk_register.py` | The register's shape, its dates, no duplicate advisory, every repository named is in the baseline list, and no entry has expired |
 | `tests/test_dast.py` | `dast.yml`'s contract, its steps run under bash (refusals, a service that blocks, detaches, dies or never answers; the `fail-on` threshold and the SARIF against canned ZAP reports; the scan step against a fake `docker`, so each `scan-type` is shown to run its ZAP script with its flags), and, in the `dast-live` CI job, the real ZAP image against `fixture/dast/server.py`: the baseline with and without its headers, the full scan against a page that reflects its query and one that escapes it, the api scan against its OpenAPI definition |
 | `tests/test_fuzz.py` | `python-fuzz.yml`'s inputs and pin, and its run step executed under bash against tiny targets: a missing directory, no match, a passing target and a crashing one (which must fail the step and leave its `crash-*` input) |
+| `tests/test_tool_locks.py` | No `run:` step of any workflow or composite action runs a `pip install` without `--require-hashes`; `security.yml` carries `.github/requirements/*.txt` verbatim; every lock line has a hash; the Snyk install step, run under bash with a recording `pip`, installs a hashed lock under `--require-hashes` and refuses an unhashed one without calling pip |
 | `tests/test_security_jobs.py` | The Semgrep job's defaults and its content-driven config; the gitleaks job as a pinned binary: no licence, no Doppler, no `id-token`, the sha256 checked before extraction, full history, SARIF under category `gitleaks`, and a canary step that plants an AWS-shaped key in a scratch repository and requires exit 1 before the real scan runs (the test also fetches the pinned release, checks the hash, and runs that canary for real; it skips only when offline) |
 | `tests/test_pre_commit_hook.py` | `.githooks/pre-commit` pins the same gitleaks version and sha256 as `security.yml`; run in a scratch repository it refuses a planted AWS-shaped key naming the rule and file but not the secret, passes a clean commit, honours `.gitleaks.toml`, refuses on a broken config or a download that is not the pinned release, and warns and allows offline (the cases that need the binary download it through the hook and skip when offline); `new-repo.sh` writes it byte for byte, executable, and adds the `core.hooksPath` line to a README's Developing section once |
 | `tests/test_wiki.py` | Every reusable workflow has a page and its generated table follows the YAML; regenerating is a no-op and `--check` catches a stale tree; every link resolves and every cited test exists; every workflow, script, composite action, audit check, test file and baseline file is mentioned somewhere in the wiki; `wiki.yml` is the self-call it should be |
