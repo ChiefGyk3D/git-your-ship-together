@@ -77,7 +77,7 @@ Sixteen reusable workflows and one composite action:
 | `.github/workflows/docs-pages.yml` | Build a static documentation site with a command you supply (MkDocs strict by default) on every pull request; upload it and deploy it to GitHub Pages from the default branch only. The two Pages writes sit on the deploy job alone |
 | `.github/workflows/wiki-publish.yml` | Run a command that generates a wiki tree, then replace the repository's GitHub wiki with it, as `github-actions[bot]`, only when something changed, from the default branch only. The write token sits on a job that runs none of your code |
 | `.github/workflows/project-sync.yml` | Keeps a GitHub Projects v2 board current: adds an issue or pull request when it opens, moves it to Done with a date when it closes or merges, and a weekly reconcile repairs what an event missed. The token comes from Doppler over OIDC; nothing from a pull request is checked out. See [Keeping a project current](#keeping-a-project-current) |
-| `.github/workflows/dast.yml` | OWASP ZAP against a loopback service the caller starts: the `baseline` scan (spider and passive rules, no attack traffic), the `full` scan (the active rules too: injection, cross-site scripting, traversal) or the `api` scan (the active rules over an OpenAPI, SOAP or GraphQL definition), with a `fail-on` threshold; reports kept as an artifact, findings uploaded as SARIF under category `zap`. The caller's service runs in a job that holds only `contents: read`; the upload is a second job that runs none of it. See [DAST](#dast-owasp-zap) |
+| `.github/workflows/dast.yml` | OWASP ZAP against a loopback service the caller starts: the `baseline` scan (spider and passive rules, no attack traffic), the `full` scan (the active rules too: injection, cross-site scripting, traversal) or the `api` scan (the active rules over an OpenAPI, SOAP or GraphQL definition), optionally signed in through a ZAP context file and user, with a `fail-on` threshold; reports kept as an artifact, findings uploaded as SARIF under category `zap`. The caller's service runs in a job that holds only `contents: read`; the upload is a second job that runs none of it. See [DAST](#dast-owasp-zap) |
 | `.github/workflows/security.yml` | CodeQL (the `actions` language included by default), gitleaks, a dependency audit (pip-audit, and any other tool by command), Semgrep, dependency review on pull requests (with a licence denylist), optional Snyk, optional OpenSSF Scorecard |
 | `.github/workflows/dependabot-auto-merge.yml` | Queues a Dependabot bump to merge itself once the required checks pass, up to a size you choose |
 | `.github/actions/doppler-secrets` | Fetches a Doppler config as masked environment variables, over OIDC or a Service Token. The workflows inline a copy of it (see the design rules); this is the source |
@@ -565,9 +565,10 @@ uploads do not close each other's alerts:
 
 Add the jobs to the caller's `CI green` gate (`needs:`). What a call does, in
 order: refuses a bad input (a `target-url` that is not loopback, an unknown
-`fail-on` or `scan-type`, a missing `rules-file`, an `api-definition` that is
-neither a repository file nor a loopback URL, or one given without `scan-type:
-api`); runs `install-command`, then `start-command` in the background with its
+`fail-on` or `scan-type`, a missing `rules-file` or `context-file`, a
+`context-user` with no `context-file`, a context whose login URL is not
+loopback, an `api-definition` that is neither a
+repository file nor a loopback URL, or one given without `scan-type: api`); runs `install-command`, then `start-command` in the background with its
 output in a file; waits for `ready-path` to answer 2xx or 3xx (a service that
 exits non-zero before then fails at once with the tail of its log); runs the ZAP
 image with the script `scan-type` names; converts ZAP's JSON report to SARIF;
@@ -606,6 +607,28 @@ days, whether the scan passed or not.
   too. The service is whatever the caller starts, so give it a recorded dataset
   and no outbound dependency, and `block` mode's allow-list stays the image pull
   and GitHub.
+- **Behind a login: `context-file` and `context-user`.** The anonymous spider
+  reaches only what a link on a public page reaches, and the form login in front
+  of the rest stops it. Export a ZAP context (the URLs in scope, the login
+  method, the users) from ZAP's desktop or API, commit it, and name it in
+  `context-file`; `context-user` is which of its users to scan as. The workflow
+  passes ZAP's `-n` and `-U`, and the spider (and for `full` the active scan)
+  signs in as that user, so the active rules reach the pages and parameters
+  behind the login. All three scan types take them: ZAP's packaged baseline,
+  full and api scripts each accept `-n` and `-U` (read from the pinned image),
+  and the baseline's spider signs in too, so its passive rules see the signed-in
+  pages; nothing is refused by scan type. A `context-user` with no `context-file`
+  is refused, since a user lives in a context, and a name the context does not
+  hold stops the scan before it starts. A context whose login or poll URL is not
+  loopback is refused too, so the credentials are never posted to another host.
+  The context names the login URL with the port, so it must match `target-url`,
+  and the credentials in it belong to a throwaway account of the service this
+  job starts, never a real one: the file is committed, and the service is on
+  loopback with nothing behind it. A signed-in scan and an anonymous one in the
+  same repository need their own `artifact-name` and `sarif-category`, like any
+  two scans. What it cannot do: sign in through a login ZAP's authentication
+  methods do not cover, or reach a deployed environment, which stays refused
+  with every other non-loopback host.
 - **The AJAX spider** (`ajax-spider: true`) adds a headless browser that clicks
   through the page, for a front end whose links are built by JavaScript. A
   server-rendered page does not need it, and it is slower.
@@ -633,7 +656,14 @@ days, whether the scan passed or not.
   nothing in its headers is wrong, and fails the full scan at `high` naming the
   cross-site scripting; the escaping page passes the full scan at `medium`; and
   the api scan imports `fixture/dast/openapi.json`, whose server is a host that
-  does not exist, and still scans the loopback service.
+  does not exist, and still scans the loopback service. For the login,
+  `fixture/dast/server.py --login` serves a form login with throwaway
+  credentials and, only behind it, the same unescaped echo at `/account/search`;
+  `fixture/dast/login.context` is the ZAP context for it. The full scan with no
+  context passes at `high`, and the same scan with `context-file` and
+  `context-user: throwaway` fails at `high` naming the cross-site scripting;
+  a baseline over the headerless login fixture reaches `/account` only with the
+  context.
 
 Inputs of `dast.yml`:
 
@@ -651,6 +681,8 @@ Inputs of `dast.yml`:
 | `active-scan-minutes` | `0` | Longest the active scan runs (`full`, `api`); `0` is no limit, so set it with `timeout-minutes` |
 | `api-definition` | empty | For `api`: an OpenAPI or SOAP definition as a repository file or a loopback URL, or the loopback URL of a GraphQL endpoint |
 | `api-format` | `openapi` | Format of `api-definition`: `openapi` (its `servers` are overridden with `target-url`), `soap` or `graphql` |
+| `context-file` | empty | A ZAP context file in the repository (URLs in scope, login method, users), passed as ZAP's `-n`; all three scan types. Its credentials are a throwaway account's, because the file is committed |
+| `context-user` | empty | Which user of `context-file` to scan as (`-U`): the spider, and for `full` the active scan, run signed in. Refused without `context-file` |
 | `python-version` | empty | Python to set up first; empty skips it |
 | `install-command` | empty | Installs the service, run before `start-command` |
 | `upload-sarif` | `true` | Upload the findings under `sarif-category`; needs `security-events: write` |
@@ -2081,7 +2113,7 @@ The tests are the contract, one file per thing they hold still:
 | `tests/test_audit_baseline.py` | The audit, fed a passing repository and a broken one per criterion; a 403 comes back UNKNOWN, never PASS; exit codes tell FAIL from UNKNOWN |
 | `tests/test_security_policy.py` | The shared SECURITY.md template's reporting, support, scope and response terms, and the baseline's copy-and-fill instructions |
 | `tests/test_risk_register.py` | The register's shape, its dates, no duplicate advisory, every repository named is in the baseline list, and no entry has expired |
-| `tests/test_dast.py` | `dast.yml`'s contract, its steps run under bash (refusals, a service that blocks, detaches, dies or never answers; the `fail-on` threshold and the SARIF against canned ZAP reports; the scan step against a fake `docker`, so each `scan-type` is shown to run its ZAP script with its flags), and, in the `dast-live` CI job, the real ZAP image against `fixture/dast/server.py`: the baseline with and without its headers, the full scan against a page that reflects its query and one that escapes it, the api scan against its OpenAPI definition |
+| `tests/test_dast.py` | `dast.yml`'s contract, its steps run under bash (refusals, a service that blocks, detaches, dies or never answers; the `fail-on` threshold and the SARIF against canned ZAP reports; the scan step against a fake `docker`, so each `scan-type` is shown to run its ZAP script with its flags), and, in the `dast-live` CI job, the real ZAP image against `fixture/dast/server.py`: the baseline with and without its headers, the full scan against a page that reflects its query and one that escapes it, the api scan against its OpenAPI definition, the anonymous and the signed-in full scan against the login fixture |
 | `tests/test_fuzz.py` | `python-fuzz.yml`'s inputs and pin, and its run step executed under bash against tiny targets: a missing directory, no match, a passing target, a crashing one and a hanging one (which must fail the step and leave its `timeout-*` input) |
 | `tests/test_tool_locks.py` | No `run:` step of any workflow or composite action runs a `pip install` without `--require-hashes`; `security.yml` carries `.github/requirements/*.txt` verbatim; every lock line has a hash; the Snyk install step, run under bash with a recording `pip`, installs a hashed lock under `--require-hashes` and refuses an unhashed one without calling pip |
 | `tests/test_security_jobs.py` | The Semgrep job's defaults and its content-driven config; the gitleaks job as a pinned binary: no licence, no Doppler, no `id-token`, the sha256 checked before extraction, full history, SARIF under category `gitleaks`, and a canary step that plants an AWS-shaped key in a scratch repository and requires exit 1 before the real scan runs (the test also fetches the pinned release, checks the hash, and runs that canary for real; it skips only when offline) |

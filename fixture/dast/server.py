@@ -14,6 +14,13 @@ scan type must catch and modes it must pass:
                                                               rules cannot see it (nothing in the response
                                                               headers is wrong) and must pass; the full scan's
                                                               active rules must find it and fail at `high`
+    python3 fixture/dast/server.py --port 8080 --login        a form login with throwaway credentials, and behind it
+                                                              the same reflected cross-site scripting hole at
+                                                              /account/search. The public pages stay escaped, so a
+                                                              full scan with no login passes at `high`; only a scan
+                                                              that signs in (a ZAP context file and a user,
+                                                              fixture/dast/login.context and `throwaway`) reaches
+                                                              the hole and fails
 
 What is served:
 
@@ -24,6 +31,16 @@ What is served:
     /api/items          a JSON list
     /api/items/{id}     one item, or a JSON 404
 
+With --login, also:
+
+    /login              GET a form; POST username and password. A right pair sets a session cookie and redirects to
+                        /account; a wrong one is a 401 and sets nothing
+    /account            only with the session cookie, otherwise a redirect to /login. The page that links to the hole
+    /account/search?q=  only with the session cookie; echoes q UNESCAPED
+
+The credentials are the constants below, throwaway by construction: the server holds them in memory, reads
+nothing from disk and is reachable only on loopback.
+
 Standard library only, bound to 127.0.0.1, and never reads anything off disk.
 """
 
@@ -33,8 +50,14 @@ import argparse
 import html
 import json
 import re
+import secrets
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
+
+# The login of --login. Throwaway: they open a fixture that holds nothing, on loopback, for one test run.
+LOGIN_USER = "throwaway"
+LOGIN_PASSWORD = "throwaway-password"
+COOKIE = "fixture_session"
 
 PAGE = b"""<!doctype html>
 <html lang="en">
@@ -55,6 +78,35 @@ SEARCH = """<!doctype html>
 <html lang="en">
 <head><meta charset="utf-8"><title>search</title></head>
 <body><p>You searched for: {q}</p><a href="/">home</a></body>
+</html>
+"""
+
+HOME_LOGIN_LINK = b'<a href="/login">sign in</a>'
+HOME_ACCOUNT_LINK = b'<a href="/account">account</a>'
+
+LOGIN_PAGE = """<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>sign in</title></head>
+<body><h1>Sign in</h1><p>{message}</p>
+<form method="post" action="/login">
+<label>Username <input name="username" type="text" autocomplete="off"></label>
+<label>Password <input name="password" type="password" autocomplete="off"></label>
+<button type="submit">Sign in</button></form><a href="/">home</a></body>
+</html>
+"""
+
+ACCOUNT = """<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>account</title></head>
+<body><h1>Account</h1><p>Signed in as {user}.</p>
+<a href="/account/search?q=fixture">search your account</a> <a href="/">home</a></body>
+</html>
+"""
+
+ACCOUNT_SEARCH = """<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>account search</title></head>
+<body><p>You searched your account for: {q}</p><a href="/account">account</a></body>
 </html>
 """
 
@@ -106,16 +158,56 @@ SECURE_HEADERS = {
 ITEM = re.compile(r"^/api/items/([^/]+)$")
 
 
-def make_handler(insecure: bool, vulnerable: bool) -> type[BaseHTTPRequestHandler]:
+def make_handler(insecure: bool, vulnerable: bool, login: bool = False) -> type[BaseHTTPRequestHandler]:
+    sessions: set[str] = set()  # the cookies this process has issued; gone when it exits
+
     class Handler(BaseHTTPRequestHandler):
         server_version = "fixture"  # no Python or library version on the wire
         sys_version = ""
 
+        def signed_in(self) -> bool:
+            for part in self.headers.get("Cookie", "").split(";"):
+                name, _, value = part.strip().partition("=")
+                if name == COOKIE and value in sessions:
+                    return True
+            return False
+
+        def redirect(self, location: str, cookie: str | None = None) -> None:
+            self.send_response(302)
+            self.send_header("Location", location)
+            if cookie:
+                self.send_header("Set-Cookie", f"{COOKIE}={cookie}; Path=/; HttpOnly; SameSite=Strict")
+            self.send_header("Content-Length", "0")
+            self.send_secure_headers()
+            self.end_headers()
+
+        def do_POST(self) -> None:
+            if not (login and urlsplit(self.path).path == "/login"):
+                self.reply(404, "text/html; charset=utf-8", NOT_FOUND)
+                return
+            length = int(self.headers.get("Content-Length") or 0)
+            form = parse_qs(self.rfile.read(min(length, 4096)).decode("utf-8", "replace"))
+            user = form.get("username", [""])[0]
+            password = form.get("password", [""])[0]
+            if secrets.compare_digest(user, LOGIN_USER) and secrets.compare_digest(password, LOGIN_PASSWORD):
+                token = secrets.token_hex(16)
+                sessions.add(token)
+                self.redirect("/account", token)
+            else:
+                page = LOGIN_PAGE.format(message="Sign in failed.")
+                self.reply(401, "text/html; charset=utf-8", page.encode())
+
         def do_GET(self) -> None:
             url = urlsplit(self.path)
             path = url.path
-            if path == "/":
-                self.reply(200, "text/html; charset=utf-8", PAGE)
+            if login and path in ("/login", "/account", "/account/search"):
+                self.login_routes(path, url.query)
+            elif path == "/":
+                page = PAGE
+                if login:
+                    link = HOME_ACCOUNT_LINK if self.signed_in() else HOME_LOGIN_LINK
+                    page = PAGE.replace(b"</body>", link + b"</body>")
+                self.reply(200, "text/html; charset=utf-8", page)
             elif path == "/about":
                 self.reply(200, "text/html; charset=utf-8", ABOUT)
             elif path == "/search":
@@ -136,12 +228,31 @@ def make_handler(insecure: bool, vulnerable: bool) -> type[BaseHTTPRequestHandle
             else:
                 self.reply(404, "text/html; charset=utf-8", NOT_FOUND)
 
+        def login_routes(self, path: str, query: str) -> None:
+            if path == "/login":
+                self.reply(200, "text/html; charset=utf-8", LOGIN_PAGE.format(message="").encode())
+            elif not self.signed_in():
+                self.redirect("/login")
+            elif path == "/account":
+                self.reply(200, "text/html; charset=utf-8", ACCOUNT.format(user=LOGIN_USER).encode())
+            else:
+                # The hole behind the login: the raw query in the page, whatever --vulnerable says.
+                q = parse_qs(query).get("q", [""])[0]
+                self.reply(200, "text/html; charset=utf-8", ACCOUNT_SEARCH.format(q=q).encode())
+
+        def send_secure_headers(self) -> None:
+            if insecure:
+                return
+            for name, value in SECURE_HEADERS.items():
+                # The login form posts to this origin; the rest of the fixture submits nothing.
+                if login and name == "Content-Security-Policy":
+                    value = value.replace("form-action 'none'", "form-action 'self'")
+                self.send_header(name, value)
+
         def reply(self, status: int, content_type: str, body: bytes) -> None:
             self.send_response(status)
             self.send_header("Content-Type", content_type)
-            if not insecure:
-                for name, value in SECURE_HEADERS.items():
-                    self.send_header(name, value)
+            self.send_secure_headers()
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -157,8 +268,10 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--insecure", action="store_true", help="send none of the security headers")
     parser.add_argument("--vulnerable", action="store_true", help="echo /search?q= into the page unescaped")
+    parser.add_argument("--login", action="store_true", help="add a form login and, behind it, an unescaped echo")
     args = parser.parse_args()
-    ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(args.insecure, args.vulnerable)).serve_forever()
+    handler = make_handler(args.insecure, args.vulnerable, args.login)
+    ThreadingHTTPServer(("127.0.0.1", args.port), handler).serve_forever()
 
 
 if __name__ == "__main__":

@@ -17,6 +17,14 @@
 #             codes and content types. There is no spider: the definition is
 #             the map, so an API with no links from a page gets covered.
 #
+# `context-file` and `context-user` make the full and api scans, and the baseline,
+# authenticated: ZAP's own `-n` (a context file the repository keeps, with the
+# login method and the users) and `-U` (which of its users to scan as). The
+# spider, and for `full` the active scan, then run signed in, so they reach
+# what sits behind the login. The credentials in the context file belong to a
+# throwaway account of the service this job starts on loopback, never to a real
+# one; the file is committed like any other.
+#
 # Call it from a repository with:
 #
 #   jobs:
@@ -106,6 +114,14 @@ on:
         description: Format of `api-definition` - `openapi`, `soap` or `graphql`. For `openapi` the definition's `servers` are overridden with `target-url`, so a definition that names the production host still scans the loopback service; `soap` and `graphql` take the definition's own addresses, which must be loopback too.
         type: string
         default: openapi
+      context-file:
+        description: Optional ZAP context file in the repository (an export from ZAP's desktop or API, usually `.zap/app.context`), loaded before the scan with ZAP's `-n`. It names the URLs in scope, the login method and the users, so the scan can sign in. For all three scan types; the context's URLs and login page must be on the loopback `target-url`. The credentials in it are those of a throwaway account of the service this job starts, never a real one, because the file is committed. Empty scans anonymously.
+        type: string
+        default: ""
+      context-user:
+        description: Which user of `context-file` to scan as (ZAP's `-U`, the user's name in the context). The spider, and for `full` the active scan, run signed in as this user. Refused without `context-file`; a name the context does not hold fails the scan before it starts. Empty scans anonymously, with the context's scope only.
+        type: string
+        default: ""
       python-version:
         description: Python to set up before `install-command`. Empty skips the step, for a service that needs none.
         type: string
@@ -185,6 +201,8 @@ jobs:
           SCAN_TYPE: ${{ inputs.scan-type }}
           API_DEFINITION: ${{ inputs.api-definition }}
           API_FORMAT: ${{ inputs.api-format }}
+          CONTEXT_FILE: ${{ inputs.context-file }}
+          CONTEXT_USER: ${{ inputs.context-user }}
         run: |
           set -euo pipefail
           loopback='^https?://(127\.0\.0\.1|localhost|\[::1\])(:[0-9]+)?'
@@ -241,6 +259,25 @@ jobs:
           if [ -n "$RULES_FILE" ] && [ ! -f "$RULES_FILE" ]; then
             echo "::error::rules-file '$RULES_FILE' is not a file in the repository. Create it, or leave rules-file empty to use ZAP's defaults."
             exit 1
+          fi
+          # ZAP's three scripts all take -n and -U (the baseline's spider signs in too), so no scan-type refuses them.
+          if [ -n "$CONTEXT_USER" ] && [ -z "$CONTEXT_FILE" ]; then
+            echo "::error::context-user '$CONTEXT_USER' is set but context-file is empty. A user lives in a ZAP context, so the scan has nobody to sign in as. Set context-file to the context that holds the user, or drop context-user."
+            exit 1
+          fi
+          if [ -n "$CONTEXT_FILE" ] && [ ! -f "$CONTEXT_FILE" ]; then
+            echo "::error::context-file '$CONTEXT_FILE' is not a file in the repository. Export the context from ZAP and commit it, or leave context-file empty to scan anonymously."
+            exit 1
+          fi
+          if [ -n "$CONTEXT_FILE" ]; then
+            # ZAP signs in at the URLs the context names, so a context that names another host would post the
+            # user's credentials there from the runner: the same rule as target-url.
+            while IFS= read -r url; do
+              if ! printf '%s' "$url" | grep -Eq "${loopback}(/|\$)"; then
+                echo "::error::context-file '$CONTEXT_FILE' names '$url' as a login or poll URL, which is not loopback. The scan signs in only to the service this job starts; export a context whose login URL is on target-url."
+                exit 1
+              fi
+            done < <(grep -Eo '<(loginurl|loginpageurl|pollurl)>[^<]+' -- "$CONTEXT_FILE" | sed 's/^<[a-z]*>//')
           fi
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -312,6 +349,8 @@ jobs:
           ACTIVE_SCAN_MINUTES: ${{ inputs.active-scan-minutes }}
           API_DEFINITION: ${{ inputs.api-definition }}
           API_FORMAT: ${{ inputs.api-format }}
+          CONTEXT_FILE: ${{ inputs.context-file }}
+          CONTEXT_USER: ${{ inputs.context-user }}
           ZAP_DIR: ${{ runner.temp }}/zap
         run: |
           set -uo pipefail
@@ -360,6 +399,12 @@ jobs:
               ;;
           esac
           args+=(-J report.json -r report.html -w report.md -I -z "$zap_options")
+          if [ -n "$CONTEXT_FILE" ]; then
+            # The scripts read the context from the mounted directory, under a name this step picks.
+            cp -- "$CONTEXT_FILE" "$ZAP_DIR/context.context"
+            args+=(-n context.context)
+            [ -n "$CONTEXT_USER" ] && args+=(-U "$CONTEXT_USER")
+          fi
           if [ -n "$RULES_FILE" ]; then
             cp -- "$RULES_FILE" "$ZAP_DIR/rules.tsv"
             args+=(-c rules.tsv)
@@ -384,6 +429,7 @@ jobs:
           FAIL_ON: ${{ inputs.fail-on }}
           TARGET_URL: ${{ inputs.target-url }}
           SCAN_TYPE: ${{ inputs.scan-type }}
+          CONTEXT_USER: ${{ inputs.context-user }}
         run: |
           python3 - <<'PY'
           """ZAP's JSON report to SARIF 2.1.0, a job summary, and the fail-on decision."""
@@ -398,6 +444,7 @@ jobs:
           zap_dir = Path(os.environ["ZAP_DIR"])
           fail_on = os.environ["FAIL_ON"]
           scan_type = os.environ.get("SCAN_TYPE", "baseline")
+          context_user = os.environ.get("CONTEXT_USER", "")
           zap_exit = os.environ.get("ZAP_EXIT", "0")
           report = json.loads((zap_dir / "report.json").read_text())
 
@@ -441,7 +488,7 @@ jobs:
                       },
                       "helpUri": first_url(alert.get("reference"), doc_url),
                       "defaultConfiguration": {"level": levels[risk]},
-                      "properties": {"tags": ["security", "dast", "zap", f"zap-{scan_type}"]},
+                      "properties": {"tags": ["security", "dast", "zap", f"zap-{scan_type}", *(["zap-authenticated"] if context_user else [])]},
                   },
               )
               if risk in severity:
@@ -501,6 +548,8 @@ jobs:
               f"fail-on: `{fail_on}`. {len(alerts)} alert(s), {len(failing)} at or above the threshold.",
               "",
           ]
+          if context_user:
+              lines[2:2] = [f"Scanned signed in as the context user `{context_user}`.", ""]
           if alerts:
               lines += ["| Risk | Alert | Instances | Rule |", "| --- | --- | --- | --- |"]
               for a in alerts:

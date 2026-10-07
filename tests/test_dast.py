@@ -39,6 +39,7 @@ import socket
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -49,6 +50,10 @@ WORKFLOW = WORKFLOWS / "dast.yml"
 FIXTURES = REPO / "tests" / "fixtures" / "dast"
 SERVER = REPO / "fixture" / "dast" / "server.py"
 OPENAPI = REPO / "fixture" / "dast" / "openapi.json"
+CONTEXT = REPO / "fixture" / "dast" / "login.context"
+CONTEXT_PATH = "fixture/dast/login.context"
+CONTEXT_USER = "throwaway"
+CONTEXT_PORT = 8080  # the context names the login URL with a port, so the live tests serve the fixture on it
 IMAGE = re.compile(r"^ghcr\.io/zaproxy/zaproxy:(\d+\.\d+\.\d+)@sha256:[0-9a-f]{64}$")
 
 INPUTS = {
@@ -63,6 +68,8 @@ INPUTS = {
     "active-scan-minutes": 0,
     "api-definition": "",
     "api-format": "openapi",
+    "context-file": "",
+    "context-user": "",
     "python-version": "",
     "install-command": "",
     "upload-sarif": True,
@@ -270,6 +277,10 @@ def server_command(port: int, *flags: str) -> str:
             {"scan_type": "api", "api_definition": "schema.graphqls", "api_format": "graphql"},
             "loopback URL of the GraphQL",
         ),
+        ({"context_user": "throwaway"}, "context-user 'throwaway' is set but context-file is empty"),
+        ({"scan_type": "full", "context_user": "throwaway"}, "has nobody to sign in as"),
+        ({"context_file": "no/such/app.context"}, "context-file 'no/such/app.context' is not a file"),
+        ({"context_file": "fixture/dast", "context_user": "throwaway"}, "is not a file in the repository"),
         ({"scan_type": "baseline", "api_definition": "fixture/dast/openapi.json"}, "but scan-type is 'baseline'"),
         ({"scan_type": "full", "api_definition": "http://127.0.0.1:8080/openapi.json"}, "but scan-type is 'full'"),
     ],
@@ -278,6 +289,19 @@ def test_a_bad_input_is_refused_before_anything_starts_and_the_message_names_the
     code, out = job(**inputs).run("Check the inputs", REPO_ROOT=str(REPO))
     assert code != 0, f"{inputs} was accepted"
     assert message in out, out
+
+
+@pytest.mark.parametrize("tag", ["loginurl", "loginpageurl", "pollurl"])
+def test_a_context_that_signs_in_somewhere_other_than_loopback_is_refused(job, tmp_path, tag):
+    context = tmp_path / "evil.context"
+    context.write_text(CONTEXT.read_text().replace("</form>", f"</form><{tag}>https://example.com/login</{tag}>"))
+    code, out = job(context_file=str(context), context_user="throwaway").run("Check the inputs", REPO_ROOT=str(REPO))
+    assert code != 0 and "which is not loopback" in out and "https://example.com/login" in out, out
+
+
+def test_a_context_whose_login_is_on_loopback_is_accepted(job):
+    code, out = job(context_file=CONTEXT_PATH, context_user="throwaway").run("Check the inputs", REPO_ROOT=str(REPO))
+    assert code == 0, out
 
 
 @pytest.mark.parametrize(
@@ -289,6 +313,15 @@ def test_a_bad_input_is_refused_before_anything_starts_and_the_message_names_the
         {"scan_type": "api", "api_definition": "http://127.0.0.1:8080/openapi.json"},
         {"scan_type": "api", "api_definition": "http://localhost:8080/soap?wsdl", "api_format": "soap"},
         {"scan_type": "api", "api_definition": "http://[::1]:8080/graphql", "api_format": "graphql"},
+        {"context_file": CONTEXT_PATH},
+        {"context_file": CONTEXT_PATH, "context_user": "throwaway"},
+        {"scan_type": "full", "context_file": CONTEXT_PATH, "context_user": "throwaway"},
+        {
+            "scan_type": "api",
+            "api_definition": "fixture/dast/openapi.json",
+            "context_file": CONTEXT_PATH,
+            "context_user": "throwaway",
+        },
     ],
 )
 def test_every_scan_type_with_its_own_inputs_is_accepted(job, inputs):
@@ -472,6 +505,46 @@ def test_the_rules_file_rides_along_for_every_scan_type(job, tmp_path):
         assert (j.temp / "zap" / "rules.tsv").read_text() == rules.read_text()
 
 
+@pytest.mark.parametrize(
+    ("scan_type", "script", "extra"),
+    [
+        ("baseline", "zap-baseline.py", {}),
+        ("full", "zap-full-scan.py", {}),
+        ("api", "zap-api-scan.py", {"api_definition": "fixture/dast/openapi.json"}),
+    ],
+)
+def test_the_context_and_the_user_become_zaps_n_and_u_for_every_scan_type(job, tmp_path, scan_type, script, extra):
+    """All three packaged scripts take -n and -U (read from the pinned image's /zap/*.py), the baseline's too."""
+    j, code, out, args = scan_step(
+        job, tmp_path, scan_type=scan_type, context_file=CONTEXT_PATH, context_user="throwaway", **extra
+    )
+    assert code == 0, out
+    cmd = after_image(args)
+    assert cmd[0] == script
+    assert flag(cmd, "-n") == "context.context", "the script reads the context from the mounted directory"
+    assert flag(cmd, "-U") == "throwaway"
+    assert (j.temp / "zap" / "context.context").read_bytes() == CONTEXT.read_bytes()
+
+
+def test_a_context_without_a_user_passes_only_n_and_no_context_passes_neither(job, tmp_path):
+    _, code, out, args = scan_step(job, tmp_path, scan_type="full", context_file=CONTEXT_PATH)
+    assert code == 0, out
+    cmd = after_image(args)
+    assert flag(cmd, "-n") == "context.context" and "-U" not in cmd
+    _, code, out, args = scan_step(job, tmp_path, scan_type="full")
+    assert code == 0, out
+    cmd = after_image(args)
+    assert "-n" not in cmd and "-U" not in cmd
+
+
+def test_a_user_name_with_shell_characters_reaches_zap_as_one_argument(job, tmp_path):
+    name = 'a b"; touch pwned; "$(id)'
+    _, code, out, args = scan_step(job, tmp_path, context_file=CONTEXT_PATH, context_user=name)
+    assert code == 0, out
+    assert flag(after_image(args), "-U") == name
+    assert not (tmp_path / "pwned").exists() and not (REPO / "pwned").exists()
+
+
 def test_a_scan_that_leaves_no_report_fails_the_step_naming_the_script(job, tmp_path):
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -541,6 +614,27 @@ def test_the_summary_and_the_sarif_say_which_scan_type_ran(job):
         assert "zap-full" in rule["properties"]["tags"], (
             "the Security tab must tell a full scan's alert from a baseline's"
         )
+
+
+def test_an_authenticated_scan_says_so_in_the_summary_and_tags_its_alerts(job):
+    j = job(fail_on="none", scan_type="full", context_file=CONTEXT_PATH, context_user="throwaway")
+    zap = j.temp / "zap"
+    zap.mkdir()
+    shutil.copy(FIXTURES / "insecure.json", zap / "report.json")
+    j.output.write_text("exit=0\n")
+    code, out = j.run("Report and apply fail-on")
+    assert code == 0, out
+    assert "Scanned signed in as the context user `throwaway`." in j.summary.read_text()
+    sarif = json.loads((zap / "zap.sarif").read_text())
+    for rule in sarif["runs"][0]["tool"]["driver"]["rules"]:
+        assert "zap-authenticated" in rule["properties"]["tags"]
+
+
+def test_an_anonymous_scan_does_not_claim_to_be_authenticated(job):
+    j, _, _, zap = report(job, "insecure.json", "none")
+    assert "signed in" not in j.summary.read_text()
+    sarif = json.loads((zap / "zap.sarif").read_text())
+    assert all("zap-authenticated" not in r["properties"]["tags"] for r in sarif["runs"][0]["tool"]["driver"]["rules"])
 
 
 def test_the_sarif_is_valid_enough_for_code_scanning(job):
@@ -617,6 +711,119 @@ def test_the_fixture_escapes_what_it_echoes_unless_told_not_to():
         finally:
             proc.kill()
             proc.wait()
+
+
+class Fixture:
+    """The fixture server in one mode, on a port, for the duration of a with block."""
+
+    def __init__(self, port: int, *flags: str):
+        self.port, self.flags = port, flags
+
+    def __enter__(self):
+        self.proc = subprocess.Popen([sys.executable, str(SERVER), "--port", str(self.port), *self.flags])
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            try:
+                urllib.request.urlopen(f"http://127.0.0.1:{self.port}/", timeout=1).close()
+                return self
+            except OSError:
+                time.sleep(0.1)
+        raise AssertionError("the fixture server never answered")
+
+    def __exit__(self, *exc):
+        self.proc.kill()
+        self.proc.wait()
+
+    def get(self, path: str, cookie: str = "", data: str | None = None):
+        """(status, headers, body), redirects not followed."""
+
+        class NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, *args, **kwargs):
+                return None
+
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}{path}",
+            data=data.encode() if data is not None else None,
+            headers={"Cookie": cookie} if cookie else {},
+        )
+        try:
+            with urllib.request.build_opener(NoRedirect).open(request, timeout=5) as resp:
+                return resp.status, dict(resp.headers), resp.read().decode()
+        except urllib.error.HTTPError as err:
+            return err.code, dict(err.headers), err.read().decode()
+
+
+GOOD_LOGIN = "username=throwaway&password=throwaway-password"
+
+
+def test_the_login_mode_hides_an_unescaped_echo_behind_a_form_login_and_leaves_the_public_pages_escaped():
+    with Fixture(free_port(), "--login") as server:
+        status, headers, _ = server.get("/account")
+        assert status == 302 and headers["Location"] == "/login", "an anonymous request must be sent to the login"
+        assert server.get("/account/search?q=%3Cb%3Ex")[0] == 302
+        assert server.get("/login")[0] == 200
+        status, headers, _ = server.get("/login", data="username=throwaway&password=wrong")
+        assert status == 401 and "Set-Cookie" not in headers
+        status, headers, _ = server.get("/login", data=GOOD_LOGIN)
+        assert status == 302 and headers["Location"] == "/account"
+        cookie = headers["Set-Cookie"].split(";")[0]
+        assert "HttpOnly" in headers["Set-Cookie"]
+        status, _, body = server.get("/account", cookie)
+        assert status == 200 and "Signed in as throwaway" in body
+        status, headers, body = server.get("/account/search?q=%3Cb%3Ex", cookie)
+        assert status == 200 and "<b>x" in body, "the hole behind the login echoes q unescaped"
+        assert "Content-Security-Policy" in headers
+        assert server.get("/account", "fixture_session=forged")[0] == 302, "only a cookie the server issued signs in"
+        _, _, body = server.get("/search?q=%3Cb%3Ex")
+        assert "&lt;b&gt;x" in body, "the public page stays escaped: only a signed-in scan can find the hole"
+        _, _, anonymous_home = server.get("/")
+        _, _, signed_in_home = server.get("/", cookie)
+        assert "/account" not in anonymous_home and "/account" in signed_in_home
+        assert "/login" in anonymous_home
+
+
+def test_the_login_routes_do_not_exist_without_the_login_flag():
+    with Fixture(free_port()) as server:
+        for path in ("/login", "/account", "/account/search?q=x"):
+            assert server.get(path)[0] == 404, path
+        assert server.get("/login", data=GOOD_LOGIN)[0] == 404
+
+
+def test_the_shipped_context_file_matches_the_fixtures_login():
+    """fixture/dast/login.context is what the live tests hand ZAP; it must describe this server's login."""
+    import base64
+    import xml.etree.ElementTree as ET
+
+    spec = importlib.util.spec_from_file_location("dast_fixture_server", SERVER)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    context = ET.parse(CONTEXT).getroot().find("context")
+    assert context is not None
+    user = context.find("users/user").text.split(";")
+    assert user[1] == "true" and base64.b64decode(user[2]).decode() == module.LOGIN_USER == CONTEXT_USER
+    username, password = (base64.b64decode(part).decode() for part in user[4].split("~")[:2])
+    assert (username, password) == (module.LOGIN_USER, module.LOGIN_PASSWORD)
+    form = context.find("authentication/form")
+    assert form.find("loginurl").text == f"http://127.0.0.1:{CONTEXT_PORT}/login"
+    assert form.find("loginbody").text == "username={%username%}&password={%password%}"
+    # ZAP checks every response (headers and body) against the logged-out indicator; a hit makes it sign in again.
+    # Its first attempt was a logged-in indicator on the account page, which the login's own redirect does not carry,
+    # and ZAP counted every sign-in as failed and shut itself down.
+    out = re.compile(context.find("authentication/loggedout").text.replace("\\Q", "(?:").replace("\\E", ")"))
+
+    def seen(response: tuple[int, dict, str]) -> bool:
+        status, headers, body = response
+        return bool(out.search("\n".join(f"{k}: {v}" for k, v in headers.items()) + "\n" + body))
+
+    with Fixture(free_port(), "--login") as server:
+        assert seen(server.get("/account")), "a request without a session is the logged-out case"
+        assert seen(server.get("/login"))
+        assert seen(server.get("/login", data="username=throwaway&password=wrong"))
+        signed_in = server.get("/login", data=GOOD_LOGIN)
+        assert not seen(signed_in), "the login's own response must not read as logged out"
+        cookie = signed_in[1]["Set-Cookie"].split(";")[0]
+        for path in ("/", "/account", "/account/search?q=fixture", "/about", "/search?q=x"):
+            assert not seen(server.get(path, cookie)), f"{path} signed in must not read as logged out"
 
 
 # --- the live scans: the real ZAP image, against the fixture server ---------
@@ -717,3 +924,75 @@ def test_live_the_api_scan_imports_the_repository_definition_and_scans_the_loopb
     sites = [site["@name"] for site in report.get("site", [])]
     assert sites and all(s.startswith("http://127.0.0.1:") for s in sites), sites
     assert "### ZAP api scan" in j.summary.read_text()
+
+
+# The login: the same hole, reachable only signed in. Two tests, one fixture, two scans -----------------
+
+
+def login_scan(job, *server_flags: str, fail_on: str, **inputs: object):
+    """scan(), on the port the shipped context names, with the login served."""
+    assert docker_usable(), "DAST_LIVE is set and docker is not usable: this job exists to run the real image"
+    j = job(
+        start_command=server_command(CONTEXT_PORT, "--login", *server_flags),
+        target_url=f"http://127.0.0.1:{CONTEXT_PORT}",
+        fail_on=fail_on,
+        **inputs,
+    )
+    for fragment in ("Check the inputs", "Start the service and wait for it", "Run the ZAP scan"):
+        code, out = j.run(fragment, timeout=1500, REPO_ROOT=str(REPO))
+        assert code == 0, f"{fragment}:\n{out}"
+    return j
+
+
+def alert_urls(j) -> set[str]:
+    report = json.loads((j.temp / "zap" / "report.json").read_text())
+    return {i["uri"] for site in report["site"] for a in site["alerts"] for i in a.get("instances", [])}
+
+
+@live
+def test_live_the_anonymous_full_scan_passes_a_hole_that_only_a_signed_in_session_reaches(job):
+    j = login_scan(job, fail_on="high", scan_type="full")
+    code, out = j.run("Report and apply fail-on")
+    assert code == 0, "the anonymous full scan found something at High; the hole must sit behind the login\n" + out
+    assert XSS not in alerts_in(j)
+    assert not any("/account" in u for u in alert_urls(j)), "an anonymous spider must not have reached /account"
+
+
+@live
+def test_live_the_authenticated_full_scan_fails_the_same_service_at_high_naming_the_xss(job):
+    j = login_scan(job, fail_on="high", scan_type="full", context_file=CONTEXT_PATH, context_user=CONTEXT_USER)
+    code, out = j.run("Report and apply fail-on")
+    assert code != 0, "the full scan, signed in, passed a page that reflects its query unescaped\n" + out
+    assert "Cross Site Scripting (Reflected)" in out, out
+    assert alerts_in(j)[XSS] == "error"
+    assert any("/account/search" in u for u in alert_urls(j)), alert_urls(j)
+    assert "Scanned signed in as the context user `throwaway`." in j.summary.read_text()
+
+
+@live
+def test_live_the_baseline_spider_signs_in_too_which_is_why_it_is_not_refused_the_context(job):
+    """With the headers off, every page it reaches is an alert: /account only shows up when the spider got in."""
+    anonymous = login_scan(job, "--insecure", fail_on="none")
+    assert anonymous.run("Report and apply fail-on")[0] == 0
+    assert not any("/account" in u for u in alert_urls(anonymous))
+    signed_in = login_scan(job, "--insecure", fail_on="none", context_file=CONTEXT_PATH, context_user=CONTEXT_USER)
+    assert signed_in.run("Report and apply fail-on")[0] == 0
+    assert any("/account" in u for u in alert_urls(signed_in)), alert_urls(signed_in)
+
+
+@live
+def test_live_a_user_the_context_does_not_hold_stops_the_scan_and_names_the_user(job):
+    """A typo in context-user must not become an anonymous scan that passes."""
+    assert docker_usable(), "DAST_LIVE is set and docker is not usable: this job exists to run the real image"
+    j = job(
+        start_command=server_command(CONTEXT_PORT, "--login"),
+        target_url=f"http://127.0.0.1:{CONTEXT_PORT}",
+        context_file=CONTEXT_PATH,
+        context_user="nobody",
+    )
+    for fragment in ("Check the inputs", "Start the service and wait for it"):
+        code, out = j.run(fragment, REPO_ROOT=str(REPO))
+        assert code == 0, out
+    code, out = j.run("Run the ZAP scan", timeout=600, REPO_ROOT=str(REPO))
+    assert code != 0, "a user the context does not hold was accepted\n" + out
+    assert "ZAP failed to find user: nobody" in out and "left no report" in out, out

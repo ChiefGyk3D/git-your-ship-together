@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<configuration>
+<!--
+  The ZAP context of the fixture server in login mode, for dast.yml's `context-file` and `context-user: throwaway`.
+  Exported from ZAP 2.17.0 and trimmed: one context for the fixture on 127.0.0.1:8080, form-based
+  authentication posting username and password to /login, a logged-out indicator (the redirect to
+  /login or the sign-in page itself; every response is checked against it, and the login's own redirect to /account is not
+  a match), and one user. The user's credentials are encoded as ZAP stores them (base64 of `throwaway` and
+  `throwaway-password`); they are the throwaway constants in server.py and open nothing else.
+-->
+    <context>
+        <name>fixture-login</name>
+        <desc/>
+        <inscope>true</inscope>
+        <incregexes>http://127\.0\.0\.1:8080.*</incregexes>
+        <urlparser>
+            <class>org.zaproxy.zap.model.StandardParameterParser</class>
+            <config>{"kvps":"&amp;","kvs":"=","struct":[]}</config>
+        </urlparser>
+        <postparser>
+            <class>org.zaproxy.zap.model.StandardParameterParser</class>
+            <config>{"kvps":"&amp;","kvs":"=","struct":[]}</config>
+        </postparser>
+        <authentication>
+            <type>2</type>
+            <strategy>EACH_RESP</strategy>
+            <pollfreq>60</pollfreq>
+            <pollunits>REQUESTS</pollunits>
+            <loggedout>\QLocation: /login\E|\Q&lt;h1&gt;Sign in&lt;/h1&gt;\E</loggedout>
+            <form>
+                <loginurl>http://127.0.0.1:8080/login</loginurl>
+                <loginbody>username={%username%}&amp;password={%password%}</loginbody>
+                <loginpageurl>http://127.0.0.1:8080/login</loginpageurl>
+            </form>
+        </authentication>
+        <users>
+            <user>0;true;dGhyb3dhd2F5;2;dGhyb3dhd2F5~dGhyb3dhd2F5LXBhc3N3b3Jk~</user>
+        </users>
+        <forceduser>-1</forceduser>
+        <session>
+            <type>0</type>
+        </session>
+        <authorization>
+            <type>0</type>
+            <basic>
+                <header/>
+                <body/>
+                <logic>AND</logic>
+                <code>-1</code>
+            </basic>
+        </authorization>
+    </context>
+</configuration>
