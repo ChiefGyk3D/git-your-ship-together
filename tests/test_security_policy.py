@@ -13,6 +13,7 @@ def test_security_template_has_repository_specific_fields_and_reporting_terms():
     for section in ("## Supported Versions", "## Reporting a Vulnerability", "## Scope", "## What to Expect"):
         assert section in text
     assert "<OWNER>/<REPO>" in text
+    assert "OWNER/REPO" not in text.replace("<OWNER>/<REPO>", "")
     assert "<version>" in text
     assert "<project-specific scope bullet>" in text
     assert "private vulnerability reporting" in text

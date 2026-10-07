@@ -8,7 +8,7 @@ ship in the next tag.
 ## Reporting a Vulnerability
 
 Report vulnerabilities through
-[GitHub private vulnerability reporting](https://github.com/OWNER/REPO/security/advisories/new).
+[GitHub private vulnerability reporting](https://github.com/<OWNER>/<REPO>/security/advisories/new).
 Do not open a public issue. Include the affected component, expected versus
 actual behavior, and reproduction steps.
 

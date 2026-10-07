@@ -35,7 +35,6 @@ Each has a "done when" in its issue.
 **Supply chain and baseline**
 
 - **#99** Attach a CycloneDX and an SPDX SBOM to every package and artifact release, signed with the rest.
-- **#79** A `SECURITY.md` template in the baseline, for Scorecard's SecurityPolicy check.
 - **#96** `new-repo.sh` should ship a gitleaks pre-commit hook beside the commit-claims hook.
 - **#74** A caller that pins job permissions to `contents: read` fails at startup with no check; document the
   `id-token` grant where it bites and lint for it.
