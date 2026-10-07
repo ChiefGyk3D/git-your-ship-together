@@ -477,11 +477,11 @@ if __name__ == "__main__":
 
 Every target runs, one after another, even when an earlier one failed; the job
 fails if any did. Each target's result and execution count is one line of the
-job summary. A crash leaves `crash-*` (also `leak-*`, `timeout-*`, `oom-*`)
-files, uploaded as the `fuzz-findings` artifact for 30 days. A `timeout-*`
-artefact means libFuzzer found an input that hung or ran too long, not a crash;
-reproduce it with `python fuzz/fuzz_x.py timeout-<sha>`. The outer timeout
-remains a backstop for a target that hangs libFuzzer itself.
+job summary. Findings leave `crash-*`, `leak-*`, `timeout-*` or `oom-*` files,
+uploaded as the `fuzz-findings` artifact for 30 days. A `timeout-*` artefact
+means libFuzzer found an input that hung or ran too long, not a crash; reproduce
+it with `python fuzz/fuzz_x.py timeout-<sha>`. The outer timeout remains a
+backstop for a target that hangs libFuzzer itself.
 
 Atheris is installed from one pinned version under `--require-hashes` with
 `--only-binary`, so nothing is built on the runner. It publishes manylinux

@@ -1,4 +1,4 @@
-"""A target that hangs on the zero byte, so libFuzzer must save a timeout input."""
+"""A target that hangs on an empty seed or zero byte, so libFuzzer saves a timeout input."""
 
 import sys
 
