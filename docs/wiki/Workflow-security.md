@@ -78,6 +78,11 @@ jobs:
   repository with no lock names its install in `snyk-install-command`.
 - **Semgrep for shell.** No `p/bash` or `p/shell` registry pack exists (the earlier default 404'd, issue #66), so shell-only
   repositories use `p/github-actions` and `p/secrets`, and [bash-ci](Workflow-bash-ci.md)'s ShellCheck covers the shell.
+- **pip-audit and Semgrep are hash-locked.** Both install under `--require-hashes --no-deps --only-binary=:all:` from locks
+  carried inside the workflow (source: `.github/requirements/`, copied in by `scripts/tool_locks.py`), because Scorecard flags
+  an unhashed `pip install` (issue #87). The Semgrep version is therefore the lock's. `semgrep-version` is **deprecated and
+  will be removed**: empty or equal to the locked version is accepted, anything else fails the install step naming the locked
+  version. A Snyk `pip-audit-requirements` file with no hashes now fails rather than installing unchecked.
 - **Semgrep suppression** is partly unsettled (issue #83); see the scanning page.
 - **The Actions allow-list** needs subdirectory forms for `github/codeql-action/init` and `snyk/actions/setup`; see
   [The baseline and the weekly audit](Baseline-and-the-weekly-audit.md).

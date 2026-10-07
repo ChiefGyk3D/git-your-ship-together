@@ -18,7 +18,7 @@ the workflow's YAML so it cannot drift; the README is the authority.
 | A package for PyPI | `python-package-release.yml` | [python-package-release](Workflow-python-package-release.md) |
 | Files to publish (`.deb`, firmware, bundles) | `artifact-release.yml` | [artifact-release](Workflow-artifact-release.md) |
 | Anything (security scanning) | `security.yml` | [security](Workflow-security.md) |
-| A service that serves HTTP (a dashboard, an API) | `dast.yml` | [dast](Workflow-dast.md) |
+| A service that serves HTTP (a dashboard, an API; passive, active or by API definition) | `dast.yml` | [dast](Workflow-dast.md) |
 | Dependabot | `dependabot-auto-merge.yml` | [dependabot-auto-merge](Workflow-dependabot-auto-merge.md) |
 | A GitHub Projects v2 board (organization) | `project-sync.yml` | [project-sync](Workflow-project-sync.md) |
 | A static docs site | `docs-pages.yml` | [docs-pages](Workflow-docs-pages.md) |
