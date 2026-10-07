@@ -77,7 +77,7 @@ Sixteen reusable workflows and one composite action:
 | `.github/workflows/docs-pages.yml` | Build a static documentation site with a command you supply (MkDocs strict by default) on every pull request; upload it and deploy it to GitHub Pages from the default branch only. The two Pages writes sit on the deploy job alone |
 | `.github/workflows/wiki-publish.yml` | Run a command that generates a wiki tree, then replace the repository's GitHub wiki with it, as `github-actions[bot]`, only when something changed, from the default branch only. The write token sits on a job that runs none of your code |
 | `.github/workflows/project-sync.yml` | Keeps a GitHub Projects v2 board current: adds an issue or pull request when it opens, moves it to Done with a date when it closes or merges, and a weekly reconcile repairs what an event missed. The token comes from Doppler over OIDC; nothing from a pull request is checked out. See [Keeping a project current](#keeping-a-project-current) |
-| `.github/workflows/dast.yml` | An OWASP ZAP baseline scan (spider and passive rules, no attack traffic) of a loopback service the caller starts, with a `fail-on` threshold; reports kept as an artifact, findings uploaded as SARIF under category `zap`. The caller's service runs in a job that holds only `contents: read`; the upload is a second job that runs none of it. See [DAST](#dast-owasp-zap-baseline) |
+| `.github/workflows/dast.yml` | OWASP ZAP against a loopback service the caller starts: the `baseline` scan (spider and passive rules, no attack traffic), the `full` scan (the active rules too: injection, cross-site scripting, traversal) or the `api` scan (the active rules over an OpenAPI, SOAP or GraphQL definition), with a `fail-on` threshold; reports kept as an artifact, findings uploaded as SARIF under category `zap`. The caller's service runs in a job that holds only `contents: read`; the upload is a second job that runs none of it. See [DAST](#dast-owasp-zap) |
 | `.github/workflows/security.yml` | CodeQL (the `actions` language included by default), gitleaks, a dependency audit (pip-audit, and any other tool by command), Semgrep, dependency review on pull requests (with a licence denylist), optional Snyk, optional OpenSSF Scorecard |
 | `.github/workflows/dependabot-auto-merge.yml` | Queues a Dependabot bump to merge itself once the required checks pass, up to a size you choose |
 | `.github/actions/doppler-secrets` | Fetches a Doppler config as masked environment variables, over OIDC or a Service Token. The workflows inline a copy of it (see the design rules); this is the source |
@@ -95,6 +95,7 @@ project before any caller pins them:
 | `.github/dependabot.yml` | Weekly action and pip bumps with a seven-day cooldown, actions grouped into one pull request |
 | `fixture/` | A package with a console script, one test, a non-root Dockerfile, a hash-pinned `requirements.txt`, and one shell script with its own test: one of everything a job needs. `fixture/README.md` says how to regenerate the lock |
 | `tests/` | The contract, as pytest, one file per thing it holds still. See [Developing](#developing) |
+| `.github/requirements/`, `scripts/tool_locks.py` | The hash locks of pip-audit and Semgrep that `security.yml` carries inline, and the script that resolves them and copies them in |
 | `pyproject.toml`, `requirements-dev.txt` | ruff and pytest configuration, and the three pinned tools the tests need |
 
 And what keeps the callers honest:
@@ -103,6 +104,7 @@ And what keeps the callers honest:
 |---|---|
 | `BASELINE.md` | The minimum every calling repository meets: people, branch protection, secrets, workflows, Actions settings, scanning, risk exceptions |
 | `baseline/repos.txt` | The repositories the baseline covers, one per line, this one included |
+| `baseline/SECURITY.template.md` | The private vulnerability reporting policy copied and filled in as `SECURITY.md` in each calling repository |
 | `baseline/selected-actions.json` | The allowed-actions policy every repository sets: GitHub-owned plus the named third parties these workflows use, subdirectory forms included |
 | `baseline/risk-register.yaml` | Every advisory a pipeline is told to ignore, with the reason, the mitigation, an owner and an expiry. See [Risk register](#risk-register) |
 | `scripts/audit_baseline.py` | Reads each repository's settings and workflows from the API and reports PASS, FAIL or UNKNOWN per baseline item. Exit 0 only when every check passed |
@@ -226,7 +228,7 @@ jobs:
     uses: ChiefGyk3D/git-your-ship-together/.github/workflows/python-ci.yml@<sha> # v1.3.1
     permissions:
       contents: read
-      id-token: write   # Doppler OIDC and Codecov; python-ci keeps it off the test job
+      id-token: write   # required even with codecov: false; job permissions are static
     secrets:
       DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}   # optional fallback, unset means OIDC only
     with:
@@ -511,14 +513,20 @@ Inputs of `python-fuzz.yml`:
 | `extra-allowed-endpoints` | empty | Appended to the list, for hosts only this repository reaches |
 | `timeout-minutes` | `30` | Job timeout; targets run one after another, so raise it with `seconds-per-target` |
 
-### DAST (OWASP ZAP baseline)
+### DAST (OWASP ZAP)
 
 Everything else in `security.yml` reads code. `dast.yml` is the one check that
 talks to a running service: it starts the caller's service on loopback, points
-an [OWASP ZAP](https://www.zaproxy.org/) baseline scan at it (a spider and ZAP's
-passive rules; the baseline sends no attack traffic), and fails the job when a
-finding reaches `fail-on`. It fits a repository that serves HTTP (a dashboard, an
-API, a docs server) and only that; a repository with no service has nothing to call.
+[OWASP ZAP](https://www.zaproxy.org/) at it, and fails the job when a finding
+reaches `fail-on`. It fits a repository that serves HTTP (a dashboard, an API, a
+docs server) and only that; a repository with no service has nothing to call.
+`scan-type` picks one of ZAP's three packaged scans:
+
+| `scan-type` | What ZAP does | Finds | Cannot find | Time on the fixture |
+|---|---|---|---|---|
+| `baseline` (default) | Spiders the service, runs the passive rules over every response. Sends no attack traffic | Missing or weak security headers, cookies without flags, server banners, information in responses | Anything the server does with its input: an injection, a reflected script, a traversal | about 1 minute |
+| `full` | The baseline, then the active rules against every URL and parameter the spider found | The passive findings, plus reflected and persistent XSS, SQL and command injection, path traversal, remote file inclusion, and the rest of ZAP's active rules | Operations no link reaches (an API with no page linking to it); anything behind a login without a context file | several minutes |
+| `api` | Imports `api-definition`, sends each operation with the parameters it declares, runs the active rules of ZAP's API-Minimal policy, and alerts on unexpected status codes and content types | The same classes of hole in an API, including operations no page links to, since the definition is the map | Operations the definition leaves out; a page | a few minutes |
 
 ```yaml
 jobs:
@@ -532,41 +540,82 @@ jobs:
       install-command: pip install .              # whatever the service needs
       start-command: myapp serve --port 8080      # blocks or detaches; both work
       target-url: http://127.0.0.1:8080
+      scan-type: full                             # baseline, full or api
       fail-on: medium
 ```
 
-Add the job to the caller's `CI green` gate (`needs:`). What it does, in order:
-refuses a bad input (a `target-url` that is not loopback, an unknown `fail-on`, a
-missing `rules-file`); runs `install-command`, then `start-command` in the
-background with its output in a file; waits for `ready-path` to answer 2xx or 3xx
-(a service that exits non-zero before then fails at once with the tail of its log);
-runs the ZAP image; converts ZAP's JSON report to SARIF; writes a job summary
-table; and fails when an alert is at or above `fail-on`. HTML, Markdown, JSON and
-SARIF reports are the `zap-reports` artifact for 14 days, whether the scan passed
-or not.
+An API gets a second call, with a second artifact name and category so the two
+uploads do not close each other's alerts:
 
+```yaml
+  dast-api:
+    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/dast.yml@<sha> # vX.Y.Z
+    permissions:
+      contents: read
+      security-events: write
+    with:
+      start-command: myapp serve --port 8080
+      target-url: http://127.0.0.1:8080
+      scan-type: api
+      api-definition: openapi/myapp.yaml          # a file in the repository, or http://127.0.0.1:8080/openapi.json
+      fail-on: medium
+      artifact-name: zap-api-reports
+      sarif-category: zap-api
+```
+
+Add the jobs to the caller's `CI green` gate (`needs:`). What a call does, in
+order: refuses a bad input (a `target-url` that is not loopback, an unknown
+`fail-on` or `scan-type`, a missing `rules-file`, an `api-definition` that is
+neither a repository file nor a loopback URL, or one given without `scan-type:
+api`); runs `install-command`, then `start-command` in the background with its
+output in a file; waits for `ready-path` to answer 2xx or 3xx (a service that
+exits non-zero before then fails at once with the tail of its log); runs the ZAP
+image with the script `scan-type` names; converts ZAP's JSON report to SARIF;
+writes a job summary table; and fails when an alert is at or above `fail-on`.
+HTML, Markdown, JSON and SARIF reports are the `zap-reports` artifact for 14
+days, whether the scan passed or not.
+
+- **Start with `baseline`, move to `full`.** The baseline is fast and its
+  findings are the ones a reverse proxy fixes in an afternoon. Once it passes
+  at `medium`, switch to `full`: it is the scan that finds what the code does
+  with input, and the one with no static-analysis substitute. Bound it with
+  `active-scan-minutes` and raise `timeout-minutes` to match; `0` is no limit,
+  and ZAP's active rules against a large service can run for a long time.
 - **`fail-on` is a risk level, not a count.** ZAP rates each alert High, Medium,
   Low or Informational. A page with no security headers has Medium alerts (no
   Content-Security-Policy, no anti-clickjacking header) and Low ones, so the
   default `high` does not catch it: set `medium` to catch missing headers, `low`
-  or `informational` to be stricter, `none` to report without failing. The
-  SARIF carries every alert whatever the threshold.
+  or `informational` to be stricter, `none` to report without failing. A
+  reflected cross-site scripting hole is High, so the default catches that in a
+  `full` or `api` scan. The SARIF carries every alert whatever the threshold,
+  tagged `zap-<scan-type>` so the Security tab says which scan found it.
 - **Accepting a finding** goes in `rules-file`, ZAP's own format, usually
   `.zap/rules.tsv`: tab-separated `<rule id>`, `IGNORE`, and a comment saying why.
-  An `IGNORE`d rule is dropped from the report and the SARIF. A rule set to `FAIL`
-  fails the job whatever `fail-on` says. Rule ids are in each report and at
+  An `IGNORE`d rule is dropped from the report and the SARIF, and for a `full` or
+  `api` scan the active rule is not run. A rule set to `FAIL` fails the job
+  whatever `fail-on` says. Rule ids are in each report and at
   `https://www.zaproxy.org/docs/alerts/<id>/`.
-- **Loopback only, by design.** The scan refuses any other host, and the
-  container shares the runner's network only to reach the service. The service
-  is whatever the caller starts, so give it a recorded dataset and no outbound
-  dependency, and `block` mode's allow-list stays the image pull and GitHub.
-- **The image is pinned by digest, not by action.** `zaproxy/action-baseline`
-  runs the same image by the moving tag `stable`, files issues with the job's
-  token and has no SARIF output; the workflow runs
-  `ghcr.io/zaproxy/zaproxy:2.17.0@sha256:...` directly, with no token in the
-  container and `-silent` so ZAP makes no unsolicited requests (measured: with no
-  network at all the scan completes, and without `-silent` it tries
-  `cfu.zaproxy.org` and `tel.zaproxy.org`). No action joins
+- **Loopback only, by design, and it matters more for the active scans.** The
+  `full` and `api` scans send attack payloads. The workflow refuses any
+  `target-url` or `api-definition` URL that is not `127.0.0.1`, `localhost` or
+  `[::1]`, and the container shares the runner's network only to reach the
+  service, so a typo cannot aim an attack at a third party. For `openapi` the
+  definition's `servers` are overridden with `target-url`, so a definition that
+  names the production host still scans the loopback service; `soap` and
+  `graphql` take the addresses the definition carries, which must be loopback
+  too. The service is whatever the caller starts, so give it a recorded dataset
+  and no outbound dependency, and `block` mode's allow-list stays the image pull
+  and GitHub.
+- **The AJAX spider** (`ajax-spider: true`) adds a headless browser that clicks
+  through the page, for a front end whose links are built by JavaScript. A
+  server-rendered page does not need it, and it is slower.
+- **The image is pinned by digest, not by action.** `zaproxy/action-baseline`,
+  `action-full-scan` and `action-api-scan` run the same image by the moving tag
+  `stable`, file issues with the job's token and have no SARIF output; the
+  workflow runs `ghcr.io/zaproxy/zaproxy:2.17.0@sha256:...` directly, with no
+  token in the container and `-silent` so ZAP makes no unsolicited requests
+  (measured: with no network at all the scan completes, and without `-silent` it
+  tries `cfu.zaproxy.org` and `tel.zaproxy.org`). No action joins
   `baseline/selected-actions.json`. A bump is a new tag and its digest in the
   workflow's `ZAP_IMAGE`.
 - **Two jobs.** `scan` runs the caller's code with `contents: read` and no
@@ -574,11 +623,17 @@ or not.
   no shell; it is skipped on a pull request from a fork, whose token cannot write,
   and with `upload-sarif: false` (a private repository without GitHub Advanced
   Security cannot take SARIF at all).
-- **Proved to fail.** `tests/test_dast.py` runs the job's steps against canned
-  reports (the threshold, the SARIF, every refusal) and, in this repository's
-  `dast-live` job, against the real image and `fixture/dast/server.py`: the
-  fixture with its headers passes at `low`, the same page without them fails at
-  `medium` and passes at `high`.
+- **Proved to fail, per scan type.** `tests/test_dast.py` runs the job's steps
+  against canned reports (the threshold, the SARIF, every refusal), runs the scan
+  step against a fake `docker` to check which ZAP script and flags each
+  `scan-type` produces, and, in this repository's `dast-live` job, runs the real
+  image against `fixture/dast/server.py`: the fixture with its headers passes the
+  baseline at `low` and the same page without them fails at `medium`; the page
+  that reflects its query unescaped (`--vulnerable`) passes the baseline, because
+  nothing in its headers is wrong, and fails the full scan at `high` naming the
+  cross-site scripting; the escaping page passes the full scan at `medium`; and
+  the api scan imports `fixture/dast/openapi.json`, whose server is a host that
+  does not exist, and still scans the loopback service.
 
 Inputs of `dast.yml`:
 
@@ -590,15 +645,21 @@ Inputs of `dast.yml`:
 | `ready-timeout-seconds` | `60` | How long to wait for `ready-path` |
 | `rules-file` | empty | ZAP rules file for accepted findings, e.g. `.zap/rules.tsv` |
 | `fail-on` | `high` | Lowest risk that fails the job: `high`, `medium`, `low`, `informational`, `none` |
-| `spider-minutes` | `1` | Longest the spider runs; it stops sooner when it has followed every link |
+| `scan-type` | `baseline` | Which ZAP scan: `baseline` (passive), `full` (active rules over what the spider found) or `api` (active rules over `api-definition`) |
+| `spider-minutes` | `1` | Longest the spider runs (`baseline`, `full`); it stops sooner when it has followed every link |
+| `ajax-spider` | `false` | Also run the AJAX spider, a headless browser, for pages whose links JavaScript builds (`baseline`, `full`) |
+| `active-scan-minutes` | `0` | Longest the active scan runs (`full`, `api`); `0` is no limit, so set it with `timeout-minutes` |
+| `api-definition` | empty | For `api`: an OpenAPI or SOAP definition as a repository file or a loopback URL, or the loopback URL of a GraphQL endpoint |
+| `api-format` | `openapi` | Format of `api-definition`: `openapi` (its `servers` are overridden with `target-url`), `soap` or `graphql` |
 | `python-version` | empty | Python to set up first; empty skips it |
 | `install-command` | empty | Installs the service, run before `start-command` |
-| `upload-sarif` | `true` | Upload the findings under category `zap`; needs `security-events: write` |
+| `upload-sarif` | `true` | Upload the findings under `sarif-category`; needs `security-events: write` |
+| `sarif-category` | `zap` | Code scanning category; two scans in one repository need two, or each closes the other's alerts |
 | `artifact-name` | `zap-reports` | Name of the reports artifact; name two calls in one run apart |
 | `egress-policy` | `audit` | harden-runner policy; see [Egress](#egress) |
 | `allowed-endpoints` | the measured list | harden-runner allow-list for `block`: GitHub and GHCR (the ZAP image). Measured by this repository's own `fixture dast` job in `block` mode |
 | `extra-allowed-endpoints` | empty | Appended to the list, for hosts the service or its install command reaches |
-| `timeout-minutes` | `20` | Timeout of the scan job (install, service start and scan) |
+| `timeout-minutes` | `20` | Timeout of the scan job (install, service start and scan); raise it for a `full` scan of a large service |
 
 ### Tofu CI
 
@@ -1255,7 +1316,7 @@ Inputs of `security.yml`:
 | `codeql-config` | empty | Inline CodeQL configuration, e.g. `paths-ignore` |
 | `gitleaks` | `true` | Secret scan over the full history with the pinned gitleaks binary (MIT; no licence or secret under any account). A `.gitleaks.toml` at the repository root is honoured; findings land in code scanning under the `gitleaks` category |
 | `gitleaks-version`, `gitleaks-sha256` | `8.30.1` and its linux_x64 tarball's hash | The gitleaks release downloaded from gitleaks/gitleaks; the hash is checked with `sha256sum -c` before extraction |
-| `pip-audit-requirements` | `requirements.txt` | File audited with `--strict`; empty skips that step, and the job when `audit-command` is empty too |
+| `pip-audit-requirements` | `requirements.txt` | File audited with `--strict`; empty skips that step, and the job when `audit-command` is empty too. With `snyk: true` it must carry hashes (`--generate-hashes`): Snyk installs it under `--require-hashes`, and a file without any fails the job with a message rather than installing unchecked |
 | `pip-audit-continue-on-error` | `false` | Report advisories without failing. A migration aid |
 | `pip-audit-extra-args` | empty | Extra pip-audit flags, e.g. `--ignore-vuln PYSEC-2026-3740` for an advisory with no fix yet; the ID needs an entry in [`baseline/risk-register.yaml`](baseline/risk-register.yaml) |
 | `audit-install-command` | empty | Run before `audit-command`, e.g. `npm ci --ignore-scripts`; Python is available |
@@ -1263,11 +1324,12 @@ Inputs of `security.yml`:
 | `audit-continue-on-error` | `false` | Report `audit-command` findings without failing. A migration aid |
 | `dependency-review` | `true` | On pull requests only |
 | `dependency-review-severity` | `moderate` | Fail the review at this severity or above |
+| `dependency-review-allow-dependencies-licenses` | empty | Comma-separated package URLs (`pkg:pypi/semgrep`) exempt from the licence rule only; advisories still fail the review. For a tool the repository runs but does not link or ship, such as an LGPL CLI whose hash lock the review reads as a manifest. This repository exempts Semgrep this way |
 | `dependency-review-allow-ghsas` | empty | Comma-separated GHSA IDs the review may not fail on. Each needs an entry in [`baseline/risk-register.yaml`](baseline/risk-register.yaml); the audit checks |
 | `dependency-review-deny-licenses` | `AGPL-3.0, GPL-3.0, GPL-2.0, LGPL-3.0, SSPL-1.0` | Comma-separated SPDX identifiers the review fails on when a pull request adds a dependency under one. Empty means no licence rule. A dependency whose licence cannot be detected is reported, not failed. Passed as the action's `deny-licenses`, which upstream has marked deprecated for a future major release; the action rejects it beside `allow-licenses`, which this workflow does not expose |
-| `semgrep` | `true` | Semgrep over the repository, SARIF uploaded to the Security tab under category `semgrep`. Installed with pip, since `semgrep/*` actions are not in the allowed set |
+| `semgrep` | `true` | Semgrep over the repository, SARIF uploaded to the Security tab under category `semgrep`. Installed with pip, since `semgrep/*` actions are not in the allowed set, under `--require-hashes` from the lock in `.github/requirements/semgrep.txt`; the version is that file's, not an input (see [Hash-locked tools](#hash-locked-tools-in-securityyml)) |
 | `semgrep-config` | empty (auto-detect) | `p/github-actions p/secrets`, adding `p/python` only when tracked Python files exist. A nonempty value replaces these defaults: space-separated configs, each passed as `--config`; registry packs or paths in the repository. Shell-only repositories use the two base packs; no `p/bash` or `p/shell` registry pack exists, so `bash-ci.yml`'s ShellCheck provides shell coverage |
-| `semgrep-version` | `1.179.0` | Semgrep release installed with pip |
+| `semgrep-version` | empty | **Deprecated; will be removed.** Semgrep is installed from a hash lock, so the version is the lock's (currently `1.179.0`, in `.github/requirements/semgrep.in`). Leave empty. A value that is not the locked version fails the install step, naming the locked one; the locked version itself is accepted |
 | `semgrep-continue-on-error` | `false` | Report findings without failing (they still reach the Security tab). Without it the scan runs with `--error` and a finding fails the job. A migration aid |
 | `semgrep-egress-policy` | `block` | harden-runner policy for the Semgrep job only |
 | `semgrep-allowed-endpoints` | the measured list | The Semgrep job's own allow-list: PyPI for the pip install, `semgrep.dev` for the rule registry, and GitHub for the SARIF upload. `extra-allowed-endpoints` is appended to it, for a private rule registry or a config fetched from another host |
@@ -1275,7 +1337,7 @@ Inputs of `security.yml`:
 | `snyk-on` | `schedule` | When Snyk runs: `schedule` is the weekly cron and `workflow_dispatch` only; `push` adds every push to the default branch and every tag. Snyk's free plan meters tests per month across the whole account, one Code and one Open Source test per run, and ten repositories on `push` spent a month's Code tests in a day. Never on a pull request |
 | `snyk-install-command` | empty | For a repository with no lock (`pip-audit-requirements: ""`) that declares its dependencies in `pyproject.toml`: the install Snyk Open Source scans a freeze of, such as `pip install .`. Empty with no lock leaves Snyk's discovery, which reads no PEP 621 `pyproject.toml` and ends in a "nothing to scan" warning |
 | `scorecard` | `false` | OpenSSF Scorecard, published; runs only on the default branch (push or schedule) |
-| `python-version` | `3.13` | Python for pip-audit and Snyk |
+| `python-version` | `3.13` | Python for pip-audit, Semgrep and Snyk. The tool locks cover CPython 3.10 through 3.14 |
 | `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `audit`, the measured list, empty | harden-runner, as in `python-ci.yml` |
 | `doppler-project`, `doppler-config`, `doppler-identity-id` | empty | See [Doppler setup](#doppler-setup) |
 | `doppler-trusted-refs-only` | `true` | Fetch CI secrets only on the default branch, a tag or a schedule; never on a pull request. See [Doppler setup](#doppler-setup) |
@@ -1319,6 +1381,24 @@ the lock's path, line 1. A repository with no lock names its install in
 over `pyproject.toml`, so its alerts attach to the file that declares the
 dependencies; with neither, Snyk Open Source has nothing it can read and
 warns.
+
+#### Hash-locked tools in `security.yml`
+
+pip-audit and Semgrep are installed with `pip install --require-hashes
+--no-deps --only-binary=:all:` from locks that travel inside the workflow
+file, the way Atheris's does in `python-fuzz.yml`: a reusable workflow cannot
+check out its own commit, so there is no file to read at run time. Scorecard's
+`PinnedDependencies` check (issue #87) flags a `pip install` not pinned by
+hash, and a workflow every caller pins by commit should not run unchecked
+code in all of them. The source of each is `.github/requirements/<tool>.in`
+(one exact version) and `<tool>.txt` (its lock: universal, so it covers every
+marker, pruned to the x86_64 and aarch64 Linux and CPython 3.10 to 3.14 wheels the jobs
+use). `python scripts/tool_locks.py` copies the files into `security.yml`,
+`--check` fails on a difference and `--relock` resolves again with `uv` (the
+script's docstring has the throwaway-venv commands). Dependabot watches the
+`.in` files; its bump fails `tests/test_tool_locks.py` until `--relock` puts
+the pruned lock back. `semgrep-version` is deprecated for the same reason: an input
+cannot change a version the hashes fix, so it may only restate it.
 
 ### Dependabot auto-merge
 
@@ -1891,6 +1971,29 @@ exception is three steps, in this order:
 When the fix ships, remove both the caller's line and the entry. Renewing an
 entry means moving `review_by` and saying why in the reason.
 
+## Troubleshooting
+
+### Startup failure, no checks
+
+GitHub validates the permissions a caller grants before starting any job or
+evaluating its `if`. When a called workflow needs a permission the caller did
+not grant, the run fails at startup with a message such as:
+
+> `is requesting id-token: write, but is only allowed id-token: none`
+
+This is a `startup_failure`, not a failed check: GitHub creates no check run,
+so the required `ci / CI green` context never appears. A merge watcher looking
+only for failing checks will see nothing. The caller job must grant the union
+of permissions declared by the called workflow's jobs:
+
+- `python-ci.yml`: `contents: read` and `id-token: write`. Keep the OIDC grant
+  even when `codecov: false`: the `coverage` job's permission declaration is
+  static, so disabling that job cannot remove its grant.
+- `tofu-ci.yml`: `contents: read` and `id-token: write` for the plan job.
+- `container-release.yml`: `contents: read`, `packages: write`,
+  `id-token: write`, `attestations: write` and `security-events: write`.
+- `bash-ci.yml`: `contents: read`; it needs no `id-token` grant.
+
 ## Lessons learned the hard way
 
 Each of these cost at least an afternoon. They are here so they cost you
@@ -1976,9 +2079,11 @@ The tests are the contract, one file per thing they hold still:
 | `tests/test_workflows.py` | SHA pins with version comments; no reference to this repository by branch; no `pull_request_target`; the write-permission allow-list; per-job permissions and timeouts; harden-runner first in every job; `persist-credentials: false` on every checkout; no untrusted interpolation; the inlined Doppler script identical to the composite action and gated on the decide step; no OIDC token on a job a pull request can run, and none on the test job; every input declared, defaulted, used and documented here; `CI green` needing every other job; signing and attestation only after a push; no Actions cache on a publishing build; the allow-list defaults one sorted line; every reusable workflow run against the fixture from this repository at the pull request's ref, never publishing |
 | `tests/test_doppler_gate.py` | The decide script, run under bash for every event and ref shape: trusted refs fetch, untrusted refs get a notice and never fail, forks never fetch, the Service Token path is gated the same way |
 | `tests/test_audit_baseline.py` | The audit, fed a passing repository and a broken one per criterion; a 403 comes back UNKNOWN, never PASS; exit codes tell FAIL from UNKNOWN |
+| `tests/test_security_policy.py` | The shared SECURITY.md template's reporting, support, scope and response terms, and the baseline's copy-and-fill instructions |
 | `tests/test_risk_register.py` | The register's shape, its dates, no duplicate advisory, every repository named is in the baseline list, and no entry has expired |
-| `tests/test_dast.py` | `dast.yml`'s contract, its steps run under bash (refusals, a service that blocks, detaches, dies or never answers; the `fail-on` threshold and the SARIF against canned ZAP reports), and, in the `dast-live` CI job, the real ZAP image against `fixture/dast/server.py` with and without its headers |
+| `tests/test_dast.py` | `dast.yml`'s contract, its steps run under bash (refusals, a service that blocks, detaches, dies or never answers; the `fail-on` threshold and the SARIF against canned ZAP reports; the scan step against a fake `docker`, so each `scan-type` is shown to run its ZAP script with its flags), and, in the `dast-live` CI job, the real ZAP image against `fixture/dast/server.py`: the baseline with and without its headers, the full scan against a page that reflects its query and one that escapes it, the api scan against its OpenAPI definition |
 | `tests/test_fuzz.py` | `python-fuzz.yml`'s inputs and pin, and its run step executed under bash against tiny targets: a missing directory, no match, a passing target, a crashing one and a hanging one (which must fail the step and leave its `timeout-*` input) |
+| `tests/test_tool_locks.py` | No `run:` step of any workflow or composite action runs a `pip install` without `--require-hashes`; `security.yml` carries `.github/requirements/*.txt` verbatim; every lock line has a hash; the Snyk install step, run under bash with a recording `pip`, installs a hashed lock under `--require-hashes` and refuses an unhashed one without calling pip |
 | `tests/test_security_jobs.py` | The Semgrep job's defaults and its content-driven config; the gitleaks job as a pinned binary: no licence, no Doppler, no `id-token`, the sha256 checked before extraction, full history, SARIF under category `gitleaks`, and a canary step that plants an AWS-shaped key in a scratch repository and requires exit 1 before the real scan runs (the test also fetches the pinned release, checks the hash, and runs that canary for real; it skips only when offline) |
 | `tests/test_pre_commit_hook.py` | `.githooks/pre-commit` pins the same gitleaks version and sha256 as `security.yml`; run in a scratch repository it refuses a planted AWS-shaped key naming the rule and file but not the secret, passes a clean commit, honours `.gitleaks.toml`, refuses on a broken config or a download that is not the pinned release, and warns and allows offline (the cases that need the binary download it through the hook and skip when offline); `new-repo.sh` writes it byte for byte, executable, and adds the `core.hooksPath` line to a README's Developing section once |
 | `tests/test_wiki.py` | Every reusable workflow has a page and its generated table follows the YAML; regenerating is a no-op and `--check` catches a stale tree; every link resolves and every cited test exists; every workflow, script, composite action, audit check, test file and baseline file is mentioned somewhere in the wiki; `wiki.yml` is the self-call it should be |

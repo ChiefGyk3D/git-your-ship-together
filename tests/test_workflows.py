@@ -788,6 +788,47 @@ def test_readme_names_every_workflow_and_the_composite():
     assert ".github/actions/doppler-secrets" in text
 
 
+def test_readme_explains_caller_permission_startup_failures():
+    text = README.read_text()
+    assert "### Startup failure, no checks" in text
+    assert "> `is requesting id-token: write, but is only allowed id-token: none`" in text
+    assert "`startup_failure`, not a failed check" in text
+    assert "even when `codecov: false`" in text
+    assert "static, so disabling that job cannot remove its grant." in text
+
+
+@pytest.mark.parametrize(
+    "workflow_name",
+    ("python-ci.yml", "tofu-ci.yml", "container-release.yml", "bash-ci.yml"),
+)
+def test_readme_caller_grants_every_permission_used_by_workflow_jobs(workflow_name):
+    text = README.read_text()
+    examples = []
+    for match in re.finditer(r"```yaml\s*\n(.*?)```", text, re.DOTALL):
+        if f".github/workflows/{workflow_name}@" not in match.group(1):
+            continue
+        example = yaml.safe_load(match.group(1))
+        if any(job.get("uses", "").endswith(f"/{workflow_name}@<sha>") for job in jobs(example).values()):
+            examples.append(example)
+    assert len(examples) == 1, f"README.md must have one YAML caller example for {workflow_name}"
+
+    callers = [job for job in jobs(examples[0]).values() if job.get("uses", "").endswith(f"/{workflow_name}@<sha>")]
+    assert len(callers) == 1, f"README.md caller example for {workflow_name} is missing or ambiguous"
+    granted = callers[0].get("permissions") or {}
+
+    rank = {"none": 0, "read": 1, "write": 2}
+    required = {}
+    for job in jobs(load(WORKFLOWS / workflow_name)).values():
+        for scope, level in (job.get("permissions") or {}).items():
+            if scope not in required or rank[level] > rank[required[scope]]:
+                required[scope] = level
+
+    for scope, level in required.items():
+        assert rank.get(granted.get(scope, "none"), -1) >= rank[level], (
+            f"README.md caller for {workflow_name} does not grant {scope}: {level}"
+        )
+
+
 @pytest.mark.parametrize("path", REUSABLE, ids=lambda p: p.name)
 def test_the_default_allow_list_is_one_line_of_sorted_host_ports(path):
     """harden-runner reads allowed-endpoints as space-separated host:port entries.

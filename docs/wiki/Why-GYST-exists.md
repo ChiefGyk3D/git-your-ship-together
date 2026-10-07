@@ -145,6 +145,26 @@ ignore comment in a workflow file is forgotten.
 owner and an expiry at most 90 days out, and the audit fails on one that is
 unregistered or expired.
 
+## There is no excuse
+
+Everything on this page was built and is maintained by one person, in spare time,
+in a basement, with free GitHub-hosted runners and free tiers: pinned actions, no
+secret in CI, hash-pinned dependencies, egress allow-lists measured per workflow,
+eight kinds of static and dependency scanning, fuzzing, an active DAST that is
+proved to fail, signed multi-arch releases with SBOMs and provenance, a weekly audit
+of every repository's settings, and tests for all of it. Not one line of it needed a
+budget, a vendor or a team.
+
+So if you are reading this from an enterprise with a platform team, a security
+budget and a compliance deadline, and your pipelines still pin to `v4`, keep tokens
+in GitHub secrets, run tests in the job that holds the deploy credential and have
+never once pointed a scanner at the running service: this repository is the
+existence proof that none of that is hard. It is a week of evenings per rule, with
+the reasoning written down so the next person does not redo the measuring. Copy it.
+[Adopting GYST in your own project](Adopting-GYST-in-your-own-project.md) is the
+page for that, and the [Roadmap](Roadmap.md) is honest about the parts that still
+need hardware one person does not have.
+
 ## What this does not claim
 
 It does not claim the pipelines are unbreakable. It holds the properties above
