@@ -28,6 +28,16 @@ and its Doppler fetch in issue #90: the licence-gated action was replaced with t
 with `sha256sum -c` before extraction, and a canary step plants an AWS-shaped key in a scratch repository and fails the job
 unless the same invocation exits 1 on it. A `.gitleaks.toml` at the repository root is honoured.
 
+## The same scan before a commit
+
+`.githooks/pre-commit` runs the gitleaks scan on the *staged* changes, so a secret is caught before it is in history. It uses
+the version and SHA-256 that `security.yml` pins (a test holds the two equal), keeps the verified release under
+`~/.cache/gyst/gitleaks/<version>/`, checks it against the pin on every run, and honours `.gitleaks.toml`. A finding refuses the
+commit and prints the rule, file and line, never the secret. With no cached binary and no network it warns and allows. It only
+protects a checkout that ran `git config core.hooksPath .githooks`; push protection and the CI scan are the two that always run.
+`scripts/new-repo.sh` copies the file byte for byte into an adopted repository and adds that one line to its README's Developing
+section.
+
 ## A minimal caller
 
 ```yaml

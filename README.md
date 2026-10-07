@@ -1285,6 +1285,17 @@ written in. A shell-only repository therefore calls it with
 `codeql-languages: actions` and `pip-audit-requirements: ""` and changes
 nothing else.
 
+The same scan can run before a commit exists. `.githooks/pre-commit` runs
+gitleaks (`git --pre-commit --staged`, redacted) over the staged changes with
+the version and sha256 `security.yml` pins, downloaded once to
+`~/.cache/gyst/gitleaks/<version>/` and checked against the pin on every run,
+and it honours the repository's `.gitleaks.toml`. A finding refuses the commit
+and prints the rule, file and line, never the secret. With the binary absent
+and no network it warns and allows. It only protects a checkout that turned it
+on (`git config core.hooksPath .githooks`); push protection and the CI scan
+are the two that always run. `scripts/new-repo.sh` copies the file, byte for
+byte, into an adopted repository.
+
 Snyk runs on the weekly schedule and on `workflow_dispatch` by default
 (`snyk-on: schedule`); the free plan meters tests per month across every
 repository on the account, and a push-triggered run in each of ten
@@ -1965,6 +1976,7 @@ The tests are the contract, one file per thing they hold still:
 | `tests/test_dast.py` | `dast.yml`'s contract, its steps run under bash (refusals, a service that blocks, detaches, dies or never answers; the `fail-on` threshold and the SARIF against canned ZAP reports), and, in the `dast-live` CI job, the real ZAP image against `fixture/dast/server.py` with and without its headers |
 | `tests/test_fuzz.py` | `python-fuzz.yml`'s inputs and pin, and its run step executed under bash against tiny targets: a missing directory, no match, a passing target and a crashing one (which must fail the step and leave its `crash-*` input) |
 | `tests/test_security_jobs.py` | The Semgrep job's defaults and its content-driven config; the gitleaks job as a pinned binary: no licence, no Doppler, no `id-token`, the sha256 checked before extraction, full history, SARIF under category `gitleaks`, and a canary step that plants an AWS-shaped key in a scratch repository and requires exit 1 before the real scan runs (the test also fetches the pinned release, checks the hash, and runs that canary for real; it skips only when offline) |
+| `tests/test_pre_commit_hook.py` | `.githooks/pre-commit` pins the same gitleaks version and sha256 as `security.yml`; run in a scratch repository it refuses a planted AWS-shaped key naming the rule and file but not the secret, passes a clean commit, honours `.gitleaks.toml`, refuses on a broken config or a download that is not the pinned release, and warns and allows offline (the cases that need the binary download it through the hook and skip when offline); `new-repo.sh` writes it byte for byte, executable, and adds the `core.hooksPath` line to a README's Developing section once |
 | `tests/test_wiki.py` | Every reusable workflow has a page and its generated table follows the YAML; regenerating is a no-op and `--check` catches a stale tree; every link resolves and every cited test exists; every workflow, script, composite action, audit check, test file and baseline file is mentioned somewhere in the wiki; `wiki.yml` is the self-call it should be |
 | `tests/test_fixture.py` | Every fixture requirement carries a hash, every direct dependency is in the lock, the fixture image runs as a non-root user |
 
