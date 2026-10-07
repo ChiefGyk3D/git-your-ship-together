@@ -22,6 +22,14 @@ scan type must catch and modes it must pass:
                                                               fixture/dast/login.context and `throwaway`) reaches
                                                               the hole and fails
 
+    python3 fixture/dast/server.py --port 8080 --login --broken-session
+                                                              the same login, but the session cookie is issued with
+                                                              Path=/login, so no request to /account ever carries it:
+                                                              the login answers with the expected redirect and every
+                                                              protected page stays closed. A scan that only looks at the
+                                                              login response would call this signed in; one that asks a
+                                                              protected page as the user must not
+
 What is served:
 
     /                   a page linking to /about and /search?q=fixture
@@ -158,7 +166,9 @@ SECURE_HEADERS = {
 ITEM = re.compile(r"^/api/items/([^/]+)$")
 
 
-def make_handler(insecure: bool, vulnerable: bool, login: bool = False) -> type[BaseHTTPRequestHandler]:
+def make_handler(
+    insecure: bool, vulnerable: bool, login: bool = False, broken_session: bool = False
+) -> type[BaseHTTPRequestHandler]:
     sessions: set[str] = set()  # the cookies this process has issued; gone when it exits
 
     class Handler(BaseHTTPRequestHandler):
@@ -176,7 +186,8 @@ def make_handler(insecure: bool, vulnerable: bool, login: bool = False) -> type[
             self.send_response(302)
             self.send_header("Location", location)
             if cookie:
-                self.send_header("Set-Cookie", f"{COOKIE}={cookie}; Path=/; HttpOnly; SameSite=Strict")
+                path = "/login" if broken_session else "/"  # --broken-session: a Path that never covers /account
+                self.send_header("Set-Cookie", f"{COOKIE}={cookie}; Path={path}; HttpOnly; SameSite=Strict")
             self.send_header("Content-Length", "0")
             self.send_secure_headers()
             self.end_headers()
@@ -269,8 +280,13 @@ def main() -> None:
     parser.add_argument("--insecure", action="store_true", help="send none of the security headers")
     parser.add_argument("--vulnerable", action="store_true", help="echo /search?q= into the page unescaped")
     parser.add_argument("--login", action="store_true", help="add a form login and, behind it, an unescaped echo")
+    parser.add_argument(
+        "--broken-session",
+        action="store_true",
+        help="with --login, issue the session cookie with a Path that never matches",
+    )
     args = parser.parse_args()
-    handler = make_handler(args.insecure, args.vulnerable, args.login)
+    handler = make_handler(args.insecure, args.vulnerable, args.login, args.broken_session)
     ThreadingHTTPServer(("127.0.0.1", args.port), handler).serve_forever()
 
 
