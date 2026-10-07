@@ -457,8 +457,11 @@ jobs:
                           continue
                       secrets.append(value)
               redact = sorted({form for s in secrets for form in forms(s)}, key=len, reverse=True)
+              # Semgrep audits every add-mask: a branch that prints ::stop-commands:: first would unmask the value. These
+              # are the committed, throwaway credentials of a loopback service, public by construction; the mask is
+              # defence in depth for the log, and the reports are redacted by a step that uses no workflow command.
               for form in redact:
-                  print(f"::add-mask::{form}")
+                  print(f"::add-mask::{form}")  # nosemgrep: yaml.github-actions.security.audit.unsafe-add-mask-workflow-command.unsafe-add-mask-workflow-command
               out = os.open(os.environ["REDACT_FILE"], os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
               with os.fdopen(out, "w") as handle:
                   json.dump(redact, handle)
