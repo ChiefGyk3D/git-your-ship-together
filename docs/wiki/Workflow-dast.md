@@ -45,10 +45,12 @@ What goes in the context file matters more than the scan, because ZAP sends the 
   repository. The service is the one this job starts on loopback, with a recorded dataset, so the account opens nothing real.
   A credential that opens anything else does not belong in a context file; this workflow has no input for a secret, on purpose.
 - **The port in it must match `target-url`.** A context names its login URL in full; a mismatch is a scan that never signs in.
-- **The logged-out indicator is yours to get right.** ZAP checks every response against it, and a hit makes it sign in again.
-  The fixture's matches the redirect to `/login` and the sign-in page and nothing a signed-in session sees. A logged-in indicator
-  that the login's own redirect does not carry is worse than none: ZAP counted every sign-in as failed and shut itself down
-  while this was being built.
+- **The indicators are yours to get right.** The logged-in indicator is the proof the scan signed in (below): text only a
+  signed-in response has. The fixture's matches the login's own redirect to `/account` and the "Signed in as" text of the pages
+  behind it. ZAP also checks every response against the logged-out indicator, and a hit makes it sign in again; the fixture's
+  matches the redirect to `/login` and the sign-in page and nothing a signed-in session sees. A logged-in indicator that the
+  login's own redirect does not carry can make ZAP count every sign-in as failed and shut itself down; that happened while this
+  was being built.
 
 ### What the context guard checks
 
@@ -105,6 +107,30 @@ that is a slice of the `[redacted]` placeholder (`redacted`) is redacted in one 
 it does not fail the job. A value
 under four characters cannot be redacted without mangling the reports, so such a context is refused. The summary says a scan
 was signed in, not as whom.
+
+### Proof that the scan signed in
+
+ZAP's scripts select the user and never check that it signed in, so wrong credentials, a wrong login URL or an indicator no page
+contains still produce a green scan of the public pages, and a summary that claims otherwise would be false. When `context-user`
+is set:
+
+- Before the scan the context must have a form-based or JSON-based login with a login URL (manual or missing authentication signs
+  in nowhere) and a logged-in indicator that does not match an empty response. Otherwise it is refused.
+- The scan step adds a small ZAP hook (`--hook`, which all three scripts take). It runs just before ZAP shuts down and asks ZAP's
+  own search API whether any response it recorded matches the context's logged-in indicator, and writes the answer for the report
+  step.
+- No match, no answer or a malformed answer fails the job, naming the likely causes: wrong credentials, a wrong login URL or
+  body, or an indicator no signed-in page contains. The summary says the scan was not verified.
+- The summary line and the `zap-authenticated` SARIF tag come from that verified result only, never from `context-user` being
+  set.
+
+Why the search and not ZAP's `stats.auth.*` counters: no success or failure counter appeared for form-based authentication in the runs here. A good and a bad login
+against the fixture dumped the same `stats.auth.*` keys; only session-token detection differed, and an application that sets a
+cookie before the login would pass that. The logged-in indicator is the one thing the caller already tells ZAP about what "signed
+in" looks like. What it cannot prove is that the indicator is a good one: one that an anonymous page also contains proves nothing,
+so use text only a signed-in response has, such as the text of a logout link. The tests run it live against the fixture: the right
+credentials are verified; wrong credentials, a wrong login URL and an indicator no page contains all fail; a manual login fails
+before the scan.
 
 ### Request-time enforcement: not required
 

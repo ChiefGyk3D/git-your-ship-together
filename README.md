@@ -693,6 +693,33 @@ days, whether the scan passed or not.
   refused; use a longer throwaway value. The summary says a scan was signed in
   but not as whom.
 
+  **Proof that it signed in.** ZAP's scripts select the user and never check
+  that it signed in, so a scan with wrong credentials, a wrong login URL or an
+  indicator no page contains is a green scan of the public pages. So when
+  `context-user` is set:
+  - before the scan, the context must have a form-based or JSON-based login with
+    a login URL (manual or missing authentication signs in nowhere) and a
+    logged-in indicator that does not match an empty response; otherwise it is
+    refused;
+  - the scan step adds a small ZAP hook (`--hook`, which all three scripts take)
+    that runs just before ZAP shuts down and asks ZAP's own search API whether any
+    response it recorded matches the context's logged-in indicator. Its answer
+    goes to a file the report step reads;
+  - no match, no file or a malformed file fails the job with the likely causes
+    (wrong credentials, a wrong login URL or body, an indicator no signed-in page
+    contains), and the summary says the scan was not verified;
+  - the summary line and the `zap-authenticated` SARIF tag come from that
+    verified result only, never from `context-user` being set.
+
+  I chose the search over ZAP's `stats.auth.*` counters because no
+  success or failure counter appeared for form-based authentication in the
+  runs here: a good and a bad login dumped the same `stats.auth.*` keys (only session-token detection differed, and an application
+  that sets a cookie before login would pass it). The indicator is the one thing
+  the caller already tells ZAP about what "signed in" looks like. What it cannot
+  prove: that the indicator is a good one. A logged-in indicator that an
+  anonymous page also contains proves nothing, so choose text only a signed-in
+  response has (the text of a logout link).
+
   **Request-time enforcement: not required.** ZAP's own requests are fixed by the
   context: it signs in only at the vetted URLs, spiders only what the vetted
   include regexes allow and attacks only `target-url`. What remains is the
@@ -770,7 +797,7 @@ Inputs of `dast.yml`:
 | `api-definition` | empty | For `api`: an OpenAPI or SOAP definition as a repository file or a loopback URL, or the loopback URL of a GraphQL endpoint |
 | `api-format` | `openapi` | Format of `api-definition`: `openapi` (its `servers` are overridden with `target-url`), `soap` or `graphql` |
 | `context-file` | empty | A ZAP context file in the repository (URLs in scope, login method, users), passed as ZAP's `-n`; all three scan types. Parsed as XML and refused unless every sign-in URL is loopback, with no credential in a URL. Its credentials are a throwaway account's, because the file is committed; they are masked in the log and redacted from the reports |
-| `context-user` | empty | Which user of `context-file` to scan as (`-U`): the spider, and for `full` the active scan, run signed in. Refused without `context-file`, and when the context holds no such user |
+| `context-user` | empty | Which user of `context-file` to scan as (`-U`): the spider, and for `full` the active scan, run signed in. Refused without `context-file`, when the context holds no such user, and when the context has no form or JSON login with a logged-in indicator; the job fails unless ZAP's own search finds a response that matches the indicator |
 | `python-version` | empty | Python to set up first; empty skips it |
 | `install-command` | empty | Installs the service, run before `start-command` |
 | `upload-sarif` | `true` | Upload the findings under `sarif-category`; needs `security-events: write` |

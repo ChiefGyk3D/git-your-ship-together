@@ -30,6 +30,10 @@
 # The install and start commands run with access to the context file, so treat its
 # credentials as visible to them.
 #
+# A signed-in scan must prove it signed in: ZAP's scripts select the user and never check, so a hook
+# asks ZAP's search whether any recorded response matches the context's logged-in indicator, and the
+# report step fails the job (and withholds the authenticated summary and tag) when none does.
+#
 # Call it from a repository with:
 #
 #   jobs:
@@ -124,7 +128,7 @@ on:
         type: string
         default: ""
       context-user:
-        description: Which user of `context-file` to scan as (ZAP's `-U`, the user's name in the context). The spider, and for `full` the active scan, run signed in as this user. Refused without `context-file`, and refused when the context holds no user of that name, so a typo cannot become an anonymous scan that passes. Empty scans anonymously, with the context's scope only.
+        description: Which user of `context-file` to scan as (ZAP's `-U`, the user's name in the context). The spider, and for `full` the active scan, run signed in as this user. Refused without `context-file`, when the context holds no user of that name (a typo cannot become an anonymous scan that passes), and when the context has no form-based or JSON-based login with a login URL and a logged-in indicator. The job fails unless ZAP's own search finds a recorded response that matches the logged-in indicator, so wrong credentials, a wrong login URL or an indicator no signed-in page contains fail instead of passing as a scan of the public pages; the summary and the `zap-authenticated` SARIF tag come from that verified result only. Empty scans anonymously, with the context's scope only.
         type: string
         default: ""
       python-version:
@@ -448,6 +452,31 @@ jobs:
                   refuse("the file is not well-formed XML, or declares an entity.")
 
 
+          def require_effective_login(auth: ET.Element | None) -> None:
+              """A user can only sign in through a login method with a login URL, and the scan can only prove that it did
+              if the context says what a signed-in response looks like (a logged-in indicator). Without both, ZAP selects
+              the user, signs in nowhere or cannot tell, and scans public pages; nothing downstream could notice."""
+              kind = text_of(auth.find("type")) if auth is not None else ""
+              if kind not in ("2", "5"):
+                  refuse("context-user is set but the context has no login method that can sign in: it needs form-based (2) "
+                         "or JSON-based (5) authentication, and manual or missing authentication signs in nowhere.")
+              form = auth.find("form")
+              if form is None or not text_of(form.find("loginurl")):
+                  refuse("context-user is set but the authentication has no login URL, so there is nothing to sign in at.")
+              indicator = text_of(auth.find("loggedin"))
+              if not indicator:
+                  refuse("context-user is set but the context has no logged-in indicator. A regex that only a signed-in "
+                         "response matches (for example the text of a logout link) is how the scan proves it signed in, "
+                         "so a signed-in scan cannot be accepted without one.")
+              plain = re.sub(r"\\Q(.*?)\\E", lambda m: re.escape(m.group(1)), indicator)
+              try:
+                  matches_nothing_in_particular = re.search(plain, "") is not None
+              except re.error:
+                  matches_nothing_in_particular = False  # Java syntax the check cannot read; the scan's own evidence decides
+              if matches_nothing_in_particular:
+                  refuse("the logged-in indicator matches an empty response, so it would 'prove' a sign-in on every page.")
+
+
           def main() -> None:
               path = Path(os.environ["CONTEXT_FILE"])
               user = os.environ.get("CONTEXT_USER", "")
@@ -519,6 +548,8 @@ jobs:
                       for inner in child:
                           if inner.tag not in FORM_ELEMENTS:
                               refuse(f"the <form> section has an element <{name_of(inner.tag)}> this check does not know.")
+              if user:
+                  require_effective_login(auth)
               session = context.find("session")
               if session is not None:
                   if text_of(session.find("type")) != "0" or any(child.tag != "type" for child in session):
@@ -686,7 +717,36 @@ jobs:
             cp -- "$CONTEXT_COPY" "$ZAP_DIR/context.context"
             chmod 0644 "$ZAP_DIR/context.context"  # the copy is 0600 and the container's user is not the runner's
             args+=(-n context.context)
-            [ -n "$CONTEXT_USER" ] && args+=(-U "$CONTEXT_USER")
+            if [ -n "$CONTEXT_USER" ]; then
+              args+=(-U "$CONTEXT_USER")
+              # ZAP's scripts select the user and never check that it signed in. This hook runs before ZAP shuts
+              # down, asks ZAP's own search API whether any response it recorded matches the context's logged-in
+              # indicator, and writes the answer for the report step. No match is no evidence, and fails the job.
+              cat > "$ZAP_DIR/auth_hook.py" <<'HOOK'
+          import json
+          import sys
+
+
+          def zap_pre_shutdown(zap):
+              evidence = {"verified": False, "hits": 0}
+              try:
+                  common = sys.modules["zap_common"]  # the script's own module: the selected user and context
+                  if common.scan_user is None:
+                      raise LookupError("no user was selected")
+                  indicator = zap.authentication.get_logged_in_indicator(common.context_id)
+                  if not indicator:
+                      raise LookupError("no logged-in indicator")
+                  found = zap.search.messages_by_response_regex(regex=indicator, baseurl="", start="0", count="1")
+                  evidence["hits"] = len(found)
+                  evidence["verified"] = len(found) > 0
+              except Exception as error:  # the class only: the message is ZAP's, not ours to forward
+                  evidence["error"] = type(error).__name__
+              with open("/zap/wrk/auth-evidence.json", "w") as handle:
+                  json.dump(evidence, handle)
+          HOOK
+              chmod 0644 "$ZAP_DIR/auth_hook.py"
+              args+=(--hook=/zap/wrk/auth_hook.py)
+            fi
           fi
           if [ -n "$RULES_FILE" ]; then
             cp -- "$RULES_FILE" "$ZAP_DIR/rules.tsv"
@@ -820,6 +880,16 @@ jobs:
           fail_on = os.environ["FAIL_ON"]
           scan_type = os.environ.get("SCAN_TYPE", "baseline")
           context_user = os.environ.get("CONTEXT_USER", "")
+          # "Signed in" is what ZAP's own search found in its recorded responses (the hook of the scan step), never
+          # the mere presence of context-user: wrong credentials, a wrong login URL or an indicator that no signed-in
+          # page contains all leave a scan of the public pages that looks the same.
+          signed_in = False
+          if context_user:
+              try:
+                  evidence = json.loads((zap_dir / "auth-evidence.json").read_text())
+                  signed_in = evidence.get("verified") is True and int(evidence.get("hits", 0)) > 0
+              except (OSError, ValueError, TypeError, AttributeError):
+                  signed_in = False
           zap_exit = os.environ.get("ZAP_EXIT", "0")
           report = json.loads((zap_dir / "report.json").read_text())
 
@@ -863,7 +933,7 @@ jobs:
                       },
                       "helpUri": first_url(alert.get("reference"), doc_url),
                       "defaultConfiguration": {"level": levels[risk]},
-                      "properties": {"tags": ["security", "dast", "zap", f"zap-{scan_type}", *(["zap-authenticated"] if context_user else [])]},
+                      "properties": {"tags": ["security", "dast", "zap", f"zap-{scan_type}", *(["zap-authenticated"] if signed_in else [])]},
                   },
               )
               if risk in severity:
@@ -923,8 +993,10 @@ jobs:
               f"fail-on: `{fail_on}`. {len(alerts)} alert(s), {len(failing)} at or above the threshold.",
               "",
           ]
-          if context_user:
-              lines[2:2] = ["Scanned signed in as a user of `context-file` (its name is kept out of the reports).", ""]
+          if context_user and signed_in:
+              lines[2:2] = ["Signed-in scan, verified: ZAP recorded a response that matches the context's logged-in indicator.", ""]
+          elif context_user:
+              lines[2:2] = ["**Signed-in scan NOT verified**: no response ZAP recorded matches the context's logged-in indicator.", ""]
           if alerts:
               lines += ["| Risk | Alert | Instances | Rule |", "| --- | --- | --- | --- |"]
               for a in alerts:
@@ -942,6 +1014,12 @@ jobs:
               problems += 1
           if zap_exit == "1":
               print("::error::a rule set to FAIL in rules-file matched; ZAP's own output above names it.")
+              problems += 1
+          if context_user and not signed_in:
+              print("::error::context-user is set but there is no evidence that ZAP signed in: no response it recorded "
+                    "matches the context's logged-in indicator. Likely causes: wrong credentials in the context, a wrong "
+                    "login URL or login body, or a logged-in indicator that no signed-in page contains. The scan covered "
+                    "public pages at most, so it is not reported as authenticated and the job fails.")
               problems += 1
           sys.exit(1 if problems else 0)
           PY

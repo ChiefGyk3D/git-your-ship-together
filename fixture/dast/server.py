@@ -106,7 +106,7 @@ ACCOUNT = """<!doctype html>
 ACCOUNT_SEARCH = """<!doctype html>
 <html lang="en">
 <head><meta charset="utf-8"><title>account search</title></head>
-<body><p>You searched your account for: {q}</p><a href="/account">account</a></body>
+<body><p>You searched your account for: {q}</p><p>Signed in as {user}.</p><a href="/account">account</a></body>
 </html>
 """
 
@@ -238,7 +238,7 @@ def make_handler(insecure: bool, vulnerable: bool, login: bool = False) -> type[
             else:
                 # The hole behind the login: the raw query in the page, whatever --vulnerable says.
                 q = parse_qs(query).get("q", [""])[0]
-                self.reply(200, "text/html; charset=utf-8", ACCOUNT_SEARCH.format(q=q).encode())
+                self.reply(200, "text/html; charset=utf-8", ACCOUNT_SEARCH.format(q=q, user=LOGIN_USER).encode())
 
         def send_secure_headers(self) -> None:
             if insecure:

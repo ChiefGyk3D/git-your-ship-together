@@ -3,10 +3,11 @@
 <!--
   The ZAP context of the fixture server in login mode, for dast.yml's `context-file` and `context-user: throwaway`.
   Exported from ZAP 2.17.0 and trimmed: one context for the fixture on 127.0.0.1:8080, form-based
-  authentication posting username and password to /login, a logged-out indicator (the redirect to
-  /login or the sign-in page itself; every response is checked against it, and the login's own redirect to /account is not
-  a match), and one user. The user's credentials are encoded as ZAP stores them (base64 of `throwaway` and
-  `throwaway-password`); they are the throwaway constants in server.py and open nothing else.
+  authentication posting username and password to /login, a logged-in indicator (the login's own redirect to /account, or
+  the "Signed in as" text of the pages behind it: the scan proves it signed in by finding a recorded response that matches it),
+  a logged-out indicator (the redirect to /login or the sign-in page itself; ZAP checks every response against it), and one
+  user. The user's credentials are encoded as ZAP stores them (base64 of `throwaway` and `throwaway-password`); they are the
+  throwaway constants in server.py and open nothing else.
 -->
     <context>
         <name>fixture-login</name>
@@ -27,6 +28,7 @@
             <strategy>EACH_RESP</strategy>
             <pollfreq>60</pollfreq>
             <pollunits>REQUESTS</pollunits>
+            <loggedin>\QLocation: /account\E|\QSigned in as\E</loggedin>
             <loggedout>\QLocation: /login\E|\Q&lt;h1&gt;Sign in&lt;/h1&gt;\E</loggedout>
             <form>
                 <loginurl>http://127.0.0.1:8080/login</loginurl>
