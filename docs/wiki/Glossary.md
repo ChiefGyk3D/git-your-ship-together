@@ -100,7 +100,9 @@ not overwrite each other.
 **SAST, SCA, DAST.** Static analysis of source (CodeQL, Semgrep); software
 composition analysis, meaning known-vulnerable dependencies (pip-audit,
 dependency review, Snyk Open Source); dynamic analysis against a running
-service (OWASP ZAP's baseline scan, [dast](Workflow-dast.md)).
+service (OWASP ZAP's baseline, full and api scans, [dast](Workflow-dast.md)).
+Within DAST, a **passive** scan only reads the responses the service sends
+and an **active** scan sends attack payloads and watches what comes back.
 
 **CodeQL, Semgrep, gitleaks, Snyk, Scorecard, Trivy.** The scanners. See
 [Security scanning explained](Security-scanning-explained.md).
