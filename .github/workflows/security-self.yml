@@ -32,6 +32,8 @@ jobs:
     with:
       codeql-languages: actions  # no Python package here; `python` would find nothing and fail
       pip-audit-requirements: requirements-dev.txt
-      audit-install-command: pip install pip-audit
+      # Semgrep is LGPL-2.1-or-later and its lock is a manifest the review reads; it is a CLI this
+      # repository runs, not code it links or ships.
+      dependency-review-allow-dependencies-licenses: pkg:pypi/semgrep
       audit-command: pip-audit --requirement fixture/requirements.txt --strict
       scorecard: true

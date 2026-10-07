@@ -313,3 +313,18 @@ same trusted-refs rule the Doppler gate already enforces, applied to compute.
     in a staging namespace against test accounts and watches the healthcheck
     for ten minutes is the missing step between "the image built" and "the
     image works".
+
+### Added 2026-10-07: what stays open until a lab runner exists
+
+The wiki's [Roadmap](wiki/Roadmap.md) carries the full table under "What needs
+the lab". In short, the gaps GitHub-hosted runners cannot close, each a
+candidate issue for the project board: DAST against a deployed, authenticated
+staging environment (`dast.yml` scans loopback by design, now with ZAP's full
+and api scans as well as the baseline); hardware-in-the-loop tests for the
+firmware; continuous fuzzing with a kept corpus; a findings aggregator
+(DefectDojo) for the private repositories that cannot take SARIF and for a
+view across all 23; Dependency-Track reading the SBOMs every release already
+ships; runtime egress measurement of the published images; native arm64 for
+the private repositories; and the items above (20 to 26) that were already
+listed. Items 27 onward are those, in the same three-part form, when they
+become issues.
