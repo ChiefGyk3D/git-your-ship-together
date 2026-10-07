@@ -23,7 +23,10 @@
 # spider, and for `full` the active scan, then run signed in, so they reach
 # what sits behind the login. The credentials in the context file belong to a
 # throwaway account of the service this job starts on loopback, never to a real
-# one; the file is committed like any other.
+# one; the file is committed like any other. Because ZAP sends the user's
+# credentials to the URLs the context names, the file is parsed as XML and
+# refused unless each of them is loopback (see `Check the context file`); the
+# credentials are masked in the log and redacted from every uploaded report.
 #
 # Call it from a repository with:
 #
@@ -115,11 +118,11 @@ on:
         type: string
         default: openapi
       context-file:
-        description: Optional ZAP context file in the repository (an export from ZAP's desktop or API, usually `.zap/app.context`), loaded before the scan with ZAP's `-n`. It names the URLs in scope, the login method and the users, so the scan can sign in. For all three scan types; the context's URLs and login page must be on the loopback `target-url`. The credentials in it are those of a throwaway account of the service this job starts, never a real one, because the file is committed. Empty scans anonymously.
+        description: Optional ZAP context file in the repository (an export from ZAP's desktop or API, usually `.zap/app.context`), loaded before the scan with ZAP's `-n`. It names the URLs in scope, the login method and the users, so the scan can sign in. For all three scan types. It is parsed as XML and refused unless every URL ZAP could sign in at (login, login page, poll) is loopback after decoding and normalising, none carries user information, a credential or a token, the authentication is manual, form-based or JSON-based, and its include regexes start at a loopback origin. The credentials in it are those of a throwaway account of the service this job starts, never a real one, because the file is committed; they are masked in the log and redacted from the reports. Empty scans anonymously.
         type: string
         default: ""
       context-user:
-        description: Which user of `context-file` to scan as (ZAP's `-U`, the user's name in the context). The spider, and for `full` the active scan, run signed in as this user. Refused without `context-file`; a name the context does not hold fails the scan before it starts. Empty scans anonymously, with the context's scope only.
+        description: Which user of `context-file` to scan as (ZAP's `-U`, the user's name in the context). The spider, and for `full` the active scan, run signed in as this user. Refused without `context-file`, and refused when the context holds no user of that name, so a typo cannot become an anonymous scan that passes. Empty scans anonymously, with the context's scope only.
         type: string
         default: ""
       python-version:
@@ -269,16 +272,244 @@ jobs:
             echo "::error::context-file '$CONTEXT_FILE' is not a file in the repository. Export the context from ZAP and commit it, or leave context-file empty to scan anonymously."
             exit 1
           fi
-          if [ -n "$CONTEXT_FILE" ]; then
-            # ZAP signs in at the URLs the context names, so a context that names another host would post the
-            # user's credentials there from the runner: the same rule as target-url.
-            while IFS= read -r url; do
-              if ! printf '%s' "$url" | grep -Eq "${loopback}(/|\$)"; then
-                echo "::error::context-file '$CONTEXT_FILE' names '$url' as a login or poll URL, which is not loopback. The scan signs in only to the service this job starts; export a context whose login URL is on target-url."
-                exit 1
-              fi
-            done < <(grep -Eo '<(loginurl|loginpageurl|pollurl)>[^<]+' -- "$CONTEXT_FILE" | sed 's/^<[a-z]*>//')
-          fi
+
+      # The context file is the one input that makes ZAP send a request to a URL the caller wrote: it signs in at
+      # the context's login URL, with the user's credentials. So it is parsed as XML (never grepped: CDATA, entities
+      # and character references hide a URL from a pattern), every URL it can carry is decoded and must be loopback,
+      # and the credentials in it are masked in the log and written to a file the report step removes from the
+      # reports. Nothing a rejected value says is printed; an error names the element and the rule.
+      - name: Check the context file
+        if: inputs.context-file != ''
+        env:
+          CONTEXT_FILE: ${{ inputs.context-file }}
+          CONTEXT_USER: ${{ inputs.context-user }}
+          REDACT_FILE: ${{ runner.temp }}/zap-redact.json
+        run: |
+          python3 - <<'PY'
+          """Check the ZAP context file before ZAP sees it: parse it as XML, validate every URL ZAP could sign in at.
+
+          Nothing a rejected value says is ever printed: an error names the element and the rule, never the value, because the
+          value may carry the credential (user:password@host, a {%password%} token) this check exists to keep out of the logs."""
+          import base64
+          import html
+          import ipaddress
+          import json
+          import os
+          import re
+          import sys
+          import urllib.parse
+          import xml.etree.ElementTree as ET
+          from xml.parsers import expat
+          from pathlib import Path
+
+          AUTH_TYPES = {"0": "manual", "2": "form-based", "5": "JSON-based"}  # ZAP 2.17: 3 http, 4 script, 6 browser, 7 auto-detect
+          AUTH_ELEMENTS = {"type", "strategy", "pollurl", "polldata", "pollheaders", "pollfreq", "pollunits", "loggedin", "loggedout"}
+          FORM_ELEMENTS = {"loginurl", "loginbody", "loginpageurl"}  # JSON-based authentication is exported as a <form> too
+          URL_ELEMENTS = {"loginurl", "loginpageurl", "pollurl"}
+          CREDENTIAL_NAME = re.compile(r"pass|pwd|secret|token|key|auth|user|login|credential|session|sid", re.I)
+          SCOPE = re.compile(
+              r"\^?https?://(?:127\.0\.0\.1|localhost|\[::1\])(?::(?:[0-9]+|\[0-9\]\+|\\d\+).*|/.*|\$)?", re.I
+          )
+          MIN_SECRET = 4
+
+
+          def refuse(message: str) -> None:
+              print(f"::error::context-file: {message}")
+              sys.exit(1)
+
+
+          def name_of(tag: str) -> str:
+              return tag if re.fullmatch(r"[A-Za-z0-9_-]{1,40}", tag) else "(an unreadable name)"
+
+
+          def text_of(element: ET.Element | None) -> str:
+              return "".join(element.itertext()).strip() if element is not None else ""
+
+
+          def is_loopback(host: str) -> bool:
+              if host == "localhost":  # urlsplit lower-cases; "localhost." and "LOCALHOST.evil" are not this
+                  return True
+              try:
+                  ip = ipaddress.ip_address(host)  # strict dotted quad or IPv6: no decimal, octal or hex IPv4 forms
+              except ValueError:
+                  return False
+              if ip.version == 4:
+                  return ip in ipaddress.ip_network("127.0.0.0/8")
+              return ip == ipaddress.IPv6Address("::1")  # not ::, not ::ffff:127.0.0.1
+
+
+          def check_url(element: str, value: str, secrets: list[str]) -> None:
+              if not value:
+                  return
+              what = f"<{element}>"
+              decoded = value
+              for _ in range(3):
+                  decoded = urllib.parse.unquote(decoded)
+              if "{%" in decoded:
+                  refuse(f"{what} carries a {{%...%}} token. ZAP substitutes {{%username%}} and {{%password%}} into a login URL, "
+                         "which would put the credential in the URL and in every log and report that records it. "
+                         "They belong in the POST body (loginbody) only.")
+              if any(ord(c) <= 32 or ord(c) == 127 or c == "\\" for c in value):
+                  refuse(f"{what} contains whitespace, a control character or a backslash.")
+              if "#" in value:
+                  refuse(f"{what} has a fragment, which URL parsers disagree about.")
+              try:
+                  parts = urllib.parse.urlsplit(value)
+                  port = parts.port
+                  host = parts.hostname
+              except ValueError:
+                  refuse(f"{what} is not a valid URL.")
+              if parts.scheme.lower() not in ("http", "https") or not parts.netloc:
+                  refuse(f"{what} is not an absolute http or https URL.")
+              if "@" in parts.netloc:
+                  refuse(f"{what} has user information (user:password@host). Credentials never go in a URL.")
+              if not host or "%" in host or not is_loopback(host):
+                  refuse(f"{what} is not loopback (127.0.0.0/8, ::1 or localhost, written plainly). The scan signs in only to the "
+                         "service this job starts; export a context whose login URL is on target-url.")
+              if port is not None and not 0 < port < 65536:
+                  refuse(f"{what} has a port outside 1-65535.")
+              for key, val in urllib.parse.parse_qsl(parts.query, keep_blank_values=True):
+                  if CREDENTIAL_NAME.search(key):
+                      refuse(f"{what} has a query parameter named like a credential. Credentials go in the POST body (loginbody).")
+                  if any(s in val or s in decoded for s in secrets):
+                      refuse(f"{what} has a user's credential in its query string.")
+              if any(s in decoded for s in secrets):
+                  refuse(f"{what} contains a user's credential.")
+
+
+          def forms(value: str) -> list[str]:
+              """Every shape a value takes in a URL, an HTML or JSON report or a header."""
+              found = {
+                  value,
+                  urllib.parse.quote(value, safe=""),
+                  urllib.parse.quote_plus(value),
+                  html.escape(value),
+                  html.escape(value, quote=False),
+                  json.dumps(value)[1:-1],
+                  base64.b64encode(value.encode()).decode(),
+              }
+              return sorted(found, key=len, reverse=True)
+
+
+          def load(path: Path) -> ET.Element:
+              raw = path.read_bytes()
+              if len(raw) > 1_000_000:
+                  refuse("the file is over 1 MB; a ZAP context is a few KB.")
+              try:
+                  text = raw.decode("utf-8")
+              except UnicodeDecodeError:
+                  refuse("the file is not UTF-8.")
+              if "\x00" in text:
+                  refuse("the file contains NUL characters (a UTF-16 file?); save it as UTF-8.")
+              if re.search(r"<!\s*(DOCTYPE|ENTITY)", text, re.I):
+                  refuse("the file declares a DOCTYPE or an entity. A ZAP export has neither, and entities are how a value hides "
+                         "from this check.")
+
+              def no(*_args: object) -> None:
+                  raise ValueError("a DOCTYPE or entity declaration")
+
+              # A second look with expat itself, which sees what a pattern over the text cannot.
+              probe = expat.ParserCreate()
+              probe.StartDoctypeDeclHandler = no
+              probe.EntityDeclHandler = no
+              try:
+                  probe.Parse(text, True)
+                  return ET.fromstring(text)
+              except (expat.ExpatError, ET.ParseError, ValueError):
+                  refuse("the file is not well-formed XML, or declares an entity.")
+
+
+          def main() -> None:
+              path = Path(os.environ["CONTEXT_FILE"])
+              user = os.environ.get("CONTEXT_USER", "")
+              root = load(path)
+              if root.tag != "configuration" or len(root.findall("context")) != 1:
+                  refuse("expected a ZAP export: one <configuration> holding exactly one <context>.")
+              context = root.find("context")
+
+              for section in ("authentication", "session", "users"):
+                  if len(context.findall(section)) > 1:
+                      refuse(f"the <{section}> section appears twice; ZAP reads one and this check cannot tell which.")
+
+              # Who can sign in, and what must never reach a log: collected first, so that every later message is safe.
+              names, secrets = [], []
+              users = context.find("users")
+              for entry in users.findall("user") if users is not None else []:
+                  fields = text_of(entry).split(";")
+                  if len(fields) != 5:
+                      refuse("a <user> entry is not in ZAP's id;enabled;name;type;credentials form.")
+                  pieces = [fields[2], *fields[4].split("~")]
+                  for index, piece in enumerate(pieces):
+                      if not piece:
+                          continue
+                      try:
+                          value = base64.b64decode(piece, validate=True).decode("utf-8")
+                      except (ValueError, UnicodeDecodeError):
+                          value = piece
+                      if index == 0:
+                          names.append(value)
+                      if "\n" in value or "\r" in value:
+                          refuse("a user's name or credential contains a line break, which a log cannot mask.")
+                      if len(value) < MIN_SECRET:
+                          if index:
+                              refuse(f"a user's credential is under {MIN_SECRET} characters, too short to keep out of the reports "
+                                     "by redaction. Use a longer throwaway value.")
+                          continue
+                      secrets.append(value)
+              redact = sorted({form for s in secrets for form in forms(s)}, key=len, reverse=True)
+              for form in redact:
+                  print(f"::add-mask::{form}")
+              out = os.open(os.environ["REDACT_FILE"], os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+              with os.fdopen(out, "w") as handle:
+                  json.dump(redact, handle)
+
+              if user and names and user not in names:
+                  refuse("context-user is not one of the context's users. The names the context holds are in the file; "
+                         "a typo here would otherwise scan anonymously.")
+
+              auth = context.find("authentication")
+              if auth is not None:
+                  kind = text_of(auth.find("type"))
+                  if kind not in AUTH_TYPES:
+                      shown = kind if re.fullmatch(r"[0-9]{1,3}", kind) else "unreadable"
+                      refuse(f"authentication type {shown} is not one this workflow vets. Supported: manual (0), form-based (2) "
+                             "and JSON-based (5). HTTP, script, browser-based and auto-detect authentication can sign in at "
+                             "hosts or run code the check cannot read.")
+                  allowed = AUTH_ELEMENTS | ({"form"} if kind in ("2", "5") else set())
+                  tags = [child.tag for child in auth]
+                  if len(tags) != len(set(tags)):
+                      refuse("the <authentication> section repeats an element; ZAP reads one and this check cannot tell which.")
+                  for child in auth:
+                      if child.tag not in allowed:
+                          refuse(f"the <authentication> section has an element <{name_of(child.tag)}> this check does not know.")
+                  for child in auth.findall("form"):
+                      for inner in child:
+                          if inner.tag not in FORM_ELEMENTS:
+                              refuse(f"the <form> section has an element <{name_of(inner.tag)}> this check does not know.")
+              session = context.find("session")
+              if session is not None:
+                  if text_of(session.find("type")) != "0" or any(child.tag != "type" for child in session):
+                      refuse("the <session> section is not cookie-based session management (type 0), the only kind this "
+                             "workflow vets.")
+
+              for element in root.iter():
+                  if element.tag in URL_ELEMENTS:
+                      check_url(element.tag, text_of(element), secrets)
+              for element in context.findall("incregexes"):
+                  if not SCOPE.fullmatch(re.sub(r"\\[QE]", "", text_of(element)).replace("\\.", ".")):
+                      refuse("an <incregexes> entry does not start with a loopback origin (http://127.0.0.1:PORT, "
+                             "http://localhost:PORT or http://[::1]:PORT), so the spider could follow links to another host.")
+              print("The context file is well-formed, signs in only at loopback URLs, and names no credential in a URL.")
+
+
+          try:
+              main()
+          except SystemExit:
+              raise
+          except BaseException:  # a traceback could carry the values this step exists to keep out of the log
+              print("::error::context-file: could not be checked; refusing it rather than guessing.")
+              sys.exit(1)
+          PY
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         if: inputs.python-version != ''
@@ -421,6 +652,58 @@ jobs:
             exit 1
           fi
 
+      # Before the report step builds the SARIF and the summary, and whether or not the scan passed, because the
+      # artifact step uploads whatever is there. A scan that fails leaves reports too.
+      - name: Remove the context's credentials from the reports
+        if: always() && inputs.context-file != ''
+        env:
+          ZAP_DIR: ${{ runner.temp }}/zap
+          REDACT_FILE: ${{ runner.temp }}/zap-redact.json
+        run: |
+          python3 - <<'PY'
+          """Take the context's credentials out of the ZAP reports before anything reads or uploads them.
+
+          Fails closed: if the redaction cannot be done and checked, the reports are deleted, so the artifact step finds nothing."""
+          import json
+          import os
+          import sys
+          from pathlib import Path
+
+          zap_dir = Path(os.environ["ZAP_DIR"])
+          redact_file = Path(os.environ["REDACT_FILE"])
+          REPORTS = ("report.json", "report.html", "report.md", "zap.sarif")
+
+
+          def delete_reports() -> None:
+              for name in REPORTS:
+                  (zap_dir / name).unlink(missing_ok=True)
+
+
+          try:
+              values = [v for v in json.loads(redact_file.read_text()) if v]
+              (zap_dir / "context.context").unlink(missing_ok=True)  # it holds the credentials, encoded
+              for name in REPORTS:
+                  path = zap_dir / name
+                  if not path.exists():
+                      continue
+                  text = path.read_text(encoding="utf-8", errors="replace")
+                  for value in values:  # longest first: a form that contains a shorter one goes whole
+                      text = text.replace(value, "[redacted]")
+                  if any(value in text for value in values):
+                      raise ValueError("a credential survived the redaction")
+                  # The container's user owns the report and the directory is the runner's: replace the file, which
+                  # needs the directory's write permission, not the file's.
+                  clean = path.with_name(path.name + ".clean")
+                  clean.write_text(text, encoding="utf-8")
+                  os.replace(clean, path)
+              redact_file.unlink()
+              print(f"Redacted {len(values)} credential form(s) from the reports.")
+          except BaseException:  # the message must not carry what was being redacted
+              delete_reports()
+              print("::error::the reports could not be cleaned of the context's credentials; they were deleted, not uploaded.")
+              sys.exit(1)
+          PY
+
       - name: Report and apply fail-on
         id: report
         env:
@@ -549,7 +832,7 @@ jobs:
               "",
           ]
           if context_user:
-              lines[2:2] = [f"Scanned signed in as the context user `{context_user}`.", ""]
+              lines[2:2] = ["Scanned signed in as a user of `context-file` (its name is kept out of the reports).", ""]
           if alerts:
               lines += ["| Risk | Alert | Instances | Rule |", "| --- | --- | --- | --- |"]
               for a in alerts:

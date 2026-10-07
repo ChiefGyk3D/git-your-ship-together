@@ -60,7 +60,10 @@ method, the users) and the name of the user to scan as, and the spider and the a
 three scan types take them, which was read from ZAP's scripts in the pinned image and then shown with a live
 test. The fixture proves it both ways: with `--login` the same reflected cross-site scripting hole sits behind
 a form login, the anonymous full scan passes it at `high`, and the signed-in one fails at `high`. The credentials
-in a context file are committed, so they are a throwaway account's on the service the job started and nothing else.
+in a context file are committed, so they are a throwaway account's on the service the job started and nothing else. Because
+ZAP sends them to the URLs the file names, the file is parsed as XML (a `grep` for the URL is how a CDATA section got past an
+earlier version) and refused unless every sign-in URL is loopback after decoding and normalising, with no credential in a URL,
+and the credentials are masked in the log and redacted from every uploaded report.
 
 The scans send attack payloads, which is why the workflow refuses any target that is
 not loopback: the service under test is the one the job started, never a shared

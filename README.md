@@ -566,8 +566,8 @@ uploads do not close each other's alerts:
 Add the jobs to the caller's `CI green` gate (`needs:`). What a call does, in
 order: refuses a bad input (a `target-url` that is not loopback, an unknown
 `fail-on` or `scan-type`, a missing `rules-file` or `context-file`, a
-`context-user` with no `context-file`, a context whose login URL is not
-loopback, an `api-definition` that is neither a
+`context-user` with no `context-file` or one the context does not hold, a context
+that could sign in off host or hide where (see below), an `api-definition` that is neither a
 repository file nor a loopback URL, or one given without `scan-type: api`); runs `install-command`, then `start-command` in the background with its
 output in a file; waits for `ready-path` to answer 2xx or 3xx (a service that
 exits non-zero before then fails at once with the tail of its log); runs the ZAP
@@ -619,16 +619,67 @@ days, whether the scan passed or not.
   and the baseline's spider signs in too, so its passive rules see the signed-in
   pages; nothing is refused by scan type. A `context-user` with no `context-file`
   is refused, since a user lives in a context, and a name the context does not
-  hold stops the scan before it starts. A context whose login or poll URL is not
-  loopback is refused too, so the credentials are never posted to another host.
-  The context names the login URL with the port, so it must match `target-url`,
-  and the credentials in it belong to a throwaway account of the service this
-  job starts, never a real one: the file is committed, and the service is on
-  loopback with nothing behind it. A signed-in scan and an anonymous one in the
-  same repository need their own `artifact-name` and `sarif-category`, like any
-  two scans. What it cannot do: sign in through a login ZAP's authentication
-  methods do not cover, or reach a deployed environment, which stays refused
-  with every other non-loopback host.
+  hold is refused before the service starts, so a typo cannot become an anonymous
+  scan that passes. The context names the login URL with the port, so it must
+  match `target-url`, and the credentials in it belong to a throwaway account of
+  the service this job starts, never a real one: the file is committed, and the
+  service is on loopback with nothing behind it.
+
+  **What the context guard checks.** ZAP sends the user's credentials to the
+  URLs the context names, so the file is parsed as XML (never searched with a
+  pattern: CDATA, character references and entities hide a URL from one) and
+  refused unless:
+  - it declares no DOCTYPE or entity, is UTF-8, and holds one `<context>`;
+  - every `loginurl`, `loginpageurl` and `pollurl`, decoded, is an absolute
+    `http` or `https` URL whose host, normalised, is `localhost` or an address
+    in `127.0.0.0/8` or `::1`. Decimal, octal, hex and short IPv4 forms,
+    `0.0.0.0`, `::`, IPv4-mapped IPv6, zone ids, a trailing dot and look-alike
+    hosts (`127.0.0.1.evil.example`) are not loopback written plainly and are
+    refused. Case is normalised, so `HTTP://LocalHost:8080` passes;
+  - no such URL has user information (`http://127.0.0.1@evil.example`), a
+    fragment, a backslash, whitespace, a `{%username%}` or `{%password%}` token
+    (ZAP substitutes them into a URL, which would put the credential in every
+    log and report that records it; they belong in `loginbody`), a query
+    parameter named like a credential, or a user's credential in it;
+  - the authentication is manual (0), form-based (2) or JSON-based (5). HTTP,
+    script, browser-based and auto-detect authentication can sign in at hosts or
+    run code the check cannot read, so they are refused, as is any element of
+    the authentication section it does not know, and session management other
+    than cookies;
+  - every `incregexes` entry starts at a loopback origin
+    (`http://127\.0\.0\.1:8080.*`), so the spider cannot follow links to
+    another host.
+
+  An error names the element and the rule and never prints the value it
+  refused, because the value may be the credential.
+
+  **Credentials stay out of the output.** The users' names and credentials are
+  masked in the log (`::add-mask::`, in the raw, URL-encoded, HTML-escaped,
+  JSON-escaped and base64 forms), and a step that runs whether or not the scan
+  passed removes them from `report.json`, `report.html`, `report.md` and the
+  SARIF before the report step and the artifact upload, deletes the copy of the
+  context file from the work directory, and, if it cannot do that and check it,
+  deletes the reports instead of uploading them. A credential under four
+  characters cannot be redacted without mangling the reports, so the context is
+  refused; use a longer throwaway value. The summary says a scan was signed in
+  but not as whom.
+
+  **Request-time enforcement: not required.** ZAP's own requests are fixed by the
+  context: it signs in only at the vetted URLs, spiders only what the vetted
+  include regexes allow and attacks only `target-url`. What remains is the
+  service redirecting off host, and that service is the caller's own code, which
+  already runs in this job with the same network and needs no ZAP to reach out.
+  `egress-policy: block` is the control for that, and it is what this
+  repository's own `fixture dast` job runs under; requiring it for
+  `context-file` would make the feature unusable on the default and add no check
+  that has been measured, since harden-runner's enforcement on a container with
+  host networking was not. Use `block` for a signed-in scan. Both policies pass
+  the same static check, and a test pins that.
+
+  A signed-in scan and an anonymous one in the same repository need their own
+  `artifact-name` and `sarif-category`, like any two scans. What it cannot do:
+  sign in through a login ZAP's authentication methods do not cover, or reach a
+  deployed environment, which stays refused with every other non-loopback host.
 - **The AJAX spider** (`ajax-spider: true`) adds a headless browser that clicks
   through the page, for a front end whose links are built by JavaScript. A
   server-rendered page does not need it, and it is slower.
@@ -663,7 +714,15 @@ days, whether the scan passed or not.
   context passes at `high`, and the same scan with `context-file` and
   `context-user: throwaway` fails at `high` naming the cross-site scripting;
   a baseline over the headerless login fixture reaches `/account` only with the
-  context.
+  context. The context guard has a refusal test per way a URL can hide or point
+  off host (CDATA, character references, entities and a DOCTYPE, mixed case, a
+  trailing dot, look-alike hosts, decimal, octal and hex IPv4, `0.0.0.0`, the
+  IPv6 forms, user information, fragment and backslash tricks, a token or a
+  credential in a URL, each authentication kind the check does not vet, a scope
+  regex that is not loopback), each shown to print nothing it refused; and a
+  context whose reports carry the credentials in a URL, an evidence field and
+  the HTML shows none of them in the SARIF, the summary, the log or any
+  uploaded report afterwards.
 
 Inputs of `dast.yml`:
 
@@ -681,8 +740,8 @@ Inputs of `dast.yml`:
 | `active-scan-minutes` | `0` | Longest the active scan runs (`full`, `api`); `0` is no limit, so set it with `timeout-minutes` |
 | `api-definition` | empty | For `api`: an OpenAPI or SOAP definition as a repository file or a loopback URL, or the loopback URL of a GraphQL endpoint |
 | `api-format` | `openapi` | Format of `api-definition`: `openapi` (its `servers` are overridden with `target-url`), `soap` or `graphql` |
-| `context-file` | empty | A ZAP context file in the repository (URLs in scope, login method, users), passed as ZAP's `-n`; all three scan types. Its credentials are a throwaway account's, because the file is committed |
-| `context-user` | empty | Which user of `context-file` to scan as (`-U`): the spider, and for `full` the active scan, run signed in. Refused without `context-file` |
+| `context-file` | empty | A ZAP context file in the repository (URLs in scope, login method, users), passed as ZAP's `-n`; all three scan types. Parsed as XML and refused unless every sign-in URL is loopback, with no credential in a URL. Its credentials are a throwaway account's, because the file is committed; they are masked in the log and redacted from the reports |
+| `context-user` | empty | Which user of `context-file` to scan as (`-U`): the spider, and for `full` the active scan, run signed in. Refused without `context-file`, and when the context holds no such user |
 | `python-version` | empty | Python to set up first; empty skips it |
 | `install-command` | empty | Installs the service, run before `start-command` |
 | `upload-sarif` | `true` | Upload the findings under `sarif-category`; needs `security-events: write` |

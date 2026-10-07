@@ -29,7 +29,8 @@ behind a login are where an application keeps most of what is worth attacking. `
 own `-n` and `-U`: the repository keeps a ZAP context (the URLs in scope, the login method, the users), exported from ZAP and
 committed, and `context-user` names which of its users to scan as. The spider signs in as that user, and for `full` so does the
 active scan, so the active rules reach the pages and parameters behind the login. `-U` without `-n` is refused, since a user
-lives in a context, and a user the context does not hold fails the scan before it starts.
+lives in a context, and so is a user the context does not hold, before the service starts, so a typo cannot become an
+anonymous scan that passes.
 
 **All three scan types take them.** This was decided by reading the scripts in the pinned image, not by assumption:
 `zap-baseline.py`, `zap-full-scan.py` and `zap-api-scan.py` each accept `-n` and `-U`, load the context before the first
@@ -38,16 +39,60 @@ AJAX and client spiders the same way) and the active scan as that user. So the b
 too, and nothing is refused by scan type. A live test shows it rather than trusting the read: the baseline over the login
 fixture without its headers alerts on `/account` only when given the context and the user.
 
-What goes in the context file matters more than the scan:
+What goes in the context file matters more than the scan, because ZAP sends the user's credentials to the URLs the file names.
 
 - **The credentials are a throwaway account's.** The file is committed, so what it holds is public to everyone who can read the
   repository. The service is the one this job starts on loopback, with a recorded dataset, so the account opens nothing real.
   A credential that opens anything else does not belong in a context file; this workflow has no input for a secret, on purpose.
 - **The port in it must match `target-url`.** A context names its login URL in full; a mismatch is a scan that never signs in.
-  A login, login page or poll URL that is not loopback is refused before anything starts, so the credentials are never posted to
+- **The logged-out indicator is yours to get right.** ZAP checks every response against it, and a hit makes it sign in again.
+  The fixture's matches the redirect to `/login` and the sign-in page and nothing a signed-in session sees. A logged-in indicator
+  that the login's own redirect does not carry is worse than none: ZAP counted every sign-in as failed and shut itself down
+  while this was being built.
+
+### What the context guard checks
+
+The guard is a step that runs before the service starts. It parses the file as XML, never with a pattern: CDATA, character
+references and entities hide a URL from a pattern over the text (an earlier version of the guard was a `grep`, and
+`<loginurl><![CDATA[https://example.com/login]]></loginurl>` matched nothing). It refuses the file unless:
+
+- it declares no DOCTYPE or entity, is UTF-8 and holds exactly one `<context>`;
+- every `loginurl`, `loginpageurl` and `pollurl`, decoded, is an absolute `http` or `https` URL whose host is loopback once
+  normalised: `localhost`, an address in `127.0.0.0/8`, or `::1`. Case is normalised, so `HTTP://LocalHost:8080` passes. Decimal,
+  octal, hex and short IPv4 (`2130706433`, `0x7f.0.0.1`, `0177.0.0.1`, `127.1`), `0.0.0.0`, `::`, IPv4-mapped IPv6, zone ids,
+  `localhost.` and look-alikes such as `127.0.0.1.evil.example` are refused: a resolver may accept them, so the check does not;
+- none of those URLs has user information (`http://127.0.0.1@evil.example`), a fragment, a backslash or whitespace (parsers
+  disagree about them), a `{%username%}` or `{%password%}` token, a query parameter named like a credential, or a user's
+  credential in it. ZAP substitutes the tokens into a login URL, which would put the credential in the URL and in every log and
+  report that records it; they belong in `loginbody`, the POST body;
+- the authentication is manual (type 0), form-based (2) or JSON-based (5), with only the elements ZAP's export writes. HTTP,
+  script, browser-based and auto-detect authentication can sign in at hosts or run code the guard cannot read, so they are
+  refused rather than let through, as is session management other than cookies. These are the type numbers of ZAP 2.17.0,
+  read from an export of each;
+- every `incregexes` entry starts at a loopback origin (`http://127\.0\.0\.1:8080.*`), so the spider cannot follow a link to
   another host.
-- **The logged-in indicator is yours to get right.** It is the text of a page only a signed-in session sees. The fixture's is
-  `Signed in as`, and a test checks that it matches the page a login lands on and not the login page.
+
+An error names the element and the rule and never prints the value it refused, because the value may be the credential.
+
+### Credentials stay out of the output
+
+The users' names and credentials are masked in the job log in every shape they take (raw, URL-encoded, HTML-escaped,
+JSON-escaped, base64). A step that runs whether or not the scan passed then removes them from `report.json`, `report.html`,
+`report.md` and the SARIF before the report step builds the summary and before the artifact upload, and deletes the copy of the
+context file from the work directory. If it cannot redact and check, it deletes the reports instead of uploading them. A value
+under four characters cannot be redacted without mangling the reports, so such a context is refused. The summary says a scan
+was signed in, not as whom.
+
+### Request-time enforcement: not required
+
+The guard is static, and `egress-policy: block` is the request-time control; the workflow does not require it for `context-file`.
+ZAP's own requests are fixed by the context: it signs in only at the vetted URLs, spiders only what the vetted include regexes
+allow and attacks only `target-url`. What the guard cannot see is the service redirecting off host. That service is the
+caller's own code, which already runs in this job with the same network, so it needs no ZAP to reach out, and `block` is the
+control for it (this repository's own `fixture dast` job runs under `block`). Requiring `block` for `context-file` would make
+the feature unusable on the default and add no check that has been measured: harden-runner's enforcement on a container with
+host networking was not measured here. Use `block` for a signed-in scan. A test pins that both policies pass the same static
+check.
 
 What it cannot do: sign in through a login ZAP's authentication methods do not cover, or reach a deployed environment. That
 stays refused with every other host that is not loopback; see the [Roadmap](Roadmap.md).
@@ -80,7 +125,8 @@ definition whose server is a host that does not exist, so the api scan can only 
 loopback. With `--login` the server adds a form login with throwaway credentials and, only behind it, the same unescaped echo
 at `/account/search`; the public pages stay escaped. The full scan with no context passes that service at `high`, and the same
 scan with `fixture/dast/login.context` and `context-user: throwaway` fails at `high` naming the cross-site scripting. Both
-halves are tests, because a check that only passes proves nothing. `tests/test_dast.py` runs the job's steps against canned reports and against a fake `docker` that records which ZAP
+halves are tests, because a check that only passes proves nothing. So is every way a context can hide an off-host URL or put a
+credential in one: each is a refused case, and the refusal is checked to print nothing it refused. `tests/test_dast.py` runs the job's steps against canned reports and against a fake `docker` that records which ZAP
 script and flags each `scan-type` produces, and this repository's `dast-live` CI job runs all of it against the real image.
 
 ## A minimal caller
@@ -144,5 +190,5 @@ And the pages behind the login, signed in as a throwaway user of the same servic
 ## What it refuses to do
 
 It never scans a host that is not loopback, never gives the container a token, never lets the upload job run your code, never
-reads `api-definition` for a scan type that would not use it (a silent no-op is how a check stops checking), never accepts a `context-user` with no context to find it in, and never passes a
+reads `api-definition` for a scan type that would not use it (a silent no-op is how a check stops checking), never accepts a `context-user` with no context to find it in, never lets a context file point ZAP's sign-in at a host that is not loopback or carry a credential in a URL, never prints a value it refused, never uploads a report that still holds the context's credentials, and never passes a
 finding by raising the threshold.

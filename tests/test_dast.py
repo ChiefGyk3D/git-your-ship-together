@@ -29,6 +29,8 @@ goes red with a message naming the fix.
 
 from __future__ import annotations
 
+import base64
+import html
 import importlib.util
 import json
 import os
@@ -40,6 +42,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -289,19 +292,6 @@ def test_a_bad_input_is_refused_before_anything_starts_and_the_message_names_the
     code, out = job(**inputs).run("Check the inputs", REPO_ROOT=str(REPO))
     assert code != 0, f"{inputs} was accepted"
     assert message in out, out
-
-
-@pytest.mark.parametrize("tag", ["loginurl", "loginpageurl", "pollurl"])
-def test_a_context_that_signs_in_somewhere_other_than_loopback_is_refused(job, tmp_path, tag):
-    context = tmp_path / "evil.context"
-    context.write_text(CONTEXT.read_text().replace("</form>", f"</form><{tag}>https://example.com/login</{tag}>"))
-    code, out = job(context_file=str(context), context_user="throwaway").run("Check the inputs", REPO_ROOT=str(REPO))
-    assert code != 0 and "which is not loopback" in out and "https://example.com/login" in out, out
-
-
-def test_a_context_whose_login_is_on_loopback_is_accepted(job):
-    code, out = job(context_file=CONTEXT_PATH, context_user="throwaway").run("Check the inputs", REPO_ROOT=str(REPO))
-    assert code == 0, out
 
 
 @pytest.mark.parametrize(
@@ -624,7 +614,7 @@ def test_an_authenticated_scan_says_so_in_the_summary_and_tags_its_alerts(job):
     j.output.write_text("exit=0\n")
     code, out = j.run("Report and apply fail-on")
     assert code == 0, out
-    assert "Scanned signed in as the context user `throwaway`." in j.summary.read_text()
+    assert "Scanned signed in as a user of `context-file`" in j.summary.read_text()
     sarif = json.loads((zap / "zap.sarif").read_text())
     for rule in sarif["runs"][0]["tool"]["driver"]["rules"]:
         assert "zap-authenticated" in rule["properties"]["tags"]
@@ -826,6 +816,320 @@ def test_the_shipped_context_file_matches_the_fixtures_login():
             assert not seen(server.get(path, cookie)), f"{path} signed in must not read as logged out"
 
 
+# --- the context file: parsed as XML, every URL decoded and loopback, credentials kept out of the output ---------
+
+LOGIN = "<loginurl>http://127.0.0.1:8080/login</loginurl>"
+PAGE_URL = "<loginpageurl>http://127.0.0.1:8080/login</loginpageurl>"
+UNITS = "<pollunits>REQUESTS</pollunits>"
+USER_ENTRY = re.search(r"<user>.*?</user>", CONTEXT.read_text()).group(0)
+PASSWORD = "throwaway-password"
+HOSTILE_HOST = re.compile(r"example\.com|evil\.example|2130706433|0x7f|0177|ffff", re.I)
+
+
+def context_file(tmp_path: Path, old: str, new: str, head: str = "") -> str:
+    text = CONTEXT.read_text()
+    assert old in text, f"{old!r} is not in the shipped context"
+    path = tmp_path / "variant.context"
+    path.write_text(text.replace(old, new, 1).replace("<configuration>", head + "<configuration>", 1))
+    return str(path)
+
+
+def check_context(job, path: str, user: str = "throwaway", **inputs: object):
+    return job(context_file=path, context_user=user, **inputs).run("Check the context file", REPO_ROOT=str(REPO))
+
+
+def log_without_masks(out: str) -> str:
+    """The runner swallows `::add-mask::` lines; they are not part of the log anyone reads."""
+    return "\n".join(line for line in out.splitlines() if not line.startswith("::add-mask::"))
+
+
+def user_entry(name: str, password: str) -> str:
+    def b64(value: str) -> str:
+        return base64.b64encode(value.encode()).decode()
+
+    return f"<user>0;true;{b64(name)};2;{b64(name)}~{b64(password)}~</user>"
+
+
+OFF_HOST = [
+    # CDATA, character references and entities hide a URL from a pattern over the text; the XML is parsed.
+    ("cdata", LOGIN, "<loginurl><![CDATA[https://example.com/login]]></loginurl>", "", "<loginurl> is not loopback"),
+    ("cdata split", LOGIN, "<loginurl><![CDATA[ht]]>tps://example.com/login</loginurl>", "", "is not loopback"),
+    ("decimal char ref", LOGIN, "<loginurl>&#104;ttps://example.com/login</loginurl>", "", "is not loopback"),
+    ("hex char ref", LOGIN, "<loginurl>&#x68;ttps://example.com/login</loginurl>", "", "is not loopback"),
+    (
+        "internal entity",
+        LOGIN,
+        "<loginurl>&u;</loginurl>",
+        '<!DOCTYPE configuration [<!ENTITY u "https://example.com/login">]>',
+        "declares a DOCTYPE or an entity",
+    ),
+    (
+        "external entity",
+        LOGIN,
+        "<loginurl>&u;</loginurl>",
+        '<!DOCTYPE configuration [<!ENTITY u SYSTEM "http://example.com/x">]>',
+        "declares a DOCTYPE or an entity",
+    ),
+    ("doctype alone", LOGIN, LOGIN, '<!DOCTYPE configuration SYSTEM "http://example.com/x.dtd">', "DOCTYPE"),
+    # Case, host spelling, trailing dots and look-alikes.
+    ("mixed-case scheme and host", LOGIN, "<loginurl>HtTpS://ExAmPlE.CoM/login</loginurl>", "", "is not loopback"),
+    ("mixed-case look-alike", LOGIN, "<loginurl>http://LocalHost.Evil.Example/login</loginurl>", "", "is not loopback"),
+    ("trailing dot", LOGIN, "<loginurl>http://localhost./login</loginurl>", "", "is not loopback"),
+    (
+        "127.0.0.1 as a subdomain",
+        LOGIN,
+        "<loginurl>http://127.0.0.1.evil.example/login</loginurl>",
+        "",
+        "is not loopback",
+    ),
+    # Numeric forms of an address, which a resolver accepts and a pattern does not see.
+    ("decimal IPv4", LOGIN, "<loginurl>http://2130706433/login</loginurl>", "", "is not loopback"),
+    ("hex IPv4", LOGIN, "<loginurl>http://0x7f.0.0.1/login</loginurl>", "", "is not loopback"),
+    ("octal IPv4", LOGIN, "<loginurl>http://0177.0.0.1/login</loginurl>", "", "is not loopback"),
+    ("short IPv4", LOGIN, "<loginurl>http://127.1/login</loginurl>", "", "is not loopback"),
+    ("unspecified address", LOGIN, "<loginurl>http://0.0.0.0:8080/login</loginurl>", "", "is not loopback"),
+    ("private address", LOGIN, "<loginurl>http://10.0.0.5:8080/login</loginurl>", "", "is not loopback"),
+    # IPv6 forms.
+    ("IPv4-mapped IPv6", LOGIN, "<loginurl>http://[::ffff:127.0.0.1]:8080/login</loginurl>", "", "is not loopback"),
+    ("unspecified IPv6", LOGIN, "<loginurl>http://[::]:8080/login</loginurl>", "", "is not loopback"),
+    ("other IPv6", LOGIN, "<loginurl>http://[2001:db8::1]:8080/login</loginurl>", "", "is not loopback"),
+    ("IPv6 zone", LOGIN, "<loginurl>http://[::1%25eth0]:8080/login</loginurl>", "", "is not loopback"),
+    ("broken IPv6", LOGIN, "<loginurl>http://[::1/login</loginurl>", "", "not a valid URL"),
+    # Userinfo and parser-confusion tricks.
+    ("userinfo host", LOGIN, "<loginurl>http://127.0.0.1@evil.example/login</loginurl>", "", "user information"),
+    ("userinfo port", LOGIN, "<loginurl>http://127.0.0.1:80@evil.example/login</loginurl>", "", "user information"),
+    ("fragment trick", LOGIN, "<loginurl>http://evil.example#@127.0.0.1/login</loginurl>", "", "fragment"),
+    ("backslash trick", LOGIN, "<loginurl>http://evil.example\\@127.0.0.1/login</loginurl>", "", "backslash"),
+    ("whitespace", LOGIN, "<loginurl>http://127.0.0.1:8080/lo gin</loginurl>", "", "whitespace"),
+    ("no scheme", LOGIN, "<loginurl>//evil.example/login</loginurl>", "", "absolute http or https"),
+    ("other scheme", LOGIN, "<loginurl>ftp://127.0.0.1/login</loginurl>", "", "absolute http or https"),
+    # The other URL-bearing elements are held to the same rule.
+    ("login page url", PAGE_URL, "<loginpageurl>https://example.com/login</loginpageurl>", "", "<loginpageurl> is not"),
+    (
+        "poll url",
+        UNITS,
+        UNITS + "<pollurl>https://example.com/poll</pollurl>",
+        "",
+        "<pollurl> is not loopback",
+    ),
+    # Authentication and session kinds the check cannot read are refused, not let through.
+    ("http authentication", "<type>2</type>", "<type>3</type>", "", "authentication type 3"),
+    ("script authentication", "<type>2</type>", "<type>4</type>", "", "authentication type 4"),
+    ("browser authentication", "<type>2</type>", "<type>6</type>", "", "authentication type 6"),
+    ("auto-detect authentication", "<type>2</type>", "<type>7</type>", "", "authentication type 7"),
+    ("unknown authentication", "<type>2</type>", "<type>99</type>", "", "authentication type 99"),
+    ("unreadable authentication", "<type>2</type>", "<type>https://example.com</type>", "", "type unreadable"),
+    ("unknown auth element", LOGIN, LOGIN + "<callback>https://example.com</callback>", "", "<callback>"),
+    ("unknown form element", LOGIN, LOGIN + "<redirect>https://example.com</redirect>", "", "<redirect>"),
+    (
+        "duplicate authentication",
+        "<forceduser>",
+        "<authentication><type>0</type></authentication><forceduser>",
+        "",
+        "twice",
+    ),
+    ("script session", "<type>0</type>\n        </session>", "<type>2</type>\n        </session>", "", "session"),
+    # Scope: the spider follows links the include regexes allow.
+    ("scope everything", "http://127\\.0\\.0\\.1:8080.*", ".*", "", "<incregexes>"),
+    ("scope look-alike host", "http://127\\.0\\.0\\.1:8080.*", "http://127\\.0\\.0\\.1.*", "", "<incregexes>"),
+    ("scope other host", "http://127\\.0\\.0\\.1:8080.*", "https://example\\.com.*", "", "<incregexes>"),
+    # The user must exist in the context, or the scan is anonymous.
+    ("user not in context", "dGhyb3dhd2F5;2;", "bm9ib2R5;2;", "", "not one of the context's users"),
+]
+
+
+@pytest.mark.parametrize(("label", "old", "new", "head", "message"), OFF_HOST, ids=[c[0] for c in OFF_HOST])
+def test_a_context_that_could_sign_in_off_host_or_hide_where_is_refused_without_echoing_it(
+    job, tmp_path, label, old, new, head, message
+):
+    code, out = check_context(job, context_file(tmp_path, old, new, head))
+    assert code != 0, f"{label} was accepted\n{out}"
+    assert message in out, out
+    log = log_without_masks(out)
+    assert not HOSTILE_HOST.search(log) and "evil" not in log and "example.com" not in log, (
+        f"the refusal printed the value it refused:\n{log}"
+    )
+    assert "Traceback" not in out
+
+
+ACCEPTED = [
+    ("shipped", LOGIN, LOGIN),
+    ("mixed-case loopback", LOGIN, "<loginurl>HTTP://LocalHost:8080/login</loginurl>"),
+    ("loopback in CDATA", LOGIN, "<loginurl><![CDATA[http://127.0.0.1:8080/login]]></loginurl>"),
+    ("loopback with a character reference", LOGIN, "<loginurl>&#104;ttp://127.0.0.1:8080/login</loginurl>"),
+    ("any 127/8 address", LOGIN, "<loginurl>http://127.0.0.2:8080/login</loginurl>"),
+    ("IPv6 loopback", LOGIN, "<loginurl>http://[::1]:8080/login</loginurl>"),
+    ("IPv6 loopback written out", LOGIN, "<loginurl>http://[0:0:0:0:0:0:0:1]:8080/login</loginurl>"),
+    ("a harmless query", LOGIN, "<loginurl>http://127.0.0.1:8080/login?next=/account</loginurl>"),
+    ("a poll url on loopback", UNITS, UNITS + "<pollurl>http://localhost:8080/account</pollurl>"),
+]
+
+
+@pytest.mark.parametrize(("label", "old", "new"), ACCEPTED, ids=[c[0] for c in ACCEPTED])
+@pytest.mark.parametrize("egress", ["audit", "block"])
+def test_a_loopback_context_in_any_spelling_is_accepted_under_either_egress_policy(
+    job, tmp_path, label, old, new, egress
+):
+    """Request-time enforcement is not required: see the wiki. Both policies pass the same static check."""
+    code, out = check_context(job, context_file(tmp_path, old, new), egress_policy=egress)
+    assert code == 0, f"{label}\n{out}"
+
+
+@pytest.mark.parametrize(
+    ("url", "message"),
+    [
+        ("http://127.0.0.1:8080/login?u={%username%}&p={%password%}", "{%...%} token"),
+        ("http://127.0.0.1:8080/login?u=%7B%25username%25%7D", "{%...%} token"),
+        ("http://127.0.0.1:8080/login?password=hunter2hunter2", "named like a credential"),
+        ("http://127.0.0.1:8080/login?API_TOKEN=abc", "named like a credential"),
+        ("http://127.0.0.1:8080/login?x=throwaway-password", "credential in its query string"),
+        ("http://127.0.0.1:8080/login?x=throwaway%2Dpassword", "credential in its query string"),
+        ("http://throwaway:throwaway-password@127.0.0.1:8080/login", "user information"),
+        ("http://127.0.0.1:8080/throwaway-password/login", "contains a user's credential"),
+    ],
+)
+def test_a_credential_in_a_url_is_refused_and_never_reaches_the_log(job, tmp_path, url, message):
+    code, out = check_context(job, context_file(tmp_path, LOGIN, f"<loginurl>{html.escape(url)}</loginurl>"))
+    assert code != 0 and message in out, out
+    log = log_without_masks(out)
+    for secret in (PASSWORD, "hunter2hunter2", "abc", "%7B%25"):
+        assert secret not in log, f"the refusal printed {secret!r}:\n{log}"
+
+
+def test_the_credentials_belong_in_the_post_body_only(job, tmp_path):
+    code, out = check_context(job, context_file(tmp_path, "<loginbody>", "<loginbody>token={%password%}&amp;"))
+    assert code == 0, "{%username%} and {%password%} are what loginbody is for\n" + out
+
+
+def test_a_user_the_context_does_not_hold_and_a_credential_too_short_to_redact_are_refused(job, tmp_path):
+    code, out = check_context(job, context_file(tmp_path, USER_ENTRY, user_entry("throwaway", "abc")))
+    assert code != 0 and "under 4 characters" in out and "abc" not in log_without_masks(out), out
+    code, out = check_context(job, context_file(tmp_path, USER_ENTRY, user_entry("throwaway", "two\nlines")))
+    assert code != 0 and "line break" in out, out
+
+
+def test_a_file_that_is_not_utf8_xml_is_refused(job, tmp_path):
+    bad = tmp_path / "utf16.context"
+    bad.write_bytes(CONTEXT.read_text().encode("utf-16"))
+    code, out = check_context(job, str(bad))
+    assert code != 0 and "UTF-8" in out, out
+    bad.write_text("<configuration><context>")
+    code, out = check_context(job, str(bad))
+    assert code != 0 and "well-formed" in out, out
+    bad.write_text("<configuration></configuration>")
+    code, out = check_context(job, str(bad))
+    assert code != 0 and "exactly one <context>" in out, out
+
+
+# The credentials of the context never reach a log, the summary, the SARIF or an uploaded report -------------
+
+
+def test_the_context_check_masks_every_shape_of_the_credentials_and_keeps_them_in_a_private_file(job, tmp_path):
+    password = "p@ss w/rd&1<x>"
+    j = job(
+        context_file=context_file(tmp_path, USER_ENTRY, user_entry("scan-user", password)), context_user="scan-user"
+    )
+    code, out = j.run("Check the context file", REPO_ROOT=str(REPO))
+    assert code == 0, out
+    masked = {line.removeprefix("::add-mask::") for line in out.splitlines() if line.startswith("::add-mask::")}
+    for form in (
+        password,
+        urllib.parse.quote(password, safe=""),
+        urllib.parse.quote_plus(password),
+        html.escape(password),
+        base64.b64encode(password.encode()).decode(),
+        "scan-user",
+    ):
+        assert form in masked, f"{form!r} is not masked: {sorted(masked)}"
+    redact = j.temp / "zap-redact.json"
+    assert redact.exists() and oct(redact.stat().st_mode & 0o777) == "0o600"
+    assert password in json.loads(redact.read_text())
+
+
+def planted_reports(j, secrets: list[str]) -> Path:
+    """The canned insecure report with the credentials where a reflecting application would put them."""
+    zap = j.temp / "zap"
+    zap.mkdir(exist_ok=True)
+    report = json.loads((FIXTURES / "insecure.json").read_text())
+    instance = report["site"][0]["alerts"][0]["instances"][0]
+    password, user = secrets
+    instance["uri"] += "?p=" + urllib.parse.quote_plus(password)
+    instance["evidence"] = f'<input value="{html.escape(password)}">'
+    instance["otherinfo"] = f"posted {user} / {password}"
+    instance["attack"] = urllib.parse.quote(password, safe="")
+    (zap / "report.json").write_text(json.dumps(report))
+    (zap / "report.html").write_text(f"<p>{html.escape(password)} for {user}</p>")
+    (zap / "report.md").write_text(f"posted {user} / {password}")
+    (zap / "context.context").write_text(CONTEXT.read_text())
+    for name in ("report.json", "report.html", "report.md"):
+        (zap / name).chmod(0o444)  # the container's user owns the real ones; the runner may only replace them
+    j.output.write_text("exit=0\n")
+    return zap
+
+
+def test_the_credentials_in_alert_instances_are_absent_from_the_sarif_the_summary_the_log_and_every_report(
+    job, tmp_path
+):
+    password, user = "p@ss w/rd&1<x>", "scan-user"
+    path = context_file(tmp_path, USER_ENTRY, user_entry(user, password))
+    j = job(context_file=path, context_user=user, fail_on="none", scan_type="full")
+    assert j.run("Check the context file", REPO_ROOT=str(REPO))[0] == 0
+    zap = planted_reports(j, [password, user])
+    code, out = j.run("Remove the context's credentials")
+    assert code == 0, out
+    code, report_out = j.run("Report and apply fail-on")
+    assert code == 0, report_out
+    forms = [
+        password,
+        urllib.parse.quote(password, safe=""),
+        urllib.parse.quote_plus(password),
+        html.escape(password),
+        user,
+    ]
+    everything = {
+        "stdout": out + report_out,
+        "summary": j.summary.read_text(),
+        **{name: (zap / name).read_text() for name in ("report.json", "report.html", "report.md", "zap.sarif")},
+    }
+    for where, text in everything.items():
+        for form in forms:
+            assert form not in text, f"{form!r} is in the {where}"
+    assert "[redacted]" in everything["report.json"] and json.loads(everything["report.json"])
+    sarif = json.loads(everything["zap.sarif"])
+    assert sarif["runs"][0]["results"], "the SARIF is still a report"
+    assert not (zap / "context.context").exists(), "the context holds the credentials, encoded; it is never uploaded"
+    assert not (j.temp / "zap-redact.json").exists()
+
+
+def test_when_the_credentials_cannot_be_removed_the_reports_are_deleted_not_uploaded(job, tmp_path):
+    j = job(context_file=CONTEXT_PATH, context_user="throwaway", fail_on="none")
+    assert j.run("Check the context file", REPO_ROOT=str(REPO))[0] == 0
+    zap = planted_reports(j, [PASSWORD, "throwaway"])
+    (j.temp / "zap-redact.json").write_text("not json")
+    code, out = j.run("Remove the context's credentials")
+    assert code != 0 and "deleted, not uploaded" in out, out
+    assert not [p for p in zap.iterdir() if p.name.startswith(("report.", "zap."))], list(zap.iterdir())
+    # and with no redaction file at all, the same
+    zap = planted_reports(j, [PASSWORD, "throwaway"])
+    (j.temp / "zap-redact.json").unlink()
+    code, out = j.run("Remove the context's credentials")
+    assert code != 0 and not (zap / "report.json").exists(), out
+
+
+def test_the_scrub_runs_whether_or_not_the_scan_passed_and_only_the_report_files_are_uploaded():
+    scan = jobs(load(WORKFLOW))["scan"]
+    names = [str(s.get("name", s.get("uses", ""))) for s in steps_of(scan)]
+    scrub = names.index("Remove the context's credentials from the reports")
+    assert names.index("Run the ZAP scan") < scrub < names.index("Report and apply fail-on")
+    spec = steps_of(scan)[scrub]
+    assert "always()" in spec["if"] and "context-file" in spec["if"], "a failed scan still leaves reports to upload"
+    upload = [s for s in steps_of(scan) if str(s.get("uses", "")).startswith("actions/upload-artifact@")][0]
+    uploaded = [Path(line.strip()).name for line in upload["with"]["path"].splitlines() if line.strip()]
+    assert sorted(uploaded) == ["report.html", "report.json", "report.md", "zap.sarif"], (
+        "anything else in the work directory (the context, the rules, the definition) must not be uploaded"
+    )
+
+
 # --- the live scans: the real ZAP image, against the fixture server ---------
 
 LIVE = os.environ.get("DAST_LIVE")
@@ -938,7 +1242,13 @@ def login_scan(job, *server_flags: str, fail_on: str, **inputs: object):
         fail_on=fail_on,
         **inputs,
     )
-    for fragment in ("Check the inputs", "Start the service and wait for it", "Run the ZAP scan"):
+    steps = ["Check the inputs"]
+    if inputs.get("context_file"):
+        steps.append("Check the context file")
+    steps += ["Start the service and wait for it", "Run the ZAP scan"]
+    if inputs.get("context_file"):
+        steps.append("Remove the context's credentials")
+    for fragment in steps:
         code, out = j.run(fragment, timeout=1500, REPO_ROOT=str(REPO))
         assert code == 0, f"{fragment}:\n{out}"
     return j
@@ -966,7 +1276,11 @@ def test_live_the_authenticated_full_scan_fails_the_same_service_at_high_naming_
     assert "Cross Site Scripting (Reflected)" in out, out
     assert alerts_in(j)[XSS] == "error"
     assert any("/account/search" in u for u in alert_urls(j)), alert_urls(j)
-    assert "Scanned signed in as the context user `throwaway`." in j.summary.read_text()
+    zap = j.temp / "zap"
+    assert not (zap / "context.context").exists(), "the context holds the credentials, encoded; it is not uploaded"
+    for name in ("report.json", "report.html", "report.md", "zap.sarif"):
+        assert "throwaway-password" not in (zap / name).read_text(), name
+    assert "Scanned signed in as a user of `context-file`" in j.summary.read_text()
 
 
 @live
@@ -978,21 +1292,3 @@ def test_live_the_baseline_spider_signs_in_too_which_is_why_it_is_not_refused_th
     signed_in = login_scan(job, "--insecure", fail_on="none", context_file=CONTEXT_PATH, context_user=CONTEXT_USER)
     assert signed_in.run("Report and apply fail-on")[0] == 0
     assert any("/account" in u for u in alert_urls(signed_in)), alert_urls(signed_in)
-
-
-@live
-def test_live_a_user_the_context_does_not_hold_stops_the_scan_and_names_the_user(job):
-    """A typo in context-user must not become an anonymous scan that passes."""
-    assert docker_usable(), "DAST_LIVE is set and docker is not usable: this job exists to run the real image"
-    j = job(
-        start_command=server_command(CONTEXT_PORT, "--login"),
-        target_url=f"http://127.0.0.1:{CONTEXT_PORT}",
-        context_file=CONTEXT_PATH,
-        context_user="nobody",
-    )
-    for fragment in ("Check the inputs", "Start the service and wait for it"):
-        code, out = j.run(fragment, REPO_ROOT=str(REPO))
-        assert code == 0, out
-    code, out = j.run("Run the ZAP scan", timeout=600, REPO_ROOT=str(REPO))
-    assert code != 0, "a user the context does not hold was accepted\n" + out
-    assert "ZAP failed to find user: nobody" in out and "left no report" in out, out
