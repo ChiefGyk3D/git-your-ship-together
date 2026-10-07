@@ -228,7 +228,7 @@ jobs:
     uses: ChiefGyk3D/git-your-ship-together/.github/workflows/python-ci.yml@<sha> # v1.3.1
     permissions:
       contents: read
-      id-token: write   # Doppler OIDC and Codecov; python-ci keeps it off the test job
+      id-token: write   # required even with codecov: false; job permissions are static
     secrets:
       DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}   # optional fallback, unset means OIDC only
     with:
@@ -1966,6 +1966,29 @@ exception is three steps, in this order:
 
 When the fix ships, remove both the caller's line and the entry. Renewing an
 entry means moving `review_by` and saying why in the reason.
+
+## Troubleshooting
+
+### Startup failure, no checks
+
+GitHub validates the permissions a caller grants before starting any job or
+evaluating its `if`. When a called workflow needs a permission the caller did
+not grant, the run fails at startup with a message such as:
+
+> `is requesting id-token: write, but is only allowed id-token: none`
+
+This is a `startup_failure`, not a failed check: GitHub creates no check run,
+so the required `ci / CI green` context never appears. A merge watcher looking
+only for failing checks will see nothing. The caller job must grant the union
+of permissions declared by the called workflow's jobs:
+
+- `python-ci.yml`: `contents: read` and `id-token: write`. Keep the OIDC grant
+  even when `codecov: false`: the `coverage` job's permission declaration is
+  static, so disabling that job cannot remove its grant.
+- `tofu-ci.yml`: `contents: read` and `id-token: write` for the plan job.
+- `container-release.yml`: `contents: read`, `packages: write`,
+  `id-token: write`, `attestations: write` and `security-events: write`.
+- `bash-ci.yml`: `contents: read`; it needs no `id-token` grant.
 
 ## Lessons learned the hard way
 
