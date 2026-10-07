@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+# Secret scan of the staged changes, before the commit exists.
+#
+# Enable it in a checkout once:   git config core.hooksPath .githooks
+#
+# Runs gitleaks at the version and sha256 that security.yml in
+# ChiefGyk3D/git-your-ship-together pins for CI (tests/test_pre_commit_hook.py
+# in that repository fails if the two disagree), so the keyboard and the
+# pipeline use the same rules. The release is downloaded once to
+# ~/.cache/gyst/gitleaks/<version>/, verified against the pinned hash on every
+# run, and reused. The repository's own .gitleaks.toml is honoured.
+#
+#   a finding            the commit is refused; the rule, file and line are
+#                        printed, never the secret
+#   offline, no binary   a warning, and the commit is allowed: a hook must not
+#                        block work on a train. CI and push protection still run
+#   a hash mismatch      refused: a download that is not the pinned release is
+#                        never run
+#
+# This file is copied, byte for byte, into every adopted repository by
+# scripts/new-repo.sh. Change it in git-your-ship-together, not in a copy.
+#
+# Overrides (tests and unusual machines): GYST_CACHE_DIR, GYST_GITLEAKS_URL
+# (the directory holding the release tarball).
+set -euo pipefail
+
+GITLEAKS_VERSION="8.30.1"
+GITLEAKS_SHA256="551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+
+warn() { echo "pre-commit: $*" >&2; }
+
+cache="${GYST_CACHE_DIR:-$HOME/.cache/gyst}/gitleaks/$GITLEAKS_VERSION"
+tarball="$cache/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+bin="$cache/gitleaks"
+base="${GYST_GITLEAKS_URL:-https://github.com/gitleaks/gitleaks/releases/download/v$GITLEAKS_VERSION}"
+
+sha_ok() { echo "$GITLEAKS_SHA256  $1" | sha256sum -c - >/dev/null 2>&1; }
+
+if [ "$(uname -s)-$(uname -m)" != "Linux-x86_64" ]; then
+  warn "no pinned gitleaks for $(uname -s) $(uname -m); secret scan skipped. CI and push protection still run."
+  exit 0
+fi
+
+# The cached tarball is checked against the pin every time; the binary is
+# only ever extracted from a tarball that passed.
+if ! { [ -f "$tarball" ] && sha_ok "$tarball"; }; then
+  rm -f "$tarball" "$bin"
+  mkdir -p "$cache"
+  part=$(mktemp "$cache/download.XXXXXX")
+  if ! curl -sSfL --max-time 120 -o "$part" "$base/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" 2>/dev/null; then
+    rm -f "$part"
+    warn "gitleaks $GITLEAKS_VERSION is not cached and could not be downloaded (offline?)."
+    warn "the staged changes were NOT scanned. CI and push protection still run."
+    exit 0
+  fi
+  if ! sha_ok "$part"; then
+    rm -f "$part"
+    echo "pre-commit: the gitleaks download does not match the pinned sha256; refusing to run it." >&2
+    echo "pre-commit: commit with --no-verify only if you have checked why." >&2
+    exit 1
+  fi
+  mv "$part" "$tarball"
+fi
+if [ ! -x "$bin" ]; then
+  tar -xzf "$tarball" -C "$cache" gitleaks
+  chmod 0755 "$bin"
+fi
+
+root=$(git rev-parse --show-toplevel)
+cd "$root"
+args=(git --pre-commit --staged --redact --no-banner --no-color -v)
+[ -f .gitleaks.toml ] && args+=(--config "$root/.gitleaks.toml")
+
+report=$(mktemp)
+trap 'rm -f "$report"' EXIT
+status=0
+"$bin" "${args[@]}" >"$report" 2>&1 || status=$?
+
+# gitleaks also exits 1 for a fatal error such as an unreadable config, so a
+# finding is exit 1 *and* a RuleID line.
+found=false
+grep -q '^RuleID:' "$report" && found=true
+
+case $status in
+  0) exit 0 ;;
+  1)
+    if ! $found; then
+      echo "pre-commit: gitleaks failed, so the staged changes were not scanned. Commit refused." >&2
+      grep -E 'ERR|FTL' "$report" | sed 's/^/  /' >&2 || true
+      exit 1
+    fi
+    echo "pre-commit: gitleaks found what looks like a secret in the staged changes. Commit refused." >&2
+    # Only these fields: the finding's own text and secret lines are never shown.
+    grep -E '^(RuleID|File|Line):' "$report" | sed -E 's/: +/=/' | paste -d' ' - - - | sed 's/^/  /' >&2 || true
+    echo "pre-commit: unstage or remove it. A false positive goes in .gitleaks.toml (allowlist) or on the line as gitleaks:allow." >&2
+    exit 1
+    ;;
+  *)
+    echo "pre-commit: gitleaks failed (exit $status), so the staged changes were not scanned. Commit refused." >&2
+    grep -E 'ERR|FTL' "$report" | sed 's/^/  /' >&2 || true
+    exit 1
+    ;;
+esac

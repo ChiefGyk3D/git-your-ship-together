@@ -36,7 +36,9 @@ scripts/new-repo.sh YOU/YOUR-REPO --dry-run --path ./your-checkout --out /tmp/pr
 ```
 
 It writes the callers from what your tree contains and prints the repository settings it would
-apply. Read both before running it for real. See [Getting started](Getting-started.md).
+apply. Read both before running it for real. It also writes `.githooks/pre-commit` (the gitleaks hook, see
+[security](Workflow-security.md)) and, when the README has a Developing section, the `git config core.hooksPath .githooks`
+line that turns it on. See [Getting started](Getting-started.md).
 
 ## The Doppler-free path
 

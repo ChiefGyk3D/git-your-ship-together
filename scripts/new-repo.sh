@@ -624,8 +624,43 @@ write_dependabot() {
   } >"$file"
 }
 
+# The secret-scan hook is one file in this repository, copied byte for byte
+# (tests/test_pre_commit_hook.py holds the copy identical). A hook the
+# repository already has under that name is left alone and said so.
+write_hook() {
+  mkdir -p "$out/.githooks"
+  if [ -f "$path/.githooks/pre-commit" ] && ! cmp -s "$HERE/.githooks/pre-commit" "$path/.githooks/pre-commit"; then
+    echo "left alone:   .githooks/pre-commit differs from the shared one; compare by hand" >&2
+    return 0
+  fi
+  cp "$HERE/.githooks/pre-commit" "$out/.githooks/pre-commit"
+  chmod 0755 "$out/.githooks/pre-commit"
+}
+
+# One line in the README's "Developing" section, once, naming the git config
+# that turns the hook on. A README with no such section is left alone.
+write_readme_hook_line() {
+  [ -f "$path/README.md" ] || return 0
+  python3 - "$path/README.md" "$out/README.md" <<'PY'
+import re, sys
+src, dst = sys.argv[1:3]
+text = open(src).read()
+if "core.hooksPath" in text:
+    sys.exit(0)
+line = (
+    "Enable the secret-scan hook once per checkout: `git config core.hooksPath .githooks`. "
+    "It runs gitleaks on staged changes; push protection and CI are the two that always run."
+)
+new, n = re.subn(r"(^## Developing[^\n]*\n)", lambda m: m.group(1) + "\n" + line + "\n", text, count=1, flags=re.M)
+if n:
+    open(dst, "w").write(new)
+PY
+}
+
 write_files() {
   mkdir -p "$out/.github/workflows"
+  write_hook
+  write_readme_hook_line
   write_ci
   write_security
   write_release
@@ -712,7 +747,8 @@ prepare_branch() {
 }
 
 commit_and_pr() {
-  git -C "$path" add .github
+  git -C "$path" add .github .githooks
+  [ -f "$path/README.md" ] && git -C "$path" add README.md
   if git -C "$path" diff --cached --quiet; then
     echo "nothing to commit: the caller files are already in place"
     return 0
@@ -747,6 +783,8 @@ $(if [ ${#kept_workflows[@]} -gt 0 ]; then echo "- Left alone: ${kept_workflows[
 
 Before merging: read the caller files once; every command in them came from what the repository already ran. A \`domain not allowed: <host>\` line in a job log names a host to add to \`extra-allowed-endpoints\`. Branch protection now requires the checks above.
 
+\`.githooks/pre-commit\` is the shared gitleaks hook; it protects a checkout only after \`git config core.hooksPath .githooks\`. Push protection and CI are the two that always run.
+
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
 EOF
 }
@@ -777,7 +815,7 @@ if $dry_run; then
   write_files
   echo
   echo "wrote:"
-  (cd "$out" && find .github -type f | sort)
+  (cd "$out" && find .github .githooks -type f 2>/dev/null | sort)
   echo
   echo "would apply:"
   settings_plan

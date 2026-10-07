@@ -94,6 +94,8 @@ publish).
 | `baseline/selected-actions.json` | The Actions allow-list every repository sets |
 | `baseline/risk-register.yaml` | Every advisory a pipeline ignores, with reason and expiry |
 | `scripts/audit_baseline.py` | Reads repository settings from the API: PASS / FAIL / UNKNOWN |
+| `.githooks/pre-commit` | The gitleaks hook on staged changes, same pin as `security.yml`; copied byte for byte by `new-repo.sh` |
+| `.githooks/pre-commit` | The gitleaks hook on staged changes, same pin as `security.yml`; copied byte for byte by `new-repo.sh` |
 | `scripts/new-repo.sh` | Adopt or start a repository: writes callers, opens the PR, applies settings |
 | `scripts/doppler-ci-set.sh` | Set one Doppler secret without the value touching a command line |
 | `scripts/project_sync.py` | The logic inlined into `project-sync.yml` |

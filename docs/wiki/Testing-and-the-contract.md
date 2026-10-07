@@ -41,6 +41,7 @@ lock.
 | `tests/test_sbom.py` | The package release's SBOMs: the one syft pin, the SBOMs kept out of the PyPI upload and into the checksums and provenance; the CycloneDX file validated against its own schema version (the committed sample, or the fixture job's real output) |
 | `tests/test_docs_wiki.py` | `docs-pages.yml` and `wiki-publish.yml`: where the write grants sit, default-branch-only, and the publish script itself run against a local git repository |
 | `tests/test_project_sync.py` | `project-sync.yml` and `scripts/project_sync.py` against recorded API responses |
+| `tests/test_pre_commit_hook.py` | The gitleaks pre-commit hook: same pin as `security.yml`, refuses a planted key without printing it, allows offline with a warning, copied byte for byte by `new-repo.sh` |
 | `tests/test_new_repo.py` | `scripts/new-repo.sh --dry-run` over synthetic trees |
 | `tests/test_fixture.py` | Every fixture requirement carries a hash; direct dependencies are in the lock; the fixture image is non-root |
 | `tests/test_wiki.py` | **This wiki**: every reusable workflow has a page whose generated table follows its YAML; regenerating is a no-op and a stale tree is caught; links resolve and cited tests exist; and every workflow, script, composite action, audit check, test file and baseline file is mentioned somewhere |
@@ -68,7 +69,7 @@ actionlint          # https://github.com/rhysd/actionlint
 zizmor --offline .  # https://docs.zizmor.sh
 ```
 
-Two tests do real network work when online (the gitleaks canary downloads the pinned release; the Semgrep registry
+Two tests do real network work when online (the gitleaks canary and the pre-commit hook tests download the pinned release; the Semgrep registry
 resolution is opt-in with `GYST_TEST_SEMGREP_REGISTRY=1`). The default run stays hermetic where it can.
 
 ## A good exercise
