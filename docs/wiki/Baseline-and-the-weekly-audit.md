@@ -38,10 +38,17 @@ it can be read back. Each section closes one of those.
 | Workflows | Every action pinned to a SHA with a version comment; every reference to these workflows names its tag; Dependabot configured, with the `uv` ecosystem for a universal uv lock | A universal lock updated by `pip` drops marker-gated lines and then fails `--require-hashes` on part of the matrix | `workflows-pinned`, `uses-shared-workflows`, `dependabot-config`, `dependabot-ecosystem` |
 | Actions settings | `GITHUB_TOKEN` read-only and unable to approve pull requests; every outside contributor's run needs approval; only GitHub-owned actions plus the named list in `baseline/selected-actions.json` may run | The pins say which commit runs; this says which actions may run at all. A pull request adding one outside the list fails at workflow start | `workflow-token-read-only`, `fork-pr-approval`, `actions-allowlist` |
 | Scanning | Secret scanning, push protection, Dependabot security updates, private vulnerability reporting on | Push protection stops a known credential shape at push time, before gitleaks sees it | `secret-scanning`, `push-protection`, `dependabot-security-updates`, `private-vulnerability-reporting` |
+| Security policy | Every repository has a `SECURITY.md` copied from `baseline/SECURITY.template.md`, with its latest supported tag and project-specific scope | OpenSSF Scorecard's SecurityPolicy check looks for a security policy; the private reporting link must point to an enabled repository setting | |
 | Risk exceptions | Every ignored advisory is in the register, for that repository, unexpired | An exception cannot be taken quietly or forgotten | `risk-exceptions` |
 
-Each section of BASELINE.md carries the `gh api` command that sets it, and
-`scripts/new-repo.sh` applies all of them.
+Copy the security template to the root of each calling repository, then fill
+in its owner and repository name, latest tagged release, and project-specific
+scope bullets. If there is no tagged release yet, say so instead of claiming a
+supported version. The upstream-project boundary and reporting expectations in
+the template apply to every repository.
+
+Each settings section of BASELINE.md carries the `gh api` command that sets it,
+and `scripts/new-repo.sh` applies all of them.
 
 **Lessons the allow-list taught.** An action used from a subdirectory
 (`snyk/actions/setup`, `github/codeql-action/init`) needs the subdirectory form of the
@@ -106,6 +113,8 @@ with another owner's. The `register-issues` job holds only the
 workflow's own `GITHUB_TOKEN` with `issues: write`. `tests/test_audit_baseline.py` feeds the
 audit a passing repository and a broken one per criterion, so the audit that checks the fleet
 is itself checked.
+`tests/test_security_policy.py` holds the shared policy template and the baseline's
+copy-and-fill instructions to the reporting and response terms every caller uses.
 
 ## The organization checks
 

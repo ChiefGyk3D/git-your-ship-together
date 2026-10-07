@@ -363,15 +363,20 @@ jobs:
       egress-policy: block
 
   # Falsifiability of dast.yml, with the real ZAP image: the scan job's own
-  # steps run against the fixture server twice, once with its headers (must
-  # pass) and once without (must fail at `fail-on: medium`, and pass at `high`,
-  # which a header-less page does not reach). tests/test_dast.py skips these
-  # unless DAST_LIVE is set, and fails them when it is set and docker is not
-  # usable, so this is the job that holds the proof.
+  # steps run against the fixture server, one scan per class of hole. The
+  # baseline must pass the page with its headers and fail it without them
+  # (`fail-on: medium`; `high` is not reached by a missing header). The page
+  # that reflects its query unescaped must pass the baseline (passive rules
+  # cannot see it) and fail the full scan at `high`, which the escaping page
+  # must pass at `medium`. The api scan must import the committed OpenAPI
+  # definition, whose server is a host that does not exist, and still scan
+  # the loopback service. tests/test_dast.py skips these unless DAST_LIVE is
+  # set, and fails them when it is set and docker is not usable, so this is
+  # the job that holds the proof. The active scans take minutes each.
   dast-live:
     name: dast fails when it should
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 60
     permissions:
       contents: read
     steps:

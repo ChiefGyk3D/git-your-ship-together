@@ -33,6 +33,33 @@ Trivy (an image scan for CRITICAL and HIGH findings) lives in
 [tofu-ci](Workflow-tofu-ci.md); both upload SARIF too. Fuzzing is
 [python-fuzz](Workflow-python-fuzz.md).
 
+## The scan that runs the service: DAST
+
+Everything in the table reads code or metadata. [dast](Workflow-dast.md) is the
+one check that starts the service and talks to it, with OWASP ZAP, and it is three
+scans in one workflow because each sees a different class of problem:
+
+| `scan-type` | Sees | Blind to | Cost |
+|---|---|---|---|
+| `baseline` | What a client sees: headers, cookies, banners, information in responses. Passive; no attack traffic | What the server does with its input | About a minute |
+| `full` | The baseline, then every URL and parameter the spider found under ZAP's active rules: cross-site scripting, SQL and command injection, path traversal and the rest | Operations no link reaches; anything behind a login | Minutes; bounded by `active-scan-minutes` |
+| `api` | Every operation an OpenAPI, SOAP or GraphQL definition declares, under the active rules, plus unexpected status codes and content types | Operations the definition leaves out | Minutes |
+
+The reason to run it beside CodeQL and Semgrep is that they match patterns in code
+they can see, and ZAP's active scan needs no pattern: it does what an attacker does
+to the running service, with its real framework, configuration and middleware in the
+path. A reflected cross-site scripting hole in `fixture/dast/server.py` passes the
+baseline (every header is right) and fails the full scan at `high`; that is the proof
+the `dast-live` CI job holds. Findings land in code scanning under category `zap` (or the
+`sarif-category` the caller sets), tagged `zap-<scan-type>` so the tab says which scan
+found each one.
+
+The scans send attack payloads, which is why the workflow refuses any target that is
+not loopback: the service under test is the one the job started, never a shared
+staging host and never production. A scan of a deployed environment, with
+authentication and real integrations, is a different thing with different risks; it
+is on the [Roadmap](Roadmap.md) as work for a self-hosted runner.
+
 Snyk is a **reporter** here, not a gate: its findings go to the Security tab and the
 job fails only when Snyk did not run (an expired token, a project it could not read).
 CodeQL and the dependency audit are the gates. It runs weekly and on manual dispatch

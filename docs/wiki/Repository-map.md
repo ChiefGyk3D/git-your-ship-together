@@ -68,7 +68,7 @@ publish).
 | `python-package-release.yml` | [Release](Which-workflow-do-I-need.md) | Build, check, publish to PyPI and the GitHub release |
 | `artifact-release.yml` | [Release](Which-workflow-do-I-need.md) | Build any file, sign it, attach it to the release |
 | `security.yml` | [Security](Workflow-security.md) | CodeQL, gitleaks, audit, dependency review, Semgrep, Snyk, Scorecard |
-| `dast.yml` | [dast](Workflow-dast.md) | OWASP ZAP baseline against a loopback service the caller starts, SARIF under `zap` |
+| `dast.yml` | [dast](Workflow-dast.md) | OWASP ZAP baseline, full (active) or api scan against a loopback service the caller starts, SARIF under `zap` |
 | `dependabot-auto-merge.yml` | [Automation](Which-workflow-do-I-need.md) | Auto-merge Dependabot bumps up to a size |
 | `project-sync.yml` | [Automation](Which-workflow-do-I-need.md) | Keep a GitHub Projects v2 board current |
 | `docs-pages.yml` | [Automation](Which-workflow-do-I-need.md) | Build docs, deploy to GitHub Pages |
@@ -89,7 +89,7 @@ publish).
 | Path | What it is |
 |---|---|
 | `.github/actions/doppler-secrets/` | Composite action: fetch a Doppler config as masked env vars. The source of the inlined copies |
-| `.github/dependabot.yml` | Weekly action, pip and docker bumps with a seven-day cooldown |
+| `.github/dependabot.yml` | Weekly action, pip (the repository root and `.github/requirements/`) and docker bumps with a seven-day cooldown |
 | `BASELINE.md` | The settings every repository must meet, with the `gh api` command for each |
 | `baseline/repos.txt` | Which repositories the baseline covers |
 | `baseline/selected-actions.json` | The Actions allow-list every repository sets |
@@ -101,6 +101,8 @@ publish).
 | `scripts/doppler-ci-set.sh` | Set one Doppler secret without the value touching a command line |
 | `scripts/project_sync.py` | The logic inlined into `project-sync.yml` |
 | `scripts/inline_project_sync.py` | Regenerates that inlined copy |
+| `.github/requirements/` | `pip-audit` and `semgrep`: the one-line `.in` and the hash lock `security.yml` carries inline |
+| `scripts/tool_locks.py` | Resolves those locks (`--relock`) and copies them into `security.yml`; `--check` fails on a difference |
 | `scripts/gen_wiki.py` | Builds this wiki from `docs/wiki/` and renders each workflow's inputs table from its YAML |
 | `fixture/` | The smallest project that exercises every job |
 | `tests/` | The [contract](Testing-and-the-contract.md), as pytest |

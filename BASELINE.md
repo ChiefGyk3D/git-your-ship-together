@@ -246,6 +246,15 @@ scans the full history on every pull request through `security.yml`. The
 byte-identical `.githooks/pre-commit` is also present in every repository;
 `scripts/new-repo.sh` installs it and documents how to enable it per checkout.
 
+**Every repository has a `SECURITY.md`.** OpenSSF Scorecard's SecurityPolicy
+check looks for one. Copy `baseline/SECURITY.template.md` to the repository
+root, replace `<OWNER>/<REPO>` and `<version>` with that repository's latest
+tagged release, and replace the scope placeholder with bullets naming that
+project's maintained components. If it has no tagged release yet, say so
+instead of claiming a version is supported. Keep the upstream-project boundary
+in the template. The private-reporting link works only when private
+vulnerability reporting is enabled below.
+
 Checked: `secret-scanning`, `push-protection`, `dependabot-security-updates`,
 `private-vulnerability-reporting`, `pre-commit-hook`.
 
@@ -333,4 +342,7 @@ permissions are in the README's "The weekly audit".
 CI job per language, the pull request, every setting above, the line in
 `baseline/repos.txt`. The Doppler identity is the one step it prints for a
 person. Then run the audit until it is clean. A repository that is not in the
-list is not covered by the baseline.
+list is not covered by the baseline. For its security policy, copy
+`baseline/SECURITY.template.md` into the repository as `SECURITY.md` and fill
+in the repository name, latest supported tag and project-specific scope before
+the pull request is merged.
