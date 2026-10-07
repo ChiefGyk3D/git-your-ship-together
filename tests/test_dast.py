@@ -385,14 +385,21 @@ exit "${FAKE_EXIT:-0}"
 """
 
 
-def scan_step(job, tmp_path, **inputs):
-    """Run the scan step with a fake docker first on PATH; returns (exit code, output, docker's arguments)."""
+def scan_step(job, tmp_path, between=None, **inputs):
+    """Run the scan step with a fake docker first on PATH; returns (exit code, output, docker's arguments).
+
+    With a context file the check step runs first, as in the job; `between(job)` runs after it, before the scan."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
     (bin_dir / "docker").write_text(FAKE_DOCKER)
     (bin_dir / "docker").chmod(0o755)
     record = tmp_path / "docker-args"
     j = job(**inputs)
+    if inputs.get("context_file"):
+        checked, check_out = j.run("Check the context file", REPO_ROOT=str(REPO))
+        assert checked == 0, check_out
+    if between:
+        between(j)
     code, out = j.run(
         "Run the ZAP scan",
         REPO_ROOT=str(REPO),
@@ -514,6 +521,7 @@ def test_the_context_and_the_user_become_zaps_n_and_u_for_every_scan_type(job, t
     assert flag(cmd, "-n") == "context.context", "the script reads the context from the mounted directory"
     assert flag(cmd, "-U") == "throwaway"
     assert (j.temp / "zap" / "context.context").read_bytes() == CONTEXT.read_bytes()
+    assert (j.temp / "zap" / "context.context").stat().st_mode & 0o004, "the container's user is not the runner's"
 
 
 def test_a_context_without_a_user_passes_only_n_and_no_context_passes_neither(job, tmp_path):
@@ -529,7 +537,8 @@ def test_a_context_without_a_user_passes_only_n_and_no_context_passes_neither(jo
 
 def test_a_user_name_with_shell_characters_reaches_zap_as_one_argument(job, tmp_path):
     name = 'a b"; touch pwned; "$(id)'
-    _, code, out, args = scan_step(job, tmp_path, context_file=CONTEXT_PATH, context_user=name)
+    path = context_file(tmp_path, USER_ENTRY, user_entry(name, "throwaway-password"))
+    _, code, out, args = scan_step(job, tmp_path, context_file=path, context_user=name)
     assert code == 0, out
     assert flag(after_image(args), "-U") == name
     assert not (tmp_path / "pwned").exists() and not (REPO / "pwned").exists()
@@ -823,6 +832,8 @@ PAGE_URL = "<loginpageurl>http://127.0.0.1:8080/login</loginpageurl>"
 UNITS = "<pollunits>REQUESTS</pollunits>"
 USER_ENTRY = re.search(r"<user>.*?</user>", CONTEXT.read_text()).group(0)
 PASSWORD = "throwaway-password"
+USERS_BLOCK = re.search(r"<users>.*?</users>", CONTEXT.read_text(), re.S).group(0)
+SCOPE_OK = "http://127\\.0\\.0\\.1:8080/.*"
 HOSTILE_HOST = re.compile(r"example\.com|evil\.example|2130706433|0x7f|0177|ffff", re.I)
 
 
@@ -836,6 +847,11 @@ def context_file(tmp_path: Path, old: str, new: str, head: str = "") -> str:
 
 def check_context(job, path: str, user: str = "throwaway", **inputs: object):
     return job(context_file=path, context_user=user, **inputs).run("Check the context file", REPO_ROOT=str(REPO))
+
+
+def runner_unescape(data: str) -> str:
+    """What the Actions runner does to a workflow command's data before it uses it."""
+    return data.replace("%0D", "\r").replace("%0A", "\n").replace("%25", "%")
 
 
 def log_without_masks(out: str) -> str:
@@ -930,9 +946,32 @@ OFF_HOST = [
     ),
     ("script session", "<type>0</type>\n        </session>", "<type>2</type>\n        </session>", "", "session"),
     # Scope: the spider follows links the include regexes allow.
-    ("scope everything", "http://127\\.0\\.0\\.1:8080.*", ".*", "", "<incregexes>"),
-    ("scope look-alike host", "http://127\\.0\\.0\\.1:8080.*", "http://127\\.0\\.0\\.1.*", "", "<incregexes>"),
-    ("scope other host", "http://127\\.0\\.0\\.1:8080.*", "https://example\\.com.*", "", "<incregexes>"),
+    ("scope everything", SCOPE_OK, ".*", "", "<incregexes>"),
+    ("scope look-alike host", SCOPE_OK, "http://127\\.0\\.0\\.1.*", "", "<incregexes>"),
+    ("scope other host", SCOPE_OK, "https://example\\.com.*", "", "<incregexes>"),
+    # The review's two: an alternation is a second scope, and `:8080.*` also matches http://127.0.0.1:8080@evil/.
+    ("scope alternation", SCOPE_OK, "http://127\\.0\\.0\\.1:8080/.*|https?://evil\\.example/.*", "", "<incregexes>"),
+    ("scope prefix form", SCOPE_OK, "http://127\\.0\\.0\\.1:8080.*", "", "<incregexes>"),
+    ("scope userinfo", SCOPE_OK, "http://127\\.0\\.0\\.1:8080/@evil\\.example/.*", "", "<incregexes>"),
+    ("scope group", SCOPE_OK, "(http://127\\.0\\.0\\.1:8080/|https://evil\\.example/).*", "", "<incregexes>"),
+    (
+        "scope mixed content",
+        SCOPE_OK,
+        "http://127\\.0\\.0\\.1:8080/<x>|http://evil.example/.*</x>",
+        "",
+        "child elements",
+    ),
+    # Mixed content: ZAP reads the element's own text, an XML parser's itertext() joins the children's too.
+    (
+        "mixed content in a login url",
+        LOGIN,
+        "<loginurl>http://<x>127.0.0.1:8080/</x>evil.example/login</loginurl>",
+        "",
+        "child elements",
+    ),
+    ("mixed content in the type", "<type>2</type>", "<type>2<x>0</x></type>", "", "child elements"),
+    ("interpolation", LOGIN, "<loginurl>http://127.0.0.1:8080/${sys:user.name}</loginurl>", "", "dollar-brace"),
+    ("no users at all", USERS_BLOCK, "", "", "holds no users"),
     # The user must exist in the context, or the scan is anonymous.
     ("user not in context", "dGhyb3dhd2F5;2;", "bm9ib2R5;2;", "", "not one of the context's users"),
 ]
@@ -961,6 +1000,8 @@ ACCEPTED = [
     ("IPv6 loopback", LOGIN, "<loginurl>http://[::1]:8080/login</loginurl>"),
     ("IPv6 loopback written out", LOGIN, "<loginurl>http://[0:0:0:0:0:0:0:1]:8080/login</loginurl>"),
     ("a harmless query", LOGIN, "<loginurl>http://127.0.0.1:8080/login?next=/account</loginurl>"),
+    ("scope: the bare origin", SCOPE_OK, "http://127\\.0\\.0\\.1:8080"),
+    ("scope: a path", SCOPE_OK, "^http://localhost:8080/app/v1/.*"),
     ("a poll url on loopback", UNITS, UNITS + "<pollurl>http://localhost:8080/account</pollurl>"),
 ]
 
@@ -1021,6 +1062,51 @@ def test_a_file_that_is_not_utf8_xml_is_refused(job, tmp_path):
     assert code != 0 and "exactly one <context>" in out, out
 
 
+def test_the_scope_regex_of_the_shipped_context_is_the_anchored_form():
+    text = CONTEXT.read_text()
+    assert (
+        f"<incregexes>{SCOPE_OK}</incregexes>" in text
+        and "<incregexes>http://127\\.0\\.0\\.1:8080</incregexes>" in text
+    )
+
+
+def test_zap_is_given_the_bytes_that_were_validated_not_whatever_the_workspace_holds_now(job, tmp_path):
+    """The install and start commands run after the check and can write the workspace."""
+    path = tmp_path / "app.context"
+    path.write_bytes(CONTEXT.read_bytes())
+
+    def rewrite(j):
+        path.write_text(CONTEXT.read_text().replace(LOGIN, "<loginurl>https://example.com/login</loginurl>"))
+
+    j, code, out, args = scan_step(job, tmp_path, between=rewrite, context_file=str(path), context_user="throwaway")
+    assert code == 0, out
+    assert (j.temp / "zap" / "context.context").read_bytes() == CONTEXT.read_bytes()
+    assert b"example.com" not in (j.temp / "zap" / "context.context").read_bytes()
+
+
+def test_a_validated_copy_that_changes_before_the_scan_is_refused(job, tmp_path):
+    def tamper(j):
+        (j.temp / "zap-context.xml").write_text("<configuration/>")
+
+    _, code, out, args = scan_step(job, tmp_path, between=tamper, context_file=CONTEXT_PATH, context_user="throwaway")
+    assert code != 0 and "changed after the check" in out and not args, out
+
+
+def test_a_password_with_the_runners_escape_sequences_is_masked_as_the_runner_will_read_it(job, tmp_path):
+    password = "abc%0Adef%25x"
+    j = job(
+        context_file=context_file(tmp_path, USER_ENTRY, user_entry("scan-user", password)), context_user="scan-user"
+    )
+    code, out = j.run("Check the context file", REPO_ROOT=str(REPO))
+    assert code == 0, out
+    masks = {line.removeprefix("::add-mask::") for line in out.splitlines() if line.startswith("::add-mask::")}
+    assert "abc%250Adef%2525x" in masks, masks
+    assert password not in masks, "the runner would read %0A as a newline and mask something else"
+    for bad in ("two\rlines", "two\nlines"):
+        code, out = check_context(job, context_file(tmp_path, USER_ENTRY, user_entry("scan-user", bad)), "scan-user")
+        assert code != 0 and "line break" in out, out
+
+
 # The credentials of the context never reach a log, the summary, the SARIF or an uploaded report -------------
 
 
@@ -1031,7 +1117,11 @@ def test_the_context_check_masks_every_shape_of_the_credentials_and_keeps_them_i
     )
     code, out = j.run("Check the context file", REPO_ROOT=str(REPO))
     assert code == 0, out
-    masked = {line.removeprefix("::add-mask::") for line in out.splitlines() if line.startswith("::add-mask::")}
+    masked = {
+        runner_unescape(line.removeprefix("::add-mask::"))
+        for line in out.splitlines()
+        if line.startswith("::add-mask::")
+    }
     for form in (
         password,
         urllib.parse.quote(password, safe=""),
@@ -1099,6 +1189,21 @@ def test_the_credentials_in_alert_instances_are_absent_from_the_sarif_the_summar
     assert sarif["runs"][0]["results"], "the SARIF is still a report"
     assert not (zap / "context.context").exists(), "the context holds the credentials, encoded; it is never uploaded"
     assert not (j.temp / "zap-redact.json").exists()
+
+
+def test_a_credential_equal_to_a_key_of_the_report_cannot_blind_the_gate(job, tmp_path):
+    """Redaction is by value: a password `alerts` must not rename the `alerts` key and turn the gate green."""
+    password, user = "alerts", "riskcode"
+    path = context_file(tmp_path, USER_ENTRY, user_entry(user, password))
+    j = job(context_file=path, context_user=user, fail_on="medium", scan_type="full")
+    assert j.run("Check the context file", REPO_ROOT=str(REPO))[0] == 0
+    zap = planted_reports(j, [password, user])
+    assert j.run("Remove the context's credentials")[0] == 0
+    report = json.loads((zap / "report.json").read_text())
+    assert report["site"][0]["alerts"], "the keys are intact"
+    code, out = j.run("Report and apply fail-on")
+    assert code != 0 and "Content Security Policy" in out, "the Medium alerts must still fail the gate\n" + out
+    assert password not in "".join(report["site"][0]["alerts"][0]["instances"][0].values())
 
 
 def test_when_the_credentials_cannot_be_removed_the_reports_are_deleted_not_uploaded(job, tmp_path):

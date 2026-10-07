@@ -56,30 +56,45 @@ The guard is a step that runs before the service starts. It parses the file as X
 references and entities hide a URL from a pattern over the text (an earlier version of the guard was a `grep`, and
 `<loginurl><![CDATA[https://example.com/login]]></loginurl>` matched nothing). It refuses the file unless:
 
-- it declares no DOCTYPE or entity, is UTF-8 and holds exactly one `<context>`;
+- it declares no DOCTYPE or entity, is UTF-8 and holds exactly one `<context>`, and no element the guard reads has child
+  elements inside it. ZAP's configuration reader returns only an element's own text, so
+  `<loginurl>http://<x>127.0.0.1:8080/</x>evil.example/login</loginurl>` reads as loopback to a parser that joins the children
+  and as `http://evil.example/login` to ZAP (measured with ZAP 2.17.0's own reader in the security review). The guard reads
+  exactly the element's own text and refuses mixed content;
 - every `loginurl`, `loginpageurl` and `pollurl`, decoded, is an absolute `http` or `https` URL whose host is loopback once
   normalised: `localhost`, an address in `127.0.0.0/8`, or `::1`. Case is normalised, so `HTTP://LocalHost:8080` passes. Decimal,
   octal, hex and short IPv4 (`2130706433`, `0x7f.0.0.1`, `0177.0.0.1`, `127.1`), `0.0.0.0`, `::`, IPv4-mapped IPv6, zone ids,
   `localhost.` and look-alikes such as `127.0.0.1.evil.example` are refused: a resolver may accept them, so the check does not;
-- none of those URLs has user information (`http://127.0.0.1@evil.example`), a fragment, a backslash or whitespace (parsers
-  disagree about them), a `{%username%}` or `{%password%}` token, a query parameter named like a credential, or a user's
+- none of those URLs has user information (`http://127.0.0.1@evil.example`), a fragment, a backslash, whitespace (parsers
+  disagree about them) or a `${...}` interpolation (ZAP expands them), a `{%username%}` or `{%password%}` token, a query parameter named like a credential, or a user's
   credential in it. ZAP substitutes the tokens into a login URL, which would put the credential in the URL and in every log and
   report that records it; they belong in `loginbody`, the POST body;
 - the authentication is manual (type 0), form-based (2) or JSON-based (5), with only the elements ZAP's export writes. HTTP,
   script, browser-based and auto-detect authentication can sign in at hosts or run code the guard cannot read, so they are
   refused rather than let through, as is session management other than cookies. These are the type numbers of ZAP 2.17.0,
   read from an export of each;
-- every `incregexes` entry starts at a loopback origin (`http://127\.0\.0\.1:8080.*`), so the spider cannot follow a link to
-  another host.
+- every `incregexes` entry is a loopback origin and a port of digits, ending there or continuing with a slash and then only plain
+  path characters, with `.*` allowed (`http://127\.0\.0\.1:8080` and `http://127\.0\.0\.1:8080/.*`; ZAP matches the whole URL,
+  read from `Context.isInContext` in the 2.17.0 jar), so the spider cannot follow a link to another host. A prefix is not enough:
+  `:8080.*` also matches `http://127.0.0.1:8080@evil.example/`, and `...|https?://evil\.example/.*` is a second scope. After the
+  slash there is no `|`, group, `@`, bracket or backslash;
+- when `context-user` is set, the context holds a user of that name. A context with no users at all is refused.
+
+The bytes the guard validated are the bytes ZAP is given: the guard copies them to the runner's temporary directory with their
+SHA-256, and the scan step copies and checks that file, never the path in the workspace, which the install and start commands
+run after the guard and could have rewritten.
 
 An error names the element and the rule and never prints the value it refused, because the value may be the credential.
 
 ### Credentials stay out of the output
 
 The users' names and credentials are masked in the job log in every shape they take (raw, URL-encoded, HTML-escaped,
-JSON-escaped, base64). A step that runs whether or not the scan passed then removes them from `report.json`, `report.html`,
+JSON-escaped, base64), each escaped the way the runner reads a workflow command (`%` as `%25`, a line break as `%0D` or `%0A`),
+so a password that contains `%0A` is masked as itself and not as a newline; a credential with a real line break is refused. A step that runs whether or not the scan passed then removes them from `report.json`, `report.html`,
 `report.md` and the SARIF before the report step builds the summary and before the artifact upload, and deletes the copy of the
-context file from the work directory. If it cannot redact and check, it deletes the reports instead of uploading them. A value
+context file from the work directory. If it cannot redact and check, it deletes the reports instead of uploading them. The JSON reports
+are redacted by value after parsing and never by key, so a password that equals a report key (`alerts`) cannot rename the key
+and turn the `fail-on` gate green; a report that does not parse is deleted. A value
 under four characters cannot be redacted without mangling the reports, so such a context is refused. The summary says a scan
 was signed in, not as whom.
 

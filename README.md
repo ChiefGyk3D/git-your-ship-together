@@ -629,7 +629,13 @@ days, whether the scan passed or not.
   URLs the context names, so the file is parsed as XML (never searched with a
   pattern: CDATA, character references and entities hide a URL from one) and
   refused unless:
-  - it declares no DOCTYPE or entity, is UTF-8, and holds one `<context>`;
+  - it declares no DOCTYPE or entity, is UTF-8, and holds one `<context>`, and
+    no element the check reads has child elements inside it: ZAP's configuration
+    reader returns only an element's own text, so
+    `<loginurl>http://<x>127.0.0.1:8080/</x>evil.example/login</loginurl>` is
+    loopback to a reader that joins the children and `http://evil.example/login`
+    to ZAP. The check reads exactly the element's own text, and mixed content is
+    refused;
   - every `loginurl`, `loginpageurl` and `pollurl`, decoded, is an absolute
     `http` or `https` URL whose host, normalised, is `localhost` or an address
     in `127.0.0.0/8` or `::1`. Decimal, octal, hex and short IPv4 forms,
@@ -637,7 +643,8 @@ days, whether the scan passed or not.
     hosts (`127.0.0.1.evil.example`) are not loopback written plainly and are
     refused. Case is normalised, so `HTTP://LocalHost:8080` passes;
   - no such URL has user information (`http://127.0.0.1@evil.example`), a
-    fragment, a backslash, whitespace, a `{%username%}` or `{%password%}` token
+    fragment, a backslash, whitespace, a `${...}` interpolation (ZAP expands
+    them), a `{%username%}` or `{%password%}` token
     (ZAP substitutes them into a URL, which would put the credential in every
     log and report that records it; they belong in `loginbody`), a query
     parameter named like a credential, or a user's credential in it;
@@ -646,18 +653,33 @@ days, whether the scan passed or not.
     run code the check cannot read, so they are refused, as is any element of
     the authentication section it does not know, and session management other
     than cookies;
-  - every `incregexes` entry starts at a loopback origin
-    (`http://127\.0\.0\.1:8080.*`), so the spider cannot follow links to
-    another host.
+  - every `incregexes` entry is a loopback origin and a port of digits, ending
+    there or continuing with a slash and then only plain path characters, with
+    `.*` allowed (`http://127\.0\.0\.1:8080` and `http://127\.0\.0\.1:8080/.*`; ZAP
+    matches the whole URL, read from `Context.isInContext` in the 2.17.0 jar), so
+    the spider cannot follow links to another host. A prefix is not enough:
+    `:8080.*` also matches `http://127.0.0.1:8080@evil.example/`, and
+    `...|https?://evil\.example/.*` is a second scope. No `|`, group, `@`,
+    bracket or backslash after the slash;
+  - when `context-user` is set, the context holds a user of that name (a
+    context with no users at all is refused too).
+
+  The bytes the check validated are the bytes ZAP gets: it copies them to the
+  runner's temporary directory with their SHA-256, and the scan step copies and
+  checks that file, not the workspace path, which `install-command` and
+  `start-command` run after the check and could have rewritten.
 
   An error names the element and the rule and never prints the value it
   refused, because the value may be the credential.
 
   **Credentials stay out of the output.** The users' names and credentials are
   masked in the log (`::add-mask::`, in the raw, URL-encoded, HTML-escaped,
-  JSON-escaped and base64 forms), and a step that runs whether or not the scan
+  JSON-escaped and base64 forms, escaped as the runner reads a command: `%` as
+  `%25`, a line break as `%0D` or `%0A`; a credential with a real line break is
+  refused), and a step that runs whether or not the scan
   passed removes them from `report.json`, `report.html`, `report.md` and the
-  SARIF before the report step and the artifact upload, deletes the copy of the
+  SARIF (JSON by value, never by key, so a password equal to a report key cannot
+  rename it and blind the gate) before the report step and the artifact upload, deletes the copy of the
   context file from the work directory, and, if it cannot do that and check it,
   deletes the reports instead of uploading them. A credential under four
   characters cannot be redacted without mangling the reports, so the context is
@@ -719,7 +741,7 @@ days, whether the scan passed or not.
   trailing dot, look-alike hosts, decimal, octal and hex IPv4, `0.0.0.0`, the
   IPv6 forms, user information, fragment and backslash tricks, a token or a
   credential in a URL, each authentication kind the check does not vet, a scope
-  regex that is not loopback), each shown to print nothing it refused; and a
+  regex that is not loopback), each shown to print nothing it refused (mixed content inside a URL element, an include-regex alternation and the `:8080.*` prefix form among them); and a
   context whose reports carry the credentials in a URL, an evidence field and
   the HTML shows none of them in the SARIF, the summary, the log or any
   uploaded report afterwards.

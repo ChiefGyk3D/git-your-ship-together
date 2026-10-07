@@ -12,7 +12,8 @@
         <name>fixture-login</name>
         <desc/>
         <inscope>true</inscope>
-        <incregexes>http://127\.0\.0\.1:8080.*</incregexes>
+        <incregexes>http://127\.0\.0\.1:8080</incregexes>
+        <incregexes>http://127\.0\.0\.1:8080/.*</incregexes>
         <urlparser>
             <class>org.zaproxy.zap.model.StandardParameterParser</class>
             <config>{"kvps":"&amp;","kvs":"=","struct":[]}</config>
