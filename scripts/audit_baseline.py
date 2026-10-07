@@ -62,6 +62,7 @@ IGNORE_VULN = re.compile(r"--ignore-vuln[\s=]+([A-Za-z0-9-]+)")
 # declaration and capture the `type:` line beneath it.
 ALLOW_GHSAS = re.compile(r"^[ \t]*dependency-review-allow-ghsas:[ \t]*(\S.*?)[ \t]*$", re.M)
 REGISTER = Path(__file__).resolve().parent.parent / "baseline" / "risk-register.yaml"
+PRE_COMMIT_HOOK = Path(__file__).resolve().parent.parent / ".githooks" / "pre-commit"
 
 PASS, FAIL, UNKNOWN = "PASS", "FAIL", "UNKNOWN"
 
@@ -554,6 +555,21 @@ def check_dependabot(repo: str, fetch: Fetcher) -> Result:
     return Result(repo, "dependabot-config", PASS, "present, with a cooldown")
 
 
+def check_pre_commit_hook(repo: str, fetch: Fetcher) -> Result:
+    code, file = fetch(f"/repos/{repo}/contents/.githooks/pre-commit")
+    if code == 404:
+        return Result(repo, "pre-commit-hook", FAIL, "no .githooks/pre-commit")
+    if code != 200 or not isinstance(file, dict) or not isinstance(file.get("content"), str):
+        return Result(repo, "pre-commit-hook", UNKNOWN, unreadable(code, file))
+    try:
+        content = base64.b64decode(file["content"], validate=True)
+    except (ValueError, TypeError):
+        return Result(repo, "pre-commit-hook", UNKNOWN, "the hook content is not valid base64")
+    if content != PRE_COMMIT_HOOK.read_bytes():
+        return Result(repo, "pre-commit-hook", FAIL, ".githooks/pre-commit does not match the shared hook")
+    return Result(repo, "pre-commit-hook", PASS, "present and byte-identical to the shared hook")
+
+
 def universal_uv_lock(text: str) -> bool:
     """Whether a requirements file's header says `uv pip compile --universal` wrote it."""
     header = []
@@ -763,6 +779,7 @@ def audit_repo(
     results.append(check_dependabot(repo, fetch))
     results.append(check_dependabot_ecosystem(repo, fetch))
     results.append(check_doppler_variable(repo, fetch, reads_doppler))
+    results.append(check_pre_commit_hook(repo, fetch))
     return results
 
 

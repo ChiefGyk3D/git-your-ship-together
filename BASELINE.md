@@ -242,10 +242,12 @@ and a PUT to every calling repository, which is the point.
 **Secret scanning with push protection**, **Dependabot security updates** and
 **private vulnerability reporting** are on. Push protection refuses a commit
 carrying a known credential shape before gitleaks ever runs; gitleaks then
-scans the full history on every pull request through `security.yml`.
+scans the full history on every pull request through `security.yml`. The
+byte-identical `.githooks/pre-commit` is also present in every repository;
+`scripts/new-repo.sh` installs it and documents how to enable it per checkout.
 
 Checked: `secret-scanning`, `push-protection`, `dependabot-security-updates`,
-`private-vulnerability-reporting`.
+`private-vulnerability-reporting`, `pre-commit-hook`.
 
 Set with:
 
