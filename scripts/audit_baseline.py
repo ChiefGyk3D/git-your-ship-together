@@ -562,7 +562,7 @@ def check_pre_commit_hook(repo: str, fetch: Fetcher) -> Result:
     if code != 200 or not isinstance(file, dict) or not isinstance(file.get("content"), str):
         return Result(repo, "pre-commit-hook", UNKNOWN, unreadable(code, file))
     try:
-        content = base64.b64decode(file["content"], validate=True)
+        content = base64.b64decode(file["content"])
     except (ValueError, TypeError):
         return Result(repo, "pre-commit-hook", UNKNOWN, "the hook content is not valid base64")
     if content != PRE_COMMIT_HOOK.read_bytes():

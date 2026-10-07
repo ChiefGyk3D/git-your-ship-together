@@ -34,7 +34,6 @@ Each has a "done when" in its issue.
 **Supply chain and baseline**
 
 - **#99** Attach a CycloneDX and an SPDX SBOM to every package and artifact release, signed with the rest.
-- **#96** `new-repo.sh` should ship a gitleaks pre-commit hook beside the commit-claims hook.
 
 ## What needs the lab: gaps GitHub-hosted runners cannot close
 

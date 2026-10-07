@@ -47,6 +47,13 @@ def encoded(text: str) -> dict:
     return {"content": base64.b64encode(text.encode()).decode(), "encoding": "base64"}
 
 
+def wrapped(text: str) -> dict:
+    """The contents API as GitHub sends it: base64 wrapped at 60 columns with newlines in it."""
+    content = base64.encodebytes(text.encode()).decode()
+    assert "\n" in content.rstrip("\n"), "the fixture must be long enough to wrap, or it proves nothing"
+    return {"content": content, "encoding": "base64"}
+
+
 def good_answers() -> dict[str, tuple[int, dict | list]]:
     """Every endpoint answering the way BASELINE.md wants."""
     r = f"/repos/{REPO_NAME}"
@@ -104,7 +111,7 @@ def good_answers() -> dict[str, tuple[int, dict | list]]:
         ),
         f"{r}/contents/.githooks/pre-commit": (
             200,
-            encoded((REPO / ".githooks" / "pre-commit").read_text()),
+            wrapped((REPO / ".githooks" / "pre-commit").read_text()),
         ),
         f"{r}/contents/requirements.txt": (404, {"message": "Not Found"}),
         f"{r}/contents/requirements-dev.txt": (404, {"message": "Not Found"}),
