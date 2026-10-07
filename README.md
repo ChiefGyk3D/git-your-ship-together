@@ -77,7 +77,7 @@ Sixteen reusable workflows and one composite action:
 | `.github/workflows/docs-pages.yml` | Build a static documentation site with a command you supply (MkDocs strict by default) on every pull request; upload it and deploy it to GitHub Pages from the default branch only. The two Pages writes sit on the deploy job alone |
 | `.github/workflows/wiki-publish.yml` | Run a command that generates a wiki tree, then replace the repository's GitHub wiki with it, as `github-actions[bot]`, only when something changed, from the default branch only. The write token sits on a job that runs none of your code |
 | `.github/workflows/project-sync.yml` | Keeps a GitHub Projects v2 board current: adds an issue or pull request when it opens, moves it to Done with a date when it closes or merges, and a weekly reconcile repairs what an event missed. The token comes from Doppler over OIDC; nothing from a pull request is checked out. See [Keeping a project current](#keeping-a-project-current) |
-| `.github/workflows/dast.yml` | OWASP ZAP against a loopback service the caller starts: the `baseline` scan (spider and passive rules, no attack traffic), the `full` scan (the active rules too: injection, cross-site scripting, traversal) or the `api` scan (the active rules over an OpenAPI, SOAP or GraphQL definition), with a `fail-on` threshold; reports kept as an artifact, findings uploaded as SARIF under category `zap`. The caller's service runs in a job that holds only `contents: read`; the upload is a second job that runs none of it. See [DAST](#dast-owasp-zap) |
+| `.github/workflows/dast.yml` | OWASP ZAP against a loopback service the caller starts: the `baseline` scan (spider and passive rules, no attack traffic), the `full` scan (the active rules too: injection, cross-site scripting, traversal) or the `api` scan (the active rules over an OpenAPI, SOAP or GraphQL definition), optionally signed in through a ZAP context file and user, with a `fail-on` threshold; reports kept as an artifact, findings uploaded as SARIF under category `zap`. The caller's service runs in a job that holds only `contents: read`; the upload is a second job that runs none of it. See [DAST](#dast-owasp-zap) |
 | `.github/workflows/security.yml` | CodeQL (the `actions` language included by default), gitleaks, a dependency audit (pip-audit, and any other tool by command), Semgrep, dependency review on pull requests (with a licence denylist), optional Snyk, optional OpenSSF Scorecard |
 | `.github/workflows/dependabot-auto-merge.yml` | Queues a Dependabot bump to merge itself once the required checks pass, up to a size you choose |
 | `.github/actions/doppler-secrets` | Fetches a Doppler config as masked environment variables, over OIDC or a Service Token. The workflows inline a copy of it (see the design rules); this is the source |
@@ -565,9 +565,10 @@ uploads do not close each other's alerts:
 
 Add the jobs to the caller's `CI green` gate (`needs:`). What a call does, in
 order: refuses a bad input (a `target-url` that is not loopback, an unknown
-`fail-on` or `scan-type`, a missing `rules-file`, an `api-definition` that is
-neither a repository file nor a loopback URL, or one given without `scan-type:
-api`); runs `install-command`, then `start-command` in the background with its
+`fail-on` or `scan-type`, a missing `rules-file` or `context-file`, a
+`context-user` with no `context-file` or one the context does not hold, a context
+that could sign in off host or hide where (see below), an `api-definition` that is neither a
+repository file nor a loopback URL, or one given without `scan-type: api`); runs `install-command`, then `start-command` in the background with its
 output in a file; waits for `ready-path` to answer 2xx or 3xx (a service that
 exits non-zero before then fails at once with the tail of its log); runs the ZAP
 image with the script `scan-type` names; converts ZAP's JSON report to SARIF;
@@ -606,6 +607,149 @@ days, whether the scan passed or not.
   too. The service is whatever the caller starts, so give it a recorded dataset
   and no outbound dependency, and `block` mode's allow-list stays the image pull
   and GitHub.
+- **Behind a login: `context-file` and `context-user`.** The anonymous spider
+  reaches only what a link on a public page reaches, and the form login in front
+  of the rest stops it. Export a ZAP context (the URLs in scope, the login
+  method, the users) from ZAP's desktop or API, commit it, and name it in
+  `context-file`; `context-user` is which of its users to scan as. The workflow
+  passes ZAP's `-n` and `-U`, and the spider (and for `full` the active scan)
+  signs in as that user, so the active rules reach the pages and parameters
+  behind the login. All three scan types take them: ZAP's packaged baseline,
+  full and api scripts each accept `-n` and `-U` (read from the pinned image),
+  and the baseline's spider signs in too, so its passive rules see the signed-in
+  pages; nothing is refused by scan type. A `context-user` with no `context-file`
+  is refused, since a user lives in a context, and a name the context does not
+  hold is refused before the service starts, so a typo cannot become an anonymous
+  scan that passes. The context names the login URL with the port, so it must
+  match `target-url`, and the credentials in it belong to a throwaway account of
+  the service this job starts, never a real one: the file is committed, and the
+  service is on loopback with nothing behind it.
+
+  **What the context guard checks.** ZAP sends the user's credentials to the
+  URLs the context names, so the file is parsed as XML (never searched with a
+  pattern: CDATA, character references and entities hide a URL from one) and
+  refused unless:
+  - it declares no DOCTYPE or entity, is UTF-8, and holds one `<context>`, and
+    no element the check reads has child elements inside it: ZAP's configuration
+    reader returns only an element's own text, so
+    `<loginurl>http://<x>127.0.0.1:8080/</x>evil.example/login</loginurl>` is
+    loopback to a reader that joins the children and `http://evil.example/login`
+    to ZAP. The check reads exactly the element's own text, and mixed content is
+    refused;
+  - every `loginurl`, `loginpageurl` and `pollurl`, decoded, is an absolute
+    `http` or `https` URL whose host, normalised, is `localhost` or an address
+    in `127.0.0.0/8` or `::1`. Decimal, octal, hex and short IPv4 forms,
+    `0.0.0.0`, `::`, IPv4-mapped IPv6, zone ids, a trailing dot and look-alike
+    hosts (`127.0.0.1.evil.example`) are not loopback written plainly and are
+    refused. Case is normalised, so `HTTP://LocalHost:8080` passes;
+  - no such URL has user information (`http://127.0.0.1@evil.example`), a
+    fragment, a backslash, whitespace, a `${...}` interpolation (ZAP expands
+    them), a `{%username%}` or `{%password%}` token
+    (ZAP substitutes them into a URL, which would put the credential in every
+    log and report that records it; they belong in `loginbody`), a query
+    parameter named like a credential, or a user's credential in it;
+  - the authentication is manual (0), form-based (2) or JSON-based (5). HTTP,
+    script, browser-based and auto-detect authentication can sign in at hosts or
+    run code the check cannot read, so they are refused, as is any element of
+    the authentication section it does not know, and session management other
+    than cookies;
+  - every `incregexes` entry fits a whitelist grammar, because Java matches the
+    whole URL against it (`Context.isInContext` in the 2.17.0 jar) and anything
+    loose is a second scope: an escaped loopback origin (dots as `\.`, IPv6 as
+    `\[::1\]`; an unescaped dot is a wildcard and an unescaped `[::1]` a
+    character class), an optional port of digits, then the end or a literal `/`,
+    literal path characters (letters, digits, `-`, `_`, `~`, `/`, `\.`) and at
+    most one trailing `.*` or `$`. `http://127\.0\.0\.1:8080` and
+    `http://127\.0\.0\.1:8080/.*` pass. Anything else is refused as a form the
+    check cannot prove safe, and the message says so and shows the form to use:
+    `/?.*` and `/*.*` make the slash optional, so they match
+    `http://127.0.0.1:8080@evil.example/x`, as does `:8080.*`; ZAP's default
+    `\Q...\E.*` is refused too. No other quantifier, group, class or alternation;
+  - when `context-user` is set, the context holds a user of that name (a
+    context with no users at all is refused too).
+
+  The bytes the check validated are the bytes ZAP gets: it copies them to the
+  runner's temporary directory with their SHA-256, and the scan step copies and
+  checks that file, not the workspace path, which `install-command` and
+  `start-command` run after the check and could have rewritten. The start
+  command runs with access to the context, so treat its credentials as visible
+  to it: a background process of the caller can still swap the file between the
+  digest check and the copy, and could read the throwaway credentials anyway.
+
+  An error names the element and the rule and never prints the value it
+  refused, because the value may be the credential.
+
+  **Credentials stay out of the output.** The users' names and credentials are
+  masked in the log (`::add-mask::`, in the raw, URL-encoded, HTML-escaped,
+  JSON-escaped and base64 forms, escaped as the runner reads a command: `%` as
+  `%25`, a line break as `%0D` or `%0A`; a credential with a real line break is
+  refused), and a step that runs whether or not the scan
+  passed removes them from `report.json`, `report.html`, `report.md` and the
+  SARIF (JSON by value, never by key, so a password equal to a report key cannot
+  rename it and blind the gate) before the report step and the artifact upload, deletes the copy of the
+  context file from the work directory, and, if it cannot do that and check it,
+  deletes the reports instead of uploading them. A credential under four
+  characters cannot be redacted without mangling the reports, so the context is
+  refused; use a longer throwaway value. The summary says a scan was signed in
+  but not as whom.
+
+  **Proof that it signed in: `auth-check-url`.** ZAP's scripts select the user and
+  never check that it signed in, and a login that answers with the redirect the
+  logged-in indicator looks for says nothing about the session that follows it
+  (a cookie with the wrong `Path` makes every later request anonymous). So
+  `context-user` requires `auth-check-url`, a page only a signed-in user reaches
+  (a profile or account page on `target-url`), and the job is verified only if
+  this holds:
+  - before the context is accepted, it has a form-based or JSON-based login with
+    a login URL and at least one of a logged-in or logged-out indicator (neither
+    may match an empty response), and `auth-check-url` is held to the rules of
+    every URL above, is on the origin of `target-url`, is inside the context's
+    include regexes, and is not the login, login-page or poll URL. Manual or
+    missing authentication, a missing `auth-check-url`, and `auth-check-url`
+    without `context-user` are refused;
+  - the scan step adds a small ZAP hook (`--hook`, which all three scripts take).
+    Before the attack phase (before the spider, and again before the active
+    scan, which `full` and `api` have) and once more after the scan, the hook has
+    ZAP request `auth-check-url` through its own session handling, as the
+    selected user (forced-user mode, switched off again right after) and, before
+    the attack phase, with no user. ZAP's regex search then judges exactly those
+    recorded responses with the context's indicators: signed in means the
+    logged-in indicator matches and a logged-out indicator, if there is one,
+    does not, or with only a logged-out indicator that it does not match;
+  - verified means the user's response is signed in at every check and the
+    anonymous one never is (a page anonymous users also see proves nothing). A
+    login response, or any response that merely matches an indicator somewhere
+    in ZAP's history, counts for nothing;
+  - any failed, missing or erroring check fails the job. The message names the
+    check (as the user before the attack, with no user, or after the scan) and
+    the likely causes: wrong credentials, a wrong login URL or body, a session
+    cookie whose Path or Domain does not cover `auth-check-url`, a session the
+    scan invalidated (a logout URL that is not excluded), or a wrong indicator.
+    The summary line and the `zap-authenticated` SARIF tag come from this result
+    only.
+
+  Why not ZAP's `stats.auth.*` counters: no success or failure counter appeared
+  for form-based authentication in the runs here; a good and a bad login dumped
+  the same keys. What it cannot prove: that the indicator is a good one, or
+  that `auth-check-url` is as protected as the pages you care about. Choose a
+  page that needs the same session as the rest.
+
+  **Request-time enforcement: not required.** ZAP's own requests are fixed by the
+  context: it signs in only at the vetted URLs, spiders only what the vetted
+  include regexes allow and attacks only `target-url`. What remains is the
+  service redirecting off host, and that service is the caller's own code, which
+  already runs in this job with the same network and needs no ZAP to reach out.
+  `egress-policy: block` is the control for that, and it is what this
+  repository's own `fixture dast` job runs under; requiring it for
+  `context-file` would make the feature unusable on the default and add no check
+  that has been measured, since harden-runner's enforcement on a container with
+  host networking was not. Use `block` for a signed-in scan. Both policies pass
+  the same static check, and a test pins that.
+
+  A signed-in scan and an anonymous one in the same repository need their own
+  `artifact-name` and `sarif-category`, like any two scans. What it cannot do:
+  sign in through a login ZAP's authentication methods do not cover, or reach a
+  deployed environment, which stays refused with every other non-loopback host.
 - **The AJAX spider** (`ajax-spider: true`) adds a headless browser that clicks
   through the page, for a front end whose links are built by JavaScript. A
   server-rendered page does not need it, and it is slower.
@@ -633,7 +777,22 @@ days, whether the scan passed or not.
   nothing in its headers is wrong, and fails the full scan at `high` naming the
   cross-site scripting; the escaping page passes the full scan at `medium`; and
   the api scan imports `fixture/dast/openapi.json`, whose server is a host that
-  does not exist, and still scans the loopback service.
+  does not exist, and still scans the loopback service. For the login,
+  `fixture/dast/server.py --login` serves a form login with throwaway
+  credentials and, only behind it, the same unescaped echo at `/account/search`;
+  `fixture/dast/login.context` is the ZAP context for it. The full scan with no
+  context passes at `high`, and the same scan with `context-file` and
+  `context-user: throwaway` fails at `high` naming the cross-site scripting;
+  a baseline over the headerless login fixture reaches `/account` only with the
+  context. The context guard has a refusal test per way a URL can hide or point
+  off host (CDATA, character references, entities and a DOCTYPE, mixed case, a
+  trailing dot, look-alike hosts, decimal, octal and hex IPv4, `0.0.0.0`, the
+  IPv6 forms, user information, fragment and backslash tricks, a token or a
+  credential in a URL, each authentication kind the check does not vet, a scope
+  regex that is not loopback), each shown to print nothing it refused (mixed content inside a URL element, an include-regex alternation and the `:8080.*` prefix form among them); and a
+  context whose reports carry the credentials in a URL, an evidence field and
+  the HTML shows none of them in the SARIF, the summary, the log or any
+  uploaded report afterwards.
 
 Inputs of `dast.yml`:
 
@@ -651,6 +810,9 @@ Inputs of `dast.yml`:
 | `active-scan-minutes` | `0` | Longest the active scan runs (`full`, `api`); `0` is no limit, so set it with `timeout-minutes` |
 | `api-definition` | empty | For `api`: an OpenAPI or SOAP definition as a repository file or a loopback URL, or the loopback URL of a GraphQL endpoint |
 | `api-format` | `openapi` | Format of `api-definition`: `openapi` (its `servers` are overridden with `target-url`), `soap` or `graphql` |
+| `context-file` | empty | A ZAP context file in the repository (URLs in scope, login method, users), passed as ZAP's `-n`; all three scan types. Parsed as XML and refused unless every sign-in URL is loopback, with no credential in a URL. Its credentials are a throwaway account's, because the file is committed; they are masked in the log and redacted from the reports |
+| `auth-check-url` | empty | A page only a signed-in user reaches (a profile or account URL on `target-url`, inside the context's scope, not the login). Required with `context-user`, refused without. ZAP requests it as the user and anonymously before the attack phase and again after the scan; any failed check fails the job |
+| `context-user` | empty | Which user of `context-file` to scan as (`-U`): the spider, and for `full` the active scan, run signed in. Refused without `context-file`, without `auth-check-url`, when the context holds no such user, and when the context has no form or JSON login with a logged-in or logged-out indicator; the job fails unless the checks of `auth-check-url` pass |
 | `python-version` | empty | Python to set up first; empty skips it |
 | `install-command` | empty | Installs the service, run before `start-command` |
 | `upload-sarif` | `true` | Upload the findings under `sarif-category`; needs `security-events: write` |
@@ -2081,7 +2243,7 @@ The tests are the contract, one file per thing they hold still:
 | `tests/test_audit_baseline.py` | The audit, fed a passing repository and a broken one per criterion; a 403 comes back UNKNOWN, never PASS; exit codes tell FAIL from UNKNOWN |
 | `tests/test_security_policy.py` | The shared SECURITY.md template's reporting, support, scope and response terms, and the baseline's copy-and-fill instructions |
 | `tests/test_risk_register.py` | The register's shape, its dates, no duplicate advisory, every repository named is in the baseline list, and no entry has expired |
-| `tests/test_dast.py` | `dast.yml`'s contract, its steps run under bash (refusals, a service that blocks, detaches, dies or never answers; the `fail-on` threshold and the SARIF against canned ZAP reports; the scan step against a fake `docker`, so each `scan-type` is shown to run its ZAP script with its flags), and, in the `dast-live` CI job, the real ZAP image against `fixture/dast/server.py`: the baseline with and without its headers, the full scan against a page that reflects its query and one that escapes it, the api scan against its OpenAPI definition |
+| `tests/test_dast.py` | `dast.yml`'s contract, its steps run under bash (refusals, a service that blocks, detaches, dies or never answers; the `fail-on` threshold and the SARIF against canned ZAP reports; the scan step against a fake `docker`, so each `scan-type` is shown to run its ZAP script with its flags), and, in the `dast-live` CI job, the real ZAP image against `fixture/dast/server.py`: the baseline with and without its headers, the full scan against a page that reflects its query and one that escapes it, the api scan against its OpenAPI definition, the anonymous and the signed-in full scan against the login fixture |
 | `tests/test_fuzz.py` | `python-fuzz.yml`'s inputs and pin, and its run step executed under bash against tiny targets: a missing directory, no match, a passing target, a crashing one and a hanging one (which must fail the step and leave its `timeout-*` input) |
 | `tests/test_tool_locks.py` | No `run:` step of any workflow or composite action runs a `pip install` without `--require-hashes`; `security.yml` carries `.github/requirements/*.txt` verbatim; every lock line has a hash; the Snyk install step, run under bash with a recording `pip`, installs a hashed lock under `--require-hashes` and refuses an unhashed one without calling pip |
 | `tests/test_security_jobs.py` | The Semgrep job's defaults and its content-driven config; the gitleaks job as a pinned binary: no licence, no Doppler, no `id-token`, the sha256 checked before extraction, full history, SARIF under category `gitleaks`, and a canary step that plants an AWS-shaped key in a scratch repository and requires exit 1 before the real scan runs (the test also fetches the pinned release, checks the hash, and runs that canary for real; it skips only when offline) |

@@ -29,6 +29,8 @@ goes red with a message naming the fix.
 
 from __future__ import annotations
 
+import base64
+import html
 import importlib.util
 import json
 import os
@@ -39,6 +41,8 @@ import socket
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -49,6 +53,11 @@ WORKFLOW = WORKFLOWS / "dast.yml"
 FIXTURES = REPO / "tests" / "fixtures" / "dast"
 SERVER = REPO / "fixture" / "dast" / "server.py"
 OPENAPI = REPO / "fixture" / "dast" / "openapi.json"
+CONTEXT = REPO / "fixture" / "dast" / "login.context"
+CONTEXT_PATH = "fixture/dast/login.context"
+CONTEXT_USER = "throwaway"
+AUTH_CHECK_URL = "http://127.0.0.1:8080/account"  # a page only a signed-in user reaches, on the origin of target-url
+CONTEXT_PORT = 8080  # the context names the login URL with a port, so the live tests serve the fixture on it
 IMAGE = re.compile(r"^ghcr\.io/zaproxy/zaproxy:(\d+\.\d+\.\d+)@sha256:[0-9a-f]{64}$")
 
 INPUTS = {
@@ -63,6 +72,9 @@ INPUTS = {
     "active-scan-minutes": 0,
     "api-definition": "",
     "api-format": "openapi",
+    "auth-check-url": "",
+    "context-file": "",
+    "context-user": "",
     "python-version": "",
     "install-command": "",
     "upload-sarif": True,
@@ -169,6 +181,8 @@ class Job:
         self.summary = tmp_path / "summary.md"
         self.inputs = {name: spec["default"] for name, spec in declared().items() if "default" in spec}
         self.inputs.update({k.replace("_", "-"): v for k, v in inputs.items()})
+        if self.inputs.get("context-user") and "auth_check_url" not in inputs:
+            self.inputs["auth-check-url"] = AUTH_CHECK_URL  # a signed-in scan always names its check page
         self.groups: list[int] = []
 
     def resolve(self, template: str) -> str:
@@ -270,6 +284,18 @@ def server_command(port: int, *flags: str) -> str:
             {"scan_type": "api", "api_definition": "schema.graphqls", "api_format": "graphql"},
             "loopback URL of the GraphQL",
         ),
+        ({"context_user": "throwaway"}, "context-user 'throwaway' is set but context-file is empty"),
+        ({"scan_type": "full", "context_user": "throwaway"}, "has nobody to sign in as"),
+        (
+            {"context_file": CONTEXT_PATH, "context_user": "throwaway", "auth_check_url": ""},
+            "auth-check-url is empty",
+        ),
+        (
+            {"context_file": CONTEXT_PATH, "auth_check_url": AUTH_CHECK_URL},
+            "auth-check-url is set but context-user is empty",
+        ),
+        ({"context_file": "no/such/app.context"}, "context-file 'no/such/app.context' is not a file"),
+        ({"context_file": "fixture/dast", "context_user": "throwaway"}, "is not a file in the repository"),
         ({"scan_type": "baseline", "api_definition": "fixture/dast/openapi.json"}, "but scan-type is 'baseline'"),
         ({"scan_type": "full", "api_definition": "http://127.0.0.1:8080/openapi.json"}, "but scan-type is 'full'"),
     ],
@@ -289,6 +315,15 @@ def test_a_bad_input_is_refused_before_anything_starts_and_the_message_names_the
         {"scan_type": "api", "api_definition": "http://127.0.0.1:8080/openapi.json"},
         {"scan_type": "api", "api_definition": "http://localhost:8080/soap?wsdl", "api_format": "soap"},
         {"scan_type": "api", "api_definition": "http://[::1]:8080/graphql", "api_format": "graphql"},
+        {"context_file": CONTEXT_PATH},
+        {"context_file": CONTEXT_PATH, "context_user": "throwaway"},
+        {"scan_type": "full", "context_file": CONTEXT_PATH, "context_user": "throwaway"},
+        {
+            "scan_type": "api",
+            "api_definition": "fixture/dast/openapi.json",
+            "context_file": CONTEXT_PATH,
+            "context_user": "throwaway",
+        },
     ],
 )
 def test_every_scan_type_with_its_own_inputs_is_accepted(job, inputs):
@@ -362,14 +397,21 @@ exit "${FAKE_EXIT:-0}"
 """
 
 
-def scan_step(job, tmp_path, **inputs):
-    """Run the scan step with a fake docker first on PATH; returns (exit code, output, docker's arguments)."""
+def scan_step(job, tmp_path, between=None, **inputs):
+    """Run the scan step with a fake docker first on PATH; returns (exit code, output, docker's arguments).
+
+    With a context file the check step runs first, as in the job; `between(job)` runs after it, before the scan."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
     (bin_dir / "docker").write_text(FAKE_DOCKER)
     (bin_dir / "docker").chmod(0o755)
     record = tmp_path / "docker-args"
     j = job(**inputs)
+    if inputs.get("context_file"):
+        checked, check_out = j.run("Check the context file", REPO_ROOT=str(REPO))
+        assert checked == 0, check_out
+    if between:
+        between(j)
     code, out = j.run(
         "Run the ZAP scan",
         REPO_ROOT=str(REPO),
@@ -472,6 +514,48 @@ def test_the_rules_file_rides_along_for_every_scan_type(job, tmp_path):
         assert (j.temp / "zap" / "rules.tsv").read_text() == rules.read_text()
 
 
+@pytest.mark.parametrize(
+    ("scan_type", "script", "extra"),
+    [
+        ("baseline", "zap-baseline.py", {}),
+        ("full", "zap-full-scan.py", {}),
+        ("api", "zap-api-scan.py", {"api_definition": "fixture/dast/openapi.json"}),
+    ],
+)
+def test_the_context_and_the_user_become_zaps_n_and_u_for_every_scan_type(job, tmp_path, scan_type, script, extra):
+    """All three packaged scripts take -n and -U (read from the pinned image's /zap/*.py), the baseline's too."""
+    j, code, out, args = scan_step(
+        job, tmp_path, scan_type=scan_type, context_file=CONTEXT_PATH, context_user="throwaway", **extra
+    )
+    assert code == 0, out
+    cmd = after_image(args)
+    assert cmd[0] == script
+    assert flag(cmd, "-n") == "context.context", "the script reads the context from the mounted directory"
+    assert flag(cmd, "-U") == "throwaway"
+    assert (j.temp / "zap" / "context.context").read_bytes() == CONTEXT.read_bytes()
+    assert (j.temp / "zap" / "context.context").stat().st_mode & 0o004, "the container's user is not the runner's"
+
+
+def test_a_context_without_a_user_passes_only_n_and_no_context_passes_neither(job, tmp_path):
+    _, code, out, args = scan_step(job, tmp_path, scan_type="full", context_file=CONTEXT_PATH)
+    assert code == 0, out
+    cmd = after_image(args)
+    assert flag(cmd, "-n") == "context.context" and "-U" not in cmd
+    _, code, out, args = scan_step(job, tmp_path, scan_type="full")
+    assert code == 0, out
+    cmd = after_image(args)
+    assert "-n" not in cmd and "-U" not in cmd
+
+
+def test_a_user_name_with_shell_characters_reaches_zap_as_one_argument(job, tmp_path):
+    name = 'a b"; touch pwned; "$(id)'
+    path = context_file(tmp_path, USER_ENTRY, user_entry(name, "throwaway-password"))
+    _, code, out, args = scan_step(job, tmp_path, context_file=path, context_user=name)
+    assert code == 0, out
+    assert flag(after_image(args), "-U") == name
+    assert not (tmp_path / "pwned").exists() and not (REPO / "pwned").exists()
+
+
 def test_a_scan_that_leaves_no_report_fails_the_step_naming_the_script(job, tmp_path):
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -541,6 +625,104 @@ def test_the_summary_and_the_sarif_say_which_scan_type_ran(job):
         assert "zap-full" in rule["properties"]["tags"], (
             "the Security tab must tell a full scan's alert from a baseline's"
         )
+
+
+def good_checks() -> dict:
+    """What the hook records for a scan that held its session: both before-checks and the after-check."""
+    return {
+        "checks": [
+            {"phase": "before", "user_signed_in": True, "anonymous_signed_in": False},
+            {"phase": "after", "user_signed_in": True},
+        ]
+    }
+
+
+def signed_in_report(job, evidence, **inputs):
+    """The report step for a signed-in scan whose ZAP hook left `evidence` (a dict, text, or None for no file)."""
+    j = job(fail_on="none", scan_type="full", context_file=CONTEXT_PATH, context_user="throwaway", **inputs)
+    zap = j.temp / "zap"
+    zap.mkdir()
+    shutil.copy(FIXTURES / "insecure.json", zap / "report.json")
+    if evidence is not None:
+        (zap / "auth-evidence.json").write_text(evidence if isinstance(evidence, str) else json.dumps(evidence))
+    j.output.write_text("exit=0\n")
+    code, out = j.run("Report and apply fail-on")
+    return j, zap, code, out
+
+
+def test_a_signed_in_scan_says_so_and_tags_its_alerts_only_when_every_check_passed(job):
+    j, zap, code, out = signed_in_report(job, good_checks())
+    assert code == 0, out
+    assert "Signed-in scan, verified" in j.summary.read_text()
+    sarif = json.loads((zap / "zap.sarif").read_text())
+    for rule in sarif["runs"][0]["tool"]["driver"]["rules"]:
+        assert "zap-authenticated" in rule["properties"]["tags"]
+
+
+def broken(index: int, **changes) -> dict:
+    evidence = good_checks()
+    evidence["checks"][index] = {**evidence["checks"][index], **changes}
+    return evidence
+
+
+FAILING_EVIDENCE = [
+    ("no file", None, "no usable record"),
+    ("garbage", "not json", "no usable record"),
+    ("a list", "[]", "no usable record"),
+    ("checks not a list", {"checks": "yes"}, "no usable record"),
+    ("the old any-match record", {"verified": True, "hits": 1}, "no usable record"),
+    ("no checks", {"checks": []}, "check before the attack phase did not run"),
+    ("no after check", {"checks": good_checks()["checks"][:1]}, "check after the scan did not run"),
+    ("no before check", {"checks": good_checks()["checks"][1:]}, "check before the attack phase did not run"),
+    (
+        "user not signed in before",
+        broken(0, user_signed_in=False),
+        "BEFORE the attack phase, auth-check-url did not look signed in as",
+    ),
+    (
+        "user flag not a bool",
+        broken(0, user_signed_in="true"),
+        "BEFORE the attack phase, auth-check-url did not look signed in as",
+    ),
+    ("anonymous signed in", broken(0, anonymous_signed_in=True), "looked signed in with NO user"),
+    (
+        "anonymous not checked",
+        {"checks": [{"phase": "before", "user_signed_in": True}, good_checks()["checks"][1]]},
+        "NO user",
+    ),
+    (
+        "session lost during the scan",
+        broken(1, user_signed_in=False),
+        "AFTER the scan, auth-check-url no longer looked signed in",
+    ),
+    ("hook error before", broken(0, error="RuntimeError"), "before check could not be completed"),
+    ("hook error after", broken(1, error="LookupError"), "after check could not be completed"),
+]
+
+
+@pytest.mark.parametrize(
+    ("evidence", "message"), [c[1:] for c in FAILING_EVIDENCE], ids=[c[0] for c in FAILING_EVIDENCE]
+)
+def test_a_signed_in_scan_that_fails_any_check_fails_the_job_names_it_and_is_not_reported_as_authenticated(
+    job, evidence, message
+):
+    """Wrong credentials, a cookie the protected page never receives, an expired session: each is a failed check."""
+    j, zap, code, out = signed_in_report(job, evidence)
+    assert code != 0, "a scan with a failed signed-in check passed\n" + out
+    assert message in out, out
+    for cause in ("wrong credentials", "cookie whose Path or Domain", "invalidated it", "logout URL", "indicator"):
+        assert cause in out, f"the message does not name {cause!r}\n{out}"
+    assert "Signed-in scan NOT verified" in j.summary.read_text()
+    assert "Signed-in scan, verified" not in j.summary.read_text()
+    sarif = json.loads((zap / "zap.sarif").read_text())
+    assert all("zap-authenticated" not in r["properties"]["tags"] for r in sarif["runs"][0]["tool"]["driver"]["rules"])
+
+
+def test_an_anonymous_scan_does_not_claim_to_be_authenticated(job):
+    j, _, _, zap = report(job, "insecure.json", "none")
+    assert "signed in" not in j.summary.read_text()
+    sarif = json.loads((zap / "zap.sarif").read_text())
+    assert all("zap-authenticated" not in r["properties"]["tags"] for r in sarif["runs"][0]["tool"]["driver"]["rules"])
 
 
 def test_the_sarif_is_valid_enough_for_code_scanning(job):
@@ -617,6 +799,815 @@ def test_the_fixture_escapes_what_it_echoes_unless_told_not_to():
         finally:
             proc.kill()
             proc.wait()
+
+
+class Fixture:
+    """The fixture server in one mode, on a port, for the duration of a with block."""
+
+    def __init__(self, port: int, *flags: str):
+        self.port, self.flags = port, flags
+
+    def __enter__(self):
+        self.proc = subprocess.Popen([sys.executable, str(SERVER), "--port", str(self.port), *self.flags])
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            try:
+                urllib.request.urlopen(f"http://127.0.0.1:{self.port}/", timeout=1).close()
+                return self
+            except OSError:
+                time.sleep(0.1)
+        raise AssertionError("the fixture server never answered")
+
+    def __exit__(self, *exc):
+        self.proc.kill()
+        self.proc.wait()
+
+    def get(self, path: str, cookie: str = "", data: str | None = None):
+        """(status, headers, body), redirects not followed."""
+
+        class NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, *args, **kwargs):
+                return None
+
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}{path}",
+            data=data.encode() if data is not None else None,
+            headers={"Cookie": cookie} if cookie else {},
+        )
+        try:
+            with urllib.request.build_opener(NoRedirect).open(request, timeout=5) as resp:
+                return resp.status, dict(resp.headers), resp.read().decode()
+        except urllib.error.HTTPError as err:
+            return err.code, dict(err.headers), err.read().decode()
+
+
+GOOD_LOGIN = "username=throwaway&password=throwaway-password"
+
+
+def test_the_login_mode_hides_an_unescaped_echo_behind_a_form_login_and_leaves_the_public_pages_escaped():
+    with Fixture(free_port(), "--login") as server:
+        status, headers, _ = server.get("/account")
+        assert status == 302 and headers["Location"] == "/login", "an anonymous request must be sent to the login"
+        assert server.get("/account/search?q=%3Cb%3Ex")[0] == 302
+        assert server.get("/login")[0] == 200
+        status, headers, _ = server.get("/login", data="username=throwaway&password=wrong")
+        assert status == 401 and "Set-Cookie" not in headers
+        status, headers, _ = server.get("/login", data=GOOD_LOGIN)
+        assert status == 302 and headers["Location"] == "/account"
+        cookie = headers["Set-Cookie"].split(";")[0]
+        assert "HttpOnly" in headers["Set-Cookie"]
+        status, _, body = server.get("/account", cookie)
+        assert status == 200 and "Signed in as throwaway" in body
+        status, headers, body = server.get("/account/search?q=%3Cb%3Ex", cookie)
+        assert status == 200 and "<b>x" in body, "the hole behind the login echoes q unescaped"
+        assert "Content-Security-Policy" in headers
+        assert server.get("/account", "fixture_session=forged")[0] == 302, "only a cookie the server issued signs in"
+        _, _, body = server.get("/search?q=%3Cb%3Ex")
+        assert "&lt;b&gt;x" in body, "the public page stays escaped: only a signed-in scan can find the hole"
+        _, _, anonymous_home = server.get("/")
+        _, _, signed_in_home = server.get("/", cookie)
+        assert "/account" not in anonymous_home and "/account" in signed_in_home
+        assert "/login" in anonymous_home
+
+
+def test_the_login_routes_do_not_exist_without_the_login_flag():
+    with Fixture(free_port()) as server:
+        for path in ("/login", "/account", "/account/search?q=x"):
+            assert server.get(path)[0] == 404, path
+        assert server.get("/login", data=GOOD_LOGIN)[0] == 404
+
+
+def test_the_shipped_context_file_matches_the_fixtures_login():
+    """fixture/dast/login.context is what the live tests hand ZAP; it must describe this server's login."""
+    import base64
+    import xml.etree.ElementTree as ET
+
+    spec = importlib.util.spec_from_file_location("dast_fixture_server", SERVER)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    context = ET.parse(CONTEXT).getroot().find("context")
+    assert context is not None
+    user = context.find("users/user").text.split(";")
+    assert user[1] == "true" and base64.b64decode(user[2]).decode() == module.LOGIN_USER == CONTEXT_USER
+    username, password = (base64.b64decode(part).decode() for part in user[4].split("~")[:2])
+    assert (username, password) == (module.LOGIN_USER, module.LOGIN_PASSWORD)
+    form = context.find("authentication/form")
+    assert form.find("loginurl").text == f"http://127.0.0.1:{CONTEXT_PORT}/login"
+    assert form.find("loginbody").text == "username={%username%}&password={%password%}"
+    # ZAP checks every response (headers and body) against the logged-out indicator; a hit makes it sign in again.
+    # Its first attempt was a logged-in indicator on the account page, which the login's own redirect does not carry,
+    # and ZAP counted every sign-in as failed and shut itself down.
+    out = re.compile(context.find("authentication/loggedout").text.replace("\\Q", "(?:").replace("\\E", ")"))
+
+    def seen(response: tuple[int, dict, str]) -> bool:
+        status, headers, body = response
+        return bool(out.search("\n".join(f"{k}: {v}" for k, v in headers.items()) + "\n" + body))
+
+    with Fixture(free_port(), "--login") as server:
+        assert seen(server.get("/account")), "a request without a session is the logged-out case"
+        assert seen(server.get("/login"))
+        assert seen(server.get("/login", data="username=throwaway&password=wrong"))
+        signed_in = server.get("/login", data=GOOD_LOGIN)
+        assert not seen(signed_in), "the login's own response must not read as logged out"
+        cookie = signed_in[1]["Set-Cookie"].split(";")[0]
+        for path in ("/", "/account", "/account/search?q=fixture", "/about", "/search?q=x"):
+            assert not seen(server.get(path, cookie)), f"{path} signed in must not read as logged out"
+
+    # The logged-in indicator is the proof that the scan signed in: the login's own redirect and the pages behind
+    # it match, and nothing an anonymous visitor gets does.
+    proof = re.compile(
+        re.sub(r"\\Q(.*?)\\E", lambda m: re.escape(m.group(1)), context.find("authentication/loggedin").text)
+    )
+
+    def proves(response: tuple[int, dict, str]) -> bool:
+        _, headers, body = response
+        return bool(proof.search("\n".join(f"{k}: {v}" for k, v in headers.items()) + "\n" + body))
+
+    with Fixture(free_port(), "--login") as server:
+        for path in ("/", "/about", "/login", "/account", "/search?q=x"):
+            assert not proves(server.get(path)), f"{path} anonymous must not prove a sign-in"
+        assert not proves(server.get("/login", data="username=throwaway&password=wrong"))
+        signed_in = server.get("/login", data=GOOD_LOGIN)
+        assert proves(signed_in), "the login's own redirect proves it"
+        cookie = signed_in[1]["Set-Cookie"].split(";")[0]
+        assert proves(server.get("/account", cookie)) and proves(server.get("/account/search?q=x", cookie))
+
+
+# --- the context file: parsed as XML, every URL decoded and loopback, credentials kept out of the output ---------
+
+LOGIN = "<loginurl>http://127.0.0.1:8080/login</loginurl>"
+PAGE_URL = "<loginpageurl>http://127.0.0.1:8080/login</loginpageurl>"
+UNITS = "<pollunits>REQUESTS</pollunits>"
+USER_ENTRY = re.search(r"<user>.*?</user>", CONTEXT.read_text()).group(0)
+PASSWORD = "throwaway-password"
+USERS_BLOCK = re.search(r"<users>.*?</users>", CONTEXT.read_text(), re.S).group(0)
+AUTH_BLOCK = re.search(r"<authentication>.*?</authentication>", CONTEXT.read_text(), re.S).group(0)
+LOGGEDIN_LINE = re.search(r"<loggedin>.*?</loggedin>", CONTEXT.read_text()).group(0)
+LOGGEDOUT_LINE = re.search(r"<loggedout>.*?</loggedout>", CONTEXT.read_text()).group(0)
+INDICATORS_BLOCK = re.search(r"<loggedin>.*?</loggedout>", CONTEXT.read_text(), re.S).group(0)
+SCOPE_OK = "http://127\\.0\\.0\\.1:8080/.*"
+HOSTILE_HOST = re.compile(r"example\.com|evil\.example|2130706433|0x7f|0177|ffff", re.I)
+
+
+def context_file(tmp_path: Path, old: str, new: str, head: str = "") -> str:
+    text = CONTEXT.read_text()
+    assert old in text, f"{old!r} is not in the shipped context"
+    path = tmp_path / "variant.context"
+    path.write_text(text.replace(old, new, 1).replace("<configuration>", head + "<configuration>", 1))
+    return str(path)
+
+
+def check_context(job, path: str, user: str = "throwaway", **inputs: object):
+    return job(context_file=path, context_user=user, **inputs).run("Check the context file", REPO_ROOT=str(REPO))
+
+
+def runner_unescape(data: str) -> str:
+    """What the Actions runner does to a workflow command's data before it uses it."""
+    return data.replace("%0D", "\r").replace("%0A", "\n").replace("%25", "%")
+
+
+def log_without_masks(out: str) -> str:
+    """The runner swallows `::add-mask::` lines; they are not part of the log anyone reads."""
+    return "\n".join(line for line in out.splitlines() if not line.startswith("::add-mask::"))
+
+
+def user_entry(name: str, password: str) -> str:
+    def b64(value: str) -> str:
+        return base64.b64encode(value.encode()).decode()
+
+    return f"<user>0;true;{b64(name)};2;{b64(name)}~{b64(password)}~</user>"
+
+
+OFF_HOST = [
+    # CDATA, character references and entities hide a URL from a pattern over the text; the XML is parsed.
+    ("cdata", LOGIN, "<loginurl><![CDATA[https://example.com/login]]></loginurl>", "", "<loginurl> is not loopback"),
+    ("cdata split", LOGIN, "<loginurl><![CDATA[ht]]>tps://example.com/login</loginurl>", "", "is not loopback"),
+    ("decimal char ref", LOGIN, "<loginurl>&#104;ttps://example.com/login</loginurl>", "", "is not loopback"),
+    ("hex char ref", LOGIN, "<loginurl>&#x68;ttps://example.com/login</loginurl>", "", "is not loopback"),
+    (
+        "internal entity",
+        LOGIN,
+        "<loginurl>&u;</loginurl>",
+        '<!DOCTYPE configuration [<!ENTITY u "https://example.com/login">]>',
+        "declares a DOCTYPE or an entity",
+    ),
+    (
+        "external entity",
+        LOGIN,
+        "<loginurl>&u;</loginurl>",
+        '<!DOCTYPE configuration [<!ENTITY u SYSTEM "http://example.com/x">]>',
+        "declares a DOCTYPE or an entity",
+    ),
+    ("doctype alone", LOGIN, LOGIN, '<!DOCTYPE configuration SYSTEM "http://example.com/x.dtd">', "DOCTYPE"),
+    # Case, host spelling, trailing dots and look-alikes.
+    ("mixed-case scheme and host", LOGIN, "<loginurl>HtTpS://ExAmPlE.CoM/login</loginurl>", "", "is not loopback"),
+    ("mixed-case look-alike", LOGIN, "<loginurl>http://LocalHost.Evil.Example/login</loginurl>", "", "is not loopback"),
+    ("trailing dot", LOGIN, "<loginurl>http://localhost./login</loginurl>", "", "is not loopback"),
+    (
+        "127.0.0.1 as a subdomain",
+        LOGIN,
+        "<loginurl>http://127.0.0.1.evil.example/login</loginurl>",
+        "",
+        "is not loopback",
+    ),
+    # Numeric forms of an address, which a resolver accepts and a pattern does not see.
+    ("decimal IPv4", LOGIN, "<loginurl>http://2130706433/login</loginurl>", "", "is not loopback"),
+    ("hex IPv4", LOGIN, "<loginurl>http://0x7f.0.0.1/login</loginurl>", "", "is not loopback"),
+    ("octal IPv4", LOGIN, "<loginurl>http://0177.0.0.1/login</loginurl>", "", "is not loopback"),
+    ("short IPv4", LOGIN, "<loginurl>http://127.1/login</loginurl>", "", "is not loopback"),
+    ("unspecified address", LOGIN, "<loginurl>http://0.0.0.0:8080/login</loginurl>", "", "is not loopback"),
+    ("private address", LOGIN, "<loginurl>http://10.0.0.5:8080/login</loginurl>", "", "is not loopback"),
+    # IPv6 forms.
+    ("IPv4-mapped IPv6", LOGIN, "<loginurl>http://[::ffff:127.0.0.1]:8080/login</loginurl>", "", "is not loopback"),
+    ("unspecified IPv6", LOGIN, "<loginurl>http://[::]:8080/login</loginurl>", "", "is not loopback"),
+    ("other IPv6", LOGIN, "<loginurl>http://[2001:db8::1]:8080/login</loginurl>", "", "is not loopback"),
+    ("IPv6 zone", LOGIN, "<loginurl>http://[::1%25eth0]:8080/login</loginurl>", "", "is not loopback"),
+    ("broken IPv6", LOGIN, "<loginurl>http://[::1/login</loginurl>", "", "not a valid URL"),
+    # Userinfo and parser-confusion tricks.
+    ("userinfo host", LOGIN, "<loginurl>http://127.0.0.1@evil.example/login</loginurl>", "", "user information"),
+    ("userinfo port", LOGIN, "<loginurl>http://127.0.0.1:80@evil.example/login</loginurl>", "", "user information"),
+    ("fragment trick", LOGIN, "<loginurl>http://evil.example#@127.0.0.1/login</loginurl>", "", "fragment"),
+    ("backslash trick", LOGIN, "<loginurl>http://evil.example\\@127.0.0.1/login</loginurl>", "", "backslash"),
+    ("whitespace", LOGIN, "<loginurl>http://127.0.0.1:8080/lo gin</loginurl>", "", "whitespace"),
+    ("no scheme", LOGIN, "<loginurl>//evil.example/login</loginurl>", "", "absolute http or https"),
+    ("other scheme", LOGIN, "<loginurl>ftp://127.0.0.1/login</loginurl>", "", "absolute http or https"),
+    # The other URL-bearing elements are held to the same rule.
+    ("login page url", PAGE_URL, "<loginpageurl>https://example.com/login</loginpageurl>", "", "<loginpageurl> is not"),
+    (
+        "poll url",
+        UNITS,
+        UNITS + "<pollurl>https://example.com/poll</pollurl>",
+        "",
+        "<pollurl> is not loopback",
+    ),
+    # Authentication and session kinds the check cannot read are refused, not let through.
+    ("http authentication", "<type>2</type>", "<type>3</type>", "", "authentication type 3"),
+    ("script authentication", "<type>2</type>", "<type>4</type>", "", "authentication type 4"),
+    ("browser authentication", "<type>2</type>", "<type>6</type>", "", "authentication type 6"),
+    ("auto-detect authentication", "<type>2</type>", "<type>7</type>", "", "authentication type 7"),
+    ("unknown authentication", "<type>2</type>", "<type>99</type>", "", "authentication type 99"),
+    ("unreadable authentication", "<type>2</type>", "<type>https://example.com</type>", "", "type unreadable"),
+    ("unknown auth element", LOGIN, LOGIN + "<callback>https://example.com</callback>", "", "<callback>"),
+    ("unknown form element", LOGIN, LOGIN + "<redirect>https://example.com</redirect>", "", "<redirect>"),
+    (
+        "duplicate authentication",
+        "<forceduser>",
+        "<authentication><type>0</type></authentication><forceduser>",
+        "",
+        "twice",
+    ),
+    ("script session", "<type>0</type>\n        </session>", "<type>2</type>\n        </session>", "", "session"),
+    # Scope: the spider follows links the include regexes allow.
+    ("scope everything", SCOPE_OK, ".*", "", "<incregexes>"),
+    ("scope look-alike host", SCOPE_OK, "http://127\\.0\\.0\\.1.*", "", "<incregexes>"),
+    ("scope other host", SCOPE_OK, "https://example\\.com.*", "", "<incregexes>"),
+    # The review's two: an alternation is a second scope, and `:8080.*` also matches http://127.0.0.1:8080@evil/.
+    ("scope alternation", SCOPE_OK, "http://127\\.0\\.0\\.1:8080/.*|https?://evil\\.example/.*", "", "<incregexes>"),
+    ("scope prefix form", SCOPE_OK, "http://127\\.0\\.0\\.1:8080.*", "", "<incregexes>"),
+    # Round 2 of the review: a quantifier on the slash makes it optional, and Java matches the whole URL.
+    ("scope optional slash", SCOPE_OK, "http://127\\.0\\.0\\.1:8080/?.*", "", "cannot prove safe"),
+    ("scope starred slash", SCOPE_OK, "http://127\\.0\\.0\\.1:8080/*.*", "", "cannot prove safe"),
+    ("scope plus slash", SCOPE_OK, "http://127\\.0\\.0\\.1:8080/+.*", "", "cannot prove safe"),
+    # Unescaped dots are wildcards (http://127505051:8080/x), and an unescaped [::1] is a character class.
+    ("scope unescaped dots", SCOPE_OK, "http://127.0.0.1:8080/.*", "", "cannot prove safe"),
+    ("scope unescaped IPv6", SCOPE_OK, "http://[::1]:8080/.*", "", "cannot prove safe"),
+    ("scope quoted default", SCOPE_OK, "\\Qhttp://127.0.0.1:8080\\E.*", "", "cannot prove safe"),
+    ("scope class", SCOPE_OK, "http://127\\.0\\.0\\.1:8080/[a-z]+", "", "cannot prove safe"),
+    ("scope userinfo", SCOPE_OK, "http://127\\.0\\.0\\.1:8080/@evil\\.example/.*", "", "<incregexes>"),
+    ("scope group", SCOPE_OK, "(http://127\\.0\\.0\\.1:8080/|https://evil\\.example/).*", "", "<incregexes>"),
+    (
+        "scope mixed content",
+        SCOPE_OK,
+        "http://127\\.0\\.0\\.1:8080/<x>|http://evil.example/.*</x>",
+        "",
+        "child elements",
+    ),
+    # Mixed content: ZAP reads the element's own text, an XML parser's itertext() joins the children's too.
+    (
+        "mixed content in a login url",
+        LOGIN,
+        "<loginurl>http://<x>127.0.0.1:8080/</x>evil.example/login</loginurl>",
+        "",
+        "child elements",
+    ),
+    ("mixed content in the type", "<type>2</type>", "<type>2<x>0</x></type>", "", "child elements"),
+    ("interpolation", LOGIN, "<loginurl>http://127.0.0.1:8080/${sys:user.name}</loginurl>", "", "dollar-brace"),
+    ("no users at all", USERS_BLOCK, "", "", "holds no users"),
+    # A user the scan cannot sign in: nothing downstream could tell, so the context is refused before the scan.
+    (
+        "manual authentication",
+        AUTH_BLOCK,
+        "<authentication><type>0</type></authentication>",
+        "",
+        "no login method that can sign in",
+    ),
+    ("missing authentication", AUTH_BLOCK, "", "", "no login method that can sign in"),
+    ("no login url", LOGIN, "<loginurl></loginurl>", "", "no login URL"),
+    ("no indicators at all", INDICATORS_BLOCK, "", "", "no logged-in or logged-out indicator"),
+    (
+        "empty indicators",
+        INDICATORS_BLOCK,
+        "<loggedin></loggedin><loggedout></loggedout>",
+        "",
+        "no logged-in or logged-out indicator",
+    ),
+    (
+        "logged-in indicator that matches anything",
+        LOGGEDIN_LINE,
+        "<loggedin>.*</loggedin>",
+        "",
+        "matches an empty response",
+    ),
+    (
+        "logged-out indicator that matches anything",
+        LOGGEDOUT_LINE,
+        "<loggedout>.*</loggedout>",
+        "",
+        "matches an empty response",
+    ),
+    # The user must exist in the context, or the scan is anonymous.
+    ("user not in context", "dGhyb3dhd2F5;2;", "bm9ib2R5;2;", "", "not one of the context's users"),
+]
+
+
+@pytest.mark.parametrize(("label", "old", "new", "head", "message"), OFF_HOST, ids=[c[0] for c in OFF_HOST])
+def test_a_context_that_could_sign_in_off_host_or_hide_where_is_refused_without_echoing_it(
+    job, tmp_path, label, old, new, head, message
+):
+    code, out = check_context(job, context_file(tmp_path, old, new, head))
+    assert code != 0, f"{label} was accepted\n{out}"
+    assert message in out, out
+    log = log_without_masks(out)
+    assert not HOSTILE_HOST.search(log) and "evil" not in log and "example.com" not in log, (
+        f"the refusal printed the value it refused:\n{log}"
+    )
+    assert "Traceback" not in out
+
+
+ACCEPTED = [
+    ("shipped", LOGIN, LOGIN),
+    ("mixed-case loopback", LOGIN, "<loginurl>HTTP://LocalHost:8080/login</loginurl>"),
+    ("loopback in CDATA", LOGIN, "<loginurl><![CDATA[http://127.0.0.1:8080/login]]></loginurl>"),
+    ("loopback with a character reference", LOGIN, "<loginurl>&#104;ttp://127.0.0.1:8080/login</loginurl>"),
+    ("any 127/8 address", LOGIN, "<loginurl>http://127.0.0.2:8080/login</loginurl>"),
+    ("IPv6 loopback", LOGIN, "<loginurl>http://[::1]:8080/login</loginurl>"),
+    ("IPv6 loopback written out", LOGIN, "<loginurl>http://[0:0:0:0:0:0:0:1]:8080/login</loginurl>"),
+    ("a harmless query", LOGIN, "<loginurl>http://127.0.0.1:8080/login?next=/account</loginurl>"),
+    ("scope: the bare origin", SCOPE_OK, "http://127\\.0\\.0\\.1:8080"),
+    ("scope: a path", SCOPE_OK, "^http://localhost:8080/app/v1/.*"),
+    ("scope: escaped IPv6", SCOPE_OK, "http://\\[::1\\]:8080/.*"),
+    ("scope: escaped dots in the path and an end anchor", SCOPE_OK, "http://localhost:8080/a\\.b/c$"),
+    ("a poll url on loopback", UNITS, UNITS + "<pollurl>http://localhost:8080/account</pollurl>"),
+]
+
+
+@pytest.mark.parametrize(("label", "old", "new"), ACCEPTED, ids=[c[0] for c in ACCEPTED])
+@pytest.mark.parametrize("egress", ["audit", "block"])
+def test_a_loopback_context_in_any_spelling_is_accepted_under_either_egress_policy(
+    job, tmp_path, label, old, new, egress
+):
+    """Request-time enforcement is not required: see the wiki. Both policies pass the same static check."""
+    code, out = check_context(job, context_file(tmp_path, old, new), user="", egress_policy=egress)
+    assert code == 0, f"{label}\n{out}"
+
+
+@pytest.mark.parametrize(
+    ("url", "message"),
+    [
+        ("http://127.0.0.1:8080/login?u={%username%}&p={%password%}", "{%...%} token"),
+        ("http://127.0.0.1:8080/login?u=%7B%25username%25%7D", "{%...%} token"),
+        ("http://127.0.0.1:8080/login?password=hunter2hunter2", "named like a credential"),
+        ("http://127.0.0.1:8080/login?API_TOKEN=abc", "named like a credential"),
+        ("http://127.0.0.1:8080/login?x=throwaway-password", "credential in its query string"),
+        ("http://127.0.0.1:8080/login?x=throwaway%2Dpassword", "credential in its query string"),
+        ("http://throwaway:throwaway-password@127.0.0.1:8080/login", "user information"),
+        ("http://127.0.0.1:8080/throwaway-password/login", "contains a user's credential"),
+    ],
+)
+def test_a_credential_in_a_url_is_refused_and_never_reaches_the_log(job, tmp_path, url, message):
+    code, out = check_context(job, context_file(tmp_path, LOGIN, f"<loginurl>{html.escape(url)}</loginurl>"))
+    assert code != 0 and message in out, out
+    log = log_without_masks(out)
+    for secret in (PASSWORD, "hunter2hunter2", "abc", "%7B%25"):
+        assert secret not in log, f"the refusal printed {secret!r}:\n{log}"
+
+
+def test_the_credentials_belong_in_the_post_body_only(job, tmp_path):
+    code, out = check_context(job, context_file(tmp_path, "<loginbody>", "<loginbody>token={%password%}&amp;"))
+    assert code == 0, "{%username%} and {%password%} are what loginbody is for\n" + out
+
+
+def test_a_user_the_context_does_not_hold_and_a_credential_too_short_to_redact_are_refused(job, tmp_path):
+    code, out = check_context(job, context_file(tmp_path, USER_ENTRY, user_entry("throwaway", "abc")))
+    assert code != 0 and "under 4 characters" in out and "abc" not in log_without_masks(out), out
+    code, out = check_context(job, context_file(tmp_path, USER_ENTRY, user_entry("throwaway", "two\nlines")))
+    assert code != 0 and "line break" in out, out
+
+
+def test_a_file_that_is_not_utf8_xml_is_refused(job, tmp_path):
+    bad = tmp_path / "utf16.context"
+    bad.write_bytes(CONTEXT.read_text().encode("utf-16"))
+    code, out = check_context(job, str(bad))
+    assert code != 0 and "UTF-8" in out, out
+    bad.write_text("<configuration><context>")
+    code, out = check_context(job, str(bad))
+    assert code != 0 and "well-formed" in out, out
+    bad.write_text("<configuration></configuration>")
+    code, out = check_context(job, str(bad))
+    assert code != 0 and "exactly one <context>" in out, out
+
+
+def test_the_scope_regex_of_the_shipped_context_is_the_anchored_form():
+    text = CONTEXT.read_text()
+    assert (
+        f"<incregexes>{SCOPE_OK}</incregexes>" in text
+        and "<incregexes>http://127\\.0\\.0\\.1:8080</incregexes>" in text
+    )
+
+
+def test_zap_is_given_the_bytes_that_were_validated_not_whatever_the_workspace_holds_now(job, tmp_path):
+    """The install and start commands run after the check and can write the workspace."""
+    path = tmp_path / "app.context"
+    path.write_bytes(CONTEXT.read_bytes())
+
+    def rewrite(j):
+        path.write_text(CONTEXT.read_text().replace(LOGIN, "<loginurl>https://example.com/login</loginurl>"))
+
+    j, code, out, args = scan_step(job, tmp_path, between=rewrite, context_file=str(path), context_user="throwaway")
+    assert code == 0, out
+    assert (j.temp / "zap" / "context.context").read_bytes() == CONTEXT.read_bytes()
+    assert b"example.com" not in (j.temp / "zap" / "context.context").read_bytes()
+
+
+def test_a_validated_copy_that_changes_before_the_scan_is_refused(job, tmp_path):
+    def tamper(j):
+        (j.temp / "zap-context.xml").write_text("<configuration/>")
+
+    _, code, out, args = scan_step(job, tmp_path, between=tamper, context_file=CONTEXT_PATH, context_user="throwaway")
+    assert code != 0 and "changed after the check" in out and not args, out
+
+
+def test_a_password_with_the_runners_escape_sequences_is_masked_as_the_runner_will_read_it(job, tmp_path):
+    password = "abc%0Adef%25x"
+    j = job(
+        context_file=context_file(tmp_path, USER_ENTRY, user_entry("scan-user", password)), context_user="scan-user"
+    )
+    code, out = j.run("Check the context file", REPO_ROOT=str(REPO))
+    assert code == 0, out
+    masks = {line.removeprefix("::add-mask::") for line in out.splitlines() if line.startswith("::add-mask::")}
+    assert "abc%250Adef%2525x" in masks, masks
+    assert password not in masks, "the runner would read %0A as a newline and mask something else"
+    for bad in ("two\rlines", "two\nlines"):
+        code, out = check_context(job, context_file(tmp_path, USER_ENTRY, user_entry("scan-user", bad)), "scan-user")
+        assert code != 0 and "line break" in out, out
+
+
+@pytest.mark.parametrize("keep", ["loggedin", "loggedout"])
+def test_either_indicator_alone_is_enough_to_tell_signed_in_from_signed_out(job, tmp_path, keep):
+    drop = LOGGEDOUT_LINE if keep == "loggedin" else LOGGEDIN_LINE
+    code, out = check_context(job, context_file(tmp_path, drop, ""))
+    assert code == 0, out
+
+
+def scoped_to_app(tmp_path: Path) -> str:
+    """The shipped context with a scope that does not cover /account."""
+    text = re.sub(r"\s*<incregexes>.*?</incregexes>", "", CONTEXT.read_text())
+    scope = "<incregexes>http://127\\.0\\.0\\.1:8080/app/.*</incregexes>"
+    path = tmp_path / "scoped.context"
+    path.write_text(text.replace("<inscope>true</inscope>", "<inscope>true</inscope>" + scope))
+    return str(path)
+
+
+@pytest.mark.parametrize(
+    ("url", "message"),
+    [
+        ("https://example.com/account", "<auth-check-url> is not loopback"),
+        ("http://127.0.0.1@evil.example/account", "<auth-check-url> has user information"),
+        ("http://127.0.0.1:8080/account?password=x", "named like a credential"),
+        ("http://127.0.0.1:8080/account?x=throwaway-password", "credential in its query string"),
+        ("http://127.0.0.1:9090/account", "not on the origin of target-url"),
+        ("http://localhost:8080/account", "not on the origin of target-url"),
+        ("https://127.0.0.1:8080/account", "not on the origin of target-url"),
+        ("http://127.0.0.1:8080/login", "login, login-page or poll URL"),
+        ("HTTP://127.0.0.1:8080/login", "login, login-page or poll URL"),
+        ("/account", "not an absolute http or https URL"),
+    ],
+)
+def test_the_auth_check_url_is_held_to_the_rules_of_every_other_url_and_is_not_a_login_side_url(
+    job, tmp_path, url, message
+):
+    j = job(context_file=CONTEXT_PATH, context_user="throwaway", auth_check_url=url)
+    code, out = j.run("Check the context file", REPO_ROOT=str(REPO))
+    assert code != 0 and message in out, out
+    log = log_without_masks(out)
+    assert "evil" not in log and "example.com" not in log and PASSWORD not in log, log
+
+
+def test_the_auth_check_url_must_be_inside_the_contexts_scope_and_a_poll_url_is_a_login_side_url(job, tmp_path):
+    j = job(context_file=scoped_to_app(tmp_path), context_user="throwaway")
+    code, out = j.run("Check the context file", REPO_ROOT=str(REPO))
+    assert code != 0 and "not inside the context's include regexes" in out, out
+    poll = context_file(tmp_path, UNITS, UNITS + "<pollurl>http://127.0.0.1:8080/account</pollurl>")
+    code, out = job(context_file=poll, context_user="throwaway").run("Check the context file", REPO_ROOT=str(REPO))
+    assert code != 0 and "login, login-page or poll URL" in out, out
+
+
+def test_the_auth_check_url_is_accepted_when_it_is_a_protected_page_in_scope_on_the_targets_origin(job):
+    for url in (AUTH_CHECK_URL, "http://127.0.0.1:8080/account/search?q=fixture"):
+        code, out = job(context_file=CONTEXT_PATH, context_user="throwaway", auth_check_url=url).run(
+            "Check the context file", REPO_ROOT=str(REPO)
+        )
+        assert code == 0, out
+
+
+def test_a_context_with_no_user_needs_no_login_method(job, tmp_path):
+    """Only a user has to sign in; a context that just scopes the scan is still fine."""
+    path = context_file(tmp_path, AUTH_BLOCK, "")
+    code, out = check_context(job, path, user="")
+    assert code == 0, out
+
+
+def hook_source() -> str:
+    """The ZAP hook the scan step writes for a signed-in scan, lifted out of the workflow."""
+    run = str(step("scan", "Run the ZAP scan")["run"])
+    return run.split("<<'HOOK'\n", 1)[1].split("\nHOOK", 1)[0]
+
+
+class FakeZap:
+    """Just enough of ZAP's API for the hook: forced-user mode, sendRequest, the regex search, the indicators.
+
+    A response says "IN" when it was sent as the user and the user's session works, and "OUT" otherwise."""
+
+    def __init__(self, *, session_works=True, anonymous_sees_in=False, logged_in="IN", logged_out="OUT", fail=None):
+        import types
+
+        self.session_works, self.anonymous_sees_in = session_works, anonymous_sees_in
+        self.indicators = (logged_in, logged_out)
+        self.fail, self.forced, self.messages, self.requests, self.mode_log = fail, False, {}, [], []
+        self.forcedUser = types.SimpleNamespace(
+            set_forced_user=self.set_forced_user, set_forced_user_mode_enabled=self.set_mode
+        )
+        self.core = types.SimpleNamespace(send_request=self.send_request)
+        self.search = types.SimpleNamespace(messages_by_response_regex=self.search_messages)
+        self.authentication = types.SimpleNamespace(
+            get_logged_in_indicator=lambda context_id: self.indicators[0],
+            get_logged_out_indicator=lambda context_id: self.indicators[1],
+        )
+
+    def set_forced_user(self, context_id, user_id):
+        assert (context_id, user_id) == ("7", "1")
+
+    def set_mode(self, enabled):
+        self.forced = enabled == "true"
+        self.mode_log.append(self.forced)
+
+    def send_request(self, request, followredirects):
+        if self.fail:
+            raise self.fail
+        assert followredirects == "false" and request.startswith("GET /account HTTP/1.1\r\nHost: 127.0.0.1:8080\r\n")
+        self.requests.append(self.forced)
+        signed_in = self.session_works if self.forced else self.anonymous_sees_in
+        message_id = str(len(self.messages) + 10)
+        self.messages[message_id] = "IN" if signed_in else "OUT"
+        return [{"id": message_id}]
+
+    def search_messages(self, regex, baseurl, start, count):
+        assert baseurl == "http://127.0.0.1:8080/account"
+        return [{"id": i} for i, body in self.messages.items() if body == regex]
+
+
+def run_hook(tmp_path, monkeypatch, zap, *, user=None, phases=("zap_spider", "zap_active_scan", "zap_pre_shutdown")):
+    """The hook against a FakeZap and a stand-in for the script's own module; returns the evidence it wrote."""
+    import types
+
+    out = tmp_path / "auth-evidence.json"
+    (tmp_path / "auth-check-url.txt").write_text(AUTH_CHECK_URL)
+    source = hook_source().replace("/zap/wrk/auth-evidence.json", str(out)).replace("/zap/wrk/", f"{tmp_path}/")
+    monkeypatch.setitem(
+        sys.modules,
+        "zap_common",
+        types.SimpleNamespace(
+            scan_user={"id": "1", "name": "throwaway"} if user is None else user or None, context_id="7"
+        ),
+    )
+    namespace: dict = {}
+    exec(compile(source, "auth_hook.py", "exec"), namespace)
+    for phase in phases:
+        args = (zap, "http://127.0.0.1:8080", "Default Policy")[: 3 if phase == "zap_active_scan" else 2]
+        namespace[phase](*args) if phase != "zap_pre_shutdown" else namespace[phase](zap)
+    return json.loads(out.read_text())["checks"]
+
+
+def test_the_hook_asks_the_page_as_the_user_and_anonymously_before_the_attack_and_as_the_user_after(
+    tmp_path, monkeypatch
+):
+    zap = FakeZap()
+    checks = run_hook(tmp_path, monkeypatch, zap)
+    assert checks == [
+        {"phase": "before", "user_signed_in": True, "anonymous_signed_in": False},  # before the spider
+        {"phase": "before", "user_signed_in": True, "anonymous_signed_in": False},  # before the active scan
+        {"phase": "after", "user_signed_in": True},
+    ]
+    assert zap.requests == [True, False, True, False, True], "user, anonymous, user, anonymous, user"
+    assert zap.mode_log[-1] is False and zap.forced is False, "the scan itself is never left forced"
+
+
+def test_the_hook_sees_a_session_the_protected_page_never_receives_as_not_signed_in(tmp_path, monkeypatch):
+    """The login redirect matched the indicator; the cookie then never reached the page. Only the page tells."""
+    checks = run_hook(tmp_path, monkeypatch, FakeZap(session_works=False))
+    assert all(c["user_signed_in"] is False for c in checks), checks
+
+
+def test_the_hook_sees_a_public_check_page_and_a_lost_session(tmp_path, monkeypatch):
+    checks = run_hook(tmp_path, monkeypatch, FakeZap(anonymous_sees_in=True), phases=("zap_spider",))
+    assert checks[0]["anonymous_signed_in"] is True, "a page anonymous users also see proves nothing"
+    zap = FakeZap()
+    first = run_hook(tmp_path, monkeypatch, zap, phases=("zap_spider",))
+    zap.session_works = False  # the scan invalidated the session (a logout URL was crawled)
+    namespace_checks = run_hook(tmp_path, monkeypatch, zap, phases=("zap_pre_shutdown",))
+    assert first[0]["user_signed_in"] is True and namespace_checks[0]["user_signed_in"] is False
+
+
+def test_the_hook_judges_by_the_logged_out_indicator_when_that_is_all_the_context_has(tmp_path, monkeypatch):
+    ok = run_hook(tmp_path, monkeypatch, FakeZap(logged_in=""), phases=("zap_spider",))
+    assert ok == [{"phase": "before", "user_signed_in": True, "anonymous_signed_in": False}]
+    lost = run_hook(tmp_path, monkeypatch, FakeZap(logged_in="", session_works=False), phases=("zap_spider",))
+    assert lost[0]["user_signed_in"] is False
+    both = run_hook(tmp_path, monkeypatch, FakeZap(logged_in="IN", logged_out="IN"), phases=("zap_spider",))
+    assert both[0]["user_signed_in"] is False, "a response that is also logged out is not signed in"
+
+
+def test_the_hook_records_errors_by_class_and_never_leaves_forced_user_mode_on(tmp_path, monkeypatch):
+    no_user = run_hook(tmp_path, monkeypatch, FakeZap(), user={}, phases=("zap_spider",))
+    assert no_user == [{"phase": "before", "error": "LookupError"}]
+    no_indicator = run_hook(tmp_path, monkeypatch, FakeZap(logged_in="", logged_out=""), phases=("zap_spider",))
+    assert no_indicator == [{"phase": "before", "error": "LookupError"}]
+    zap = FakeZap(fail=RuntimeError("secret detail"))
+    failed = run_hook(tmp_path, monkeypatch, zap, phases=("zap_spider",))
+    assert failed == [{"phase": "before", "error": "RuntimeError"}] and zap.forced is False
+
+
+def test_a_signed_in_scan_gets_the_hook_and_an_anonymous_one_does_not(job, tmp_path):
+    j, code, out, args = scan_step(job, tmp_path, scan_type="full", context_file=CONTEXT_PATH, context_user="throwaway")
+    assert code == 0, out
+    assert "--hook=/zap/wrk/auth_hook.py" in after_image(args)
+    hook = j.temp / "zap" / "auth_hook.py"
+    assert "zap_pre_shutdown" in hook.read_text() and hook.stat().st_mode & 0o004, "the container's user must read it"
+    assert (j.temp / "zap" / "auth-check-url.txt").read_text() == AUTH_CHECK_URL
+    hook.unlink()
+    for n, inputs in enumerate(({}, {"context_file": CONTEXT_PATH})):
+        (tmp_path / f"anon{n}").mkdir()
+        j, code, out, args = scan_step(job, tmp_path / f"anon{n}", scan_type="full", **inputs)
+        assert code == 0, out
+        assert not any(a.startswith("--hook") for a in args) and not (j.temp / "zap" / "auth_hook.py").exists()
+
+
+# The credentials of the context never reach a log, the summary, the SARIF or an uploaded report -------------
+
+
+def test_the_context_check_masks_every_shape_of_the_credentials_and_keeps_them_in_a_private_file(job, tmp_path):
+    password = "p@ss w/rd&1<x>"
+    j = job(
+        context_file=context_file(tmp_path, USER_ENTRY, user_entry("scan-user", password)), context_user="scan-user"
+    )
+    code, out = j.run("Check the context file", REPO_ROOT=str(REPO))
+    assert code == 0, out
+    masked = {
+        runner_unescape(line.removeprefix("::add-mask::"))
+        for line in out.splitlines()
+        if line.startswith("::add-mask::")
+    }
+    for form in (
+        password,
+        urllib.parse.quote(password, safe=""),
+        urllib.parse.quote_plus(password),
+        html.escape(password),
+        base64.b64encode(password.encode()).decode(),
+        "scan-user",
+    ):
+        assert form in masked, f"{form!r} is not masked: {sorted(masked)}"
+    redact = j.temp / "zap-redact.json"
+    assert redact.exists() and oct(redact.stat().st_mode & 0o777) == "0o600"
+    assert password in json.loads(redact.read_text())
+
+
+def planted_reports(j, secrets: list[str]) -> Path:
+    """The canned insecure report with the credentials where a reflecting application would put them."""
+    zap = j.temp / "zap"
+    zap.mkdir(exist_ok=True)
+    report = json.loads((FIXTURES / "insecure.json").read_text())
+    instance = report["site"][0]["alerts"][0]["instances"][0]
+    password, user = secrets
+    instance["uri"] += "?p=" + urllib.parse.quote_plus(password)
+    instance["evidence"] = f'<input value="{html.escape(password)}">'
+    instance["otherinfo"] = f"posted {user} / {password}"
+    instance["attack"] = urllib.parse.quote(password, safe="")
+    (zap / "report.json").write_text(json.dumps(report))
+    (zap / "report.html").write_text(f"<p>{html.escape(password)} for {user}</p>")
+    (zap / "report.md").write_text(f"posted {user} / {password}")
+    (zap / "context.context").write_text(CONTEXT.read_text())
+    (zap / "auth-evidence.json").write_text(json.dumps(good_checks()))
+    for name in ("report.json", "report.html", "report.md"):
+        (zap / name).chmod(0o444)  # the container's user owns the real ones; the runner may only replace them
+    j.output.write_text("exit=0\n")
+    return zap
+
+
+def test_the_credentials_in_alert_instances_are_absent_from_the_sarif_the_summary_the_log_and_every_report(
+    job, tmp_path
+):
+    password, user = "p@ss w/rd&1<x>", "scan-user"
+    path = context_file(tmp_path, USER_ENTRY, user_entry(user, password))
+    j = job(context_file=path, context_user=user, fail_on="none", scan_type="full")
+    assert j.run("Check the context file", REPO_ROOT=str(REPO))[0] == 0
+    zap = planted_reports(j, [password, user])
+    code, out = j.run("Remove the context's credentials")
+    assert code == 0, out
+    code, report_out = j.run("Report and apply fail-on")
+    assert code == 0, report_out
+    forms = [
+        password,
+        urllib.parse.quote(password, safe=""),
+        urllib.parse.quote_plus(password),
+        html.escape(password),
+        user,
+    ]
+    everything = {
+        "stdout": out + report_out,
+        "summary": j.summary.read_text(),
+        **{name: (zap / name).read_text() for name in ("report.json", "report.html", "report.md", "zap.sarif")},
+    }
+    for where, text in everything.items():
+        for form in forms:
+            assert form not in text, f"{form!r} is in the {where}"
+    assert "[redacted]" in everything["report.json"] and json.loads(everything["report.json"])
+    sarif = json.loads(everything["zap.sarif"])
+    assert sarif["runs"][0]["results"], "the SARIF is still a report"
+    assert not (zap / "context.context").exists(), "the context holds the credentials, encoded; it is never uploaded"
+    assert not (j.temp / "zap-redact.json").exists()
+
+
+def test_a_credential_equal_to_a_key_of_the_report_cannot_blind_the_gate(job, tmp_path):
+    """Redaction is by value: a password `alerts` must not rename the `alerts` key and turn the gate green."""
+    password, user = "alerts", "riskcode"
+    path = context_file(tmp_path, USER_ENTRY, user_entry(user, password))
+    j = job(context_file=path, context_user=user, fail_on="medium", scan_type="full")
+    assert j.run("Check the context file", REPO_ROOT=str(REPO))[0] == 0
+    zap = planted_reports(j, [password, user])
+    assert j.run("Remove the context's credentials")[0] == 0
+    report = json.loads((zap / "report.json").read_text())
+    assert report["site"][0]["alerts"], "the keys are intact"
+    code, out = j.run("Report and apply fail-on")
+    assert code != 0 and "Content Security Policy" in out, "the Medium alerts must still fail the gate\n" + out
+    assert password not in "".join(report["site"][0]["alerts"][0]["instances"][0].values())
+
+
+@pytest.mark.parametrize("password", ["redacted", "reda", "[redacted]"])
+def test_a_credential_that_is_a_slice_of_the_placeholder_is_still_redacted_and_does_not_fail_the_job(
+    job, tmp_path, password
+):
+    user = "scan-user"
+    j = job(
+        context_file=context_file(tmp_path, USER_ENTRY, user_entry(user, password)), context_user=user, fail_on="none"
+    )
+    assert j.run("Check the context file", REPO_ROOT=str(REPO))[0] == 0
+    zap = planted_reports(j, [password, user])
+    code, out = j.run("Remove the context's credentials")
+    assert code == 0, out
+    report = (zap / "report.json").read_text()
+    assert json.loads(report) and "[redacted]" in report
+    instance = json.loads(report)["site"][0]["alerts"][0]["instances"][0]
+    assert instance["evidence"] == '<input value="[redacted]">', instance
+    assert j.run("Report and apply fail-on")[0] == 0
+
+
+def test_when_the_credentials_cannot_be_removed_the_reports_are_deleted_not_uploaded(job, tmp_path):
+    j = job(context_file=CONTEXT_PATH, context_user="throwaway", fail_on="none")
+    assert j.run("Check the context file", REPO_ROOT=str(REPO))[0] == 0
+    zap = planted_reports(j, [PASSWORD, "throwaway"])
+    (j.temp / "zap-redact.json").write_text("not json")
+    code, out = j.run("Remove the context's credentials")
+    assert code != 0 and "deleted, not uploaded" in out, out
+    assert not [p for p in zap.iterdir() if p.name.startswith(("report.", "zap."))], list(zap.iterdir())
+    # and with no redaction file at all, the same
+    zap = planted_reports(j, [PASSWORD, "throwaway"])
+    (j.temp / "zap-redact.json").unlink()
+    code, out = j.run("Remove the context's credentials")
+    assert code != 0 and not (zap / "report.json").exists(), out
+
+
+def test_the_scrub_runs_whether_or_not_the_scan_passed_and_only_the_report_files_are_uploaded():
+    scan = jobs(load(WORKFLOW))["scan"]
+    names = [str(s.get("name", s.get("uses", ""))) for s in steps_of(scan)]
+    scrub = names.index("Remove the context's credentials from the reports")
+    assert names.index("Run the ZAP scan") < scrub < names.index("Report and apply fail-on")
+    spec = steps_of(scan)[scrub]
+    assert "always()" in spec["if"] and "context-file" in spec["if"], "a failed scan still leaves reports to upload"
+    upload = [s for s in steps_of(scan) if str(s.get("uses", "")).startswith("actions/upload-artifact@")][0]
+    uploaded = [Path(line.strip()).name for line in upload["with"]["path"].splitlines() if line.strip()]
+    assert sorted(uploaded) == ["report.html", "report.json", "report.md", "zap.sarif"], (
+        "anything else in the work directory (the context, the rules, the definition) must not be uploaded"
+    )
 
 
 # --- the live scans: the real ZAP image, against the fixture server ---------
@@ -717,3 +1708,154 @@ def test_live_the_api_scan_imports_the_repository_definition_and_scans_the_loopb
     sites = [site["@name"] for site in report.get("site", [])]
     assert sites and all(s.startswith("http://127.0.0.1:") for s in sites), sites
     assert "### ZAP api scan" in j.summary.read_text()
+
+
+# The login: the same hole, reachable only signed in. Two tests, one fixture, two scans -----------------
+
+
+def login_scan(job, *server_flags: str, fail_on: str, **inputs: object):
+    """scan(), on the port the shipped context names, with the login served."""
+    assert docker_usable(), "DAST_LIVE is set and docker is not usable: this job exists to run the real image"
+    j = job(
+        start_command=server_command(CONTEXT_PORT, "--login", *server_flags),
+        target_url=f"http://127.0.0.1:{CONTEXT_PORT}",
+        fail_on=fail_on,
+        **inputs,
+    )
+    steps = ["Check the inputs"]
+    if inputs.get("context_file"):
+        steps.append("Check the context file")
+    steps += ["Start the service and wait for it", "Run the ZAP scan"]
+    if inputs.get("context_file"):
+        steps.append("Remove the context's credentials")
+    for fragment in steps:
+        code, out = j.run(fragment, timeout=1500, REPO_ROOT=str(REPO))
+        assert code == 0, f"{fragment}:\n{out}"
+    return j
+
+
+def alert_urls(j) -> set[str]:
+    report = json.loads((j.temp / "zap" / "report.json").read_text())
+    return {i["uri"] for site in report["site"] for a in site["alerts"] for i in a.get("instances", [])}
+
+
+@live
+def test_live_the_anonymous_full_scan_passes_a_hole_that_only_a_signed_in_session_reaches(job):
+    j = login_scan(job, fail_on="high", scan_type="full")
+    code, out = j.run("Report and apply fail-on")
+    assert code == 0, "the anonymous full scan found something at High; the hole must sit behind the login\n" + out
+    assert XSS not in alerts_in(j)
+    assert not any("/account" in u for u in alert_urls(j)), "an anonymous spider must not have reached /account"
+
+
+@live
+def test_live_the_authenticated_full_scan_fails_the_same_service_at_high_naming_the_xss(job):
+    j = login_scan(job, fail_on="high", scan_type="full", context_file=CONTEXT_PATH, context_user=CONTEXT_USER)
+    code, out = j.run("Report and apply fail-on")
+    assert code != 0, "the full scan, signed in, passed a page that reflects its query unescaped\n" + out
+    assert "Cross Site Scripting (Reflected)" in out, out
+    assert alerts_in(j)[XSS] == "error"
+    assert any("/account/search" in u for u in alert_urls(j)), alert_urls(j)
+    zap = j.temp / "zap"
+    assert not (zap / "context.context").exists(), "the context holds the credentials, encoded; it is not uploaded"
+    for name in ("report.json", "report.html", "report.md", "zap.sarif"):
+        assert "throwaway-password" not in (zap / name).read_text(), name
+    assert "Signed-in scan, verified" in j.summary.read_text()
+    before = {"phase": "before", "user_signed_in": True, "anonymous_signed_in": False}
+    assert json.loads((zap / "auth-evidence.json").read_text())["checks"] == [
+        before,  # before the spider
+        before,  # before the active scan
+        {"phase": "after", "user_signed_in": True},
+    ]
+    sarif = json.loads((zap / "zap.sarif").read_text())
+    assert all("zap-authenticated" in r["properties"]["tags"] for r in sarif["runs"][0]["tool"]["driver"]["rules"])
+
+
+def signed_in_attempt(job, tmp_path, old: str, new: str, scan_type: str = "baseline", server_flags: tuple = ()):
+    """The whole signed-in flow against the live fixture with a variant of the shipped context.
+
+    Returns (job, the step that failed or None, its output). Each step is run as the job runs it."""
+    assert docker_usable(), "DAST_LIVE is set and docker is not usable: this job exists to run the real image"
+    j = job(
+        start_command=server_command(CONTEXT_PORT, "--login", *server_flags),
+        target_url=f"http://127.0.0.1:{CONTEXT_PORT}",
+        fail_on="none",
+        scan_type=scan_type,
+        context_file=context_file(tmp_path, old, new),
+        context_user=CONTEXT_USER,
+    )
+    for fragment in (
+        "Check the inputs",
+        "Check the context file",
+        "Start the service and wait for it",
+        "Run the ZAP scan",
+        "Remove the context's credentials",
+        "Report and apply fail-on",
+    ):
+        code, out = j.run(fragment, timeout=1500, REPO_ROOT=str(REPO))
+        if code != 0:
+            return j, fragment, out
+    return j, None, ""
+
+
+def assert_not_reported_as_signed_in(j, failed, out, expect_in_check: bool = False):
+    assert failed is not None, "a scan that never signed in passed\n" + out
+    summary = j.summary.read_text() if j.summary.exists() else ""
+    assert "Signed-in scan, verified" not in summary
+    sarif = j.temp / "zap" / "zap.sarif"
+    if sarif.exists():
+        assert "zap-authenticated" not in sarif.read_text()
+    if failed == "Report and apply fail-on":
+        assert "signed-in verification failed" in out, out
+    else:
+        # ZAP shut itself down on a 100% authentication failure rate, or the check refused the context: still a failure.
+        assert failed in ("Check the context file", "Run the ZAP scan"), (failed, out)
+
+
+@live
+@pytest.mark.parametrize(
+    ("label", "old", "new"),
+    [
+        ("wrong credentials", USER_ENTRY, user_entry("throwaway", "not-the-password")),
+        ("a login URL that is not the login", LOGIN, "<loginurl>http://127.0.0.1:8080/nologin</loginurl>"),
+        ("an indicator no signed-in page contains", LOGGEDIN_LINE, r"<loggedin>\QNever on any page\E</loggedin>"),
+    ],
+)
+def test_live_a_scan_that_never_signs_in_fails_and_is_not_reported_as_authenticated(job, tmp_path, label, old, new):
+    j, failed, out = signed_in_attempt(job, tmp_path, old, new)
+    assert_not_reported_as_signed_in(j, failed, out)
+
+
+@live
+@pytest.mark.parametrize("scan_type", ["baseline", "full"])
+def test_live_a_login_that_redirects_as_expected_but_whose_session_the_protected_page_rejects_fails(
+    job, tmp_path, scan_type
+):
+    """The review's case. The login answers with the redirect the logged-in indicator looks for, so any check that
+    accepts the login response (or any recorded response) calls this signed in; the cookie, though, is issued with a
+    Path that never covers /account, so every protected request stays anonymous."""
+    j, failed, out = signed_in_attempt(job, tmp_path, LOGIN, LOGIN, scan_type, server_flags=("--broken-session",))
+    assert failed == "Report and apply fail-on", (failed, out)
+    assert "BEFORE the attack phase, auth-check-url did not look signed in as the selected user" in out, out
+    assert "cookie whose Path or Domain" in out
+    checks = json.loads((j.temp / "zap" / "auth-evidence.json").read_text())["checks"]
+    assert all(c["user_signed_in"] is False for c in checks), checks
+    assert "Signed-in scan NOT verified" in j.summary.read_text()
+    assert "zap-authenticated" not in (j.temp / "zap" / "zap.sarif").read_text()
+
+
+@live
+def test_live_a_context_with_no_effective_login_method_fails_before_the_scan(job, tmp_path):
+    j, failed, out = signed_in_attempt(job, tmp_path, AUTH_BLOCK, "<authentication><type>0</type></authentication>")
+    assert failed == "Check the context file" and "no login method that can sign in" in out, (failed, out)
+
+
+@live
+def test_live_the_baseline_spider_signs_in_too_which_is_why_it_is_not_refused_the_context(job):
+    """With the headers off, every page it reaches is an alert: /account only shows up when the spider got in."""
+    anonymous = login_scan(job, "--insecure", fail_on="none")
+    assert anonymous.run("Report and apply fail-on")[0] == 0
+    assert not any("/account" in u for u in alert_urls(anonymous))
+    signed_in = login_scan(job, "--insecure", fail_on="none", context_file=CONTEXT_PATH, context_user=CONTEXT_USER)
+    assert signed_in.run("Report and apply fail-on")[0] == 0
+    assert any("/account" in u for u in alert_urls(signed_in)), alert_urls(signed_in)

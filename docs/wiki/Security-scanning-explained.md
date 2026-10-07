@@ -42,7 +42,7 @@ scans in one workflow because each sees a different class of problem:
 | `scan-type` | Sees | Blind to | Cost |
 |---|---|---|---|
 | `baseline` | What a client sees: headers, cookies, banners, information in responses. Passive; no attack traffic | What the server does with its input | About a minute |
-| `full` | The baseline, then every URL and parameter the spider found under ZAP's active rules: cross-site scripting, SQL and command injection, path traversal and the rest | Operations no link reaches; anything behind a login | Minutes; bounded by `active-scan-minutes` |
+| `full` | The baseline, then every URL and parameter the spider found under ZAP's active rules: cross-site scripting, SQL and command injection, path traversal and the rest | Operations no link reaches; anything behind a login, unless a context file and user sign the scan in | Minutes; bounded by `active-scan-minutes` |
 | `api` | Every operation an OpenAPI, SOAP or GraphQL definition declares, under the active rules, plus unexpected status codes and content types | Operations the definition leaves out | Minutes |
 
 The reason to run it beside CodeQL and Semgrep is that they match patterns in code
@@ -54,10 +54,21 @@ the `dast-live` CI job holds. Findings land in code scanning under category `zap
 `sarif-category` the caller sets), tagged `zap-<scan-type>` so the tab says which scan
 found each one.
 
+A login hides most of a real application from the spider, and the active rules cannot attack a page the
+spider never saw. `context-file` and `context-user` hand ZAP a committed context (the URLs in scope, the login
+method, the users) and the name of the user to scan as, and the spider and the active scan run signed in; all
+three scan types take them, which was read from ZAP's scripts in the pinned image and then shown with a live
+test. The fixture proves it both ways: with `--login` the same reflected cross-site scripting hole sits behind
+a form login, the anonymous full scan passes it at `high`, and the signed-in one fails at `high`. The credentials
+in a context file are committed, so they are a throwaway account's on the service the job started and nothing else. Because
+ZAP sends them to the URLs the file names, the file is parsed as XML (a `grep` for the URL is how a CDATA section got past an
+earlier version) and refused unless every sign-in URL is loopback after decoding and normalising, with no credential in a URL,
+and the credentials are masked in the log and redacted from every uploaded report.
+
 The scans send attack payloads, which is why the workflow refuses any target that is
 not loopback: the service under test is the one the job started, never a shared
 staging host and never production. A scan of a deployed environment, with
-authentication and real integrations, is a different thing with different risks; it
+real integrations behind its login, is a different thing with different risks; it
 is on the [Roadmap](Roadmap.md) as work for a self-hosted runner.
 
 Snyk is a **reporter** here, not a gate: its findings go to the Security tab and the
