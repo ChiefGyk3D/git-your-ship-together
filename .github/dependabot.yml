@@ -25,6 +25,19 @@ updates:
       default-days: 7
     labels: [dependencies, python]
 
+  # pip-audit and Semgrep, locked for security.yml. A bump rewrites the lock
+  # with every platform's hashes, which fails tests/test_tool_locks.py until
+  # `python scripts/tool_locks.py --relock` puts the pruned lock back and
+  # copies it into the workflow.
+  - package-ecosystem: pip
+    directory: /.github/requirements
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7
+    labels: [dependencies, python]
+
   # The fixture image's base is pinned by digest; without this entry the pin
   # goes stale and Trivy reports the base's OS packages against it.
   - package-ecosystem: docker

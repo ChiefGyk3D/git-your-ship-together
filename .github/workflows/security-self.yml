@@ -32,6 +32,5 @@ jobs:
     with:
       codeql-languages: actions  # no Python package here; `python` would find nothing and fail
       pip-audit-requirements: requirements-dev.txt
-      audit-install-command: pip install pip-audit
       audit-command: pip-audit --requirement fixture/requirements.txt --strict
       scorecard: true
