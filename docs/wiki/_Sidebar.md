@@ -37,6 +37,7 @@
 **Security**
 
 - [security](Workflow-security.md)
+- [dast](Workflow-dast.md)
 - [dependabot-auto-merge](Workflow-dependabot-auto-merge.md)
 
 **Release**

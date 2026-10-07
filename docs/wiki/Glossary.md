@@ -100,7 +100,7 @@ not overwrite each other.
 **SAST, SCA, DAST.** Static analysis of source (CodeQL, Semgrep); software
 composition analysis, meaning known-vulnerable dependencies (pip-audit,
 dependency review, Snyk Open Source); dynamic analysis against a running
-service (not built here yet, issue #97).
+service (OWASP ZAP's baseline scan, [dast](Workflow-dast.md)).
 
 **CodeQL, Semgrep, gitleaks, Snyk, Scorecard, Trivy.** The scanners. See
 [Security scanning explained](Security-scanning-explained.md).

@@ -18,6 +18,7 @@ the workflow's YAML so it cannot drift; the README is the authority.
 | A package for PyPI | `python-package-release.yml` | [python-package-release](Workflow-python-package-release.md) |
 | Files to publish (`.deb`, firmware, bundles) | `artifact-release.yml` | [artifact-release](Workflow-artifact-release.md) |
 | Anything (security scanning) | `security.yml` | [security](Workflow-security.md) |
+| A service that serves HTTP (a dashboard, an API) | `dast.yml` | [dast](Workflow-dast.md) |
 | Dependabot | `dependabot-auto-merge.yml` | [dependabot-auto-merge](Workflow-dependabot-auto-merge.md) |
 | A GitHub Projects v2 board (organization) | `project-sync.yml` | [project-sync](Workflow-project-sync.md) |
 | A static docs site | `docs-pages.yml` | [docs-pages](Workflow-docs-pages.md) |
@@ -41,6 +42,7 @@ from its own caller job, and requires every gate. See
 | `python-package-release.yml` | Yes, publish jobs only | No (Trusted Publishing) | Builds and checks only | PyPI and GitHub release |
 | `artifact-release.yml` | Yes, publish job only | No | Builds and checks only | GitHub release |
 | `security.yml` | `security-events`, plus `id-token` for Snyk and Scorecard | For `SNYK_TOKEN` | Yes (no Snyk, no secrets) | SARIF to the Security tab |
+| `dast.yml` | `security-events` on the upload job only; the job that runs your service holds `contents: read` | No | Yes (not the upload, from a fork) | SARIF to the Security tab |
 | `dependabot-auto-merge.yml` | `contents`/`pull-requests` write; checks nothing out | No | Dependabot PRs | Merges |
 | `project-sync.yml` | App token via Doppler; checks nothing out | Yes (the App's key) | `pull_request_target` | Board updates |
 | `docs-pages.yml` | `pages`/`id-token` on the deploy job only | No | Builds only | GitHub Pages |

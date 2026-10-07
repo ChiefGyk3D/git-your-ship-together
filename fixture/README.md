@@ -17,7 +17,7 @@ under `tofu/` with no provider, so `init` needs no network (fmt, validate,
 tflint, the configuration scan), one Arduino sketch under `firmware/blink/`
 compiled for an Uno (the smallest core), and one shell script,
 `scripts/greet.sh`, with `tests/test_greet.sh` to run it (shellcheck, shfmt,
-the test command). `bash-ci.yml` is run over the whole repository, so
+the test command). `dast/server.py` is the loopback server `dast.yml` scans: with its security headers the scan passes, with `--insecure` it sends none and a `fail-on: medium` scan must fail (`tests/test_dast.py`, `dast-live` in `ci.yml`). `bash-ci.yml` is run over the whole repository, so
 `scripts/doppler-ci-set.sh` is linted by the same call.
 
 `requirements.in` lists the direct dependencies. Regenerate the lock after

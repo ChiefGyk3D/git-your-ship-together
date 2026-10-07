@@ -47,6 +47,7 @@ REUSABLE = [
         "docs-pages.yml",
         "wiki-publish.yml",
         "project-sync.yml",
+        "dast.yml",
     )
 ]
 # The subset that fetches CI secrets. The Doppler rules are about those steps,
@@ -68,6 +69,7 @@ DOPPLER = [
         "verify-published.yml",
         "docs-pages.yml",
         "wiki-publish.yml",
+        "dast.yml",
     )
 ]
 # The language CI workflows: each ends in the `CI green` gate branch protection requires.
@@ -107,7 +109,7 @@ def all_steps(path: Path):
 
 
 def test_there_is_something_to_check():
-    assert len(REUSABLE) == 15, "expected the fifteen callable workflows"
+    assert len(REUSABLE) == 16, "expected the sixteen callable workflows"
     assert len(DOPPLER) == 5, "expected five of them to fetch CI secrets"
     assert [p.name for p in LANGUAGE_CI] == ["arduino-ci.yml", "bash-ci.yml", "python-ci.yml", "tofu-ci.yml"]
     assert ACTION_FILES, "no composite actions found"
@@ -213,6 +215,9 @@ ALLOWED_WRITES = {
     ("artifact-release.yml", "publish", "contents"),
     ("artifact-release.yml", "publish", "id-token"),
     ("artifact-release.yml", "publish", "attestations"),
+    # dast.yml's SARIF upload, from a job that checks nothing out and runs none of the
+    # caller's code; the service under test runs in the scan job, which holds only contents: read.
+    ("dast.yml", "upload", "security-events"),
     ("security.yml", "codeql", "security-events"),
     ("security.yml", "gitleaks", "security-events"),
     ("security.yml", "semgrep", "security-events"),
@@ -266,6 +271,7 @@ ALLOWED_WRITES = {
     # job declares. The generate job it runs holds contents: read.
     ("wiki.yml", "wiki", "contents"),
     # And both on the fixture, whose callers pass deploy/publish: false.
+    ("ci.yml", "fixture-dast", "security-events"),  # dast.yml's SARIF upload, which does run on the fixture
     ("ci.yml", "fixture-pages", "pages"),
     ("ci.yml", "fixture-pages", "id-token"),
     ("ci.yml", "fixture-project-sync", "id-token"),

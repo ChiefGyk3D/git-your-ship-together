@@ -35,6 +35,8 @@ lock.
 | `tests/test_audit_workflow.py` | The weekly audit workflow's shape and token handling |
 | `tests/test_risk_register.py` | The register's shape and dates; no duplicates; every repository named is in the baseline list; **no entry has expired** |
 | `tests/test_fuzz.py` | `python-fuzz.yml`: its pin, and its run step executed against tiny targets (missing dir, no match, passing, crashing) |
+| `tests/test_dast.py` | `dast.yml`: the contract (digest-pinned image, a read-only scan job, an upload job with no shell), its steps run under bash (every refusal, a service that blocks, detaches, dies or never answers, the `fail-on` threshold and the SARIF against canned ZAP reports), and, in the `dast-live` CI job only, the real ZAP image against `fixture/dast/server.py`: with its headers it passes, without them it fails at `medium` |
+| `tests/test_dast.py` | `dast.yml`: the contract (digest-pinned image, a read-only scan job, an upload job with no shell), its steps run under bash (every refusal, a service that blocks, detaches, dies or never answers, the `fail-on` threshold and the SARIF against canned ZAP reports), and, in the `dast-live` CI job only, the real ZAP image against `fixture/dast/server.py`: with its headers it passes, without them it fails at `medium` |
 | `tests/test_security_jobs.py` | Semgrep defaults and content-driven config; the gitleaks job as a pinned binary with its canary |
 | `tests/test_image_hardening.py` | The container-release image checks (non-root, read-only probe) |
 | `tests/test_verify_published.py` | `verify-published.yml`'s steps and gate, image and release halves |
