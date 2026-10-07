@@ -36,8 +36,6 @@ Each has a "done when" in its issue.
 
 - **#99** Attach a CycloneDX and an SPDX SBOM to every package and artifact release, signed with the rest.
 - **#96** `new-repo.sh` should ship a gitleaks pre-commit hook beside the commit-claims hook.
-- **#74** A caller that pins job permissions to `contents: read` fails at startup with no check; document the
-  `id-token` grant where it bites and lint for it.
 
 ## What needs the lab: gaps GitHub-hosted runners cannot close
 
