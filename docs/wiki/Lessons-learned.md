@@ -89,6 +89,42 @@ a CI secret in every job. Separate project, separate config, only the names the 
 in one busy day (34 runs). Snyk now runs weekly by default; `snyk-on: push` is opt-in.
 *Principle: model quota like any other shared resource; default to the cheap schedule.*
 
+## Added 2026-10-07
+
+## 14. Two APIs can disagree about the same setting
+
+**The REST API reports force pushes as allowed whenever a GraphQL `bypassForcePushAllowances` list exists,** even when
+`allowsForcePushes` is false. The list is a separate grant, and the REST view folds it into the answer. Clear it with
+`updateBranchProtectionRule(bypassForcePushActorIds: [])` and check both APIs afterward.
+*Principle: when two views of one setting can differ, read both before saying it is off.*
+
+## 15. A caller grants the union of what the callee declares
+
+**A caller must grant every permission a called reusable workflow declares, even on jobs that will be skipped.** `id-token: write`
+for the Snyk or Scorecard job is the usual one. GitHub checks the grants at startup, so without it every run fails before any job
+starts. A reviewer caught this on a Copilot pull request; the row is in [Troubleshooting](Troubleshooting.md).
+*Principle: a static check cannot know which branch you meant to skip.*
+
+## 16. No pull request CI can mean the pull request conflicts
+
+**A pull request that conflicts with its base gets no `pull_request` runs at all.** GitHub has no merge commit to test, so
+nothing starts and nothing is red. "CI is not running" can mean "rebase me".
+*Principle: absence of a signal is a state to explain, not a pass.*
+
+## 17. Validate input the way the consumer parses it
+
+**DAST context files: check them with the parser semantics ZAP uses.** Three checks passed while ZAP did something else: mixed-content
+XML (text split across child elements), Java-regex dialect differences (unescaped dots, `[::1]` read as a character class,
+quantifiers after the port) and redaction done by string replacement. Each was found by adversarial review and then reproduced
+against ZAP 2.17.0's own classes. Whitelist grammars beat blocklists.
+*Principle: a validator that parses differently from the consumer is a second, wrong parser.*
+
+## 18. Use two different reviewers on a security-sensitive workflow
+
+**On the same pull request a Claude-model reviewer running hostile inputs and Codex's adversarial review caught different
+classes of bug.** Use both on security-sensitive workflows.
+*Principle: reviewers differ in what they notice, so one clean review is not coverage.*
+
 ## Themes worth carrying into your own work
 
 - **Make the rule a test.** A rule that is only written down is a wish.

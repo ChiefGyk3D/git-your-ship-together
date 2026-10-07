@@ -47,8 +47,8 @@ from one job each and requires each gate (`ci / CI green` and `shell / CI green`
 **The grant that fails silently.** GitHub validates a called workflow's declared permissions at startup, before any `if`. A
 caller that pins `permissions: contents: read` makes the coverage job's `id-token: write` impossible, and the run ends
 `startup_failure` with **no check run at all**. Nothing is red; the required check never appears. Measured on two callers
-on 2026-10-03, which then merged without a gate (issue #74, open: a README troubleshooting entry and a test that
-the example grants every permission the workflow declares).
+on 2026-10-03, which then merged without a gate (issue #74, closed: the [Troubleshooting](Troubleshooting.md) page now has the
+row, and a test checks that the example grants every permission the workflow declares).
 
 ## Notes from measured trouble
 
