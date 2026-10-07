@@ -27,12 +27,14 @@ WORKFLOW = WORKFLOWS / "python-fuzz.yml"
 FIXTURE_TARGET_DIR = REPO / "fixture" / "fuzz"
 PASS_DIR = REPO / "tests" / "fuzz_pass"
 CRASH_DIR = REPO / "tests" / "fuzz_crash"
+TIMEOUT_DIR = REPO / "tests" / "fuzz_timeout"
 
 INPUTS = {
     "python-version": "3.14",
     "fuzz-dir": "fuzz",
     "target-glob": "fuzz_*.py",
     "seconds-per-target": 60,
+    "timeout-per-input": 25,
     "max-len": 4096,
     "install-command": "pip install -e .",
     "runner": "ubuntu-24.04",
@@ -126,7 +128,14 @@ def test_the_fixture_ships_a_target_the_workflow_will_find():
 # --- the run step, executed -------------------------------------------------
 
 
-def run_step(tmp_path: Path, fuzz_dir: Path | str, seconds: int = 3, glob: str = "fuzz_*.py"):
+def run_step(
+    tmp_path: Path,
+    fuzz_dir: Path | str,
+    seconds: int = 3,
+    glob: str = "fuzz_*.py",
+    timeout_per_input: int = 25,
+    process_timeout: int = 120,
+):
     """Run python-fuzz.yml's run step under bash the way the job does, in a scratch directory."""
     assert importlib.util.find_spec("atheris"), (
         "atheris is not installed: pip install --require-hashes -r requirements-dev.txt"
@@ -146,6 +155,7 @@ def run_step(tmp_path: Path, fuzz_dir: Path | str, seconds: int = 3, glob: str =
         "FUZZ_DIR": str(fuzz_dir),
         "TARGET_GLOB": glob,
         "SECONDS_PER_TARGET": str(seconds),
+        "TIMEOUT_PER_INPUT": str(timeout_per_input),
         "MAX_LEN": "64",
         "FINDINGS": str(findings),
         "GITHUB_STEP_SUMMARY": str(summary),
@@ -156,7 +166,7 @@ def run_step(tmp_path: Path, fuzz_dir: Path | str, seconds: int = 3, glob: str =
         env=env,
         capture_output=True,
         text=True,
-        timeout=120,
+        timeout=process_timeout,
     )
     return done, (summary.read_text() if summary.exists() else ""), findings
 
@@ -188,6 +198,15 @@ def test_a_crashing_target_fails_the_step_and_leaves_its_input(tmp_path):
     assert done.returncode != 0, "a crashing target did not fail the step: the job could never go red"
     assert "FAILED" in summary, summary
     assert list(findings.glob("*/crash-*")), f"no crash-* input saved under {findings}"
+
+
+def test_a_timed_out_input_fails_the_step_and_leaves_its_input(tmp_path):
+    done, summary, findings = run_step(
+        tmp_path, TIMEOUT_DIR, seconds=5, timeout_per_input=1, process_timeout=20
+    )
+    assert done.returncode != 0, "a hanging input did not fail the step"
+    assert "FAILED" in summary, summary
+    assert list(findings.glob("*/timeout-*")), f"no timeout-* input saved under {findings}"
 
 
 def test_one_failing_target_does_not_hide_the_others(tmp_path):

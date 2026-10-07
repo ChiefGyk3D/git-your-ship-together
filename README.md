@@ -65,7 +65,7 @@ Sixteen reusable workflows and one composite action:
 | File | What it does |
 |---|---|
 | `.github/workflows/python-ci.yml` | Lint, workflow lint, test matrix, coverage upload, optional CLI smoke test, single-arch container build with a check, one `CI green` gate job |
-| `.github/workflows/python-fuzz.yml` | Runs every Atheris target a repository keeps under `fuzz/` for a fixed time, fails on a crash and uploads the crashing input. The real fuzzing OpenSSF Scorecard's Fuzzing check looks for. Holds no token |
+| `.github/workflows/python-fuzz.yml` | Runs every Atheris target a repository keeps under `fuzz/` for a fixed time, fails on a crash or hang and uploads the input. The real fuzzing OpenSSF Scorecard's Fuzzing check looks for. Holds no token |
 | `.github/workflows/bash-ci.yml` | shellcheck and shfmt over every tracked script, an optional test command, an optional configuration lint (yamllint, ansible-lint), workflow lint, the same `CI green` gate. Holds no token |
 | `.github/workflows/tofu-ci.yml` | For OpenTofu or Terraform: fmt, validate without a backend, tflint and a Trivy configuration scan on every push and pull request; a plan on the default branch only, with credentials through the Doppler gate; the same `CI green` gate. Nothing applies |
 | `.github/workflows/arduino-ci.yml` | For firmware built with arduino-cli: compile every sketch for a board with pinned cores and libraries, keep the binaries as an artifact, host-side tests, workflow lint, the same `CI green` gate. Holds no token; the binaries reach a release through `artifact-release.yml` |
@@ -419,8 +419,9 @@ OpenSSF Scorecard's Fuzzing check credits a Python repository for one thing
 only: an `import atheris` in a `*.py` file in the tree (or OSS-Fuzz,
 ClusterFuzzLite, OneFuzz). Hypothesis does not count. `python-fuzz.yml` makes
 that credit honest: it runs each Atheris target a repository keeps for a fixed
-time on every call, fails the job on a crash, and uploads the input that
-caused it.
+time on every call, fails the job on a crash or hang, and uploads the input that
+caused it. libFuzzer also stops an individual input that runs longer than
+`timeout-per-input` (default 25 seconds) and saves it as `timeout-<sha>`.
 
 ```yaml
 jobs:
@@ -440,7 +441,7 @@ targets fails: a missing `fuzz-dir`, or one with nothing matching
 
 **A target** is a file under `fuzz-dir` matching `target-glob` (default
 `fuzz/fuzz_*.py`, searched recursively), run as
-`python <target> -max_total_time=<seconds> -max_len=<max-len> -artifact_prefix=<dir>/ -print_final_stats=1`. It must:
+`python <target> -max_total_time=<seconds> -timeout=<timeout-per-input> -max_len=<max-len> -artifact_prefix=<dir>/ -print_final_stats=1`. It must:
 
 - `import atheris`, and wrap the imports of the code under test in
   `atheris.instrument_imports()`, or Atheris sees no coverage and fuzzes blind;
@@ -477,8 +478,10 @@ if __name__ == "__main__":
 Every target runs, one after another, even when an earlier one failed; the job
 fails if any did. Each target's result and execution count is one line of the
 job summary. A crash leaves `crash-*` (also `leak-*`, `timeout-*`, `oom-*`)
-files, uploaded as the `fuzz-findings` artifact for 30 days; reproduce one
-with `python fuzz/fuzz_x.py crash-<sha>`.
+files, uploaded as the `fuzz-findings` artifact for 30 days. A `timeout-*`
+artefact means libFuzzer found an input that hung or ran too long, not a crash;
+reproduce it with `python fuzz/fuzz_x.py timeout-<sha>`. The outer timeout
+remains a backstop for a target that hangs libFuzzer itself.
 
 Atheris is installed from one pinned version under `--require-hashes` with
 `--only-binary`, so nothing is built on the runner. It publishes manylinux
@@ -499,6 +502,7 @@ Inputs of `python-fuzz.yml`:
 | `fuzz-dir` | `fuzz` | Directory searched recursively for targets; missing is a failure |
 | `target-glob` | `fuzz_*.py` | `find -name` pattern of a target; no match is a failure |
 | `seconds-per-target` | `60` | Seconds each target runs (`-max_total_time`); a fraction is truncated |
+| `timeout-per-input` | `25` | Seconds libFuzzer allows one input (`-timeout`) before saving a `timeout-*` artefact; a fraction is truncated |
 | `max-len` | `4096` | Longest input libFuzzer generates, in bytes |
 | `install-command` | `pip install -e .` | Installs the project under test before Atheris; override for extras |
 | `runner` | `ubuntu-24.04` | Must be x86_64 Linux: Atheris publishes no aarch64 wheel |
@@ -1974,7 +1978,7 @@ The tests are the contract, one file per thing they hold still:
 | `tests/test_audit_baseline.py` | The audit, fed a passing repository and a broken one per criterion; a 403 comes back UNKNOWN, never PASS; exit codes tell FAIL from UNKNOWN |
 | `tests/test_risk_register.py` | The register's shape, its dates, no duplicate advisory, every repository named is in the baseline list, and no entry has expired |
 | `tests/test_dast.py` | `dast.yml`'s contract, its steps run under bash (refusals, a service that blocks, detaches, dies or never answers; the `fail-on` threshold and the SARIF against canned ZAP reports), and, in the `dast-live` CI job, the real ZAP image against `fixture/dast/server.py` with and without its headers |
-| `tests/test_fuzz.py` | `python-fuzz.yml`'s inputs and pin, and its run step executed under bash against tiny targets: a missing directory, no match, a passing target and a crashing one (which must fail the step and leave its `crash-*` input) |
+| `tests/test_fuzz.py` | `python-fuzz.yml`'s inputs and pin, and its run step executed under bash against tiny targets: a missing directory, no match, a passing target, a crashing one and a hanging one (which must fail the step and leave its `timeout-*` input) |
 | `tests/test_security_jobs.py` | The Semgrep job's defaults and its content-driven config; the gitleaks job as a pinned binary: no licence, no Doppler, no `id-token`, the sha256 checked before extraction, full history, SARIF under category `gitleaks`, and a canary step that plants an AWS-shaped key in a scratch repository and requires exit 1 before the real scan runs (the test also fetches the pinned release, checks the hash, and runs that canary for real; it skips only when offline) |
 | `tests/test_pre_commit_hook.py` | `.githooks/pre-commit` pins the same gitleaks version and sha256 as `security.yml`; run in a scratch repository it refuses a planted AWS-shaped key naming the rule and file but not the secret, passes a clean commit, honours `.gitleaks.toml`, refuses on a broken config or a download that is not the pinned release, and warns and allows offline (the cases that need the binary download it through the hook and skip when offline); `new-repo.sh` writes it byte for byte, executable, and adds the `core.hooksPath` line to a README's Developing section once |
 | `tests/test_wiki.py` | Every reusable workflow has a page and its generated table follows the YAML; regenerating is a no-op and `--check` catches a stale tree; every link resolves and every cited test exists; every workflow, script, composite action, audit check, test file and baseline file is mentioned somewhere in the wiki; `wiki.yml` is the self-call it should be |
