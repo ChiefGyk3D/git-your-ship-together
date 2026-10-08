@@ -25,6 +25,8 @@ Merged to `main` on 2026-10-06 and 2026-10-07, after the v1.14.0 tag and so not 
 - `verify-published.yml` rescans a published image (every platform) and a release's `sbom.cdx.json` with a pinned Trivy for
   advisories published since release, opt-in with `rescan: true` and a nightly `schedule:` in the caller; accepted
   advisories come from the risk register, which the weekly audit now also reads for them (#117, epic #115 item 2).
+- Signed-in `dast.yml` scans of an `https://` loopback target: the sign-in probe sends the complete absolute URL in its
+  request line, so ZAP keeps the scheme and port, and the live tests run it against a self-signed TLS fixture (#129).
 - A CycloneDX and an SPDX SBOM attached to every release of `python-package-release.yml`, signed with the rest
   (#99, in #106).
 - The gitleaks pre-commit hook, written into an adopted repository by `scripts/new-repo.sh` (#96, in #104), and the
