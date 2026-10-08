@@ -18,17 +18,25 @@ repository and the issue tracker are right and this page has a bug.
 - The gitleaks binary pinned by sha256 in place of the licence-gated action (#90, closed), after the
   Hammunition suite moved into an organization.
 
-Merged to `main` on 2026-10-06 and 2026-10-07, after the v1.14.0 tag and so not yet in a release:
+## Unreleased
 
-- `dast.yml` ([dast](Workflow-dast.md)): ZAP's full (active) and api scans beside the baseline, each proved to fail
-  on the fixture (#109, after the baseline scan in #107).
-- `verify-published.yml` rescans a published image (every platform) and a release's `sbom.cdx.json` with a pinned Trivy for
-  advisories published since release, opt-in with `rescan: true` and a nightly `schedule:` in the caller; accepted
-  advisories come from the risk register, which the weekly audit now also reads for them (#117, epic #115 item 2).
-- Signed-in `dast.yml` scans of an `https://` loopback target: the sign-in probe sends the complete absolute URL in its
-  request line, so ZAP keeps the scheme and port, and the live tests run it against a self-signed TLS fixture (#129).
-- A CycloneDX and an SPDX SBOM attached to every release of `python-package-release.yml`, signed with the rest
-  (#99, in #106).
+Generated from git: the merges to `main` since {{latest_release}} ({{latest_release_date}}), newest first. Nothing here is
+typed, so it cannot go stale; at a release it moves, by hand, into a dated block below.
+
+{{unreleased}}
+
+## Released
+
+### v1.15.0 (2026-10-07)
+
+- `dast.yml` ([dast](Workflow-dast.md)), a new reusable workflow for OWASP ZAP: it starts the caller's service on
+  loopback and scans it, with the `baseline`, `full` (active rules) and `api` scans, each proved to fail on the fixture
+  (#107, #109).
+- Signed-in `dast.yml` scans through a ZAP context file and user, with `auth-check-url` proving the session works before
+  and after; the context is parsed with ZAP's own semantics and refused when it can leave the loopback origin (#127). In
+  this release the target had to be `http://`; an `https://` target failed closed (#129).
+- A CycloneDX and an SPDX SBOM attached to every release of `python-package-release.yml` (`sbom`, default `true`), and
+  `verify-release-sbom` in `verify-published.yml` (#99, in #106).
 - The gitleaks pre-commit hook, written into an adopted repository by `scripts/new-repo.sh` (#96, in #104), and the
   audit's `pre-commit-hook` check that reads it (#112). Rolling it out to the repositories that already exist is #126, below.
 - The weekly audit's organization checks: a GitHub App token per owner, and organization owners are not counted as
@@ -39,6 +47,7 @@ Merged to `main` on 2026-10-06 and 2026-10-07, after the v1.14.0 tag and so not 
 - The shared `SECURITY.md` template in `baseline/` (#110, closing #79).
 - `security.yml` installs pip-audit, Semgrep and Snyk's lock under `--require-hashes`, which clears the Scorecard
   pinned-dependencies alert (#114, closing #87).
+- The wiki: the two wikis merged into one generated from `docs/wiki/` (#102, #128).
 
 ## Open, measured issues
 
@@ -56,6 +65,7 @@ Each has a "done when" in its issue.
 Filed 2026-10-07 after #109, as epic **#115** (nine items, in order), each to close on GitHub-hosted runners only.
 
 - **#116** Authenticated DAST: ZAP context and user for the full and api scans.
+- **#117** Post-release vulnerability rescans in `verify-published.yml`.
 - **#118** Semgrep pack selection by content: Dockerfile, Terraform, OWASP Top Ten.
 - **#119** Licence audit of the whole dependency tree in `security.yml`.
 - **#120** Fuzz corpus persistence outside anything a pull request can write.

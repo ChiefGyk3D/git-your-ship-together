@@ -125,6 +125,24 @@ against ZAP 2.17.0's own classes. Whitelist grammars beat blocklists.
 classes of bug.** Use both on security-sensitive workflows.
 *Principle: reviewers differ in what they notice, so one clean review is not coverage.*
 
+## 19. Generate version facts; do not type them
+
+**2026-10-08: the hand-written wiki pages went stale at every release.** The pin in Getting started still said v1.14.0
+after v1.15.0, Home never named the release, and the Roadmap listed the released contents as "not yet released". The
+generated tables were current the whole time; the typed versions and pins were not, because no release step touched them.
+The generator now fills `\{{latest_release}}`, `\{{latest_pin}}`, `\{{latest_release_date}}` and the Roadmap's unreleased
+list from git, and a test fails on a literal 40-hex SHA or a `# vX.Y.Z` pin comment in a hand page.
+*Principle: a fact that changes at a known event is computed at that event, not remembered.*
+
+Three smaller lessons from the same week's re-pin work:
+
+- **A green pin-only re-pin is merged by the lead**, not queued for a human to look at; the pin is the whole change.
+- **A re-pin that jumps several versions can hit older defaults.** Moving a caller across many GYST versions at once
+  turned on defaults added in between (non-root image checks, hadolint in the container release), and the caller went red
+  for reasons that were not in the re-pin.
+- **The background security review earned its keep.** It caught a test filter that weakened a pin check, so a pin that
+  should have failed passed.
+
 ## Themes worth carrying into your own work
 
 - **Make the rule a test.** A rule that is only written down is a wish.

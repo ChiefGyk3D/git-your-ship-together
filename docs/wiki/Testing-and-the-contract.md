@@ -47,6 +47,7 @@ lock.
 | `tests/test_new_repo.py` | `scripts/new-repo.sh --dry-run` over synthetic trees |
 | `tests/test_fixture.py` | Every fixture requirement carries a hash; direct dependencies are in the lock; the fixture image is non-root |
 | `tests/test_wiki.py` | **This wiki**: every reusable workflow has a page whose generated table follows its YAML; regenerating is a no-op and a stale tree is caught; links resolve and cited tests exist; and every workflow, script, composite action, audit check, test file and baseline file is mentioned somewhere |
+| `tests/test_wiki_release_facts.py` | **Version facts in the wiki are generated**: the release placeholders render from a temp repository's tags (newest by version, the peeled commit SHA, the date, the merges since), and no hand page types a 40-hex SHA or a `# vX.Y.Z` pin comment |
 
 (The exact set of files is whatever is in `tests/`; `test_wiki.py` is what catches a new one the wiki
 has not mentioned.)
