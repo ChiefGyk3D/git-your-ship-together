@@ -16,6 +16,14 @@
 # `sbom.spdx.json` must be present, listed and the formats they claim to be.
 # That is what python-package-release.yml publishes.
 #
+# With `rescan: true` it also asks the question verification cannot: has an
+# advisory been published since this was released? Trivy (pinned by version and
+# sha256) scans each platform of the image, and the release's `sbom.cdx.json`,
+# against today's vulnerability database. Findings at or above `rescan-severity`
+# fail the run, `rescan-exit-code` "0" only reports, and the SARIF is kept as a
+# workflow artifact. It is off by default; a nightly `schedule:` in the caller
+# is what makes it a rescan.
+#
 # Call it with:
 #
 #   on:
@@ -79,6 +87,38 @@ on:
         description: Shell run once per platform against the pulled image; `$IMAGE` names it and `DOCKER_DEFAULT_PLATFORM` is set. Empty skips the check.
         type: string
         default: ""
+      rescan:
+        description: Rescan the verified image (every platform) and the release's `sbom.cdx.json` with Trivy for advisories published since release. Findings at or above `rescan-severity` fail the run unless `rescan-exit-code` is "0". Runs only when the verification itself passed. Off by default.
+        type: boolean
+        default: false
+      rescan-severity:
+        description: Severities the rescan reports and fails on, comma-separated.
+        type: string
+        default: CRITICAL,HIGH
+      rescan-exit-code:
+        description: Trivy exit code when the rescan finds something. "1" (the default, the same as `trivy-exit-code` in container-release.yml) fails the job; "0" reports only.
+        type: string
+        default: "1"
+      rescan-ignore-unfixed:
+        description: Skip advisories that have no fixed version yet, so a finding the maintainers cannot act on does not fail a nightly run.
+        type: boolean
+        default: true
+      rescan-ignore-advisories:
+        description: Comma-separated advisory IDs (CVE-..., GHSA-...) the rescan does not fail on. Each one needs an entry for the calling repository in the shared repository's baseline/risk-register.yaml with `trivy` in `where`; the weekly audit reads this input and fails on an ID that has none, or whose review date has passed.
+        type: string
+        default: ""
+      rescan-artifact-name:
+        description: Name of the workflow artifact that carries the rescan's SARIF and text reports. A caller that calls this workflow twice in one run gives each call its own name.
+        type: string
+        default: verify-published-rescan
+      trivy-version:
+        description: Trivy release to download (aquasecurity/trivy), without the `v`; the one Trivy pin in this workflow. Changing it means changing `trivy-sha256`. To bump - `gh release download v<new> -R aquasecurity/trivy -p 'trivy_<new>_Linux-64bit.tar.gz' -p 'trivy_<new>_checksums.txt'`, `sha256sum` the archive and compare the line in the checksums file.
+        type: string
+        default: 0.75.0
+      trivy-sha256:
+        description: sha256 of `trivy_<trivy-version>_Linux-64bit.tar.gz`. The download is refused when it does not match.
+        type: string
+        default: c6e65abddb348e25f10549df887045629cf28cc72453cd1c63acb717316b3f3f
       platforms:
         description: Comma-separated platforms to pull and test. A platform that differs from the runner's runs under QEMU.
         type: string
@@ -284,10 +324,156 @@ jobs:
           print("SBOMs verified:", cdx["specVersion"], spdx["spdxVersion"])
           PY
 
+  # Verification says the artefact is what the producer published; it says
+  # nothing about what has been found in it since. This job asks that, with a
+  # pinned Trivy binary and no action, against the vulnerability database as of
+  # now. It holds a read token and writes nothing to the repository; the SARIF
+  # leaves as a workflow artifact, because a job that uploads to the Security
+  # tab needs `security-events: write`, and a called workflow that asks for a
+  # permission its caller did not grant fails at startup for every caller,
+  # opted in or not.
+  rescan:
+    name: Rescan for new advisories
+    needs: [verify, verify-release]
+    # Only artefacts that verified are worth rescanning. A skipped half is a
+    # half the caller did not ask for.
+    if: >-
+      always() && inputs.rescan &&
+      !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
+    runs-on: ubuntu-24.04
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read  # download the release's SBOM
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: ${{ inputs.egress-policy }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          disable-sudo: true
+          # The agent may only stop reporting to StepSecurity in block mode.
+          disable-telemetry: ${{ inputs.egress-policy == 'block' }}
+
+      # The binary is pinned by hash; no action and no new egress host is
+      # involved (github.com redirects to release-assets.githubusercontent.com,
+      # and the vulnerability database comes from mirror.gcr.io or ghcr.io,
+      # all already on the list).
+      - name: Install Trivy
+        env:
+          TRIVY_VERSION: ${{ inputs.trivy-version }}
+          TRIVY_SHA256: ${{ inputs.trivy-sha256 }}
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/trivy.tar.gz"
+          curl -sSfL -o "$archive" "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          echo "${TRIVY_SHA256}  ${archive}" | sha256sum -c -
+          mkdir "$RUNNER_TEMP/trivy-bin"
+          tar -xzf "$archive" -C "$RUNNER_TEMP/trivy-bin" trivy
+          "$RUNNER_TEMP/trivy-bin/trivy" --version
+
+      # The accepted advisories become a .trivyignore. An ID that is not
+      # shaped like an advisory is refused rather than written, so the input
+      # cannot add a line of anything else to the file.
+      - name: Write the ignore file from the accepted advisories
+        env:
+          ADVISORIES: ${{ inputs.rescan-ignore-advisories }}
+        run: |
+          set -euo pipefail
+          : > "$RUNNER_TEMP/rescan.trivyignore"
+          IFS=',' read -r -a list <<< "$ADVISORIES"
+          for id in "${list[@]}"; do
+            id="${id// /}"
+            [ -n "$id" ] || continue
+            if ! [[ "$id" =~ ^(CVE-[0-9]{4}-[0-9]{4,}|GHSA-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{4})$ ]]; then
+              echo "::error::rescan-ignore-advisories: '$id' is not a CVE or GHSA ID"
+              exit 1
+            fi
+            echo "$id" >> "$RUNNER_TEMP/rescan.trivyignore"
+          done
+          echo "ignoring $(wc -l < "$RUNNER_TEMP/rescan.trivyignore") accepted advisory ID(s)"
+
+      # One JSON report per target, converted to SARIF and to a table for the
+      # log, so a failing run names what it found. Trivy's own exit code is
+      # kept: a scan that errors fails as surely as one that finds something.
+      # Both halves run before the step fails, so one finding hides nothing.
+      - name: Rescan with Trivy
+        env:
+          TRIVY_CACHE_DIR: ${{ runner.temp }}/trivy-cache
+          TRIVY_DISABLE_TELEMETRY: "true"
+          GH_TOKEN: ${{ github.token }}
+          IMAGE: ${{ inputs.image }}
+          PLATFORMS: ${{ inputs.platforms }}
+          RELEASE_TAG: ${{ inputs.release-tag }}
+          REPO: ${{ inputs.release-repository || github.repository }}
+          SEVERITY: ${{ inputs.rescan-severity }}
+          EXIT_CODE: ${{ inputs.rescan-exit-code }}
+          IGNORE_UNFIXED: ${{ inputs.rescan-ignore-unfixed }}
+        run: |
+          # No -e: a scan that finds something exits non-zero and the other half must still run.
+          set -u +e
+          set -o pipefail
+          trivy="$RUNNER_TEMP/trivy-bin/trivy"
+          ignorefile="$RUNNER_TEMP/rescan.trivyignore"
+          out="$RUNNER_TEMP/rescan"
+          mkdir -p "$out"
+          common=(--quiet --skip-version-check --scanners vuln --severity "$SEVERITY" --ignorefile "$ignorefile")
+          if [ "$IGNORE_UNFIXED" = "true" ]; then common+=(--ignore-unfixed); fi
+          status=0
+
+          # scan <name> <trivy subcommand and its target and extra flags...>
+          scan() {
+            local name="$1"; shift
+            echo "::group::rescan $name"
+            "$trivy" "$1" "${common[@]}" --format json --output "$out/$name.json" --exit-code "$EXIT_CODE" "${@:2}"
+            local rc=$?
+            if [ -s "$out/$name.json" ]; then
+              "$trivy" convert --quiet --severity "$SEVERITY" --ignorefile "$ignorefile" \
+                --format sarif --output "$out/$name.sarif" "$out/$name.json" || rc=1
+              "$trivy" convert --quiet --severity "$SEVERITY" --ignorefile "$ignorefile" \
+                --format table --output "$out/$name.txt" "$out/$name.json" || rc=1
+              cat "$out/$name.txt"
+            fi
+            echo "::endgroup::"
+            if [ "$rc" -ne 0 ]; then
+              echo "::error title=rescan::$name: Trivy exited $rc (findings at $SEVERITY, or an error)"
+              status=1
+            fi
+          }
+
+          if [ -n "$IMAGE" ]; then
+            IFS=',' read -r -a list <<< "$PLATFORMS"
+            for platform in "${list[@]}"; do
+              platform="${platform// /}"
+              [ -n "$platform" ] || continue
+              scan "image-${platform//\//-}" image --image-src remote --platform "$platform" -- "$IMAGE"
+            done
+          fi
+
+          if [ -n "$RELEASE_TAG" ]; then
+            mkdir -p "$out/release"
+            if gh release download "$RELEASE_TAG" --repo "$REPO" --dir "$out/release" --pattern sbom.cdx.json \
+                && [ -s "$out/release/sbom.cdx.json" ]; then
+              scan release sbom -- "$out/release/sbom.cdx.json"
+            else
+              echo "::error title=rescan::the release has no sbom.cdx.json to rescan"
+              status=1
+            fi
+          fi
+          exit "$status"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: ${{ inputs.rescan-artifact-name }}
+          path: |
+            ${{ runner.temp }}/rescan/*.sarif
+            ${{ runner.temp }}/rescan/*.txt
+          if-no-files-found: ignore
+          retention-days: 14
+
   verified:
     name: Verified
     if: always()
-    needs: [verify, verify-release]
+    needs: [verify, verify-release, rescan]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions: {}
@@ -301,19 +487,21 @@ jobs:
         env:
           IMAGE_RESULT: ${{ needs.verify.result }}
           RELEASE_RESULT: ${{ needs.verify-release.result }}
+          RESCAN_RESULT: ${{ needs.rescan.result }}
         run: |
           set -euo pipefail
           echo "image: $IMAGE_RESULT"
           echo "release: $RELEASE_RESULT"
+          echo "rescan: $RESCAN_RESULT"
           # A skipped job is one the caller did not ask for; both skipped is
           # a call that verified nothing.
           if [ "$IMAGE_RESULT" = "skipped" ] && [ "$RELEASE_RESULT" = "skipped" ]; then
             echo "::error::neither image nor release-tag was set, so nothing was verified"
             exit 1
           fi
-          for result in "$IMAGE_RESULT" "$RELEASE_RESULT"; do
+          for result in "$IMAGE_RESULT" "$RELEASE_RESULT" "$RESCAN_RESULT"; do
             if [ "$result" != "success" ] && [ "$result" != "skipped" ]; then
-              echo "::error::the published artefact did not verify"
+              echo "::error::the published artefact did not verify, or the rescan found something"
               exit 1
             fi
           done

@@ -600,6 +600,18 @@ def test_an_input_description_is_not_an_exception():
     assert audit.exceptions_in(text) == set()
 
 
+def test_the_rescan_input_is_read_as_an_exception_and_its_own_declaration_is_not():
+    caller = (
+        "      with:\n        image: ghcr.io/o/i:1\n"
+        "        rescan-ignore-advisories: CVE-2026-12345, GHSA-aaaa-bbbb-cccc\n"
+    )
+    assert audit.exceptions_in(caller) == {"CVE-2026-12345", "GHSA-aaaa-bbbb-cccc"}
+    shared = (REPO / ".github" / "workflows" / "verify-published.yml").read_text()
+    assert audit.exceptions_in(shared) == set()
+    result = audit.check_risk_exceptions(REPO_NAME, {"CVE-2026-12345"}, REGISTER, today=TODAY)
+    assert result.status == audit.FAIL and "not in baseline/risk-register.yaml" in result.detail
+
+
 def test_registered_unexpired_exceptions_pass():
     ids = audit.exceptions_in(SECURITY_CALLER)
     result = audit.check_risk_exceptions(REPO_NAME, ids, REGISTER, today=TODAY)

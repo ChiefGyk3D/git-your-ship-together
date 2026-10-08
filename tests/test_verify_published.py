@@ -48,7 +48,7 @@ def test_inputs_and_defaults():
 
 
 def test_shape_and_permissions():
-    assert set(JOBS) == {"verify", "verify-release", "verified"}
+    assert set(JOBS) == {"verify", "verify-release", "rescan", "verified"}
     assert JOBS["verify"]["name"] == "Verify ${{ inputs.image }}"
     assert JOBS["verify"]["if"] == "inputs.image != ''"
     assert JOBS["verify-release"]["if"] == "inputs.release-tag != ''"
@@ -56,7 +56,7 @@ def test_shape_and_permissions():
     assert JOBS["verify"]["runs-on"] == "ubuntu-24.04"
     assert JOBS["verify"]["permissions"] == {"contents": "read", "packages": "read"}
     assert JOBS["verified"]["name"] == "Verified"
-    assert JOBS["verified"]["needs"] == ["verify", "verify-release"]
+    assert JOBS["verified"]["needs"] == ["verify", "verify-release", "rescan"]
     assert JOBS["verified"]["if"] == "always()"
     assert JOBS["verified"]["permissions"] == {}
 
@@ -207,3 +207,349 @@ def test_verified_fails_when_nothing_was_asked_for_and_accepts_a_skipped_half():
     run = steps("verified")[-1]["run"]
     assert 'if [ "$IMAGE_RESULT" = "skipped" ] && [ "$RELEASE_RESULT" = "skipped" ]' in run
     assert 'if [ "$result" != "success" ] && [ "$result" != "skipped" ]' in run
+
+
+# --- the rescan ------------------------------------------------------------
+#
+# Opt-in, a pinned Trivy binary, no action, no write, and a failure that is
+# Trivy's own exit code. The scan step's script is run here with a stub `trivy`
+# that records its arguments, so the flags are proved; the live half (the real
+# binary against an SBOM with a known-vulnerable package) is `rescan_live`
+# below, run by ci.yml's `rescan-live` job.
+
+import os  # noqa: E402
+import re  # noqa: E402
+import subprocess  # noqa: E402
+
+import pytest  # noqa: E402
+
+RESCAN_INPUTS = (
+    "rescan",
+    "rescan-severity",
+    "rescan-exit-code",
+    "rescan-ignore-unfixed",
+    "rescan-ignore-advisories",
+    "rescan-artifact-name",
+    "trivy-version",
+    "trivy-sha256",
+)
+
+
+def rescan_step(fragment: str) -> dict:
+    for step in steps("rescan"):
+        if fragment in step.get("name", "") or fragment in step.get("uses", ""):
+            return step
+    raise AssertionError(f"no rescan step mentions {fragment!r}")
+
+
+def test_the_rescan_is_off_by_default_and_its_defaults_are_the_containers():
+    inputs = CALL["inputs"]
+    assert inputs["rescan"]["default"] is False
+    assert inputs["rescan-severity"]["default"] == "CRITICAL,HIGH"
+    assert inputs["rescan-exit-code"]["default"] == "1"
+    assert inputs["rescan-ignore-unfixed"]["default"] is True
+    assert inputs["rescan-ignore-advisories"]["default"] == ""
+    container = yaml.safe_load((REPO / ".github" / "workflows" / "container-release.yml").read_text())
+    container_inputs = (container.get("on") or container.get(True))["workflow_call"]["inputs"]
+    assert inputs["rescan-severity"]["default"] == container_inputs["trivy-severity"]["default"]
+    assert inputs["rescan-exit-code"]["default"] == container_inputs["trivy-exit-code"]["default"]
+    assert inputs["rescan-ignore-unfixed"]["default"] == container_inputs["trivy-ignore-unfixed"]["default"]
+    for name in RESCAN_INPUTS:
+        assert name in inputs and inputs[name]["description"].strip()
+
+
+def test_the_rescan_job_runs_only_when_asked_and_only_after_a_good_verification():
+    job = JOBS["rescan"]
+    assert job["needs"] == ["verify", "verify-release"]
+    assert "inputs.rescan" in job["if"]
+    assert "contains(needs.*.result, 'failure')" in job["if"]
+    assert "contains(needs.*.result, 'cancelled')" in job["if"]
+    assert job["permissions"] == {"contents": "read"}
+    assert steps("rescan")[0]["with"]["disable-sudo"] is True
+    assert JOBS["verified"]["permissions"] == {}
+
+
+def test_trivy_is_a_binary_pinned_by_hash_and_no_new_action_or_host_is_involved():
+    install = rescan_step("Install Trivy")
+    assert 'echo "${TRIVY_SHA256}  ${archive}" | sha256sum -c -' in install["run"]
+    assert install["env"]["TRIVY_VERSION"] == "${{ inputs.trivy-version }}"
+    assert re.fullmatch(r"[0-9a-f]{64}", CALL["inputs"]["trivy-sha256"]["default"])
+    assert "aquasecurity/trivy-action" not in TEXT
+    # the download and the database come from hosts the list already carries
+    default = CALL["inputs"]["allowed-endpoints"]["default"].split()
+    for host in ("github.com:443", "release-assets.githubusercontent.com:443", "mirror.gcr.io:443", "ghcr.io:443"):
+        assert host in default
+    assert "check.trivy.dev" not in default and "get.trivy.dev" not in default
+    assert "--skip-version-check" in rescan_step("Rescan")["run"]
+
+
+def test_caller_values_reach_the_rescan_only_through_env():
+    for name in ("Install Trivy", "Write the ignore file", "Rescan"):
+        assert "${{" not in rescan_step(name)["run"], name
+    scan = rescan_step("Rescan")["env"]
+    assert scan["SEVERITY"] == "${{ inputs.rescan-severity }}"
+    assert scan["EXIT_CODE"] == "${{ inputs.rescan-exit-code }}"
+    assert scan["IMAGE"] == "${{ inputs.image }}"
+
+
+def test_the_sarif_leaves_as_an_artifact_because_an_upload_would_break_every_existing_caller():
+    upload = rescan_step("upload-artifact")
+    assert upload["if"] == "always()"
+    assert upload["with"]["name"] == "${{ inputs.rescan-artifact-name }}"
+    assert "security-events" not in TEXT.replace("`security-events: write`", "")
+
+
+def stub_env(directory, *, trivy_body: str, gh_body: str = "exit 0"):
+    bin_dir = directory / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    (directory / "trivy-bin").mkdir(exist_ok=True)
+    (directory / "trivy-bin" / "trivy").write_text(f"#!/bin/bash\n{trivy_body}\n")
+    (directory / "trivy-bin" / "trivy").chmod(0o755)
+    (bin_dir / "gh").write_text(f"#!/bin/bash\n{gh_body}\n")
+    (bin_dir / "gh").chmod(0o755)
+    return {
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "RUNNER_TEMP": str(directory),
+        "SEVERITY": "CRITICAL,HIGH",
+        "EXIT_CODE": "1",
+        "IGNORE_UNFIXED": "true",
+        "IMAGE": "",
+        "PLATFORMS": "linux/amd64, linux/arm64",
+        "RELEASE_TAG": "",
+        "REPO": "o/r",
+        "GH_TOKEN": "x",
+    }
+
+
+def run_rescan(directory, env, step="Rescan"):
+    return subprocess.run(
+        ["bash", "-eo", "pipefail", "-c", rescan_step(step)["run"]],
+        cwd=directory,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+
+WRITE_SBOM = (
+    'dir=""; prev=""; for a in "$@"; do [ "$prev" = "--dir" ] && dir="$a"; prev="$a"; done; '
+    "echo '{}' > \"$dir/sbom.cdx.json\""
+)
+# A trivy that logs its arguments, writes a JSON report for scans and a file for conversions.
+RECORDING = (
+    'echo "$@" >> "$RUNNER_TEMP/calls"\n'
+    'out=""; prev=""; for a in "$@"; do [ "$prev" = "--output" ] && out="$a"; prev="$a"; done\n'
+    '[ -n "$out" ] && echo \'{}\' > "$out"\n'
+    'exit "${STUB_RC:-0}"'
+)
+
+
+def test_each_platform_of_the_image_is_scanned_with_the_configured_severity_and_exit_code(tmp_path):
+    env = stub_env(tmp_path, trivy_body=RECORDING)
+    env["IMAGE"] = "ghcr.io/o/i:1"
+    result = run_rescan(tmp_path, env)
+    assert result.returncode == 0, result.stdout + result.stderr
+    calls = (tmp_path / "calls").read_text()
+    for platform in ("linux/amd64", "linux/arm64"):
+        assert f"--platform {platform} -- ghcr.io/o/i:1" in calls
+    assert "--severity CRITICAL,HIGH" in calls and "--exit-code 1" in calls
+    assert "--image-src remote" in calls and "--ignore-unfixed" in calls
+    assert (tmp_path / "rescan" / "image-linux-arm64.sarif").exists()
+
+
+def test_a_finding_fails_the_step_and_exit_code_zero_only_reports(tmp_path):
+    env = stub_env(tmp_path, trivy_body=RECORDING)
+    env.update(IMAGE="ghcr.io/o/i:1", STUB_RC="1")
+    failed = run_rescan(tmp_path, env)
+    assert failed.returncode == 1 and "::error title=rescan::image-linux-amd64" in failed.stdout
+    # the report is still written, so the artifact carries what was found
+    assert (tmp_path / "rescan" / "image-linux-amd64.sarif").exists()
+
+    (tmp_path / "calls").unlink()
+    env.update(EXIT_CODE="0", STUB_RC="0")
+    assert run_rescan(tmp_path, env).returncode == 0
+    assert "--exit-code 0" in (tmp_path / "calls").read_text()
+
+
+def test_a_scan_that_errors_before_writing_a_report_still_fails(tmp_path):
+    env = stub_env(tmp_path, trivy_body="exit 2")
+    env["IMAGE"] = "ghcr.io/o/i:1"
+    result = run_rescan(tmp_path, env)
+    assert result.returncode == 1
+    assert not list((tmp_path / "rescan").glob("*.sarif"))
+
+
+def test_the_release_sbom_is_scanned_and_a_release_without_one_fails(tmp_path):
+    gh = WRITE_SBOM
+    env = stub_env(tmp_path, trivy_body=RECORDING, gh_body=gh)
+    env["RELEASE_TAG"] = "v1"
+    assert run_rescan(tmp_path, env).returncode == 0
+    assert "sbom --quiet" in (tmp_path / "calls").read_text()
+    assert (tmp_path / "rescan" / "release.sarif").exists()
+
+    (tmp_path / "m").mkdir()
+    missing = stub_env(tmp_path / "m", trivy_body=RECORDING)
+    missing["RELEASE_TAG"] = "v1"
+    result = run_rescan(tmp_path / "m", missing)
+    assert result.returncode == 1 and "no sbom.cdx.json" in result.stdout
+
+
+def test_both_halves_are_scanned_even_when_the_first_one_fails(tmp_path):
+    gh = WRITE_SBOM
+    env = stub_env(tmp_path, trivy_body=RECORDING, gh_body=gh)
+    env.update(IMAGE="ghcr.io/o/i:1", RELEASE_TAG="v1", STUB_RC="1")
+    assert run_rescan(tmp_path, env).returncode == 1
+    calls = (tmp_path / "calls").read_text()
+    assert "image " in calls and "sbom " in calls
+
+
+def ignore_file(tmp_path, advisories):
+    env = {**os.environ, "RUNNER_TEMP": str(tmp_path), "ADVISORIES": advisories}
+    result = subprocess.run(
+        ["bash", "-eo", "pipefail", "-c", rescan_step("Write the ignore file")["run"]],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    return result, tmp_path / "rescan.trivyignore"
+
+
+def test_accepted_advisories_become_the_ignore_file(tmp_path):
+    result, path = ignore_file(tmp_path, "CVE-2026-12345, GHSA-abcd-1234-wxyz")
+    assert result.returncode == 0
+    assert path.read_text().split() == ["CVE-2026-12345", "GHSA-abcd-1234-wxyz"]
+
+
+def test_no_accepted_advisories_is_an_empty_ignore_file(tmp_path):
+    result, path = ignore_file(tmp_path, "")
+    assert result.returncode == 0 and path.read_text() == ""
+
+
+@pytest.mark.parametrize("bad", ["*", "CVE-2026-1", "CVE-2026-12345 exp:2099-01-01", "$(id)", "GHSA-ABCD-1234-wxyz"])
+def test_a_value_that_is_not_an_advisory_id_is_refused_not_written(tmp_path, bad):
+    result, path = ignore_file(tmp_path, f"CVE-2026-12345,{bad}")
+    assert result.returncode != 0 and "is not a CVE or GHSA ID" in result.stdout
+    assert "uid=" not in path.read_text()
+
+
+def test_verified_reads_the_rescan_and_fails_on_it():
+    run = steps("verified")[-1]["run"]
+    assert 'for result in "$IMAGE_RESULT" "$RELEASE_RESULT" "$RESCAN_RESULT"' in run
+    assert steps("verified")[-1]["env"]["RESCAN_RESULT"] == "${{ needs.rescan.result }}"
+
+
+def test_the_fixture_rescans_a_real_image_and_gates_ci_green():
+    ci = yaml.safe_load(CI.read_text())["jobs"]
+    job = ci["fixture-rescan"]
+    assert job["uses"] == "./.github/workflows/verify-published.yml"
+    assert job["with"]["rescan"] is True
+    assert job["with"]["image"].startswith("ghcr.io/chiefgyk3d/")
+    assert job["permissions"] == {"contents": "read", "packages": "read"}
+    assert "fixture-rescan" in ci["ci-green"]["needs"]
+    live = ci["rescan-live"]
+    assert live["steps"][-1]["env"]["RESCAN_LIVE"] == "1"
+    assert "rescan-live" in ci["ci-green"]["needs"]
+
+
+# --- the live half: the real Trivy against an SBOM with a known-vulnerable package --------
+
+LIVE = bool(os.environ.get("RESCAN_LIVE"))
+live = pytest.mark.skipif(not LIVE, reason="set RESCAN_LIVE=1 to run the real Trivy (ci.yml's rescan-live does)")
+
+VULNERABLE_SBOM = {
+    "bomFormat": "CycloneDX",
+    "specVersion": "1.6",
+    "version": 1,
+    "components": [
+        {
+            "type": "library",
+            "name": "django",
+            "version": "1.11.0",
+            "purl": "pkg:pypi/django@1.11.0",
+            "bom-ref": "pkg:pypi/django@1.11.0",
+        }
+    ],
+}
+CLEAN_SBOM = {"bomFormat": "CycloneDX", "specVersion": "1.6", "version": 1, "components": []}
+
+
+def live_rescan(tmp_path, sbom, *, advisories="", exit_code="1"):
+    """Install the pinned Trivy with the workflow's own step, then run its scan step on a release carrying `sbom`."""
+    import json
+
+    env = {
+        **os.environ,
+        "RUNNER_TEMP": str(tmp_path),
+        "TRIVY_VERSION": CALL["inputs"]["trivy-version"]["default"],
+        "TRIVY_SHA256": CALL["inputs"]["trivy-sha256"]["default"],
+    }
+    if not (tmp_path / "trivy-bin" / "trivy").exists():
+        install = subprocess.run(
+            ["bash", "-eo", "pipefail", "-c", rescan_step("Install Trivy")["run"]],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        assert install.returncode == 0, install.stdout + install.stderr
+    ignored, _ = ignore_file(tmp_path, advisories)
+    assert ignored.returncode == 0, ignored.stdout
+    (tmp_path / "bin").mkdir(exist_ok=True)
+    payload = json.dumps(sbom)
+    (tmp_path / "bin" / "gh").write_text(
+        '#!/bin/bash\ndir=""; prev=""; for a in "$@"; do [ "$prev" = "--dir" ] && dir="$a"; prev="$a"; done\n'
+        f"cat > \"$dir/sbom.cdx.json\" <<'J'\n{payload}\nJ\n"
+    )
+    (tmp_path / "bin" / "gh").chmod(0o755)
+    env.update(
+        PATH=f"{tmp_path / 'bin'}:{os.environ['PATH']}",
+        TRIVY_CACHE_DIR=os.environ.get("TRIVY_CACHE_DIR", str(tmp_path / "cache")),
+        SEVERITY="CRITICAL",
+        EXIT_CODE=exit_code,
+        IGNORE_UNFIXED="false",
+        IMAGE="",
+        PLATFORMS="",
+        RELEASE_TAG="v1",
+        REPO="o/r",
+        GH_TOKEN="x",
+    )
+    return subprocess.run(
+        ["bash", "-eo", "pipefail", "-c", rescan_step("Rescan")["run"]],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+
+@live
+def test_live_an_sbom_with_a_known_critical_advisory_fails_the_rescan_and_writes_sarif(tmp_path):
+    import json
+
+    result = live_rescan(tmp_path, VULNERABLE_SBOM)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "CVE-2019-14234" in result.stdout
+    sarif = json.loads((tmp_path / "rescan" / "release.sarif").read_text())
+    assert sarif["runs"][0]["results"], "the SARIF carries no results"
+
+
+@live
+def test_live_exit_code_zero_reports_the_same_finding_without_failing(tmp_path):
+    result = live_rescan(tmp_path, VULNERABLE_SBOM, exit_code="0")
+    assert result.returncode == 0 and "CVE-2019-14234" in result.stdout
+
+
+@live
+def test_live_an_accepted_advisory_is_honoured_and_the_others_still_fail(tmp_path):
+    import json
+
+    assert live_rescan(tmp_path, VULNERABLE_SBOM).returncode == 1
+    found = {r["ruleId"] for r in json.loads((tmp_path / "rescan" / "release.sarif").read_text())["runs"][0]["results"]}
+    assert len(found) >= 2, "the sample must carry more than one critical advisory for this proof"
+    first, *rest = sorted(found)
+    assert live_rescan(tmp_path, VULNERABLE_SBOM, advisories=first).returncode == 1  # the rest still fail
+    assert live_rescan(tmp_path, VULNERABLE_SBOM, advisories=",".join(sorted(found))).returncode == 0
+
+
+@live
+def test_live_an_sbom_with_nothing_in_it_passes(tmp_path):
+    assert live_rescan(tmp_path, CLEAN_SBOM).returncode == 0

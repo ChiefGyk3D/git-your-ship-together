@@ -22,6 +22,9 @@ Merged to `main` on 2026-10-06 and 2026-10-07, after the v1.14.0 tag and so not 
 
 - `dast.yml` ([dast](Workflow-dast.md)): ZAP's full (active) and api scans beside the baseline, each proved to fail
   on the fixture (#109, after the baseline scan in #107).
+- `verify-published.yml` rescans a published image (every platform) and a release's `sbom.cdx.json` with a pinned Trivy for
+  advisories published since release, opt-in with `rescan: true` and a nightly `schedule:` in the caller; accepted
+  advisories come from the risk register, which the weekly audit now also reads for them (#117, epic #115 item 2).
 - A CycloneDX and an SPDX SBOM attached to every release of `python-package-release.yml`, signed with the rest
   (#99, in #106).
 - The gitleaks pre-commit hook, written into an adopted repository by `scripts/new-repo.sh` (#96, in #104), and the
@@ -51,7 +54,6 @@ Each has a "done when" in its issue.
 Filed 2026-10-07 after #109, as epic **#115** (nine items, in order), each to close on GitHub-hosted runners only.
 
 - **#116** Authenticated DAST: ZAP context and user for the full and api scans.
-- **#117** Post-release vulnerability rescans in `verify-published.yml`.
 - **#118** Semgrep pack selection by content: Dockerfile, Terraform, OWASP Top Ten.
 - **#119** Licence audit of the whole dependency tree in `security.yml`.
 - **#120** Fuzz corpus persistence outside anything a pull request can write.

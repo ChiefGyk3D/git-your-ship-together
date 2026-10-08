@@ -33,6 +33,18 @@ Trivy (an image scan for CRITICAL and HIGH findings) lives in
 [tofu-ci](Workflow-tofu-ci.md); both upload SARIF too. Fuzzing is
 [python-fuzz](Workflow-python-fuzz.md).
 
+## The scan that runs after release: the rescan
+
+Every scan above looks at the code as it was when it merged. An advisory published next month
+is not in any of those results. [verify-published](Workflow-verify-published.md) takes it up
+with `rescan: true`: a pinned Trivy reads today's vulnerability database and scans each
+platform of the published image and the release's `sbom.cdx.json`, failing at `rescan-severity`.
+It finds known advisories against the packages the image or the SBOM names. It cannot find a
+flaw nobody has reported, a package the SBOM leaves out, or anything in code you wrote
+yourself. It is off by default and is only a rescan when the caller schedules it. The accepted
+advisories it skips are the ones in the [risk register](Baseline-and-the-weekly-audit.md), and
+the weekly audit fails on one that is not there.
+
 ## The scan that runs the service: DAST
 
 Everything in the table reads code or metadata. [dast](Workflow-dast.md) is the

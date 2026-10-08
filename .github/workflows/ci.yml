@@ -342,6 +342,54 @@ jobs:
       image: ghcr.io/chiefgyk3d/star-daemon:latest
       test-command: docker run --rm "$IMAGE" sh -c "python -m py_compile /app/star-daemon.py /app/star_daemon.py /app/star_announcer.py /app/github_stars.py /app/config.py /app/platforms.py"
 
+  # verify-published.yml's rescan over the same published image: Trivy,
+  # pinned by hash, against today's database, in block mode with the workflow's
+  # own default list, so the database and image hosts are measured here. It
+  # runs at CRITICAL only, so an advisory landing on a base layer on a Tuesday
+  # does not turn main red; that the rescan DOES fail on a finding is proved by
+  # the next job, against an SBOM that carries one.
+  fixture-rescan:
+    name: fixture rescan
+    uses: ./.github/workflows/verify-published.yml # zizmor: ignore[self-repository]
+    permissions:
+      contents: read  # the call's own read grant
+      packages: read  # the verify job pulls the public image from GHCR
+    with:
+      image: ghcr.io/chiefgyk3d/star-daemon:latest
+      platforms: linux/amd64
+      rescan: true
+      rescan-severity: CRITICAL
+      rescan-artifact-name: fixture-rescan
+
+  # The real Trivy, installed by the workflow's own pinned step, over an SBOM
+  # naming a package with known critical advisories. tests/test_verify_published.py
+  # skips these unless RESCAN_LIVE is set.
+  rescan-live:
+    name: rescan fails when it should
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install test dependencies
+        run: pip install --require-hashes -r requirements-dev.txt
+
+      - name: Run the live rescans
+        env:
+          RESCAN_LIVE: "1"
+        run: pytest tests/test_verify_published.py -k live
+
   # dast.yml at this ref over the fixture's loopback server, which sends the
   # security headers a ZAP baseline looks for: it must pass at `low`, the
   # strictest level that has nothing to find on it. Block mode with the
@@ -437,7 +485,7 @@ jobs:
   ci-green:
     name: CI green
     if: always()
-    needs: [actionlint, zizmor, test, fixture-ci, fixture-bash, fixture-fuzz, fixture-tofu, fixture-arduino, fixture-package, fixture-sbom, fixture-artifact, fixture-pages, fixture-wiki, fixture-release, fixture-verify, fixture-project-sync, fixture-dast, dast-live]
+    needs: [actionlint, zizmor, test, fixture-ci, fixture-bash, fixture-fuzz, fixture-tofu, fixture-arduino, fixture-package, fixture-sbom, fixture-artifact, fixture-pages, fixture-wiki, fixture-release, fixture-verify, fixture-rescan, rescan-live, fixture-project-sync, fixture-dast, dast-live]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}

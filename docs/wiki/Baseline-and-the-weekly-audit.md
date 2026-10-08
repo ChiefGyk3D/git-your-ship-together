@@ -72,7 +72,8 @@ an exception is three steps, in this order:
    than fixed, what limits the exposure meanwhile, the date accepted, a `review_by` at
    most 90 days out, and an owner.
 2. **Name it in the caller**, with a comment pointing at the entry (`pip-audit-extra-args:
-   --ignore-vuln <id>` or `dependency-review-allow-ghsas: <id>`).
+   --ignore-vuln <id>`, `dependency-review-allow-ghsas: <id>` or, for the post-release rescan,
+   `rescan-ignore-advisories: <id>` with `trivy` in the entry's `where`).
 3. **Run the audit.** `risk-exceptions` fails on an ignored advisory that is not
    registered, is registered for another repository, or whose review date has passed.
 

@@ -38,7 +38,7 @@ from its own caller job, and requires every gate. See
 | `arduino-ci.yml` | No | No | Yes | No (binaries kept as an artifact) |
 | `python-fuzz.yml` | No | No | Yes | No |
 | `container-release.yml` | Yes, after a push only | Docker Hub credentials, if used | Builds and scans only | GHCR (and Docker Hub) |
-| `verify-published.yml` | No (`packages: read`) | No | n/a (scheduled) | No |
+| `verify-published.yml` | No (`packages: read`; the rescan adds nothing) | No | n/a (scheduled) | No |
 | `python-package-release.yml` | Yes, publish jobs only | No (Trusted Publishing) | Builds and checks only | PyPI and GitHub release |
 | `artifact-release.yml` | Yes, publish job only | No | Builds and checks only | GitHub release |
 | `security.yml` | `security-events`, plus `id-token` for Snyk and Scorecard | For `SNYK_TOKEN` | Yes (no Snyk, no secrets) | SARIF to the Security tab |

@@ -62,7 +62,7 @@ def test_repos_are_in_the_baseline_list():
 def test_where_names_a_check_that_takes_exceptions():
     for entry in entries():
         for where in entry["where"]:
-            assert where in ("pip-audit", "dependency-review"), f"{entry['id']}: unknown check {where!r}"
+            assert where in ("pip-audit", "dependency-review", "trivy"), f"{entry['id']}: unknown check {where!r}"
 
 
 def test_dates_are_dates_and_the_review_is_at_most_ninety_days_out():
