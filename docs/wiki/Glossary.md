@@ -25,7 +25,7 @@ with `uses:` and passes inputs under `with:`.
 **Input.** A named value a caller passes under `with:`. Each workflow page lists
 them, generated from the YAML.
 
-**Pin.** Naming the exact commit to run, `@<40-hex sha> # v1.14.0`, instead of a
+**Pin.** Naming the exact commit to run, `@<40-hex sha> # {{latest_release}}`, instead of a
 tag or a branch that can move. The comment is for humans and for zizmor, which
 checks that it still agrees with the SHA.
 

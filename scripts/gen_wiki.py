@@ -14,7 +14,7 @@ What is written into the directory named by `--out`:
 * `_Footer.md`, naming the source commit given with `--commit`. Never a clock
   or a hostname: the output is a function of the tree and the commit.
 
-Two things are generated rather than typed:
+Three things are generated rather than typed:
 
 * **Input tables.** A page named `Workflow-<name>.md` is about
   `.github/workflows/<name>.yml`. Where it holds the line `<!-- inputs -->`,
@@ -26,6 +26,16 @@ Two things are generated rather than typed:
   page's wiki name (no extension, anchor kept). A relative link to anything
   else in the repository (a workflow file, BASELINE.md) becomes a link to the
   file on GitHub `main`. A link to something that does not exist is an error.
+
+* **Release facts.** A hand page never types a version, a pin or a date that
+  changes at every release. It writes a placeholder and the generator fills it
+  from git: `{{latest_release}}` (the newest `vX.Y.Z` tag reachable from HEAD),
+  `{{latest_pin}}` (that tag's commit SHA, peeled from the tag object),
+  `{{latest_release_date}}` (that commit's date, `YYYY-MM-DD`), and
+  `{{unreleased}}` (one bullet per first-parent merge in `<tag>..HEAD`, with
+  its pull request number). Needs the tags: a shallow clone without them is an
+  error that says how to fetch them. A historical mention ("since v1.10.0")
+  stays literal.
 
 Needs no network.
 
@@ -39,6 +49,7 @@ from __future__ import annotations
 import argparse
 import posixpath
 import re
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -63,6 +74,68 @@ EXTERNAL = re.compile(r"^(?:[a-z][a-z0-9+.-]*:|//|#|/|<)", re.IGNORECASE)
 
 class WikiError(Exception):
     """A tree the wiki cannot be generated from."""
+
+
+# ---------------------------------------------------------------------------
+# Release facts, from git
+# ---------------------------------------------------------------------------
+
+RELEASE_TAG = re.compile(r"v(\d+)\.(\d+)\.(\d+)")
+PLACEHOLDER = re.compile(r"(\\?)\{\{(latest_release|latest_pin|latest_release_date|unreleased)\}\}")
+PR_SUFFIX = re.compile(r"\s*\(#(\d+)\)\s*$")
+
+
+def _git(*args: str) -> str:
+    try:
+        done = subprocess.run(
+            ["git", *args], cwd=REPO_ROOT, capture_output=True, text=True, check=False
+        )
+    except FileNotFoundError as e:
+        raise WikiError("git is not installed; the release facts are read from it") from e
+    if done.returncode != 0:
+        raise WikiError(f"git {' '.join(args)} failed: {done.stderr.strip()}")
+    return done.stdout
+
+
+def release_facts() -> dict[str, str]:
+    """The values behind the placeholders, read from git (no network)."""
+    tags = [t for t in _git("tag", "--merged", "HEAD", "--list", "v*").split() if RELEASE_TAG.fullmatch(t)]
+    if not tags:
+        raise WikiError(
+            "no vX.Y.Z tag is reachable from HEAD; the wiki's release facts come from the tags. "
+            "Fetch them: git fetch --tags --unshallow (checkout in CI needs fetch-depth: 0)"
+        )
+    tag = max(tags, key=lambda t: tuple(int(n) for n in RELEASE_TAG.fullmatch(t).groups()))
+    # ^{commit} peels an annotated tag to the commit a caller pins; the tag object's own SHA is not that.
+    sha = _git("rev-parse", "--verify", f"{tag}^{{commit}}").strip()
+    date = _git("log", "-1", "--format=%cs", sha).strip()
+    merges = [m for m in _git("log", "--first-parent", "--format=%s", f"{tag}..HEAD").splitlines() if m.strip()]
+    return {
+        "latest_release": tag,
+        "latest_pin": sha,
+        "latest_release_date": date,
+        "unreleased": _unreleased(tag, merges),
+    }
+
+
+def _unreleased(tag: str, subjects: list[str]) -> str:
+    if not subjects:
+        return f"Nothing yet: `main` is at {tag}."
+    bullets = []
+    for subject in subjects:
+        subject = subject.replace("\u2014", "-")  # the wiki carries no em dash
+        pr = PR_SUFFIX.search(subject)
+        if pr:
+            text = subject[: pr.start()]
+            bullets.append(f"- {text} ([#{pr.group(1)}]({REPO_URL}/pull/{pr.group(1)}))")
+        else:
+            bullets.append(f"- {subject}")
+    return "\n".join(bullets)
+
+
+def fill_placeholders(text: str, facts: dict[str, str]) -> str:
+    """Fill the placeholders; a backslash before one (`\\{{latest_release}}`) writes it literally, for the docs about them."""
+    return PLACEHOLDER.sub(lambda m: m.group(0)[1:] if m.group(1) else facts[m.group(2)], text)
 
 
 # ---------------------------------------------------------------------------
@@ -234,9 +307,10 @@ def render(commit: str = "unknown") -> dict[str, str]:
         if f"{PAGE_PREFIX}{stem}" not in pages:
             raise WikiError(f"no page for {stem}.yml: write docs/wiki/{PAGE_PREFIX}{stem}.md")
 
+    facts = release_facts()
     files: dict[str, str] = {}
     for path in sources:
-        text = path.read_text()
+        text = fill_placeholders(path.read_text(), facts)
         if text.count(MARKER) > 1:
             raise WikiError(f"{path.name} holds the {MARKER} marker more than once")
         stem = path.stem.removeprefix(PAGE_PREFIX)

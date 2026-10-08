@@ -23,7 +23,7 @@ docs/wiki/*.md ──▶ scripts/gen_wiki.py ──▶ wiki-out/ ──▶ wiki-
 
 ## How it is kept up to date
 
-Documentation rots when nothing fails. Four things make this one fail loudly:
+Documentation rots when nothing fails. Five things make this one fail loudly:
 
 1. **Tables are generated, not typed.** A workflow page holds one inputs marker (an HTML comment, copy it from any existing
    `Workflow-*.md` page) and the generator fills it from the YAML. Add an input and the page gains it on the next publish; a table cannot say what the workflow does not.
@@ -31,7 +31,14 @@ Documentation rots when nothing fails. Four things make this one fail loudly:
 3. **A drift test.** `tests/test_wiki.py` also fails if any of these exist in the repository but are never mentioned in
    the wiki: a workflow under `.github/workflows/`, a script under `scripts/`, a composite action, an audit check, a test file, or
    a file in `baseline/`. Add one, forget the wiki, and CI says which page needs a line.
-4. **A habit, written down.** The pull-request template has a checkbox ("does this change what the wiki says?") and
+4. **Release facts are generated, not typed.** A hand page that needs the current version, the pin or a release date writes
+   a placeholder, and `scripts/gen_wiki.py` fills it from git at generation time: `\{{latest_release}}` (the newest `vX.Y.Z`
+   tag reachable from HEAD), `\{{latest_pin}}` (that tag's commit SHA, not the tag object's) and `\{{latest_release_date}}`.
+   The Roadmap's `\{{unreleased}}` becomes one bullet per merge to `main` since that tag. A test fails if a hand page holds
+   a literal 40-hex SHA or a `# vX.Y.Z` pin comment, so a release cannot leave a stale pin behind. Historical mentions
+   ("since v1.10.0") stay literal; to show a placeholder's own name in prose, put a backslash before it.
+   The generator reads tags, so a checkout that runs it needs them (`fetch-depth: 0`); `wiki-publish.yml` and the test job fetch them.
+5. **A habit, written down.** The pull-request template has a checkbox ("does this change what the wiki says?") and
    [Contributing and developing](Contributing-and-developing.md) lists the wiki in the checklist for adding a workflow.
 
 A test can only prove a page *mentions* a thing, not that what it says is still true. So the rule for authors is:
@@ -40,6 +47,14 @@ A test can only prove a page *mentions* a thing, not that what it says is still 
 
 Generated tables carry reference data. Prose pages should explain what a thing is *for* and link to the authority rather than
 copying values that change.
+
+## At a release
+
+The version, pin and date everywhere are already right: they follow the tag. One manual step remains, in the pull request or
+commit that follows the tag: **move the Roadmap's generated "Unreleased" list into a dated block** under "Released"
+(`### vX.Y.Z (YYYY-MM-DD)`), written from the release notes (`gh release view vX.Y.Z`). Until you do, the Unreleased
+section simply reads "Nothing yet" and the new release's contents are missing from the history, which is the only thing a
+release can still leave stale.
 
 ## One-time setup (the owner's)
 
