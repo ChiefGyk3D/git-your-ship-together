@@ -757,6 +757,7 @@ jobs:
           # port that is the local end of an open connection passes the check, ZAP cannot bind it ("unable to start the
           # main proxy"), exits, and the script waits ten minutes and exits 3 with no report (issue 133). Below that
           # range no connection's local end can be, and a bind (not a connect) shows anything else already holding it.
+          # ZAP_PORT_LOW and ZAP_PORT_HIGH exist only so the tests can narrow the range; no workflow input sets them.
           zap_port="$(python3 - <<'PORT'
           import os
           import random

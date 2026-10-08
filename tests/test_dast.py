@@ -486,6 +486,32 @@ def test_the_port_picker_skips_a_port_something_holds(job, tmp_path):
         held.close()
 
 
+def test_the_port_picker_fails_the_step_when_no_port_is_free(job, tmp_path):
+    """Exhaustion: with a one-port range and that port held, the step's own lines (picker plus its error handler) end
+    with exit 1 and the error annotation, rather than looping or handing ZAP a busy port."""
+    step_text = str(step("scan", "Run the ZAP scan")["run"])
+    block = re.search(r"(zap_port=\"\$\(python3 - <<'PORT'\n.*?\nPORT\n\)\" \|\| \{[^\n]*\})", step_text, re.S)
+    assert block, "the step no longer picks ZAP's port with an inline python3 heredoc and an error handler"
+    held = socket.socket()
+    held.bind(("0.0.0.0", 0))
+    held.listen()
+    taken = held.getsockname()[1]
+    try:
+        env = {**os.environ, "ZAP_PORT_LOW": str(taken), "ZAP_PORT_HIGH": str(taken)}
+        ran = subprocess.run(
+            ["bash", "-c", block.group(1) + '\necho "picked=$zap_port"'],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=30,
+        )
+        assert ran.returncode == 1, (ran.returncode, ran.stdout, ran.stderr)
+        assert "::error::could not find a free port for ZAP" in ran.stdout
+        assert "picked=" not in ran.stdout
+    finally:
+        held.close()
+
+
 def test_the_full_scan_runs_the_full_script_with_the_spider_bound_and_no_active_limit_by_default(job, tmp_path):
     _, code, out, args = scan_step(job, tmp_path, scan_type="full", spider_minutes=3)
     assert code == 0, out
