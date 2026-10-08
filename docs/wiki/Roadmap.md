@@ -27,6 +27,16 @@ typed, so it cannot go stale; at a release it moves, by hand, into a dated block
 
 ## Released
 
+### v1.16.0 (2026-10-08)
+
+- Post-release vulnerability rescans in `verify-published.yml`: opt-in `rescan: true` runs a pinned Trivy over every
+  platform of `image` and the release's CycloneDX SBOM and fails on `rescan-severity`; accepted advisories need a
+  `where: trivy` entry in the risk register, which the weekly audit checks (#130, closing #117).
+- Signed-in `dast.yml` scans of an `https://` loopback target: the sign-in probe sends the absolute URL, so ZAP keeps the
+  scheme (#131, closing #129).
+- The wiki's release facts (latest release, pin, date and the Unreleased list) generated from git, with a test that bans
+  literal pins in hand pages (#132).
+
 ### v1.15.0 (2026-10-07)
 
 - `dast.yml` ([dast](Workflow-dast.md)), a new reusable workflow for OWASP ZAP: it starts the caller's service on
@@ -59,13 +69,15 @@ Each has a "done when" in its issue.
   [Security scanning explained](Security-scanning-explained.md)).
 - **#97** A `dast.yml` workflow: OWASP ZAP against a service the caller starts (first caller:
   hammunition-hill). The baseline, full and api scans have shipped; what stays open is the first caller.
+- **#133** A live `dast.yml` test in this repository's CI occasionally fails because ZAP exits 3 and writes no
+  report. Seen twice on `main`, in two different tests; a re-run passes. Callers are not affected.
 
 ## Open: the hardening backlog
 
 Filed 2026-10-07 after #109, as epic **#115** (nine items, in order), each to close on GitHub-hosted runners only.
 
-- **#116** Authenticated DAST: ZAP context and user for the full and api scans.
-- **#117** Post-release vulnerability rescans in `verify-published.yml`.
+- **#116** Authenticated DAST: ZAP context and user for the full and api scans. Shipped in v1.15.0 (#127).
+- **#117** Post-release vulnerability rescans in `verify-published.yml`. Shipped in v1.16.0 (#130).
 - **#118** Semgrep pack selection by content: Dockerfile, Terraform, OWASP Top Ten.
 - **#119** Licence audit of the whole dependency tree in `security.yml`.
 - **#120** Fuzz corpus persistence outside anything a pull request can write.
