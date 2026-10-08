@@ -289,7 +289,7 @@ def test_caller_values_reach_the_rescan_only_through_env():
     scan = rescan_step("Rescan")["env"]
     assert scan["SEVERITY"] == "${{ inputs.rescan-severity }}"
     assert scan["EXIT_CODE"] == "${{ inputs.rescan-exit-code }}"
-    assert scan["IMAGE"] == "${{ inputs.image }}"
+    assert scan["IMAGE_REQUESTED"] == "${{ inputs.image }}"
 
 
 def test_the_sarif_leaves_as_an_artifact_because_an_upload_would_break_every_existing_caller():
@@ -299,14 +299,26 @@ def test_the_sarif_leaves_as_an_artifact_because_an_upload_would_break_every_exi
     assert "security-events" not in TEXT.replace("`security-events: write`", "")
 
 
-def stub_env(directory, *, trivy_body: str, gh_body: str = "exit 0"):
+DIGEST = "sha256:" + "ab" * 32
+DIGEST_REF = f"ghcr.io/o/i@{DIGEST}"
+
+
+def put_sbom(directory, env, body: bytes = b"{}", *, recorded: bytes | None = None):
+    """Place the verified SBOM where the download step puts it, and record its hash as the verify job did."""
+    import hashlib
+
+    sbom_dir = directory / "verified-sbom"
+    sbom_dir.mkdir(exist_ok=True)
+    (sbom_dir / "sbom.cdx.json").write_bytes(body)
+    env["SBOM_SHA256"] = hashlib.sha256(body if recorded is None else recorded).hexdigest()
+
+
+def stub_env(directory, *, trivy_body: str):
     bin_dir = directory / "bin"
     bin_dir.mkdir(exist_ok=True)
     (directory / "trivy-bin").mkdir(exist_ok=True)
     (directory / "trivy-bin" / "trivy").write_text(f"#!/bin/bash\n{trivy_body}\n")
     (directory / "trivy-bin" / "trivy").chmod(0o755)
-    (bin_dir / "gh").write_text(f"#!/bin/bash\n{gh_body}\n")
-    (bin_dir / "gh").chmod(0o755)
     return {
         "PATH": f"{bin_dir}:{os.environ['PATH']}",
         "RUNNER_TEMP": str(directory),
@@ -314,10 +326,11 @@ def stub_env(directory, *, trivy_body: str, gh_body: str = "exit 0"):
         "EXIT_CODE": "1",
         "IGNORE_UNFIXED": "true",
         "IMAGE": "",
+        "IMAGE_REQUESTED": "",
         "PLATFORMS": "linux/amd64, linux/arm64",
         "RELEASE_TAG": "",
-        "REPO": "o/r",
-        "GH_TOKEN": "x",
+        "SBOM_DIR": str(directory / "verified-sbom"),
+        "SBOM_SHA256": "",
     }
 
 
@@ -331,10 +344,6 @@ def run_rescan(directory, env, step="Rescan"):
     )
 
 
-WRITE_SBOM = (
-    'dir=""; prev=""; for a in "$@"; do [ "$prev" = "--dir" ] && dir="$a"; prev="$a"; done; '
-    "echo '{}' > \"$dir/sbom.cdx.json\""
-)
 # A trivy that logs its arguments, writes a JSON report for scans and a file for conversions.
 RECORDING = (
     'echo "$@" >> "$RUNNER_TEMP/calls"\n'
@@ -346,12 +355,12 @@ RECORDING = (
 
 def test_each_platform_of_the_image_is_scanned_with_the_configured_severity_and_exit_code(tmp_path):
     env = stub_env(tmp_path, trivy_body=RECORDING)
-    env["IMAGE"] = "ghcr.io/o/i:1"
+    env.update(IMAGE=DIGEST_REF, IMAGE_REQUESTED="ghcr.io/o/i:1")
     result = run_rescan(tmp_path, env)
     assert result.returncode == 0, result.stdout + result.stderr
     calls = (tmp_path / "calls").read_text()
     for platform in ("linux/amd64", "linux/arm64"):
-        assert f"--platform {platform} -- ghcr.io/o/i:1" in calls
+        assert f"--platform {platform} -- {DIGEST_REF}" in calls
     assert "--severity CRITICAL,HIGH" in calls and "--exit-code 1" in calls
     assert "--image-src remote" in calls and "--ignore-unfixed" in calls
     assert (tmp_path / "rescan" / "image-linux-arm64.sarif").exists()
@@ -359,7 +368,7 @@ def test_each_platform_of_the_image_is_scanned_with_the_configured_severity_and_
 
 def test_a_finding_fails_the_step_and_exit_code_zero_only_reports(tmp_path):
     env = stub_env(tmp_path, trivy_body=RECORDING)
-    env.update(IMAGE="ghcr.io/o/i:1", STUB_RC="1")
+    env.update(IMAGE=DIGEST_REF, IMAGE_REQUESTED="ghcr.io/o/i:1", STUB_RC="1")
     failed = run_rescan(tmp_path, env)
     assert failed.returncode == 1 and "::error title=rescan::image-linux-amd64" in failed.stdout
     # the report is still written, so the artifact carries what was found
@@ -373,16 +382,16 @@ def test_a_finding_fails_the_step_and_exit_code_zero_only_reports(tmp_path):
 
 def test_a_scan_that_errors_before_writing_a_report_still_fails(tmp_path):
     env = stub_env(tmp_path, trivy_body="exit 2")
-    env["IMAGE"] = "ghcr.io/o/i:1"
+    env.update(IMAGE=DIGEST_REF, IMAGE_REQUESTED="ghcr.io/o/i:1")
     result = run_rescan(tmp_path, env)
     assert result.returncode == 1
     assert not list((tmp_path / "rescan").glob("*.sarif"))
 
 
 def test_the_release_sbom_is_scanned_and_a_release_without_one_fails(tmp_path):
-    gh = WRITE_SBOM
-    env = stub_env(tmp_path, trivy_body=RECORDING, gh_body=gh)
+    env = stub_env(tmp_path, trivy_body=RECORDING)
     env["RELEASE_TAG"] = "v1"
+    put_sbom(tmp_path, env)
     assert run_rescan(tmp_path, env).returncode == 0
     assert "sbom --quiet" in (tmp_path / "calls").read_text()
     assert (tmp_path / "rescan" / "release.sarif").exists()
@@ -394,13 +403,88 @@ def test_the_release_sbom_is_scanned_and_a_release_without_one_fails(tmp_path):
     assert result.returncode == 1 and "no sbom.cdx.json" in result.stdout
 
 
+def test_a_replaced_sbom_with_a_different_hash_is_never_scanned(tmp_path):
+    env = stub_env(tmp_path, trivy_body=RECORDING)
+    env["RELEASE_TAG"] = "v1"
+    put_sbom(tmp_path, env, b'{"clean": true}', recorded=b'{"verified": true}')
+    result = run_rescan(tmp_path, env)
+    assert result.returncode == 1 and "sha256 mismatch" in result.stdout
+    assert not (tmp_path / "calls").exists()
+
+
+def test_a_missing_recorded_hash_fails_rather_than_trusting_the_file(tmp_path):
+    env = stub_env(tmp_path, trivy_body=RECORDING)
+    env["RELEASE_TAG"] = "v1"
+    put_sbom(tmp_path, env)
+    env["SBOM_SHA256"] = ""
+    assert run_rescan(tmp_path, env).returncode == 1
+
+
 def test_both_halves_are_scanned_even_when_the_first_one_fails(tmp_path):
-    gh = WRITE_SBOM
-    env = stub_env(tmp_path, trivy_body=RECORDING, gh_body=gh)
-    env.update(IMAGE="ghcr.io/o/i:1", RELEASE_TAG="v1", STUB_RC="1")
+    env = stub_env(tmp_path, trivy_body=RECORDING)
+    env.update(IMAGE=DIGEST_REF, IMAGE_REQUESTED="ghcr.io/o/i:1", RELEASE_TAG="v1", STUB_RC="1")
+    put_sbom(tmp_path, env)
     assert run_rescan(tmp_path, env).returncode == 1
     calls = (tmp_path / "calls").read_text()
     assert "image " in calls and "sbom " in calls
+
+
+def test_the_scan_is_bound_to_the_verified_digest_not_the_tag_the_caller_typed(tmp_path):
+    """The tag may resolve to different bytes by now; the scan names only what verify resolved."""
+    env = stub_env(tmp_path, trivy_body=RECORDING)
+    env.update(IMAGE=DIGEST_REF, IMAGE_REQUESTED="ghcr.io/o/i:latest", PLATFORMS="linux/amd64")
+    assert run_rescan(tmp_path, env).returncode == 0
+    calls = (tmp_path / "calls").read_text()
+    assert f"-- {DIGEST_REF}" in calls and ":latest" not in calls
+
+
+@pytest.mark.parametrize("ref", ["", "ghcr.io/o/i:latest", "ghcr.io/o/i@sha256:abc"])
+def test_a_reference_that_is_not_a_full_digest_is_refused_not_scanned(tmp_path, ref):
+    env = stub_env(tmp_path, trivy_body=RECORDING)
+    env.update(IMAGE=ref, IMAGE_REQUESTED="ghcr.io/o/i:latest")
+    result = run_rescan(tmp_path, env)
+    assert result.returncode == 1 and "no image digest" in result.stdout
+    assert not (tmp_path / "calls").exists()
+
+
+@pytest.mark.parametrize("platforms", ["", "   ", ",", " , ,, "])
+def test_an_empty_platform_list_fails_before_scanning_anything(tmp_path, platforms):
+    env = stub_env(tmp_path, trivy_body=RECORDING)
+    env.update(IMAGE=DIGEST_REF, IMAGE_REQUESTED="ghcr.io/o/i:1", PLATFORMS=platforms)
+    result = run_rescan(tmp_path, env)
+    assert result.returncode == 1 and "no image scan ran" in result.stdout
+    assert not (tmp_path / "calls").exists()
+
+
+def test_the_rescan_binds_to_what_the_verify_jobs_output():
+    env = rescan_step("Rescan")["env"]
+    assert env["IMAGE"] == "${{ needs.verify.outputs.ref }}"
+    assert env["SBOM_SHA256"] == "${{ needs.verify-release.outputs.sbom-sha256 }}"
+    assert JOBS["verify"]["outputs"]["ref"] == "${{ steps.digest.outputs.ref }}"
+    for name in ("signature", "SBOM attestation", "provenance"):
+        assert step_named(name)["env"]["IMAGE"] == "${{ steps.digest.outputs.ref }}"
+    assert "gh release download" not in rescan_step("Rescan")["run"]
+    handoff = [s for s in steps("verify-release") if "upload-artifact" in s.get("uses", "")]
+    assert len(handoff) == 1 and handoff[0]["with"]["path"] == "release/sbom.cdx.json"
+    assert JOBS["verify-release"]["permissions"] == {"contents": "read"}
+
+
+def test_the_digest_step_resolves_the_manifest_digest_and_drops_the_tag(tmp_path):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "docker").write_text(f"#!/bin/bash\necho {DIGEST}\n")
+    (bin_dir / "docker").chmod(0o755)
+    for image in ("ghcr.io/o/i:latest", "ghcr.io/o/i", f"ghcr.io/o/i@sha256:{'cd' * 32}", "localhost:5000/o/i:1"):
+        out = tmp_path / "out"
+        out.write_text("")
+        env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}", "IMAGE": image, "GITHUB_OUTPUT": str(out)}
+        step = next(s for s in steps("verify") if s.get("id") == "digest")
+        result = subprocess.run(["bash", "-eo", "pipefail", "-c", step["run"]], env=env, capture_output=True, text=True)
+        assert result.returncode == 0, result.stdout + result.stderr
+        base = image.split("@")[0]
+        if base.rsplit("/", 1)[-1].count(":"):
+            base = base.rsplit(":", 1)[0]
+        assert out.read_text().strip() == f"ref={base}@{DIGEST}"
 
 
 def ignore_file(tmp_path, advisories):
@@ -493,24 +577,17 @@ def live_rescan(tmp_path, sbom, *, advisories="", exit_code="1"):
         assert install.returncode == 0, install.stdout + install.stderr
     ignored, _ = ignore_file(tmp_path, advisories)
     assert ignored.returncode == 0, ignored.stdout
-    (tmp_path / "bin").mkdir(exist_ok=True)
-    payload = json.dumps(sbom)
-    (tmp_path / "bin" / "gh").write_text(
-        '#!/bin/bash\ndir=""; prev=""; for a in "$@"; do [ "$prev" = "--dir" ] && dir="$a"; prev="$a"; done\n'
-        f"cat > \"$dir/sbom.cdx.json\" <<'J'\n{payload}\nJ\n"
-    )
-    (tmp_path / "bin" / "gh").chmod(0o755)
+    put_sbom(tmp_path, env, json.dumps(sbom).encode())
     env.update(
-        PATH=f"{tmp_path / 'bin'}:{os.environ['PATH']}",
         TRIVY_CACHE_DIR=os.environ.get("TRIVY_CACHE_DIR", str(tmp_path / "cache")),
         SEVERITY="CRITICAL",
         EXIT_CODE=exit_code,
         IGNORE_UNFIXED="false",
         IMAGE="",
+        IMAGE_REQUESTED="",
         PLATFORMS="",
         RELEASE_TAG="v1",
-        REPO="o/r",
-        GH_TOKEN="x",
+        SBOM_DIR=str(tmp_path / "verified-sbom"),
     )
     return subprocess.run(
         ["bash", "-eo", "pipefail", "-c", rescan_step("Rescan")["run"]],

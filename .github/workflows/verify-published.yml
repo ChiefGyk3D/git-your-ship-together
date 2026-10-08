@@ -152,6 +152,9 @@ jobs:
     permissions:
       contents: read
       packages: read  # pull the image, its signature and its attestations
+    outputs:
+      # The immutable reference every check below ran against, and the rescan scans.
+      ref: ${{ steps.digest.outputs.ref }}
     steps:
       - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
         with:
@@ -160,12 +163,27 @@ jobs:
           # The agent may only stop reporting to StepSecurity in block mode.
           disable-telemetry: ${{ inputs.egress-policy == 'block' }}
 
+      # Everything below verifies, and the rescan scans, the bytes this digest
+      # names. A tag can move between jobs; a digest cannot.
+      - name: Resolve the image digest
+        id: digest
+        env:
+          IMAGE: ${{ inputs.image }}
+        run: |
+          set -euo pipefail
+          digest="$(docker buildx imagetools inspect "$IMAGE" --format '{{.Manifest.Digest}}')"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::could not resolve a digest for $IMAGE"; exit 1; }
+          repo="${IMAGE%%@*}"
+          [[ "${repo##*/}" == *:* ]] && repo="${repo%:*}"
+          echo "ref=${repo}@${digest}" >> "$GITHUB_OUTPUT"
+          echo "verifying $IMAGE as ${repo}@${digest}"
+
       - name: Install cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
       - name: Verify the signature
         env:
-          IMAGE: ${{ inputs.image }}
+          IMAGE: ${{ steps.digest.outputs.ref }}
           IDENTITY_REGEXP: ${{ inputs.identity-regexp }}
           OIDC_ISSUER: ${{ inputs.oidc-issuer }}
         run: |
@@ -178,7 +196,7 @@ jobs:
       - name: Verify the SBOM attestation
         if: inputs.verify-sbom
         env:
-          IMAGE: ${{ inputs.image }}
+          IMAGE: ${{ steps.digest.outputs.ref }}
           IDENTITY_REGEXP: ${{ inputs.identity-regexp }}
           OIDC_ISSUER: ${{ inputs.oidc-issuer }}
         run: |
@@ -191,7 +209,7 @@ jobs:
       - name: Verify the build provenance
         if: inputs.verify-provenance
         env:
-          IMAGE: ${{ inputs.image }}
+          IMAGE: ${{ steps.digest.outputs.ref }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
@@ -252,6 +270,8 @@ jobs:
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read  # list and download the release's assets
+    outputs:
+      sbom-sha256: ${{ steps.sbom-hash.outputs.sha256 }}
     steps:
       - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
         with:
@@ -324,6 +344,26 @@ jobs:
           print("SBOMs verified:", cdx["specVersion"], spdx["spdxVersion"])
           PY
 
+      # The rescan scans this file, not a second download of the release: the
+      # bytes checked above are the bytes scanned. The hash is recorded so the
+      # rescan can prove the artifact it receives is the file that was verified.
+      - name: Keep the verified SBOM for the rescan
+        id: sbom-hash
+        if: inputs.rescan
+        run: |
+          set -euo pipefail
+          if [ -f release/sbom.cdx.json ]; then
+            echo "sha256=$(sha256sum release/sbom.cdx.json | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: inputs.rescan
+        with:
+          name: ${{ inputs.rescan-artifact-name }}-verified-sbom
+          path: release/sbom.cdx.json
+          if-no-files-found: ignore
+          retention-days: 1
+
   # Verification says the artefact is what the producer published; it says
   # nothing about what has been found in it since. This job asks that, with a
   # pinned Trivy binary and no action, against the vulnerability database as of
@@ -370,6 +410,14 @@ jobs:
           tar -xzf "$archive" -C "$RUNNER_TEMP/trivy-bin" trivy
           "$RUNNER_TEMP/trivy-bin/trivy" --version
 
+      # The SBOM verify-release checked, carried between jobs; the rescan never
+      # downloads the release again.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: inputs.release-tag != ''
+        with:
+          name: ${{ inputs.rescan-artifact-name }}-verified-sbom
+          path: ${{ runner.temp }}/verified-sbom
+
       # The accepted advisories become a .trivyignore. An ID that is not
       # shaped like an advisory is refused rather than written, so the input
       # cannot add a line of anything else to the file.
@@ -399,11 +447,13 @@ jobs:
         env:
           TRIVY_CACHE_DIR: ${{ runner.temp }}/trivy-cache
           TRIVY_DISABLE_TELEMETRY: "true"
-          GH_TOKEN: ${{ github.token }}
-          IMAGE: ${{ inputs.image }}
+          # What verify resolved and checked; never the tag the caller typed.
+          IMAGE: ${{ needs.verify.outputs.ref }}
+          IMAGE_REQUESTED: ${{ inputs.image }}
           PLATFORMS: ${{ inputs.platforms }}
           RELEASE_TAG: ${{ inputs.release-tag }}
-          REPO: ${{ inputs.release-repository || github.repository }}
+          SBOM_DIR: ${{ runner.temp }}/verified-sbom
+          SBOM_SHA256: ${{ needs.verify-release.outputs.sbom-sha256 }}
           SEVERITY: ${{ inputs.rescan-severity }}
           EXIT_CODE: ${{ inputs.rescan-exit-code }}
           IGNORE_UNFIXED: ${{ inputs.rescan-ignore-unfixed }}
@@ -439,23 +489,36 @@ jobs:
             fi
           }
 
-          if [ -n "$IMAGE" ]; then
-            IFS=',' read -r -a list <<< "$PLATFORMS"
-            for platform in "${list[@]}"; do
-              platform="${platform// /}"
-              [ -n "$platform" ] || continue
-              scan "image-${platform//\//-}" image --image-src remote --platform "$platform" -- "$IMAGE"
-            done
+          if [ -n "$IMAGE_REQUESTED" ]; then
+            scanned=0
+            if ! [[ "$IMAGE" =~ @sha256:[0-9a-f]{64}$ ]]; then
+              echo "::error title=rescan::the verify job passed no image digest, so there is nothing verified to scan"
+              status=1
+            else
+              IFS=',' read -r -a list <<< "$PLATFORMS"
+              for platform in "${list[@]}"; do
+                platform="${platform// /}"
+                [ -n "$platform" ] || continue
+                scanned=$((scanned + 1))
+                scan "image-${platform//\//-}" image --image-src remote --platform "$platform" -- "$IMAGE"
+              done
+              if [ "$scanned" -eq 0 ]; then
+                echo "::error title=rescan::platforms names no platform, so no image scan ran; set at least one, for example linux/amd64"
+                status=1
+              fi
+            fi
           fi
 
           if [ -n "$RELEASE_TAG" ]; then
-            mkdir -p "$out/release"
-            if gh release download "$RELEASE_TAG" --repo "$REPO" --dir "$out/release" --pattern sbom.cdx.json \
-                && [ -s "$out/release/sbom.cdx.json" ]; then
-              scan release sbom -- "$out/release/sbom.cdx.json"
-            else
-              echo "::error title=rescan::the release has no sbom.cdx.json to rescan"
+            sbom="$SBOM_DIR/sbom.cdx.json"
+            if [ ! -s "$sbom" ]; then
+              echo "::error title=rescan::the verified release SBOM is missing; the release has no sbom.cdx.json to rescan"
               status=1
+            elif [ -z "$SBOM_SHA256" ] || [ "$(sha256sum "$sbom" | awk '{print $1}')" != "$SBOM_SHA256" ]; then
+              echo "::error title=rescan::the SBOM received is not the file the verify job checked (sha256 mismatch)"
+              status=1
+            else
+              scan release sbom -- "$sbom"
             fi
           fi
           exit "$status"

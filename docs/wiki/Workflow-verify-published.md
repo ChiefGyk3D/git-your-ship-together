@@ -49,6 +49,12 @@ reported against it since. `rescan: true` adds a `rescan` job that runs only if 
   Docker, no QEMU), and `sbom.cdx.json` from the release `release-tag`, the SBOM
   [python-package-release](Workflow-python-package-release.md) attaches. A release with no `sbom.cdx.json`
   fails the rescan rather than passing it.
+- **Bound to what was verified.** The `verify` job resolves the image to its digest first and runs the
+  signature, SBOM and provenance checks against `repo@sha256:...`; the rescan scans that digest, never the
+  tag, so a tag that moves between jobs is not scanned unverified. The release SBOM is the file
+  `verify-release` checked, carried to the rescan as a one-day workflow artifact with its sha256; the
+  rescan fails if the hash differs and never downloads the release a second time. An empty `platforms`
+  list fails the rescan (no image scan ran) rather than passing.
 - **What it fails on.** Findings at `rescan-severity` (`CRITICAL,HIGH`), with unfixed advisories skipped,
   using Trivy's exit code: `rescan-exit-code: "1"` fails, `"0"` reports only. Both halves are scanned
   before the step fails, and a Trivy error fails it too. The table is in the job log.
