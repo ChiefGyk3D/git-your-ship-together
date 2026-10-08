@@ -8,7 +8,8 @@ rest. A bug fixed in a shared workflow is fixed in every project on its next
 pin bump. The projects that call it today are the Python daemons, the
 Hammunition suite, a firmware project and a few lab repositories;
 [`baseline/repos.txt`](../../baseline/repos.txt) is the list, 24 repositories
-as of 2026-10-07.
+as of 2026-10-07. The latest release is {{latest_release}} ({{latest_release_date}}); the
+[Roadmap](Roadmap.md) lists what has merged since.
 
 It is also written to be read. Every rule in it came from something that
 broke or something that was measured, and the wiki says which. If you have

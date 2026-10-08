@@ -150,6 +150,11 @@ the feature unusable on the default and add no check that has been measured: har
 host networking was not measured here. Use `block` for a signed-in scan. A test pins that both policies pass the same static
 check.
 
+**HTTPS targets.** Signed-in scans of an `https://` loopback target work as of #131: the sign-in probe sends the complete
+absolute URL in its request line, so ZAP keeps the scheme and port. #131 merged after v1.15.0, so it is unreleased until
+the next tag (the [Roadmap](Roadmap.md) lists what has merged since the latest release). Through v1.15.0 an `https://` target
+failed closed (#129).
+
 What it cannot do: sign in through a login ZAP's authentication methods do not cover, or reach a deployed environment. That
 stays refused with every other host that is not loopback; see the [Roadmap](Roadmap.md).
 
