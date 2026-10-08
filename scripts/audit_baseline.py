@@ -61,6 +61,8 @@ IGNORE_VULN = re.compile(r"--ignore-vuln[\s=]+([A-Za-z0-9-]+)")
 # Same-line whitespace only: `\s*` would cross the newline of a bare input
 # declaration and capture the `type:` line beneath it.
 ALLOW_GHSAS = re.compile(r"^[ \t]*dependency-review-allow-ghsas:[ \t]*(\S.*?)[ \t]*$", re.M)
+# verify-published.yml's rescan: the same shape, read by the same rule.
+RESCAN_IGNORE = re.compile(r"^[ \t]*rescan-ignore-advisories:[ \t]*(\S.*?)[ \t]*$", re.M)
 REGISTER = Path(__file__).resolve().parent.parent / "baseline" / "risk-register.yaml"
 PRE_COMMIT_HOOK = Path(__file__).resolve().parent.parent / ".githooks" / "pre-commit"
 
@@ -449,8 +451,8 @@ def check_workflows(repo: str, fetch: Fetcher) -> tuple[list[Result], bool, set[
 def exceptions_in(text: str) -> set[str]:
     """Every advisory ID a workflow tells a scanner to ignore.
 
-    Two shapes: `--ignore-vuln ID` inside pip-audit-extra-args, and the
-    comma-separated `dependency-review-allow-ghsas:` input. Comment lines are
+    Three shapes: `--ignore-vuln ID` inside pip-audit-extra-args, and the
+    comma-separated `dependency-review-allow-ghsas:` and `rescan-ignore-advisories:` inputs. Comment lines are
     skipped so that a reason written beside the line is not read as a second
     exception, and so are `description:` lines: the shared workflow documents
     both inputs with example IDs, which are prose, not exceptions.
@@ -461,7 +463,7 @@ def exceptions_in(text: str) -> set[str]:
         if not line.lstrip().startswith("#") and not line.lstrip().startswith("description:")
     )
     found = set(IGNORE_VULN.findall(live))
-    for match in ALLOW_GHSAS.finditer(live):
+    for match in [*ALLOW_GHSAS.finditer(live), *RESCAN_IGNORE.finditer(live)]:
         value = match.group(1).strip().strip("'\"")
         found |= {part.strip() for part in value.split(",") if part.strip()}
     return found

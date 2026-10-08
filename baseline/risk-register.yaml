@@ -1,8 +1,9 @@
 # The risk register: every advisory a pipeline is told to ignore, with the
 # reason, and a date by which somebody looks again.
 #
-# A caller may name an advisory in two places: `pip-audit-extra-args:
-# --ignore-vuln <id>` and `dependency-review-allow-ghsas: <id>`. The audit
+# A caller may name an advisory in three places: `pip-audit-extra-args:
+# --ignore-vuln <id>`, `dependency-review-allow-ghsas: <id>` and
+# verify-published.yml's `rescan-ignore-advisories: <id>`. The audit
 # (scripts/audit_baseline.py, check `risk-exceptions`) reads every caller's
 # security workflow and fails when an ID it finds is not entered here for that
 # repository, or when the entry's review_by date has passed. So an exception
@@ -14,7 +15,7 @@
 #   aliases    other IDs for the same advisory (optional)
 #   package    the affected package, and `versions` the affected range
 #   repos      the repositories allowed to except it, owner/name
-#   where      which check names it: pip-audit, dependency-review
+#   where      which check names it: pip-audit, dependency-review, trivy
 #   reason     why it is accepted rather than fixed, in plain words
 #   mitigation what limits the exposure meanwhile
 #   accepted   the date the exception was taken (YYYY-MM-DD)

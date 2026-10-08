@@ -1107,6 +1107,14 @@ jobs:
       test-command: docker run --rm "$IMAGE" --version
 ```
 
+With `rescan: true` the same run asks whether an advisory has been published since
+release: Trivy scans each platform of the image and the release's `sbom.cdx.json`, fails on
+`rescan-severity` and writes SARIF. Schedule the caller nightly (`schedule:` plus
+`workflow_dispatch:`) and grant nothing beyond `contents: read` and `packages: read`; the
+SARIF is a workflow artifact, not a Security-tab upload, because a job asking for
+`security-events: write` would make the call fail at startup for every caller that did not
+grant it. See the [wiki page](docs/wiki/Workflow-verify-published.md) for a caller that uploads it.
+
 The certificate identity of an image published through `container-release.yml`
 is the reusable workflow's ref, so the default `identity-regexp` (any workflow
 in the owner's repositories) matches it. Narrow it to pin one workflow, for
@@ -1124,8 +1132,15 @@ Inputs of `verify-published.yml`:
 | `oidc-issuer` | `https://token.actions.githubusercontent.com` | OIDC issuer the certificate must name |
 | `verify-sbom` | `true` | `cosign verify-attestation --type spdxjson` |
 | `verify-provenance` | `true` | `gh attestation verify oci://<image> --owner <owner>` |
-| `test-command` | empty | Run once per platform with `$IMAGE` set; empty skips |
-| `platforms` | `linux/amd64,linux/arm64` | Platforms to pull and test |
+| `test-command` | empty | Run once per platform with `$IMAGE` set to the verified `repo@sha256:...` digest, never the tag; empty skips |
+| `platforms` | `linux/amd64,linux/arm64` | Platforms to pull and test, and to rescan |
+| `rescan` | `false` | Rescan the verified image (every platform) and the release's `sbom.cdx.json` with Trivy for advisories published since release. Runs only after the verification passed. Needs a nightly `schedule:` in the caller to be a rescan |
+| `rescan-severity` | `CRITICAL,HIGH` | Severities the rescan reports and fails on |
+| `rescan-exit-code` | `1` | Trivy's exit code on a finding; `0` reports only. Same meaning as `trivy-exit-code` in `container-release.yml` |
+| `rescan-ignore-unfixed` | `true` | Skip advisories with no fixed version yet |
+| `rescan-ignore-advisories` | empty | Comma-separated CVE or GHSA IDs the rescan does not fail on; each needs a `where: trivy` entry for the repository in `baseline/risk-register.yaml`, which the weekly audit checks |
+| `rescan-artifact-name` | `verify-published-rescan` | Workflow artifact holding the SARIF and text reports |
+| `trivy-version`, `trivy-sha256` | `0.75.0`, its hash | The one pinned Trivy binary; change both together |
 | `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `block`, the measured list, empty | harden-runner; the list covers the GHCR pull, Sigstore, and GitHub's attestation store |
 | `timeout-minutes` | `20` | Job timeout |
 
