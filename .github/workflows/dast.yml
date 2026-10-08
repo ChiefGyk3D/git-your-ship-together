@@ -753,7 +753,34 @@ jobs:
               exit 1
               ;;
           esac
-          args+=(-J report.json -r report.html -w report.md -I -z "$zap_options")
+          # ZAP's own listen port. Left to the scripts it is drawn from 32768-61000 and only checked by connecting, so a
+          # port that is the local end of an open connection passes the check, ZAP cannot bind it ("unable to start the
+          # main proxy"), exits, and the script waits ten minutes and exits 3 with no report (issue 133). Below that
+          # range no connection's local end can be, and a bind (not a connect) shows anything else already holding it.
+          # ZAP_PORT_LOW and ZAP_PORT_HIGH exist only so the tests can narrow the range; no workflow input sets them.
+          zap_port="$(python3 - <<'PORT'
+          import os
+          import random
+          import socket
+
+          low = int(os.environ.get("ZAP_PORT_LOW", "10000"))
+          high = int(os.environ.get("ZAP_PORT_HIGH", "32000"))
+          ports = list(range(low, high + 1))
+          random.shuffle(ports)
+          for port in ports:
+              probe = socket.socket()
+              try:
+                  probe.bind(("0.0.0.0", port))
+              except OSError:
+                  continue
+              finally:
+                  probe.close()
+              print(port)
+              raise SystemExit(0)
+          raise SystemExit("no free port to give ZAP")
+          PORT
+          )" || { echo "::error::could not find a free port for ZAP"; exit 1; }
+          args+=(-J report.json -r report.html -w report.md -I -P "$zap_port" -z "$zap_options")
           if [ -n "$CONTEXT_FILE" ]; then
             # The scripts read the context from the mounted directory, under a name this step picks. The copy is the
             # file the check step validated, not the workspace path, which the install and start commands could have

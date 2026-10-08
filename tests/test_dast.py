@@ -40,6 +40,7 @@ import signal
 import socket
 import subprocess
 import sys
+import textwrap
 import time
 import urllib.error
 import urllib.parse
@@ -445,6 +446,70 @@ def test_the_default_scan_is_the_baseline_with_the_flags_it_always_had(job, tmp_
     assert "-I" in cmd and flag(cmd, "-z") == "-silent"
     assert "-j" not in cmd and "-f" not in cmd and "-O" not in cmd and "-c" not in cmd
     assert re.search(r"^exit=0$", j.output.read_text(), re.M)
+
+
+@pytest.mark.parametrize("scan_type", ["baseline", "full", "api"])
+def test_zaps_own_port_is_chosen_outside_the_ephemeral_range(job, tmp_path, scan_type):
+    """Issue 133. The packaged scripts pick ZAP's listen port at random from 32768-61000 and only test that nothing
+    LISTENS there. A port that is the local end of an open connection (this host's outgoing ports are drawn from the
+    same range) passes that test, ZAP then fails to bind ("Terminating ZAP, unable to start the main proxy"), exits,
+    and the script waits ten minutes for an API that never comes and exits 3 with no report. The step names the
+    port itself, below the ephemeral range, where no connection's local end can be."""
+    inputs = {"scan_type": scan_type}
+    if scan_type == "api":
+        definition = tmp_path / "openapi.json"
+        definition.write_text("{}")
+        inputs["api_definition"] = str(definition)
+    _, code, out, args = scan_step(job, tmp_path, **inputs)
+    assert code == 0, out
+    port = int(flag(after_image(args), "-P"))
+    assert 1024 <= port < 32768, f"-P {port} is not below the ephemeral range"
+
+
+def test_the_port_picker_skips_a_port_something_holds(job, tmp_path):
+    """The negative of the above: the choice is checked by binding, so a port held by a listener or by an open
+    connection is not chosen. Every port in the picker's range but one is taken; it must find the one."""
+    step_text = str(step("scan", "Run the ZAP scan")["run"])
+    from_workflow = re.search(r"zap_port=\"\$\(python3 - <<'PORT'\n(.*?)\n\s*PORT\n", step_text, re.S)
+    assert from_workflow, "the step no longer picks ZAP's port with an inline python3 heredoc"
+    picker = textwrap.dedent(from_workflow.group(1))
+    held = socket.socket()
+    held.bind(("0.0.0.0", 0))
+    held.listen()
+    taken = held.getsockname()[1]
+    try:
+        env = {**os.environ, "ZAP_PORT_LOW": str(taken), "ZAP_PORT_HIGH": str(taken + 1)}
+        ran = subprocess.run(["python3", "-c", picker], capture_output=True, text=True, env=env, timeout=30)
+        assert ran.returncode == 0, ran.stderr
+        assert ran.stdout.strip() == str(taken + 1), (ran.stdout, ran.stderr)
+    finally:
+        held.close()
+
+
+def test_the_port_picker_fails_the_step_when_no_port_is_free(job, tmp_path):
+    """Exhaustion: with a one-port range and that port held, the step's own lines (picker plus its error handler) end
+    with exit 1 and the error annotation, rather than looping or handing ZAP a busy port."""
+    step_text = str(step("scan", "Run the ZAP scan")["run"])
+    block = re.search(r"(zap_port=\"\$\(python3 - <<'PORT'\n.*?\nPORT\n\)\" \|\| \{[^\n]*\})", step_text, re.S)
+    assert block, "the step no longer picks ZAP's port with an inline python3 heredoc and an error handler"
+    held = socket.socket()
+    held.bind(("0.0.0.0", 0))
+    held.listen()
+    taken = held.getsockname()[1]
+    try:
+        env = {**os.environ, "ZAP_PORT_LOW": str(taken), "ZAP_PORT_HIGH": str(taken)}
+        ran = subprocess.run(
+            ["bash", "-c", block.group(1) + '\necho "picked=$zap_port"'],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=30,
+        )
+        assert ran.returncode == 1, (ran.returncode, ran.stdout, ran.stderr)
+        assert "::error::could not find a free port for ZAP" in ran.stdout
+        assert "picked=" not in ran.stdout
+    finally:
+        held.close()
 
 
 def test_the_full_scan_runs_the_full_script_with_the_spider_bound_and_no_active_limit_by_default(job, tmp_path):
