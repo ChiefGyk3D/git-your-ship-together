@@ -1132,7 +1132,7 @@ Inputs of `verify-published.yml`:
 | `oidc-issuer` | `https://token.actions.githubusercontent.com` | OIDC issuer the certificate must name |
 | `verify-sbom` | `true` | `cosign verify-attestation --type spdxjson` |
 | `verify-provenance` | `true` | `gh attestation verify oci://<image> --owner <owner>` |
-| `test-command` | empty | Run once per platform with `$IMAGE` set; empty skips |
+| `test-command` | empty | Run once per platform with `$IMAGE` set to the verified `repo@sha256:...` digest, never the tag; empty skips |
 | `platforms` | `linux/amd64,linux/arm64` | Platforms to pull and test, and to rescan |
 | `rescan` | `false` | Rescan the verified image (every platform) and the release's `sbom.cdx.json` with Trivy for advisories published since release. Runs only after the verification passed. Needs a nightly `schedule:` in the caller to be a rescan |
 | `rescan-severity` | `CRITICAL,HIGH` | Severities the rescan reports and fails on |

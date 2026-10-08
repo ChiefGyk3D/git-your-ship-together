@@ -114,6 +114,42 @@ def test_fixture_verifies_a_real_image_and_gates_ci_green():
     assert "fixture-verify" in ci["ci-green"]["needs"]
 
 
+def test_every_image_reference_pulled_verified_run_or_rescanned_is_the_one_resolved_digest():
+    """A tag can move after it is resolved; nothing but the digest may be verified, pulled, run or scanned.
+
+    `inputs.image` may appear only where the digest is resolved, in the job's name and condition, and as the
+    rescan's record of what was asked for. Every other IMAGE in the workflow is an output of the resolution.
+    """
+    allowed = {
+        ("verify", "Resolve the image digest", "IMAGE"),
+        ("rescan", "Rescan with Trivy", "IMAGE_REQUESTED"),
+    }
+    used = set()
+    for job_name, job in JOBS.items():
+        for step in job.get("steps", []):
+            for key, value in (step.get("env") or {}).items():
+                if "inputs.image" in str(value):
+                    assert (job_name, step.get("name"), key) in allowed, (
+                        f"{job_name}/{step.get('name')}: {key} takes inputs.image; use the resolved digest"
+                    )
+                    used.add((job_name, step.get("name"), key))
+            for field in ("run", "with", "if"):
+                assert "inputs.image" not in str(step.get(field, "")), f"{job_name}/{step.get('name')}: {field}"
+    assert used == allowed
+    refs = {
+        (job_name, step.get("name")): step["env"]["IMAGE"]
+        for job_name, job in JOBS.items()
+        for step in job.get("steps", [])
+        if "IMAGE" in (step.get("env") or {}) and (job_name, step.get("name"), "IMAGE") not in allowed
+    }
+    assert refs, "no step takes an image reference"
+    assert {r for (j, _), r in refs.items() if j == "verify"} == {"${{ steps.digest.outputs.ref }}"}
+    assert {r for (j, _), r in refs.items() if j == "rescan"} == {"${{ needs.verify.outputs.ref }}"}
+    for fragment in ("signature", "SBOM attestation", "provenance", "each platform"):
+        assert step_named(fragment)["env"]["IMAGE"] == "${{ steps.digest.outputs.ref }}"
+    assert 'docker pull --platform "$platform" "$IMAGE"' in step_named("each platform")["run"]
+
+
 # --- the release half ------------------------------------------------------
 
 

@@ -84,7 +84,7 @@ on:
         type: boolean
         default: true
       test-command:
-        description: Shell run once per platform against the pulled image; `$IMAGE` names it and `DOCKER_DEFAULT_PLATFORM` is set. Empty skips the check.
+        description: Shell run once per platform against the pulled image; `$IMAGE` is the verified digest reference (`repo@sha256:...`), never the tag, and `DOCKER_DEFAULT_PLATFORM` is set. Empty skips the check.
         type: string
         default: ""
       rescan:
@@ -248,7 +248,7 @@ jobs:
       - name: Pull and check each platform
         if: inputs.test-command != ''
         env:
-          IMAGE: ${{ inputs.image }}
+          IMAGE: ${{ steps.digest.outputs.ref }}
           PLATFORMS: ${{ inputs.platforms }}
           COMMAND: ${{ inputs.test-command }}
         run: |

@@ -2,7 +2,7 @@
 
 **What it does.** Verifies a published image from the outside, the way an operator would: `cosign verify` for the signature,
 `cosign verify-attestation --type spdxjson` for the SBOM, `gh attestation verify` for provenance, then each platform pulled and
-your `test-command` run against it. Set `release-tag` and it verifies a GitHub release the same way: every asset against
+your `test-command` run against it (`$IMAGE` there is the verified `repo@sha256:...` digest, never the tag, so what runs is what was verified). Set `release-tag` and it verifies a GitHub release the same way: every asset against
 `SHA256SUMS`, build provenance for every file, and (unless `verify-release-sbom` is false) the two SBOMs a Python package release
 carries. A final `Verified` job is the gate. It stops at the first failure. With `rescan: true` it also asks what
 verification cannot: whether an advisory has been published since the release (see below).
