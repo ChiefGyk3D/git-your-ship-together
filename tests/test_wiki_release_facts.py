@@ -101,7 +101,11 @@ def test_unreleased_with_nothing_since_the_tag(tagged_repo):
 
 def test_placeholders_are_filled_and_an_escaped_one_is_literal(tagged_repo):
     facts = gen.release_facts()
-    text = "uses: x/y.yml@{{latest_pin}} # {{latest_release}} ({{latest_release_date}})\nwrite \\{{latest_release}}\n{{unreleased}}"
+    text = (
+        "uses: x/y.yml@{{latest_pin}} # {{latest_release}} ({{latest_release_date}})\n"
+        "write \\{{latest_release}}\n"
+        "{{unreleased}}"
+    )
     out = gen.fill_placeholders(text, facts)
     assert f"@{facts['latest_pin']} # v1.10.0 (2026-10-02)" in out
     assert "write {{latest_release}}" in out
