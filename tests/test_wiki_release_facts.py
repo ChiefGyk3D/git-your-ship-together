@@ -35,11 +35,17 @@ ALLOWED_LITERAL_PINS: dict[str, str] = {}
 
 def git(repo: Path, *args: str, env: dict[str, str] | None = None) -> str:
     base = {
-        "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
-        "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid",
-        "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null", "PATH": "/usr/bin:/bin:/usr/local/bin",
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@example.invalid",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@example.invalid",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_SYSTEM": "/dev/null",
+        "PATH": "/usr/bin:/bin:/usr/local/bin",
     }
-    out = subprocess.run(["git", *args], cwd=repo, env={**base, **(env or {})}, capture_output=True, text=True, check=True)
+    out = subprocess.run(
+        ["git", *args], cwd=repo, env={**base, **(env or {})}, capture_output=True, text=True, check=True
+    )
     return out.stdout.strip()
 
 
