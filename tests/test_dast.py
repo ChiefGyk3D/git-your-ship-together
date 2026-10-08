@@ -949,11 +949,14 @@ SCOPE_OK = "http://127\\.0\\.0\\.1:8080/.*"
 HOSTILE_HOST = re.compile(r"example\.com|evil\.example|2130706433|0x7f|0177|ffff", re.I)
 
 
-def context_file(tmp_path: Path, old: str, new: str, head: str = "") -> str:
+def context_file(tmp_path: Path, old: str, new: str, head: str = "", https: bool = False) -> str:
     text = CONTEXT.read_text()
     assert old in text, f"{old!r} is not in the shipped context"
+    text = text.replace(old, new, 1).replace("<configuration>", head + "<configuration>", 1)
+    if https:  # every URL of the shipped context, scope and login alike, on the same loopback origin over TLS
+        text = text.replace("http://127", "https://127")
     path = tmp_path / "variant.context"
-    path.write_text(text.replace(old, new, 1).replace("<configuration>", head + "<configuration>", 1))
+    path.write_text(text)
     return str(path)
 
 
@@ -1364,7 +1367,9 @@ class FakeZap:
     def send_request(self, request, followredirects):
         if self.fail:
             raise self.fail
-        assert followredirects == "false" and request.startswith("GET /account HTTP/1.1\r\nHost: 127.0.0.1:8080\r\n")
+        assert followredirects == "false" and request.startswith(
+            "GET http://127.0.0.1:8080/account HTTP/1.1\r\nHost: 127.0.0.1:8080\r\n"
+        )
         self.requests.append(self.forced)
         signed_in = self.session_works if self.forced else self.anonymous_sees_in
         message_id = str(len(self.messages) + 10)
@@ -1410,6 +1415,37 @@ def test_the_hook_asks_the_page_as_the_user_and_anonymously_before_the_attack_an
     ]
     assert zap.requests == [True, False, True, False, True], "user, anonymous, user, anonymous, user"
     assert zap.mode_log[-1] is False and zap.forced is False, "the scan itself is never left forced"
+
+
+@pytest.mark.parametrize(
+    ("url", "line"),
+    [
+        ("https://127.0.0.1:8443/account", "GET https://127.0.0.1:8443/account HTTP/1.1"),
+        ("https://[::1]:8443/me?tab=1&x=2", "GET https://[::1]:8443/me?tab=1&x=2 HTTP/1.1"),
+        ("http://localhost:8080", "GET http://localhost:8080/ HTTP/1.1"),
+    ],
+)
+def test_the_hook_puts_the_whole_absolute_url_in_the_request_line(tmp_path, url, line):
+    """Origin-form plus a Host header reads as plain HTTP to ZAP, so https lost its scheme (#129)."""
+    sent = []
+
+    def send_request(request, followredirects):
+        sent.append(request)
+        raise RuntimeError  # the evidence is not the point here
+
+    zap = FakeZap()
+    zap.core.send_request = send_request
+    (tmp_path / "auth-check-url.txt").write_text(url)
+    source = (
+        hook_source()
+        .replace("/zap/wrk/auth-evidence.json", str(tmp_path / "e.json"))
+        .replace("/zap/wrk/", f"{tmp_path}/")
+    )
+    namespace: dict = {}
+    exec(compile(source, "auth_hook.py", "exec"), namespace)
+    with pytest.raises(RuntimeError):
+        namespace["fetch"](zap, None, False)
+    assert sent == [f"{line}\r\nHost: {urllib.parse.urlsplit(url).netloc}\r\n\r\n"]
 
 
 def test_the_hook_sees_a_session_the_protected_page_never_receives_as_not_signed_in(tmp_path, monkeypatch):
@@ -1771,17 +1807,22 @@ def test_live_the_authenticated_full_scan_fails_the_same_service_at_high_naming_
     assert all("zap-authenticated" in r["properties"]["tags"] for r in sarif["runs"][0]["tool"]["driver"]["rules"])
 
 
-def signed_in_attempt(job, tmp_path, old: str, new: str, scan_type: str = "baseline", server_flags: tuple = ()):
+def signed_in_attempt(
+    job, tmp_path, old: str, new: str, scan_type: str = "baseline", server_flags: tuple = (), https: bool = False
+):
     """The whole signed-in flow against the live fixture with a variant of the shipped context.
 
-    Returns (job, the step that failed or None, its output). Each step is run as the job runs it."""
+    With https, the fixture serves TLS (a self-signed certificate) and the target, the check page and the context
+    all name https://. Returns (job, the step that failed or None, its output). Each step is run as the job runs it."""
     assert docker_usable(), "DAST_LIVE is set and docker is not usable: this job exists to run the real image"
+    scheme = "https" if https else "http"
     j = job(
-        start_command=server_command(CONTEXT_PORT, "--login", *server_flags),
-        target_url=f"http://127.0.0.1:{CONTEXT_PORT}",
+        start_command=server_command(CONTEXT_PORT, "--login", *(("--tls",) if https else ()), *server_flags),
+        target_url=f"{scheme}://127.0.0.1:{CONTEXT_PORT}",
+        auth_check_url=f"{scheme}://127.0.0.1:{CONTEXT_PORT}/account",
         fail_on="none",
         scan_type=scan_type,
-        context_file=context_file(tmp_path, old, new),
+        context_file=context_file(tmp_path, old, new, https=https),
         context_user=CONTEXT_USER,
     )
     for fragment in (
@@ -1840,6 +1881,38 @@ def test_live_a_login_that_redirects_as_expected_but_whose_session_the_protected
     assert "cookie whose Path or Domain" in out
     checks = json.loads((j.temp / "zap" / "auth-evidence.json").read_text())["checks"]
     assert all(c["user_signed_in"] is False for c in checks), checks
+    assert "Signed-in scan NOT verified" in j.summary.read_text()
+    assert "zap-authenticated" not in (j.temp / "zap" / "zap.sarif").read_text()
+
+
+@live
+def test_live_an_https_target_is_verified_signed_in_as_the_user_and_not_anonymously(job, tmp_path):
+    """#129: the probe used to reach ZAP as origin-form HTTP, so an https target failed verification with valid
+    credentials. The fixture serves TLS with a self-signed certificate; ZAP has to take it and the probe has to keep
+    its scheme, or the user's check page is a plaintext request to a TLS port and nothing looks signed in."""
+    j, failed, out = signed_in_attempt(job, tmp_path, LOGIN, LOGIN, https=True, server_flags=("--insecure",))
+    assert failed is None, (failed, out)
+    zap = j.temp / "zap"
+    before = {"phase": "before", "user_signed_in": True, "anonymous_signed_in": False}
+    assert json.loads((zap / "auth-evidence.json").read_text())["checks"] == [
+        before,
+        {"phase": "after", "user_signed_in": True},
+    ]
+    assert "Signed-in scan, verified" in j.summary.read_text()
+    assert "zap-authenticated" in (zap / "zap.sarif").read_text()
+    # With the headers off every page the spider reaches is an alert: /account over https only shows up if it got in.
+    assert f"https://127.0.0.1:{CONTEXT_PORT}/account" in alert_urls(j), alert_urls(j)
+
+
+@live
+def test_live_an_https_login_whose_session_the_protected_page_rejects_still_fails(job, tmp_path):
+    """The negative of the one above: over TLS the probe reaches the right origin, so a broken session is judged on
+    the page, not excused by a scheme mix-up, and a scan that never signed in is not reported as signed in."""
+    j, failed, out = signed_in_attempt(job, tmp_path, LOGIN, LOGIN, https=True, server_flags=("--broken-session",))
+    assert failed == "Report and apply fail-on", (failed, out)
+    assert "BEFORE the attack phase, auth-check-url did not look signed in as the selected user" in out, out
+    checks = json.loads((j.temp / "zap" / "auth-evidence.json").read_text())["checks"]
+    assert checks and all(c.get("user_signed_in") is False for c in checks), checks
     assert "Signed-in scan NOT verified" in j.summary.read_text()
     assert "zap-authenticated" not in (j.temp / "zap" / "zap.sarif").read_text()
 

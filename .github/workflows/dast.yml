@@ -661,7 +661,9 @@ jobs:
           url="${TARGET_URL%/}${READY_PATH}"
           deadline=$((SECONDS + READY_TIMEOUT))
           while [ "$SECONDS" -lt "$deadline" ]; do
-            if python3 -c 'import sys, urllib.request; urllib.request.urlopen(sys.argv[1], timeout=3)' "$url" 2> /dev/null; then
+            # Answering is all this asks of an https target, whose certificate is the service's own and self-signed:
+            # target-url is loopback (checked above), so nothing here depends on who issued it.
+            if python3 -c 'import ssl, sys, urllib.request; c = ssl.create_default_context(); c.check_hostname = False; c.verify_mode = ssl.CERT_NONE; urllib.request.urlopen(sys.argv[1], timeout=3, context=c)' "$url" 2> /dev/null; then
               echo "The service answered at $url after ${SECONDS}s."
               exit 0
             fi
@@ -785,7 +787,9 @@ jobs:
               is what is exercised) or with no user. Returns the URL and the id of the message ZAP recorded for it."""
               url = open(URL_FILE).read().strip()
               parts = urllib.parse.urlsplit(url)
-              target = (parts.path or "/") + ("?" + parts.query if parts.query else "")
+              # Absolute-form: the whole URL is the request target, so ZAP keeps the scheme, host and port. An origin-form
+              # line with only a Host header reads as plain HTTP, which sends plaintext to an https target's port.
+              target = urllib.parse.urlunsplit((parts.scheme, parts.netloc, parts.path or "/", parts.query, ""))
               request = "GET " + target + " HTTP/1.1\r\nHost: " + parts.netloc + "\r\n\r\n"
               if as_user:
                   zap.forcedUser.set_forced_user(common.context_id, common.scan_user["id"])

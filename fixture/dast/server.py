@@ -30,6 +30,14 @@ scan type must catch and modes it must pass:
                                                               login response would call this signed in; one that asks a
                                                               protected page as the user must not
 
+    python3 fixture/dast/server.py --port 8080 --login --tls  the same login served over HTTPS with a certificate the
+                                                              server makes for itself at start-up (openssl, valid for
+                                                              127.0.0.1, held in a temporary directory that is gone
+                                                              before the first request is served). No CA signs it, so a
+                                                              client has to accept it on purpose; the session cookie is
+                                                              Secure. Flags combine: --tls --broken-session is the
+                                                              broken session over HTTPS
+
 What is served:
 
     /                   a page linking to /about and /search?q=fixture
@@ -59,6 +67,9 @@ import html
 import json
 import re
 import secrets
+import ssl
+import subprocess
+import tempfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
@@ -167,7 +178,7 @@ ITEM = re.compile(r"^/api/items/([^/]+)$")
 
 
 def make_handler(
-    insecure: bool, vulnerable: bool, login: bool = False, broken_session: bool = False
+    insecure: bool, vulnerable: bool, login: bool = False, broken_session: bool = False, tls: bool = False
 ) -> type[BaseHTTPRequestHandler]:
     sessions: set[str] = set()  # the cookies this process has issued; gone when it exits
 
@@ -187,7 +198,8 @@ def make_handler(
             self.send_header("Location", location)
             if cookie:
                 path = "/login" if broken_session else "/"  # --broken-session: a Path that never covers /account
-                self.send_header("Set-Cookie", f"{COOKIE}={cookie}; Path={path}; HttpOnly; SameSite=Strict")
+                secure = "; Secure" if tls else ""
+                self.send_header("Set-Cookie", f"{COOKIE}={cookie}; Path={path}; HttpOnly; SameSite=Strict{secure}")
             self.send_header("Content-Length", "0")
             self.send_secure_headers()
             self.end_headers()
@@ -274,6 +286,28 @@ def make_handler(
     return Handler
 
 
+def tls_context() -> ssl.SSLContext:
+    """A server context with a throwaway self-signed certificate for 127.0.0.1 and localhost.
+
+    The key and certificate exist for the few milliseconds the context takes to load them, in a temporary directory
+    that is removed right after; nothing is written anywhere else and nothing is reusable."""
+    with tempfile.TemporaryDirectory() as tmp:
+        key, cert = f"{tmp}/key.pem", f"{tmp}/cert.pem"
+        subprocess.run(
+            [
+                "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
+                "-subj", "/CN=fixture", "-addext", "subjectAltName=IP:127.0.0.1,DNS:localhost",
+                "-keyout", key, "-out", cert,
+            ],
+            check=True,
+            capture_output=True,
+        )  # fmt: skip
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
+        context.load_cert_chain(cert, key)
+    return context
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--port", type=int, default=8080)
@@ -285,9 +319,15 @@ def main() -> None:
         action="store_true",
         help="with --login, issue the session cookie with a Path that never matches",
     )
+    parser.add_argument(
+        "--tls", action="store_true", help="serve HTTPS with a self-signed certificate made at start-up"
+    )
     args = parser.parse_args()
-    handler = make_handler(args.insecure, args.vulnerable, args.login, args.broken_session)
-    ThreadingHTTPServer(("127.0.0.1", args.port), handler).serve_forever()
+    handler = make_handler(args.insecure, args.vulnerable, args.login, args.broken_session, args.tls)
+    server = ThreadingHTTPServer(("127.0.0.1", args.port), handler)
+    if args.tls:
+        server.socket = tls_context().wrap_socket(server.socket, server_side=True)
+    server.serve_forever()
 
 
 if __name__ == "__main__":

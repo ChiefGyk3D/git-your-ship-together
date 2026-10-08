@@ -22,6 +22,8 @@ Merged to `main` on 2026-10-06 and 2026-10-07, after the v1.14.0 tag and so not 
 
 - `dast.yml` ([dast](Workflow-dast.md)): ZAP's full (active) and api scans beside the baseline, each proved to fail
   on the fixture (#109, after the baseline scan in #107).
+- Signed-in `dast.yml` scans of an `https://` loopback target: the sign-in probe sends the complete absolute URL in its
+  request line, so ZAP keeps the scheme and port, and the live tests run it against a self-signed TLS fixture (#129).
 - A CycloneDX and an SPDX SBOM attached to every release of `python-package-release.yml`, signed with the rest
   (#99, in #106).
 - The gitleaks pre-commit hook, written into an adopted repository by `scripts/new-repo.sh` (#96, in #104), and the
