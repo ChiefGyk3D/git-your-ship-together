@@ -258,6 +258,10 @@ jobs:
             platform="${platform// /}"
             [ -n "$platform" ] || continue
             echo "::group::$platform"
+            # One digest names one image in the local store: a second platform
+            # cannot be pulled under it ("cannot overwrite digest") until the
+            # first is removed. Its test has already run.
+            docker image rm --force "$IMAGE" > /dev/null 2>&1 || true
             docker pull --platform "$platform" "$IMAGE"
             DOCKER_DEFAULT_PLATFORM="$platform" bash -eo pipefail -c "$COMMAND"
             echo "::endgroup::"

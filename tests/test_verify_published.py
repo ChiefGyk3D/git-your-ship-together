@@ -147,7 +147,10 @@ def test_every_image_reference_pulled_verified_run_or_rescanned_is_the_one_resol
     assert {r for (j, _), r in refs.items() if j == "rescan"} == {"${{ needs.verify.outputs.ref }}"}
     for fragment in ("signature", "SBOM attestation", "provenance", "each platform"):
         assert step_named(fragment)["env"]["IMAGE"] == "${{ steps.digest.outputs.ref }}"
-    assert 'docker pull --platform "$platform" "$IMAGE"' in step_named("each platform")["run"]
+    run = step_named("each platform")["run"]
+    assert 'docker pull --platform "$platform" "$IMAGE"' in run
+    # a digest holds one platform at a time locally, so the previous one is removed before the next pull
+    assert run.index('docker image rm --force "$IMAGE"') < run.index("docker pull") < run.index("bash -eo pipefail -c")
 
 
 # --- the release half ------------------------------------------------------
