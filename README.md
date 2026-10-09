@@ -1728,7 +1728,7 @@ Inputs of `project-sync.yml`:
 | `dry-run` | `false` | Read the board and print every change instead of making it. With no token it only says so and succeeds, which is how this repository's CI exercises the workflow |
 | `client-id` | empty (set this or `app-id`) | The Client ID of the GitHub App, from its settings page; an identifier, not a secret. Callers pass the repository variable `PROJECTS_APP_CLIENT_ID` |
 | `app-id` | empty | Deprecated, accepted for one release. The numeric App ID; `actions/create-github-app-token` deprecates it and prints a warning when it is passed. Used only when `client-id` is empty |
-| `app-owner` | empty (the repository's owner) | A repository on a personal account whose board is in an organization: the account whose installation of the App mints the token. Needs a public repository; see [A repository on a personal account, a board in an organization](#a-repository-on-a-personal-account-a-board-in-an-organization) |
+| `app-owner` | empty (the repository's owner) | A repository on a personal account whose board is in an organization: the organization whose installation of the App mints the token. Needs a public repository; see [A repository on a personal account, a board in an organization](#a-repository-on-a-personal-account-a-board-in-an-organization) |
 | `pull-request-events` | `true` | `false` skips the whole job on a `pull_request_target` run, so a caller that keeps that trigger without a Doppler identity that covers it stays green; see below |
 | `egress-policy` | `audit` | harden-runner: `audit` or `block` |
 | `allowed-endpoints` | `api.doppler.com:443 api.github.com:443` | The allow-list for `block`; these two are all the job reaches |
@@ -1743,16 +1743,19 @@ An installation token belongs to one account. Installed on both your personal
 account and the organization, the App mints a personal-account token by default,
 and that token cannot resolve the organization's project (`Could not resolve to
 a ProjectV2`). Pass `app-owner: <organization>` and the token comes from the
-organization's installation instead, with no repository list, so it reaches the
-installation. It adds no permission and needs no new secret: the same App,
-another installation.
+organization's installation instead. It cannot be scoped to a repository, so it
+is scoped by permission: **organization Projects write and nothing else** (the
+repository is public, so its issues and pull requests need no permission). It
+adds no new secret: the same App, another installation.
 
 That token cannot read a private repository on another account, so the
-repository must be **public**. The workflow checks the event's visibility
-before minting and fails with an `::error::` for a private repository, rather
-than writing cards it could not read. The value must be a GitHub login; anything
-else is refused before minting. Left empty, nothing changes: the token is
-scoped to the calling repository.
+repository must be **public**. Before minting, the workflow reads the
+repository's visibility from the API with the job's own `contents: read` token
+(so `schedule` and `workflow_dispatch` runs work too) and fails with an
+`::error::` for a private repository, or if it cannot tell, rather than writing
+cards it could not read. The value must be a GitHub login; anything else is
+refused before minting. Left empty, or set to the repository's own owner,
+nothing changes: the token is scoped to the calling repository.
 
 ##### Why `pull_request_target`, and the lint line
 

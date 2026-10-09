@@ -443,28 +443,42 @@ def test_app_owner_is_an_optional_input_defaulting_to_empty():
 
 
 def test_default_leaves_both_token_steps_owner_and_repositories_unchanged():
+    own = "(inputs.app-owner == '' || inputs.app-owner == github.repository_owner)"
     for step_id, marker in (("app", "inputs.client-id != ''"), ("app_legacy", "inputs.app-id != ''")):
         step = _step(step_id)
         assert step["with"]["owner"] == "${{ github.repository_owner }}"
         assert step["with"]["repositories"] == "${{ github.event.repository.name }}"
-        assert "inputs.app-owner == ''" in step["if"] and marker in step["if"]
+        assert own in step["if"] and marker in step["if"]  # empty or the repo's own owner: repo-scoped as before
+        assert step["with"]["permission-issues"] == "read" and step["with"]["permission-pull-requests"] == "read"
 
 
-def test_app_owner_set_mints_from_that_owner_with_no_repositories_in_both_paths():
+def test_foreign_app_owner_mints_from_that_owner_with_no_repositories_and_only_projects_write():
+    foreign = "inputs.app-owner != '' && inputs.app-owner != github.repository_owner"
     for step_id, ident in (("app_org", "client-id"), ("app_legacy_org", "app-id")):
         step = _step(step_id)
         w = step["with"]
         assert w["owner"] == "${{ inputs.app-owner }}"
         assert "repositories" not in w
         assert f"inputs.{ident}" in w[ident]
-        assert "inputs.app-owner != ''" in step["if"]
-        assert w["permission-organization-projects"] == "write"
-        assert w["permission-issues"] == "read" and w["permission-pull-requests"] == "read"
+        assert foreign in step["if"]
+        perms = {k: v for k, v in w.items() if k.startswith("permission-")}
+        assert perms == {"permission-organization-projects": "write"}
         assert step["uses"] == _step("app")["uses"]
     assert "app-id" not in _step("app_org")["with"] and "client-id" not in _step("app_legacy_org")["with"]
-    ps_token = next(s for s in _steps() if s.get("name") == "Sync the project")["env"]["PS_TOKEN"]
-    for step_id in ("app", "app_legacy", "app_org", "app_legacy_org"):
-        assert f"steps.{step_id}.outputs.token" in ps_token
+    # the two pairs of steps are mutually exclusive on app-owner
+    assert "inputs.app-owner != github.repository_owner" in _step("app_org")["if"]
+    sync = next(s for s in _steps() if s.get("name") == "Sync the project")
+    assert sync["env"]["PS_TOKEN"] == (
+        "${{ steps.app.outputs.token || steps.app_legacy.outputs.token"
+        " || steps.app_org.outputs.token || steps.app_legacy_org.outputs.token }}"
+    )
+
+
+def test_the_zizmor_ignore_is_inline_on_only_the_two_org_steps_with_a_reason():
+    text = WORKFLOW.read_text()
+    lines = [ln for ln in text.splitlines() if "zizmor: ignore[github-app]" in ln]
+    assert len(lines) == 2 and all("GYST #139" in ln and "org projects only" in ln for ln in lines)
+    assert "app-owner" not in (REPO / ".github" / "zizmor.yml").read_text()
 
 
 def test_the_public_repo_guard_runs_before_every_mint_and_takes_inputs_through_env():
@@ -477,42 +491,63 @@ def test_the_public_repo_guard_runs_before_every_mint_and_takes_inputs_through_e
     assert "inputs.app-owner != ''" in guard["if"]
     assert "${{" not in guard["run"], "inputs must reach the script through env, never template expansion"
     assert guard["env"]["APP_OWNER"] == "${{ inputs.app-owner }}"
-    assert guard["env"]["REPO_PRIVATE"] == "${{ github.event.repository.private }}"
     assert guard["env"]["REPO_OWNER"] == "${{ github.repository_owner }}"
+    assert guard["env"]["GH_TOKEN"] == "${{ github.token }}"
+    assert "github.event.repository" not in str(guard)  # visibility comes from the API, so every event works
 
 
-def _run_guard(owner, repo_owner="ChiefGyk3D", private="false"):
+def _run_guard(tmp_path, owner, repo_owner="ChiefGyk3D", gh="false"):
+    """Run the guard's script with a stub `gh`: `gh` is what `gh api` prints on stdout, or 'fail' to exit 1."""
     import os
     import subprocess
 
-    env = {**os.environ, "APP_OWNER": owner, "REPO_OWNER": repo_owner, "REPO_PRIVATE": private}
-    return subprocess.run(["bash", "-c", _guard()["run"]], env=env, capture_output=True, text=True)
+    stub = tmp_path / "gh"
+    log = tmp_path / "gh.args"
+    if gh == "fail":
+        body = "exit 1"
+    else:
+        body = f"echo {gh}"
+    stub.write_text(f'#!/bin/sh\necho "$@" >> {log}\n{body}\n')
+    stub.chmod(0o755)
+    env = {
+        **os.environ,
+        "PATH": f"{tmp_path}:{os.environ['PATH']}",
+        "APP_OWNER": owner,
+        "REPO_OWNER": repo_owner,
+        "GITHUB_REPOSITORY": f"{repo_owner}/some-repo",
+    }
+    r = subprocess.run(["bash", "-c", _guard()["run"]], env=env, capture_output=True, text=True)
+    r.gh_calls = log.read_text().splitlines() if log.exists() else []
+    return r
 
 
-def test_guard_accepts_a_valid_login_on_a_public_repo():
-    r = _run_guard("Renegade-Penguin")
+def test_guard_accepts_a_valid_login_on_a_public_repo(tmp_path):
+    r = _run_guard(tmp_path, "Renegade-Penguin")
     assert r.returncode == 0, r.stdout + r.stderr
-    assert _run_guard("a").returncode == 0
-    assert _run_guard("a" * 39).returncode == 0  # GitHub's 39-character limit
+    assert r.gh_calls == ["api repos/ChiefGyk3D/some-repo --jq .private"]
+    assert _run_guard(tmp_path, "a").returncode == 0
+    assert _run_guard(tmp_path, "a" * 39).returncode == 0  # GitHub's 39-character limit
 
 
-def test_guard_refuses_things_that_are_not_a_github_login():
+def test_guard_refuses_things_that_are_not_a_github_login(tmp_path):
     for bad in ("../x", "a b", "a" * 40, "-a", "a--b", "a-", "a/b", "a\nb", "$(id)"):
-        r = _run_guard(bad)
+        r = _run_guard(tmp_path, bad)
         assert r.returncode != 0, bad
         assert "::error::" in r.stdout and "app-owner" in r.stdout, bad
 
 
-def test_guard_refuses_a_private_or_unknown_visibility_when_the_owner_differs():
-    for private in ("true", "", "null"):
-        r = _run_guard("Renegade-Penguin", private=private)
-        assert r.returncode != 0, private
-        assert "::error::" in r.stdout and "private" in r.stdout
+def test_guard_refuses_a_private_repo_and_fails_closed_on_any_api_problem(tmp_path):
+    for gh in ("true", "null", "", "fail"):
+        r = _run_guard(tmp_path, "Renegade-Penguin", gh=gh)
+        assert r.returncode != 0, gh
+        assert "::error::" in r.stdout and "private" in r.stdout, gh
 
 
-def test_guard_lets_a_private_repo_through_when_app_owner_is_its_own_owner():
-    assert _run_guard("ChiefGyk3D", private="true").returncode == 0
-    assert _run_guard("chiefgyk3d", private="true").returncode == 0  # logins are case-insensitive
+def test_guard_does_not_ask_the_api_when_app_owner_is_its_own_owner(tmp_path):
+    for owner in ("ChiefGyk3D", "chiefgyk3d"):  # logins are case-insensitive
+        r = _run_guard(tmp_path, owner, gh="true")
+        assert r.returncode == 0, r.stdout
+        assert r.gh_calls == []
 
 
 def test_doppler_ci_set_reads_a_multiline_value_from_a_file(tmp_path):

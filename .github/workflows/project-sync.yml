@@ -102,7 +102,7 @@ on:
         type: string
         default: ""
       app-owner:
-        description: The account whose installation of the App mints the token, when the board belongs to a different account than the calling repository (a public repository on a personal account, a board in an organization). Empty uses the repository's own owner and scopes the token to this repository. Set, the token comes from that owner's installation with no repository list, so it reaches the whole installation, and the repository must be public - an organization token cannot read a private repository on another account, so the run refuses one before minting. A GitHub login; no new permission.
+        description: The account whose installation of the App mints the token, when the board belongs to a different account than the calling repository (a public repository on a personal account, a board in an organization). Empty, or the repository's own owner, keeps today's token scoped to this repository. Another account's installation gives a token with no repository list that holds only organization Projects write, and the repository must be public - an organization token cannot read a private repository on another account, so the run refuses one (visibility read from the API) before minting. A GitHub login; no new permission.
         type: string
         default: ""
       pull-request-events:
@@ -263,30 +263,36 @@ jobs:
           echo "::error::project-sync needs the App's Client ID: pass client-id (the PROJECTS_APP_CLIENT_ID repository variable). app-id is accepted for one release but is deprecated."
           exit 1
 
-      # app-owner mints from another account's installation. That token has no
-      # repository list and cannot read a private repository of this account, so
-      # a private caller would get cards written blind: refuse it here, from the
-      # token-free event context, before anything is minted. The value reaches
-      # the script through env only, and must be a GitHub login.
+      # app-owner naming another account mints from that account's installation
+      # with no repository list. That token cannot read a private repository of
+      # this account, so a private caller would get cards written blind: refuse
+      # it here, before anything is minted. Visibility comes from the API with
+      # the job's own read-only token, not from the event payload, so schedule
+      # and workflow_dispatch runs are covered; any error fails closed. The
+      # value reaches the script through env only, and must be a GitHub login.
       - name: Guard app-owner
         if: ${{ inputs.app-owner != '' }}
         env:
           APP_OWNER: ${{ inputs.app-owner }}
           REPO_OWNER: ${{ github.repository_owner }}
-          REPO_PRIVATE: ${{ github.event.repository.private }}
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
           if ! [[ "$APP_OWNER" =~ ^[A-Za-z0-9](-?[A-Za-z0-9]){0,38}$ ]]; then
             echo "::error::project-sync: app-owner is not a GitHub login (letters, digits and single hyphens, at most 39 characters)."
             exit 1
           fi
-          if [ "${APP_OWNER,,}" != "${REPO_OWNER,,}" ] && [ "$REPO_PRIVATE" != "false" ]; then
-            echo "::error::project-sync: app-owner is set to another account, which needs a public repository. This repository is private (or its visibility is unknown): an organization token cannot read a private repository on another account, so cards would be written blind."
-            exit 1
+          if [ "${APP_OWNER,,}" != "${REPO_OWNER,,}" ]; then
+            private=$(gh api "repos/$GITHUB_REPOSITORY" --jq .private) || private=unknown
+            if [ "$private" != "false" ]; then
+              echo "::error::project-sync: app-owner is set to another account, which needs a public repository. This repository is private (or its visibility could not be read): an organization token cannot read a private repository on another account, so cards would be written blind."
+              exit 1
+            fi
           fi
 
       - name: Mint a one-hour installation token
         id: app
-        if: ${{ env.PROJECTS_APP_PRIVATE_KEY != '' && inputs.client-id != '' && inputs.app-owner == '' }}
+        if: ${{ env.PROJECTS_APP_PRIVATE_KEY != '' && inputs.client-id != '' && (inputs.app-owner == '' || inputs.app-owner == github.repository_owner) }}
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           client-id: ${{ inputs.client-id }}
@@ -299,7 +305,7 @@ jobs:
 
       - name: Mint a one-hour installation token (deprecated app-id)
         id: app_legacy
-        if: ${{ env.PROJECTS_APP_PRIVATE_KEY != '' && inputs.client-id == '' && inputs.app-id != '' && inputs.app-owner == '' }}
+        if: ${{ env.PROJECTS_APP_PRIVATE_KEY != '' && inputs.client-id == '' && inputs.app-id != '' && (inputs.app-owner == '' || inputs.app-owner == github.repository_owner) }}
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           app-id: ${{ inputs.app-id }}
@@ -310,32 +316,32 @@ jobs:
           permission-issues: read
           permission-pull-requests: read
 
-      # app-owner set: the same App, the owner's installation, no repository
-      # list (the token covers that installation; the guard above holds the
-      # repository public).
+      # app-owner names another account: the same App, that account's
+      # installation, no repository list. The token is scoped by permission
+      # instead: organization Projects write only. The caller repository is
+      # public (the guard above), and public issues and pull requests need no
+      # repository permission.
       - name: Mint a one-hour installation token (app-owner)
         id: app_org
-        if: ${{ env.PROJECTS_APP_PRIVATE_KEY != '' && inputs.client-id != '' && inputs.app-owner != '' }}
+        if: ${{ env.PROJECTS_APP_PRIVATE_KEY != '' && inputs.client-id != '' && inputs.app-owner != '' && inputs.app-owner != github.repository_owner }}
+        # zizmor: ignore[github-app] org installation token with no repository list by design (GYST #139); the caller repo must be public (guard above); the permissions are org projects only.
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           client-id: ${{ inputs.client-id }}
           private-key: ${{ env.PROJECTS_APP_PRIVATE_KEY }}
           owner: ${{ inputs.app-owner }}
           permission-organization-projects: write
-          permission-issues: read
-          permission-pull-requests: read
 
       - name: Mint a one-hour installation token (deprecated app-id, app-owner)
         id: app_legacy_org
-        if: ${{ env.PROJECTS_APP_PRIVATE_KEY != '' && inputs.client-id == '' && inputs.app-id != '' && inputs.app-owner != '' }}
+        if: ${{ env.PROJECTS_APP_PRIVATE_KEY != '' && inputs.client-id == '' && inputs.app-id != '' && inputs.app-owner != '' && inputs.app-owner != github.repository_owner }}
+        # zizmor: ignore[github-app] org installation token with no repository list by design (GYST #139); the caller repo must be public (guard above); the permissions are org projects only.
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           app-id: ${{ inputs.app-id }}
           private-key: ${{ env.PROJECTS_APP_PRIVATE_KEY }}
           owner: ${{ inputs.app-owner }}
           permission-organization-projects: write
-          permission-issues: read
-          permission-pull-requests: read
 
       - name: Sync the project
         env:
