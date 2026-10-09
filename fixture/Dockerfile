@@ -6,6 +6,14 @@ FROM python:3.13-slim@sha256:bb2988715db2cf7ace7b53f38f3cffbef7c7046a656bee66245
 LABEL org.opencontainers.image.title="fixture-app"
 LABEL org.opencontainers.image.source="https://github.com/ChiefGyk3D/git-your-ship-together"
 
+# Debian security fixes land in the archive before a new python:3.13-slim is
+# published, so Trivy can flag the pinned base for a package that already has
+# a fix (liblzma5, DSA-6549-1, on 2026-10-08). Upgrade in place, then drop the
+# apt lists so the layer stays small. Trivy still scans the result.
+RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 COPY pyproject.toml ./
 COPY src ./src
