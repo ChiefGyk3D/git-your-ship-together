@@ -69,9 +69,12 @@ on:
         type: string
         default: "3.13"
       lint-install-command:
-        description: Shell that installs the linters.
+        description: >-
+          Shell that installs the linters. The default pins ruff: an unpinned install turned every
+          caller's lint red on the day ruff 0.17.0 changed its default target version (2026-10-09).
+          Move the pin here, deliberately, with a release.
         type: string
-        default: pip install ruff
+        default: pip install "ruff==0.16.9"
       lint-command:
         description: Shell that lints. A non-zero exit fails the job unless `lint-continue-on-error` is set.
         type: string

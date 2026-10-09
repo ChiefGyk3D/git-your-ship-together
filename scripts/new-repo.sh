@@ -296,10 +296,10 @@ PY
     lint_install="$install_cmd"
     lint_cmd='ruff check .'$'\n''ruff format --check . || echo "::warning title=ruff format::formatting drift (advisory)"'$'\n''mypy'
   elif $ruff; then
-    lint_install='pip install ruff'
+    lint_install='pip install "ruff==0.16.9"'
     lint_cmd='ruff check .'$'\n''ruff format --check . || echo "::warning title=ruff format::formatting drift (advisory)"'
   else
-    lint_install='pip install ruff'
+    lint_install='pip install "ruff==0.16.9"'
     lint_cmd='ruff check .'
   fi
 

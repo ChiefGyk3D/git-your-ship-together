@@ -920,3 +920,11 @@ def test_this_repositorys_gate_needs_every_other_job():
     doc = load(WORKFLOWS / "ci.yml")
     others = sorted(name for name in jobs(doc) if name != "ci-green")
     assert sorted(jobs(doc)["ci-green"]["needs"]) == others
+
+
+def test_python_ci_installs_a_pinned_ruff_by_default():
+    """ruff 0.17.0 (2026-10-09) changed its default target version and turned every caller's lint
+    red at once because the default was an unpinned `pip install ruff`."""
+    wf = yaml.safe_load((WORKFLOWS / "python-ci.yml").read_text())
+    default = wf[True]["workflow_call"]["inputs"]["lint-install-command"]["default"]
+    assert re.search(r"ruff==\d+\.\d+\.\d+", default), default
