@@ -282,7 +282,7 @@ Inputs of `python-ci.yml`:
 | `coverage-threshold` | empty (no check) | Minimum total line coverage as a percentage, e.g. `85`. The `test` job fails below it, judged from the `line-rate` of `coverage-file` (Cobertura XML, as coverage.py and pytest-cov write it) on the leg that uploads it; the test command must write that file |
 | `codecov` | `false` | Also upload to Codecov over GitHub OIDC; no token, the repository just has to be enabled in the Codecov GitHub App |
 | `lint-python-version` | `3.13` | Python for the lint job |
-| `lint-install-command` | `pip install ruff` | Installs the linters |
+| `lint-install-command` | `pip install "ruff==0.16.9"` | Installs the linters; ruff is pinned so a new ruff release cannot turn every caller red at once |
 | `lint-command` | `ruff check .` | The lint step |
 | `lint-continue-on-error` | `false` | Report lint failures without failing CI. A migration aid; no caller sets it any more |
 | `typecheck-install-command` | empty | Installs the type checker, e.g. `pip install mypy==2.4.0`; empty installs nothing |
