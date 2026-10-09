@@ -17,9 +17,11 @@
 #   3. PyPI is NOT published from here. Trusted Publishing cannot use a
 #      reusable workflow as the publisher (the OIDC token names this file, not
 #      the caller's, and PyPI answers `invalid-publisher`; warehouse#11096).
-#      Publish from a job in the caller's own workflow with the composite
-#      action `.github/actions/publish-pypi`, which downloads the `dist`
-#      artifact this workflow uploads. The README shows the job.
+#      Publish from a job in the caller's own workflow: download the `dist`
+#      artifact this workflow uploads, then run pypa/gh-action-pypi-publish as
+#      a DIRECT step (it is a Docker action; wrapped in a composite action or
+#      a reusable workflow it resolves its image from the wrapper's
+#      repository and fails). The README shows the job.
 #   The build job also writes a CycloneDX and an SPDX SBOM (`sbom.cdx.json`,
 #   `sbom.spdx.json`) with syft, pinned by the `syft-version` and `syft-sha256` inputs, over the
 #   unpacked wheel and sdist. They travel in their own artifact, never in
@@ -366,7 +368,7 @@ jobs:
         env:
           ENVIRONMENT: ${{ inputs.pypi-environment }}
         run: |
-          echo "::error title=pypi: true cannot work::PyPI Trusted Publishing rejects a reusable workflow as the publisher (invalid-publisher, warehouse#11096). Set pypi: false and add a publish-pypi job (environment: ${ENVIRONMENT}) to your own workflow that uses ChiefGyk3D/git-your-ship-together/.github/actions/publish-pypi; see the README, Python package release."
+          echo "::error title=pypi: true cannot work::PyPI Trusted Publishing rejects a reusable workflow as the publisher (invalid-publisher, warehouse#11096). Set pypi: false and add a publish-pypi job (environment: ${ENVIRONMENT}) to your own workflow with actions/download-artifact (name: dist) then pypa/gh-action-pypi-publish as direct steps; see the README, Python package release."
           exit 1
 
   # No checkout here either: the one write in the workflow runs beside

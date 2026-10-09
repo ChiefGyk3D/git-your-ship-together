@@ -4,7 +4,7 @@ pypa/gh-action-pypi-publish is a Docker action: the runner pulls
 ghcr.io/pypa/gh-action-pypi-publish before it runs, and the layers are
 redirected to pkg-containers.githubusercontent.com. Under harden-runner `block`
 the pull is refused (hypeman v0.3.1, "connection refused"). Publishing now runs
-in the caller's own job (see test_pypi_publish_action.py), so the allow-list is
+in the caller's own job (see test_pypi_publish_direct.py), so the allow-list is
 the caller's: the README example is the one place this repository writes it, and
 it must hold every host the publish needs.
 """

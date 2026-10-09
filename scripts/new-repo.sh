@@ -552,7 +552,14 @@ write_release() {
         echo "          allowed-endpoints: $PYPI_HOSTS"
         echo "          disable-sudo: true"
         echo "          disable-telemetry: true"
-        echo "      - uses: $SHARED/.github/actions/publish-pypi@$sha # $pin"
+        echo "      # pypa/gh-action-pypi-publish must stay a direct step: wrapped in a composite action or reusable workflow its image fails to resolve"
+        echo "      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1"
+        echo "        with:"
+        echo "          name: dist"
+        echo "          path: dist/"
+        echo "      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2"
+        echo "        with:"
+        echo "          attestations: true"
       fi
     fi
     if [ -n "$dockerfile" ]; then

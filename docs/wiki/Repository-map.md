@@ -65,7 +65,7 @@ publish).
 | `container-release.yml` | [Release](Which-workflow-do-I-need.md) | Build, test, scan, push multi-arch, sign, SBOM, provenance |
 | `python-docker-release.yml` | [Release](Which-workflow-do-I-need.md) | Old name of the above; forwards everything |
 | `verify-published.yml` | [Release](Which-workflow-do-I-need.md) | Verify a published image from outside |
-| `python-package-release.yml` | [Release](Which-workflow-do-I-need.md) | Build, check, publish to the GitHub release (PyPI via the `publish-pypi` action in the caller) |
+| `python-package-release.yml` | [Release](Which-workflow-do-I-need.md) | Build, check, publish to the GitHub release (PyPI via a direct pypa publish step in the caller's own job) |
 | `artifact-release.yml` | [Release](Which-workflow-do-I-need.md) | Build any file, sign it, attach it to the release |
 | `security.yml` | [Security](Workflow-security.md) | CodeQL, gitleaks, audit, dependency review, Semgrep, Snyk, Scorecard |
 | `dast.yml` | [dast](Workflow-dast.md) | OWASP ZAP baseline, full (active) or api scan against a loopback service the caller starts, SARIF under `zap` |
@@ -89,7 +89,6 @@ publish).
 | Path | What it is |
 |---|---|
 | `.github/actions/doppler-secrets/` | Composite action: fetch a Doppler config as masked env vars. The source of the inlined copies |
-| `.github/actions/publish-pypi/` | Composite action: publish the package release's `dist` artifact to PyPI, from a job in the caller's workflow |
 | `.github/dependabot.yml` | Weekly action, pip (the repository root and `.github/requirements/`) and docker bumps with a seven-day cooldown |
 | `BASELINE.md` | The settings every repository must meet, with the `gh api` command for each |
 | `baseline/repos.txt` | Which repositories the baseline covers |
