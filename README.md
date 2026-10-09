@@ -1774,8 +1774,8 @@ A `pull_request` run from a fork gets a read-only token and no secrets, so a
 fork's pull request could never reach the board. `pull_request_target` runs the
 caller's workflow file from the **base** branch, with secrets. It is dangerous
 only when the job then checks out and runs the pull request's code. This job
-does neither: it has no checkout at all, and its one step is the script inlined
-from this repository (`scripts/project_sync.py`), which reads the event payload
+does neither: it has no checkout at all, and its one step is the safo Action
+(`ChiefGyk3D/scrum-around-and-find-out`, pinned by commit), which reads the event payload
 as JSON data and never expands it into a shell. The pull request's title and
 body are never read. The caller must still pass `doppler-trusted-refs-only:
 false`, because the Doppler rule treats `pull_request_target` as untrusted
