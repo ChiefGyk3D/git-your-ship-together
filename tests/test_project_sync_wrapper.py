@@ -87,9 +87,7 @@ def test_every_input_a_caller_passes_today_is_still_accepted():
 
 
 def test_safo_is_called_by_commit_with_a_version_comment():
-    match = re.search(
-        r"uses: ChiefGyk3D/scrum-around-and-find-out@([0-9a-f]{40}) # v0\.1\.0\n", WORKFLOW.read_text()
-    )
+    match = re.search(r"uses: ChiefGyk3D/scrum-around-and-find-out@([0-9a-f]{40}) # v0\.1\.0\n", WORKFLOW.read_text())
     assert match and match[1] != "0123456789abcdef0123456789abcdef01234567"
     expected = (REPO / "tests" / "safo-release-commit.txt").read_text().strip()
     assert re.fullmatch(r"[0-9a-f]{40}", expected) and match[1] == expected
