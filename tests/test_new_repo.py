@@ -190,7 +190,9 @@ def test_a_library_that_already_publishes_to_pypi_keeps_publishing(tmp_path):
     job = release["publish-pypi"]
     assert job["needs"] == "package" and job["environment"]["name"] == "pypi"
     assert job["permissions"] == {"contents": "read", "id-token": "write"}
-    assert job["steps"][-1]["uses"].startswith("ChiefGyk3D/git-your-ship-together/.github/actions/publish-pypi@" + SHA)
+    uses = [s["uses"].split("@")[0] for s in job["steps"]]
+    assert uses[-2:] == ["actions/download-artifact", "pypa/gh-action-pypi-publish"], "direct steps, no wrapper"
+    assert job["steps"][-1]["with"] == {"attestations": True}
     pinned = re.search(r"harden-runner@([0-9a-f]{40})", job["steps"][0]["uses"]).group(1)
     reusable = (REPO / ".github" / "workflows" / "python-package-release.yml").read_text()
     assert f"harden-runner@{pinned}" in reusable, "the script's harden-runner pin has drifted"

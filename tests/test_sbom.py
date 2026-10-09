@@ -92,8 +92,9 @@ def test_sbom_files_stay_out_of_the_pypi_upload_and_into_the_release():
     assert upload[0]["with"]["path"] == "${{ runner.temp }}/sbom/"
     dist = [s for s in JOBS["build"]["steps"] if s.get("with", {}).get("name") == "dist"]
     assert dist[0]["with"]["path"] == "${{ inputs.package-directory }}/dist/"
-    action = yaml.safe_load((REPO / ".github" / "actions" / "publish-pypi" / "action.yml").read_text())
-    pypi_downloads = [s["with"]["name"] for s in action["runs"]["steps"] if "download-artifact" in s.get("uses", "")]
+    readme = (REPO / "README.md").read_text()
+    job = yaml.safe_load(re.search(r"  publish-pypi:\n(?:    .*\n|\n)+", readme).group(0))["publish-pypi"]
+    pypi_downloads = [s["with"]["name"] for s in job["steps"] if "download-artifact" in s.get("uses", "")]
     assert pypi_downloads == ["dist"], "PyPI must be handed the distributions alone"
     release = JOBS["github-release"]["steps"]
     fetch = next(s for s in release if s.get("with", {}).get("name") == "sbom")
