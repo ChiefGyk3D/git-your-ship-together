@@ -1231,6 +1231,7 @@ Inputs of `python-package-release.yml`:
 | `syft-sha256` | the 1.54.0 linux_amd64 tarball's | SHA-256 of that tarball |
 | `attest` | `true` | Record SLSA build provenance for every file, SBOMs included |
 | `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `audit`, the measured list, empty | harden-runner, as in `python-ci.yml`. The build's hosts were measured in block mode here; the publishing hosts are PyPI's and Sigstore's documented ones |
+| `publish-allowed-endpoints` | `ghcr.io:443 pkg-containers.githubusercontent.com:443` | Appended to the list for the PyPI publish job only: `pypa/gh-action-pypi-publish` is a Docker action, so the runner pulls its image from `ghcr.io` (layers from `pkg-containers.githubusercontent.com`). Under `block` that pull was refused on hypeman's v0.3.1 release |
 | `timeout-minutes` | `20` | Per-job timeout |
 
 The workflow outputs `version`, the version the sdist was built as, for a

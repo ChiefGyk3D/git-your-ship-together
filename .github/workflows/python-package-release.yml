@@ -125,6 +125,10 @@ on:
         description: harden-runner allow-list for `block`, space-separated host:port entries. The build hosts were measured by running the build in block mode here; the publishing hosts are PyPI's and Sigstore's documented ones. Wildcards are not supported and a newline-separated list matches nothing.
         type: string
         default: "api.github.com:443 files.pythonhosted.org:443 fulcio.sigstore.dev:443 github.com:443 pypi.org:443 rekor.sigstore.dev:443 release-assets.githubusercontent.com:443 timestamp.sigstore.dev:443 tuf-repo-cdn.sigstore.dev:443 upload.pypi.org:443 uploads.github.com:443"
+      publish-allowed-endpoints:
+        description: Appended to `allowed-endpoints` for the PyPI publish job only. pypa/gh-action-pypi-publish is a Docker action - the runner pulls ghcr.io/pypa/gh-action-pypi-publish before it runs, and the layers come from pkg-containers.githubusercontent.com. Under `block` that pull was refused (hypeman v0.3.1, connection refused). No other job pulls an image. Same format.
+        type: string
+        default: "ghcr.io:443 pkg-containers.githubusercontent.com:443"
       extra-allowed-endpoints:
         description: Appended to `allowed-endpoints`, for hosts only this repository reaches. Same format.
         type: string
@@ -354,7 +358,7 @@ jobs:
       - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
         with:
           egress-policy: ${{ inputs.egress-policy }}
-          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.publish-allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
           disable-sudo: true
           # The agent may only stop reporting to StepSecurity in block mode.
           disable-telemetry: ${{ inputs.egress-policy == 'block' }}
