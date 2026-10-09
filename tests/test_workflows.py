@@ -460,9 +460,9 @@ PR_ID_TOKEN_EXCEPTIONS = {
     ("python-docker-release.yml", "release"),  # the thin caller of the above
     # Called from `pull_request_target`, which runs the caller's base-branch
     # workflow, so a fork's pull request reaches the board. Nothing from the
-    # pull request is checked out or executed: the one step runs the script
-    # inlined from this repository over the event payload, read as data
-    # (tests/test_project_sync.py pins both halves).
+    # pull request is checked out or executed: the one step runs safo
+    # (ChiefGyk3D/scrum-around-and-find-out) over the event payload, read as data
+    # (tests/test_project_sync_wrapper.py pins the call).
     ("project-sync.yml", "sync"),
 }
 

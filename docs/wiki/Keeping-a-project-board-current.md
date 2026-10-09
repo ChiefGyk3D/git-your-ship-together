@@ -53,7 +53,7 @@ it can mint, and one already minted dies within the hour.
 
 **It is for organization-owned projects only.** GitHub Apps have no user-account Projects
 permission (Projects is listed under Organization permissions only), so a token cannot write
-to a user-owned project, and the script refuses a `/users/` URL before any API call.
+to a user-owned project, and safo refuses a `/users/` URL before any API call.
 
 ## Why the caller uses `pull_request_target`
 
@@ -61,7 +61,7 @@ A `pull_request` run from a fork gets a read-only token and no secrets, so a for
 could never reach the board. `pull_request_target` runs the caller's workflow file from the
 **base** branch, with secrets. It is dangerous only when the job then checks out and runs the
 pull request's code. This job does neither: it has no checkout at all, and its one step is the
-script inlined from this repository, which reads the event payload as JSON data and never
+safo Action (pinned by commit), which reads the event payload as JSON data and never
 expands it into a shell. The pull request's title and body are never read. Do not copy that
 trigger into a caller that checks out the pull request.
 
