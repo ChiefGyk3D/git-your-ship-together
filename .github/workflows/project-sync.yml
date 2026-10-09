@@ -271,28 +271,38 @@ jobs:
       # and workflow_dispatch runs are covered; any error fails closed. The
       # value reaches the script through env only, and must be a GitHub login.
       - name: Guard app-owner
-        if: ${{ inputs.app-owner != '' }}
+        id: guard
         env:
           APP_OWNER: ${{ inputs.app-owner }}
           REPO_OWNER: ${{ github.repository_owner }}
           GH_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
+          # One decision, made here and nowhere else: `own` keeps the
+          # repository-scoped token, `org` mints from another account's
+          # installation. Every mint step tests this output.
+          if [ -z "$APP_OWNER" ]; then
+            echo "path=own" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           if ! [[ "$APP_OWNER" =~ ^[A-Za-z0-9](-?[A-Za-z0-9]){0,38}$ ]]; then
             echo "::error::project-sync: app-owner is not a GitHub login (letters, digits and single hyphens, at most 39 characters)."
             exit 1
           fi
-          if [ "${APP_OWNER,,}" != "${REPO_OWNER,,}" ]; then
-            private=$(gh api "repos/$GITHUB_REPOSITORY" --jq .private) || private=unknown
-            if [ "$private" != "false" ]; then
-              echo "::error::project-sync: app-owner is set to another account, which needs a public repository. This repository is private (or its visibility could not be read): an organization token cannot read a private repository on another account, so cards would be written blind."
-              exit 1
-            fi
+          if [ "${APP_OWNER,,}" = "${REPO_OWNER,,}" ]; then
+            echo "path=own" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+          private=$(gh api "repos/$GITHUB_REPOSITORY" --jq .private) || private=unknown
+          if [ "$private" != "false" ]; then
+            echo "::error::project-sync: app-owner is set to another account, which needs a public repository. This repository is private (or its visibility could not be read): an organization token cannot read a private repository on another account, so cards would be written blind."
+            exit 1
+          fi
+          echo "path=org" >> "$GITHUB_OUTPUT"
 
       - name: Mint a one-hour installation token
         id: app
-        if: ${{ env.PROJECTS_APP_PRIVATE_KEY != '' && inputs.client-id != '' && (inputs.app-owner == '' || inputs.app-owner == github.repository_owner) }}
+        if: ${{ env.PROJECTS_APP_PRIVATE_KEY != '' && inputs.client-id != '' && steps.guard.outputs.path == 'own' }}
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           client-id: ${{ inputs.client-id }}
@@ -305,7 +315,7 @@ jobs:
 
       - name: Mint a one-hour installation token (deprecated app-id)
         id: app_legacy
-        if: ${{ env.PROJECTS_APP_PRIVATE_KEY != '' && inputs.client-id == '' && inputs.app-id != '' && (inputs.app-owner == '' || inputs.app-owner == github.repository_owner) }}
+        if: ${{ env.PROJECTS_APP_PRIVATE_KEY != '' && inputs.client-id == '' && inputs.app-id != '' && steps.guard.outputs.path == 'own' }}
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           app-id: ${{ inputs.app-id }}
@@ -323,7 +333,7 @@ jobs:
       # repository permission.
       - name: Mint a one-hour installation token (app-owner)
         id: app_org
-        if: ${{ env.PROJECTS_APP_PRIVATE_KEY != '' && inputs.client-id != '' && inputs.app-owner != '' && inputs.app-owner != github.repository_owner }}
+        if: ${{ env.PROJECTS_APP_PRIVATE_KEY != '' && inputs.client-id != '' && steps.guard.outputs.path == 'org' }}
         # zizmor: ignore[github-app] org installation token with no repository list by design (GYST #139); the caller repo must be public (guard above); the permissions are org projects only.
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
@@ -334,7 +344,7 @@ jobs:
 
       - name: Mint a one-hour installation token (deprecated app-id, app-owner)
         id: app_legacy_org
-        if: ${{ env.PROJECTS_APP_PRIVATE_KEY != '' && inputs.client-id == '' && inputs.app-id != '' && inputs.app-owner != '' && inputs.app-owner != github.repository_owner }}
+        if: ${{ env.PROJECTS_APP_PRIVATE_KEY != '' && inputs.client-id == '' && inputs.app-id != '' && steps.guard.outputs.path == 'org' }}
         # zizmor: ignore[github-app] org installation token with no repository list by design (GYST #139); the caller repo must be public (guard above); the permissions are org projects only.
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
