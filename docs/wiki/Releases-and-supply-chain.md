@@ -43,7 +43,8 @@ sdist, listed in `SHA256SUMS` and attested with the rest. Not built.
 **Checksums.** Package and artifact releases attach a `SHA256SUMS` file.
 
 **PyPI Trusted Publishing.** PyPI accepts the job's OIDC identity for a named repository,
-workflow file and environment. No API token exists. It also publishes PEP 740 attestations for
+workflow file and environment. The workflow file is the one that defines the job, so it cannot be a reusable workflow:
+the caller publishes with the `publish-pypi` composite action. No API token exists. It also publishes PEP 740 attestations for
 every file.
 
 ## Why a publishing build never reads the cache

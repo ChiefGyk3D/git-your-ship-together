@@ -79,10 +79,12 @@ the write permission it holds never runs beside the proposed change.
 **Package release** (`python-package-release.yml`) is the same promise for a
 wheel: build once, `twine check`, read the version off the sdist and refuse
 a tag that disagrees, install the wheel into a clean venv and run it, then
-publish the same files to PyPI over the job's OIDC identity and to the
-GitHub release with build provenance and checksums. Every caller command
-runs in the read-only build job; the two writes run pinned actions and `gh`
-against files the build handed over, and never check the tree out.
+publish the same files to the GitHub release with build provenance and
+checksums. PyPI is published by a job in the caller's own workflow with the
+`publish-pypi` composite action, because Trusted Publishing cannot use a
+reusable workflow as the publisher. Every caller command runs in the
+read-only build job; the write runs pinned actions and `gh` against files the
+build handed over, and never checks the tree out.
 
 **Artifact release** (`artifact-release.yml`) is the same promise for a file
 that is not an image: a `.deb`, a firmware binary, a bundle. A caller's
@@ -217,7 +219,7 @@ token was one more thing to store for no reason, and it is gone.
 | GHCR, and Docker Hub | Registries | GHCR authenticates with the job's own `GITHUB_TOKEN`, so it needs nothing stored. Docker Hub is kept only for the projects that already publish there and is the reason the `ci` config holds a registry credential at all. |
 | cosign (sigstore) | Image signature, keyless | The signature is bound to the job's OIDC identity and logged in Rekor. No signing key to store, lose or rotate. |
 | syft | SBOM | Generated from the built image and attached as a cosign attestation, so the SBOM is bound to the same identity as the signature. |
-| pypa/gh-action-pypi-publish | Publishing to PyPI | Trusted Publishing: PyPI accepts the job's OIDC identity for a named repository, workflow and environment, so no API token exists to store. It also publishes PEP 740 attestations for every file. |
+| pypa/gh-action-pypi-publish | Publishing to PyPI, inside the `publish-pypi` composite action that a caller's job uses | Trusted Publishing: PyPI accepts the job's OIDC identity for a named repository, workflow and environment (the caller's, never a reusable workflow's), so no API token exists to store. It also publishes PEP 740 attestations for every file. |
 | GitHub attestations | SLSA build provenance | GitHub's own record of which workflow, at which commit, produced the image. |
 | Dependabot | Moves the pins | Bumps action SHAs and their version comments together, and bumps the callers' pin on this repository when a tag is cut. A seven-day cooldown keeps a release cut this morning from being proposed this afternoon. |
 | dependabot/fetch-metadata | Says what a bump actually changes | Reads the update type and packages out of Dependabot's own commit trailers, and verifies the commits are Dependabot's before answering, which is what makes an automatic merge decision trustworthy. |

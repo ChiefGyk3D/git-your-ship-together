@@ -11,6 +11,7 @@ workflows named for replacement rather than silently deleted.
 from __future__ import annotations
 
 import importlib.util
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -184,8 +185,15 @@ def test_a_library_that_already_publishes_to_pypi_keeps_publishing(tmp_path):
     assert 'pip install -e ".[dev]"' in ci["install-command"]
     assert ci["docker-build"] is False
     release = workflow(out, "release.yml")["jobs"]
-    assert set(release) == {"package"}
-    assert release["package"]["with"]["pypi"] is True, "the old workflow published there; a Trusted Publisher exists"
+    assert set(release) == {"package", "publish-pypi"}
+    assert release["package"]["with"]["pypi"] is False, "a reusable workflow can never be the PyPI publisher"
+    job = release["publish-pypi"]
+    assert job["needs"] == "package" and job["environment"]["name"] == "pypi"
+    assert job["permissions"] == {"contents": "read", "id-token": "write"}
+    assert job["steps"][-1]["uses"].startswith("ChiefGyk3D/git-your-ship-together/.github/actions/publish-pypi@" + SHA)
+    pinned = re.search(r"harden-runner@([0-9a-f]{40})", job["steps"][0]["uses"]).group(1)
+    reusable = (REPO / ".github" / "workflows" / "python-package-release.yml").read_text()
+    assert f"harden-runner@{pinned}" in reusable, "the script's harden-runner pin has drifted"
     assert release["package"]["with"]["publish"] == "${{ startsWith(github.ref, 'refs/tags/v') }}"
 
 

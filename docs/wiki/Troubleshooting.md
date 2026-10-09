@@ -52,7 +52,7 @@ Symptom, likely cause, fix. Many of these cost an afternoon the first time; the 
 | Symptom | Cause | Fix |
 |---|---|---|
 | Package release refuses the tag | The tag's version disagrees with the version in the built sdist | Make them agree; `tag-prefix` controls what precedes the version |
-| PyPI publish is rejected | The Trusted Publisher on PyPI does not name the **caller's** workflow filename and the `pypi` environment | Fix the Publisher entry on PyPI's *Publishing* page |
+| PyPI publish is rejected with `invalid-publisher` | The publish ran inside a reusable workflow, whose OIDC identity PyPI cannot match to your publisher (or the Publisher entry names the wrong workflow file or environment) | Publish from a job in your own workflow with `.github/actions/publish-pypi` (see [python-package-release](Workflow-python-package-release.md)); the Publisher names that workflow's file and the `pypi` environment |
 | Cosign verification fails on the identity | You matched the caller's workflow; the certificate names the **reusable** workflow | Use `--certificate-identity-regexp '^https://github.com/ChiefGyk3D/git-your-ship-together/'` |
 | Temporary `<sha>-<arch>` tags clutter GHCR | Each platform job pushes one before the merge job joins them | Delete them when you no longer need them |
 | Docs `deploy` fails with a Pages message | Pages source is not "GitHub Actions" | Settings, Pages, Source: GitHub Actions. `deploy: false` meanwhile |

@@ -366,6 +366,11 @@ uses_line() {
   echo "uses: $SHARED/.github/workflows/$1@$sha # $pin"
 }
 
+# The pinned harden-runner of the PyPI publish job below; keep it equal to the
+# pin in python-package-release.yml (tests/test_new_repo.py checks they agree).
+HARDEN_RUNNER="step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1"
+PYPI_HOSTS="api.github.com:443 files.pythonhosted.org:443 fulcio.sigstore.dev:443 ghcr.io:443 github.com:443 pkg-containers.githubusercontent.com:443 productionresultssa12.blob.core.windows.net:443 pypi.org:443 rekor.sigstore.dev:443 release-assets.githubusercontent.com:443 timestamp.sigstore.dev:443 tuf-repo-cdn.sigstore.dev:443 upload.pypi.org:443 uploads.github.com:443"
+
 write_ci() {
   local file="$out/.github/workflows/ci.yml"
   {
@@ -515,15 +520,11 @@ write_release() {
       echo "    $(uses_line python-package-release.yml)"
       echo "    permissions:"
       echo "      contents: write      # the GitHub release and its assets"
-      echo "      id-token: write      # PyPI Trusted Publishing, and build provenance"
+      echo "      id-token: write      # build provenance"
       echo "      attestations: write  # the provenance record"
       echo "    with:"
       echo "      publish: \${{ startsWith(github.ref, 'refs/tags/v') }}"
-      if $pypi; then
-        echo "      pypi: true   # the Trusted Publisher on PyPI names this repository, release.yml and the pypi environment"
-      else
-        echo "      pypi: false   # turn on once a Trusted Publisher on PyPI names this repository, release.yml and the pypi environment"
-      fi
+      echo "      pypi: false   # PyPI cannot trust a reusable workflow; the publish-pypi job below publishes"
       if [ -n "$smoke_cmd" ]; then
         echo "      smoke-command: $smoke_cmd"
       fi
@@ -531,6 +532,28 @@ write_release() {
         echo '      verify-command: grep -q "^## \[$VERSION\]" CHANGELOG.md'
       fi
       echo "      egress-policy: block"
+      if $pypi; then
+        echo
+        echo "  # Trusted Publishing needs the job in THIS file: the Trusted Publisher on PyPI names release.yml and the pypi environment."
+        echo "  publish-pypi:"
+        echo "    needs: package"
+        echo "    if: startsWith(github.ref, 'refs/tags/v')"
+        echo "    runs-on: ubuntu-latest"
+        echo "    environment:"
+        echo "      name: pypi"
+        echo "      url: https://pypi.org/p/$name"
+        echo "    permissions:"
+        echo "      contents: read"
+        echo "      id-token: write      # PyPI Trusted Publishing"
+        echo "    steps:"
+        echo "      - uses: $HARDEN_RUNNER"
+        echo "        with:"
+        echo "          egress-policy: block"
+        echo "          allowed-endpoints: $PYPI_HOSTS"
+        echo "          disable-sudo: true"
+        echo "          disable-telemetry: true"
+        echo "      - uses: $SHARED/.github/actions/publish-pypi@$sha # $pin"
+      fi
     fi
     if [ -n "$dockerfile" ]; then
       if $package; then echo; fi

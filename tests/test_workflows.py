@@ -201,11 +201,10 @@ ALLOWED_WRITES = {
     # SARIF uploads to the Security tab.
     ("container-release.yml", "build", "security-events"),
     ("python-docker-release.yml", "release", "security-events"),  # forwarded
-    # The package release: PyPI trusts the job's OIDC identity, and the
-    # GitHub release is created and its assets uploaded with the job's own
-    # token, with provenance recorded for every file. Neither job checks
-    # anything out; both are skipped unless publish is true off a pull request.
-    ("python-package-release.yml", "publish-pypi", "id-token"),
+    # The package release: the GitHub release is created and its assets
+    # uploaded with the job's own token, with provenance recorded for every
+    # file. The job checks nothing out and is skipped unless publish is true
+    # off a pull request. PyPI is published from the caller's own job.
     ("python-package-release.yml", "github-release", "contents"),
     ("python-package-release.yml", "github-release", "id-token"),
     ("python-package-release.yml", "github-release", "attestations"),
@@ -669,11 +668,11 @@ def test_snyk_open_source_scans_a_freeze_of_the_installed_environment():
 
 
 def test_the_package_release_publishes_only_when_told_and_never_beside_the_tree():
-    """Every caller command runs in the read-only build job; the two writes run only pinned actions and gh."""
+    """Every caller command runs in the read-only build job; the write runs only pinned actions and gh."""
     doc = load(WORKFLOWS / "python-package-release.yml")
     build = jobs(doc)["build"]
     assert build["permissions"] == {"contents": "read"}
-    for job_name in ("publish-pypi", "github-release"):
+    for job_name in ("github-release",):
         job = jobs(doc)[job_name]
         cond = str(job["if"])
         assert "inputs.publish" in cond and "github.event_name != 'pull_request'" in cond, f"{job_name} is not gated"

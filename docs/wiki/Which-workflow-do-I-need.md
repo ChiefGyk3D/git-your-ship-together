@@ -39,7 +39,7 @@ from its own caller job, and requires every gate. See
 | `python-fuzz.yml` | No | No | Yes | No |
 | `container-release.yml` | Yes, after a push only | Docker Hub credentials, if used | Builds and scans only | GHCR (and Docker Hub) |
 | `verify-published.yml` | No (`packages: read`; the rescan adds nothing) | No | n/a (scheduled) | No |
-| `python-package-release.yml` | Yes, publish jobs only | No (Trusted Publishing) | Builds and checks only | PyPI and GitHub release |
+| `python-package-release.yml` | Yes, the release job only (your own `publish-pypi` job holds `id-token` for PyPI) | No (Trusted Publishing) | Builds and checks only | GitHub release; PyPI from your job |
 | `artifact-release.yml` | Yes, publish job only | No | Builds and checks only | GitHub release |
 | `security.yml` | `security-events`, plus `id-token` for Snyk and Scorecard | For `SNYK_TOKEN` | Yes (no Snyk, no secrets) | SARIF to the Security tab |
 | `dast.yml` | `security-events` on the upload job only; the job that runs your service holds `contents: read` | No | Yes (not the upload, from a fork) | SARIF to the Security tab |

@@ -60,7 +60,7 @@ Read in this order. Each one is short.
 
 ## What is in the repository
 
-Sixteen reusable workflows and one composite action:
+Sixteen reusable workflows and two composite actions:
 
 | File | What it does |
 |---|---|
@@ -72,7 +72,7 @@ Sixteen reusable workflows and one composite action:
 | `.github/workflows/container-release.yml` | Build, test, Trivy-scan, then publish multi-arch to GHCR (and Docker Hub), sign with cosign, attach a syft SBOM, record SLSA provenance. Builds whatever the Dockerfile builds |
 | `.github/workflows/python-docker-release.yml` | The old name of the above: a thin caller that forwards every input, the secret and the outputs through a `./` reference at its own commit, so an existing pin keeps working. New callers use `container-release.yml` |
 | `.github/workflows/verify-published.yml` | Consumer-side verification of a published image (cosign signature, SPDX SBOM attestation and build provenance verified from outside, then each platform pulled and checked) or of a GitHub release's assets (checksums, provenance, SBOMs). Read-only, no secret, no token beyond the default one |
-| `.github/workflows/python-package-release.yml` | Build the sdist and wheel, `twine check`, refuse a tag that disagrees with the packaged version, smoke-test from the wheel, then publish to PyPI (Trusted Publishing, PEP 740 attestations) and to the GitHub release with SHA256SUMS and build provenance. No secret anywhere |
+| `.github/workflows/python-package-release.yml` | Build the sdist and wheel, `twine check`, refuse a tag that disagrees with the packaged version, smoke-test from the wheel, then publish to the GitHub release with SHA256SUMS and build provenance; PyPI is published from a job in the caller's own workflow with the `.github/actions/publish-pypi` composite action (Trusted Publishing cannot use a reusable workflow). No secret anywhere |
 | `.github/workflows/artifact-release.yml` | For a file rather than an image (a `.deb`, a firmware binary, a bundle): build it with a command, then publish it to the GitHub release with SHA256SUMS, a keyless cosign signature bundle per file and build provenance. No secret anywhere |
 | `.github/workflows/docs-pages.yml` | Build a static documentation site with a command you supply (MkDocs strict by default) on every pull request; upload it and deploy it to GitHub Pages from the default branch only. The two Pages writes sit on the deploy job alone |
 | `.github/workflows/wiki-publish.yml` | Run a command that generates a wiki tree, then replace the repository's GitHub wiki with it, as `github-actions[bot]`, only when something changed, from the default branch only. The write token sits on a job that runs none of your code |
@@ -81,6 +81,7 @@ Sixteen reusable workflows and one composite action:
 | `.github/workflows/security.yml` | CodeQL (the `actions` language included by default), gitleaks, a dependency audit (pip-audit, and any other tool by command), Semgrep, dependency review on pull requests (with a licence denylist), optional Snyk, optional OpenSSF Scorecard |
 | `.github/workflows/dependabot-auto-merge.yml` | Queues a Dependabot bump to merge itself once the required checks pass, up to a size you choose |
 | `.github/actions/doppler-secrets` | Fetches a Doppler config as masked environment variables, over OIDC or a Service Token. The workflows inline a copy of it (see the design rules); this is the source |
+| `.github/actions/publish-pypi` | Downloads the `dist` artifact of `python-package-release.yml` and publishes it to PyPI with attestations. Used from a job in the caller's own workflow, because Trusted Publishing cannot use a reusable workflow as the publisher |
 
 This repository's own pipeline, which runs the workflows against a real
 project before any caller pins them:
@@ -1149,10 +1150,23 @@ Inputs of `verify-published.yml`:
 For a project that ships to PyPI, or attaches its wheel to a GitHub release,
 or both. Four repositories wrote this by hand before it existed here.
 
+PyPI is published from a job in *your* workflow, not from this reusable one:
+Trusted Publishing cannot use a reusable workflow as the publisher. PyPI
+matches the OIDC token's `job_workflow_ref`, which inside a reusable workflow
+is the reusable file, and answers `invalid-publisher` even when the owner,
+repository, workflow file and environment all match (warehouse#11096; hypeman
+v0.3.1 and v0.3.2). The `publish-pypi` job in the example below is the fix: it is defined in
+the caller, `needs` the `package` job, and uses the composite action
+`.github/actions/publish-pypi`, which downloads the `dist` artifact the build
+job uploaded and runs `pypa/gh-action-pypi-publish` with attestations on. A
+composite action keeps the caller's `job_workflow_ref`, so the Trusted
+Publisher matches. Keep `publish:` on for the `package` job so the GitHub
+release is still made.
+
 ```yaml
 name: Release
 on:
-  push: { tags: ['v*'] }
+  release: { types: [published] }
   pull_request:          # builds and checks; never publishes
   workflow_dispatch:
 
@@ -1164,14 +1178,33 @@ jobs:
     uses: ChiefGyk3D/git-your-ship-together/.github/workflows/python-package-release.yml@<sha> # vX.Y.Z
     permissions:
       contents: write      # the GitHub release and its assets
-      id-token: write      # PyPI Trusted Publishing, and build provenance
+      id-token: write      # build provenance
       attestations: write  # the provenance record
     with:
-      publish: ${{ startsWith(github.ref, 'refs/tags/v') }}
+      publish: ${{ github.event_name == 'release' }}   # the GitHub release step; pypi stays false
       verify-command: grep -q "^## \[$VERSION\]" CHANGELOG.md
       smoke-command: my-cli --version
       release-notes-command: python scripts/changelog_section.py "$VERSION"
       egress-policy: block
+
+  publish-pypi:
+    needs: package
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi            # the name the Trusted Publisher on PyPI holds
+      url: https://pypi.org/p/<project>
+    permissions:
+      contents: read
+      id-token: write       # PyPI Trusted Publishing; the OIDC token names THIS workflow
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: block
+          allowed-endpoints: api.github.com:443 files.pythonhosted.org:443 fulcio.sigstore.dev:443 ghcr.io:443 github.com:443 pkg-containers.githubusercontent.com:443 productionresultssa12.blob.core.windows.net:443 pypi.org:443 rekor.sigstore.dev:443 release-assets.githubusercontent.com:443 timestamp.sigstore.dev:443 tuf-repo-cdn.sigstore.dev:443 upload.pypi.org:443 uploads.github.com:443
+          disable-sudo: true
+          disable-telemetry: true
+      - uses: ChiefGyk3D/git-your-ship-together/.github/actions/publish-pypi@<sha> # vX.Y.Z
 ```
 
 The build job does everything that runs the caller's code, with
@@ -1179,9 +1212,8 @@ The build job does everything that runs the caller's code, with
 sdist's own name (so a static `version =`, a dynamic attribute and a VCS
 plugin all answer alike), refuse a tag that disagrees with it, run
 `verify-command`, install the wheel into a fresh venv and run
-`smoke-command`, write the release notes. The two publishing jobs check
-nothing out: `publish-pypi` hands `dist/` to PyPI over the job's OIDC
-identity from the `pypi` environment, and `github-release` records build
+`smoke-command`, write the release notes. The release job checks
+nothing out; `github-release` records build
 provenance for every file and attaches them with a `SHA256SUMS` to the
 release for the tag, creating it from the notes when it does not exist and
 uploading to it when it does (a caller that triggers on `release: published`).
@@ -1205,9 +1237,16 @@ directories released into one tag would overwrite each other's SBOMs.
 `verify-published.yml` checks them with `release-tag`.
 
 PyPI setup, once per project: on the project's *Publishing* page add a
-Trusted Publisher naming this owner, the calling repository, the caller's
-workflow file name (not this one's) and the environment `pypi`. That is the
-whole credential.
+Trusted Publisher naming this owner, the calling repository, the file name of
+the workflow that holds the `publish-pypi` job (the caller's; this repository's
+reusable workflow can never be the publisher) and the environment `pypi`. That
+is the whole credential. The publish job's `harden-runner` list is the
+caller's: the pypa action is a Docker action, so under `block` it needs
+`ghcr.io:443` and `pkg-containers.githubusercontent.com:443` for the image pull
+beside PyPI's and Sigstore's hosts, as in the example.
+
+Inputs of the `publish-pypi` action: `repository-url` (default PyPI's upload
+endpoint; `https://test.pypi.org/legacy/` for TestPyPI).
 
 Inputs of `python-package-release.yml`:
 
@@ -1221,17 +1260,16 @@ Inputs of `python-package-release.yml`:
 | `verify-command` | empty | Run with `$VERSION` set, to refuse a release whose tree disagrees with it: a CHANGELOG section, a `__version__` |
 | `smoke-command` | empty (skips the check) | Run with the built wheel installed in a fresh venv on `PATH`, e.g. `my-cli --version` |
 | `release-notes-command` | empty (GitHub generates them) | Prints the release notes to stdout with `$VERSION` set |
-| `publish` | `false` | Publish. A pull request never publishes whatever this says |
-| `pypi` | `true` | Publish to PyPI |
-| `pypi-environment` | `pypi` | The GitHub environment the PyPI job runs in, which the Trusted Publisher names |
+| `publish` | `false` | Publish the GitHub release. A pull request never publishes whatever this says |
+| `pypi` | `false` | Unsupported: `true` fails the run with the fix, because PyPI cannot trust a reusable workflow as the publisher. Publish with the `publish-pypi` action from a caller job (above) |
+| `pypi-environment` | `pypi` | Unused here; the environment belongs to the caller's `publish-pypi` job. Kept so existing callers parse |
 | `github-release` | `true` | Attach the files, their SBOMs, `SHA256SUMS` and provenance to the GitHub release |
 | `release-title` | empty (the tag) | Title of a release this workflow creates |
 | `sbom` | `true` | Write `sbom.cdx.json` and `sbom.spdx.json` with syft and attach them to the release, listed in `SHA256SUMS` and attested with the rest |
 | `syft-version` | `1.54.0` | syft release to download, without the `v`. Changing it means changing `syft-sha256` |
 | `syft-sha256` | the 1.54.0 linux_amd64 tarball's | SHA-256 of that tarball |
 | `attest` | `true` | Record SLSA build provenance for every file, SBOMs included |
-| `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `audit`, the measured list, empty | harden-runner, as in `python-ci.yml`. The build's hosts were measured in block mode here; the publishing hosts are PyPI's and Sigstore's documented ones |
-| `publish-allowed-endpoints` | `ghcr.io:443 pkg-containers.githubusercontent.com:443` | Appended to the list for the PyPI publish job only: `pypa/gh-action-pypi-publish` is a Docker action, so the runner pulls its image from `ghcr.io` (layers from `pkg-containers.githubusercontent.com`). Under `block` that pull was refused on hypeman's v0.3.1 release |
+| `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `audit`, the measured list, empty | harden-runner, as in `python-ci.yml`. The build's hosts were measured in block mode here; the release job's hosts are GitHub's and Sigstore's documented ones |
 | `timeout-minutes` | `20` | Per-job timeout |
 
 The workflow outputs `version`, the version the sdist was built as, for a
