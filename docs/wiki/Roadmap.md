@@ -27,6 +27,19 @@ typed, so it cannot go stale; at a release it moves, by hand, into a dated block
 
 ## Released
 
+### v1.17.0 (2026-10-08)
+
+- `app-owner` in `project-sync.yml`: a public repository on a personal account can sync to an organization's Projects
+  board, with the token minted from the organization's App installation (`organization-projects: write` only) after a
+  fail-closed check that the repository is public (#140, closing #139). Shipped.
+- `publish-allowed-endpoints` in `python-package-release.yml`: the PyPI publish job alone may reach `ghcr.io` and
+  `pkg-containers.githubusercontent.com`, so the publish action can pull its image under egress `block`. Before this,
+  every publish failed at the image pull (#141). Callers that publish to PyPI need this release.
+- `dast.yml`: ZAP's port is chosen below the ephemeral range and checked by binding, which targets the intermittent exit 3
+  with no report; the live job runs with `-vv` (#135, ref #133). #133 stays open while it is watched for a week.
+- The fixture container upgrades liblzma5 (DSA-6549-1), so its Trivy gate passes (#141).
+- Wiki: v1.16.0 moved into a dated Roadmap block (#134); Department of Internal Arguments joins the audited baseline (#137).
+
 ### v1.16.0 (2026-10-08)
 
 - Post-release vulnerability rescans in `verify-published.yml`: opt-in `rescan: true` runs a pinned Trivy over every
