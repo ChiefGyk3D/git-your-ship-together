@@ -1,7 +1,7 @@
 # Reusable Python package release: build the sdist and wheel once, check
 # them, prove the wheel installs and runs, then publish the same files to
-# PyPI through Trusted Publishing and to a GitHub release with build
-# provenance. Four repositories carried a copy of this by hand.
+# a GitHub release with build provenance and hand them (the `dist` artifact)
+# to the caller's own PyPI publish job. Four repositories carried a copy of this by hand.
 #
 #   1. Build: `python -m build`, `twine check --strict`, the version read
 #      from the sdist's own name. On a tag, refuse a tag that disagrees with
@@ -9,13 +9,17 @@
 #      smoke command. Run the caller's verify command (a CHANGELOG section,
 #      say) and its release-notes command. Everything here runs with
 #      contents: read.
-#   2. When `publish` is true and the event is not a pull request:
-#        - publish dist/ to PyPI over the job's OIDC identity, with PEP 740
-#          attestations, from a job that checks nothing out;
-#        - record build provenance for every file and attach them, with a
-#          SHA256SUMS, to the GitHub release for the tag, creating it from
-#          the notes when it does not exist and uploading to it when it does
-#          (a caller that triggers on `release: published`).
+#   2. When `publish` is true and the event is not a pull request: record
+#      build provenance for every file and attach them, with a SHA256SUMS, to
+#      the GitHub release for the tag, creating it from the notes when it does
+#      not exist and uploading to it when it does (a caller that triggers on
+#      `release: published`).
+#   3. PyPI is NOT published from here. Trusted Publishing cannot use a
+#      reusable workflow as the publisher (the OIDC token names this file, not
+#      the caller's, and PyPI answers `invalid-publisher`; warehouse#11096).
+#      Publish from a job in the caller's own workflow with the composite
+#      action `.github/actions/publish-pypi`, which downloads the `dist`
+#      artifact this workflow uploads. The README shows the job.
 #   The build job also writes a CycloneDX and an SPDX SBOM (`sbom.cdx.json`,
 #   `sbom.spdx.json`) with syft, pinned by the `syft-version` and `syft-sha256` inputs, over the
 #   unpacked wheel and sdist. They travel in their own artifact, never in
@@ -35,14 +39,14 @@
 #         publish: ${{ startsWith(github.ref, 'refs/tags/v') }}
 #         smoke-command: my-cli --version
 #
-# Nothing here needs a secret: PyPI trusts the job's OIDC identity once the
-# project names this workflow as a publisher, and the GitHub release uses
-# the job's own token. No Doppler step, no secrets: block.
+# Nothing here needs a secret: the GitHub release uses the job's own token
+# and PyPI (from the caller's job) trusts that job's OIDC identity. No Doppler
+# step, no secrets: block.
 #
 # Commands a caller supplies reach the shell through an environment variable,
 # never by template expansion into the script, so a value can only ever be
 # data. They run in the build job, which holds contents: read; the two
-# publishing jobs run only pinned actions and `gh`.
+# release job runs only pinned actions and `gh`.
 
 name: Python package release (reusable)
 
@@ -82,15 +86,15 @@ on:
         type: string
         default: ""
       publish:
-        description: Publish to PyPI and the GitHub release. False builds, checks and stops; a pull request never publishes whatever this says.
+        description: Publish to the GitHub release. False builds, checks and stops; a pull request never publishes whatever this says.
         type: boolean
         default: false
       pypi:
-        description: Publish to PyPI (Trusted Publishing; the project must name this workflow and the environment as a publisher).
+        description: Unsupported, kept so old callers still parse. PyPI Trusted Publishing cannot use a reusable workflow as the publisher (invalid-publisher, warehouse#11096), so true fails the run with the fix; publish from a job in the caller's workflow with the publish-pypi composite action instead.
         type: boolean
-        default: true
+        default: false
       pypi-environment:
-        description: The GitHub environment the PyPI job runs in, which is what the Trusted Publisher names.
+        description: Unused by this workflow; the environment belongs to the caller's publish job. Kept so existing callers still parse.
         type: string
         default: pypi
       github-release:
@@ -122,13 +126,9 @@ on:
         type: string
         default: audit
       allowed-endpoints:
-        description: harden-runner allow-list for `block`, space-separated host:port entries. The build hosts were measured by running the build in block mode here; the publishing hosts are PyPI's and Sigstore's documented ones. Wildcards are not supported and a newline-separated list matches nothing.
+        description: harden-runner allow-list for `block`, space-separated host:port entries. The build hosts were measured by running the build in block mode here; the release job's hosts are GitHub's and Sigstore's documented ones. Wildcards are not supported and a newline-separated list matches nothing.
         type: string
         default: "api.github.com:443 files.pythonhosted.org:443 fulcio.sigstore.dev:443 github.com:443 pypi.org:443 rekor.sigstore.dev:443 release-assets.githubusercontent.com:443 timestamp.sigstore.dev:443 tuf-repo-cdn.sigstore.dev:443 upload.pypi.org:443 uploads.github.com:443"
-      publish-allowed-endpoints:
-        description: Appended to `allowed-endpoints` for the PyPI publish job only. pypa/gh-action-pypi-publish is a Docker action - the runner pulls ghcr.io/pypa/gh-action-pypi-publish before it runs, and the layers come from pkg-containers.githubusercontent.com. Under `block` that pull was refused (hypeman v0.3.1, connection refused). No other job pulls an image. Same format.
-        type: string
-        default: "ghcr.io:443 pkg-containers.githubusercontent.com:443"
       extra-allowed-endpoints:
         description: Appended to `allowed-endpoints`, for hosts only this repository reaches. Same format.
         type: string
@@ -343,33 +343,31 @@ jobs:
           path: ${{ runner.temp }}/release-notes.md
           retention-days: 7
 
-  # No checkout: the token that PyPI trusts never sits beside the tree. The
-  # environment is what the Trusted Publisher on PyPI names.
-  publish-pypi:
-    name: Publish to PyPI
-    needs: build
+  # PyPI cannot be published from here (see the header), so asking for it fails
+  # at once with the fix rather than at PyPI with `invalid-publisher`. The
+  # release job does not need it, so a GitHub release is still made.
+  pypi-unsupported:
+    name: PyPI publishing moved to the caller
     if: inputs.publish && inputs.pypi && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: ${{ inputs.timeout-minutes }}
-    environment: ${{ inputs.pypi-environment }}
     permissions:
-      id-token: write  # PyPI Trusted Publishing
+      contents: read
     steps:
       - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
         with:
           egress-policy: ${{ inputs.egress-policy }}
-          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.publish-allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
           disable-sudo: true
           # The agent may only stop reporting to StepSecurity in block mode.
           disable-telemetry: ${{ inputs.egress-policy == 'block' }}
 
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: dist
-          path: dist/
-
-      # Publishes PEP 740 attestations alongside the distribution by default.
-      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+      - name: Explain
+        env:
+          ENVIRONMENT: ${{ inputs.pypi-environment }}
+        run: |
+          echo "::error title=pypi: true cannot work::PyPI Trusted Publishing rejects a reusable workflow as the publisher (invalid-publisher, warehouse#11096). Set pypi: false and add a publish-pypi job (environment: ${ENVIRONMENT}) to your own workflow that uses ChiefGyk3D/git-your-ship-together/.github/actions/publish-pypi; see the README, Python package release."
+          exit 1
 
   # No checkout here either: the one write in the workflow runs beside
   # nothing from the tree, only the files the build job handed over.
