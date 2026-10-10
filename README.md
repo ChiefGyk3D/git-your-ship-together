@@ -1773,6 +1773,7 @@ Inputs of `project-sync.yml`:
 | `client-id` | empty (set this or `app-id`) | The Client ID of the GitHub App, from its settings page; an identifier, not a secret. Callers pass the repository variable `PROJECTS_APP_CLIENT_ID` |
 | `app-id` | empty | Deprecated, accepted for one release. The numeric App ID; `actions/create-github-app-token` deprecates it and prints a warning when it is passed. Used only when `client-id` is empty |
 | `app-owner` | empty (the repository's owner) | A repository on a personal account whose board is in an organization: the organization whose installation of the App mints the token. Needs a public repository; see [A repository on a personal account, a board in an organization](#a-repository-on-a-personal-account-a-board-in-an-organization) |
+| `repositories` | empty (the calling repository) | Repository names, no owner, the token is limited to. Required with `app-owner` naming another account: name repositories that account owns and the App is installed on |
 | `pull-request-events` | `true` | `false` skips the whole job on a `pull_request_target` run, so a caller that keeps that trigger without a Doppler identity that covers it stays green; see below |
 | `egress-policy` | `audit` | harden-runner: `audit` or `block` |
 | `allowed-endpoints` | `api.doppler.com:443 api.github.com:443` | The allow-list for `block`; these two are all the job reaches |
@@ -1787,10 +1788,13 @@ An installation token belongs to one account. Installed on both your personal
 account and the organization, the App mints a personal-account token by default,
 and that token cannot resolve the organization's project (`Could not resolve to
 a ProjectV2`). Pass `app-owner: <organization>` and the token comes from the
-organization's installation instead. It cannot be scoped to a repository, so it
-is scoped by permission: **organization Projects write and nothing else** (the
-repository is public, so its issues and pull requests need no permission). It
-adds no new secret: the same App, another installation.
+organization's installation instead, and name one or more of the organization's
+repositories in `repositories` (names only; the calling repository belongs to the
+personal account, so it cannot be the scope). The token is limited to those
+repositories and carries **organization Projects write and nothing else** (the
+repository is public, so its issues and pull requests need no permission). A run
+that names none is refused: the token is never installation-wide. It adds no new
+secret: the same App, another installation.
 
 That token cannot read a private repository on another account, so the
 repository must be **public**. Before minting, the workflow reads the

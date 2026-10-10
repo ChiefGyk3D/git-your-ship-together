@@ -98,7 +98,11 @@ on:
         type: string
         default: ""
       app-owner:
-        description: The account whose installation of the App mints the token, when the board belongs to a different account than the calling repository (a public repository on a personal account, a board in an organization). Empty, or the repository's own owner, keeps today's token scoped to this repository. Another account's installation gives a token with no repository list that holds only organization Projects write, and the repository must be public - an organization token cannot read a private repository on another account, so the run refuses one (visibility read from the API) before minting. A GitHub login; no new permission.
+        description: The account whose installation of the App mints the token, when the board belongs to a different account than the calling repository (a public repository on a personal account, a board in an organization). Empty, or the repository's own owner, keeps today's token scoped to this repository. Another account's installation needs `repositories` (the organization's repository names) and gives a token limited to them that holds only organization Projects write, and the repository must be public - an organization token cannot read a private repository on another account, so the run refuses one (visibility read from the API) before minting. A GitHub login; no new permission.
+        type: string
+        default: ""
+      repositories:
+        description: Comma-separated repository names (no owner) the minted token is limited to. Empty, the calling repository's name, which is right when the board belongs to the repository's own account. Required with `app-owner` naming another account, because the calling repository belongs to the personal account; name repositories the organization owns and the App is installed on (any one of them will do; the token still carries only organization Projects write). A repository name list, nothing else.
         type: string
         default: ""
       pull-request-events:
@@ -251,7 +255,7 @@ jobs:
       # `reconcile: false` makes the schedule and manual runs a no-op, as before.
       - name: Sync the project
         if: ${{ inputs.reconcile || (github.event_name != 'schedule' && github.event_name != 'workflow_dispatch') }}
-        uses: ChiefGyk3D/scrum-around-and-find-out@4606f3ae9155c172103d7da92f01482e75ae84fa # v0.1.0
+        uses: ChiefGyk3D/scrum-around-and-find-out@613c021532ed5c6f64960e8e98fbf414a95c7d79 # v0.1.1
         with:
           mode: ${{ inputs.dry-run && env.PROJECTS_APP_PRIVATE_KEY == '' && 'validate' || (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'reconcile' || 'sync' }}
           project-url: ${{ inputs.project-url }}
@@ -268,4 +272,4 @@ jobs:
           app-id: ${{ inputs.app-id }}
           app-owner: ${{ inputs.app-owner }}
           private-key: ${{ env.PROJECTS_APP_PRIVATE_KEY }}
-          repositories: ${{ github.event.repository.name }}
+          repositories: ${{ inputs.repositories || github.event.repository.name }}
