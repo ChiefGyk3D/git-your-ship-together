@@ -217,6 +217,17 @@ def test_gitleaks_scans_full_history_and_uploads_sarif():
     assert upload["if"].startswith("always()")
 
 
+def test_gitleaks_upload_is_skippable_but_the_scan_is_not():
+    # A private repository without Advanced Security cannot take the upload; the scan must still run and gate.
+    spec = INPUTS["gitleaks-upload-sarif"]
+    assert spec["type"] == "boolean" and spec["default"] is True
+    upload = next(s for s in steps_of(GITLEAKS) if "upload-sarif" in str(s.get("uses", "")))
+    assert "inputs.gitleaks-upload-sarif" in upload["if"]
+    assert "hashFiles('gitleaks.sarif')" in upload["if"]
+    scan = next(s for s in steps_of(GITLEAKS) if s.get("name", "").startswith("Scan the full history"))
+    assert "if" not in scan and "--exit-code 1" in scan["run"]
+
+
 def test_gitleaks_canary_is_wired_before_the_scan():
     names = [s.get("name", "") for s in steps_of(GITLEAKS)]
     canary = next(i for i, n in enumerate(names) if "planted key" in n)
