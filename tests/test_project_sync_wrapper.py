@@ -27,6 +27,7 @@ CALLER_INPUTS = {
     "done-date-field",
     "reconcile",
     "app-owner",
+    "repositories",
     "default-area-field",
     "default-area",
     "dry-run",
@@ -87,7 +88,7 @@ def test_every_input_a_caller_passes_today_is_still_accepted():
 
 
 def test_safo_is_called_by_commit_with_a_version_comment():
-    match = re.search(r"uses: ChiefGyk3D/scrum-around-and-find-out@([0-9a-f]{40}) # v0\.1\.0\n", WORKFLOW.read_text())
+    match = re.search(r"uses: ChiefGyk3D/scrum-around-and-find-out@([0-9a-f]{40}) # v0\.1\.1\n", WORKFLOW.read_text())
     assert match and match[1] != "0123456789abcdef0123456789abcdef01234567"
     expected = (REPO / "tests" / "safo-release-commit.txt").read_text().strip()
     assert re.fullmatch(r"[0-9a-f]{40}", expected) and match[1] == expected
@@ -131,9 +132,10 @@ def test_the_mode_follows_the_event_and_reconcile_false_is_a_no_op_on_schedule()
     assert "inputs.reconcile" in step["if"] and "'schedule'" in step["if"]
 
 
-def test_the_token_is_limited_to_the_calling_repository_and_the_key_comes_from_doppler():
+def test_the_token_is_limited_to_the_named_repositories_else_the_calling_one_and_the_key_comes_from_doppler():
     with_ = safo_step()["with"]
-    assert with_["repositories"] == "${{ github.event.repository.name }}"
+    # a caller whose board belongs to another account names that account's repositories; otherwise the calling one
+    assert with_["repositories"] == "${{ inputs.repositories || github.event.repository.name }}"
     assert with_["private-key"] == "${{ env.PROJECTS_APP_PRIVATE_KEY }}"
     assert any(str(s.get("uses", "")).startswith("dopplerhq/secrets-fetch-action@") for s in steps())
 
