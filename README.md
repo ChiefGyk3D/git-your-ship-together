@@ -1537,6 +1537,7 @@ Inputs of `security.yml`:
 | `codeql-config` | empty | Inline CodeQL configuration, e.g. `paths-ignore` |
 | `gitleaks` | `true` | Secret scan over the full history with the pinned gitleaks binary (MIT; no licence or secret under any account). A `.gitleaks.toml` at the repository root is honoured; findings land in code scanning under the `gitleaks` category |
 | `gitleaks-version`, `gitleaks-sha256` | `8.30.1` and its linux_x64 tarball's hash | The gitleaks release downloaded from gitleaks/gitleaks; the hash is checked with `sha256sum -c` before extraction |
+| `gitleaks-upload-sarif` | `true` | Upload the gitleaks SARIF to code scanning. Set `false` on a private repository without GitHub Advanced Security, where code scanning is unavailable and the upload step fails the job even on a clean scan; the scan still runs and still fails on a finding |
 | `pip-audit-requirements` | `requirements.txt` | File audited with `--strict`; empty skips that step, and the job when `audit-command` is empty too. With `snyk: true` it must carry hashes (`--generate-hashes`): Snyk installs it under `--require-hashes`, and a file without any fails the job with a message rather than installing unchecked |
 | `pip-audit-continue-on-error` | `false` | Report advisories without failing. A migration aid |
 | `pip-audit-extra-args` | empty | Extra pip-audit flags, e.g. `--ignore-vuln PYSEC-2026-3740` for an advisory with no fix yet; the ID needs an entry in [`baseline/risk-register.yaml`](baseline/risk-register.yaml) |

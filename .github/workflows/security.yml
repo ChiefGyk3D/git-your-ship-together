@@ -64,6 +64,10 @@ on:
         description: SHA-256 of the gitleaks linux_x64 tarball for that version.
         type: string
         default: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+      gitleaks-upload-sarif:
+        description: Upload the gitleaks SARIF to code scanning. Turn it off on a private repository without GitHub Advanced Security, where code scanning is unavailable and the upload fails the job; the scan still runs and still fails on a finding.
+        type: boolean
+        default: true
       pip-audit-requirements:
         description: Requirements file audited by pip-audit; empty skips that step. With `audit-command` empty too, the job is skipped.
         type: string
@@ -290,7 +294,7 @@ jobs:
         run: gitleaks git --redact --no-banner --exit-code 1 --report-format sarif --report-path gitleaks.sarif --log-opts="--all" .
 
       - name: Upload gitleaks results
-        if: always() && hashFiles('gitleaks.sarif') != ''
+        if: always() && inputs.gitleaks-upload-sarif && hashFiles('gitleaks.sarif') != ''
         uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
         with:
           sarif_file: gitleaks.sarif
