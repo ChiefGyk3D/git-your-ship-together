@@ -27,6 +27,31 @@ typed, so it cannot go stale; at a release it moves, by hand, into a dated block
 
 ## Released
 
+### v1.21.0 (2026-10-09)
+
+- `python-ci.yml` pins ruff in its default lint install (`ruff==0.16.9`). The default was an unpinned `pip install ruff`,
+  so ruff 0.17.0, released the same day with a new default target version, turned Lint red on every caller that
+  inherits it. `new-repo.sh` emits the pin and a test keeps it pinned (#146). Move the pin here, in a release.
+
+### v1.20.0 (2026-10-09)
+
+- `python-package-release.yml`: PyPI publishing is a caller job with direct steps (harden-runner, download the `dist`
+  artifact, `pypa/gh-action-pypi-publish`). PyPI Trusted Publishing cannot use a reusable workflow as the publisher
+  (pypi/warehouse#11096), and the publish action cannot run nested in a composite action. Proven by hypeman v0.3.4
+  reaching PyPI (#145). `pypi` stays `false` by default and `pypi: true` fails fast with an explanation.
+
+### v1.19.0 (2026-10-09)
+
+- `python-package-release.yml`: the `publish-pypi` job and the `publish-allowed-endpoints` input of v1.17.0 are removed
+  and PyPI publishing moves to a composite action a caller job uses (#144). The composite action did not work
+  (the publish action names its image from the repository that contains it) and v1.20.0 replaces it.
+
+### v1.18.0 (2026-10-09)
+
+- `project-sync.yml` is a thin wrapper around [scrum-around-and-find-out](https://github.com/ChiefGyk3D/scrum-around-and-find-out)
+  v0.1.0, pinned by commit. The sync script, its inliner and their tests moved to that repository; the inputs callers
+  pass are unchanged, and `app-owner` is passed through (#143).
+
 ### v1.17.0 (2026-10-08)
 
 - `app-owner` in `project-sync.yml`: a public repository on a personal account can sync to an organization's Projects
