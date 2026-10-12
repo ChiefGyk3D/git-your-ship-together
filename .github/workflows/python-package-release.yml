@@ -160,7 +160,7 @@ jobs:
       run:
         working-directory: ${{ inputs.package-directory }}
     steps:
-      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+      - uses: step-security/harden-runner@351661ca32ac09a36dc5ee2d536e3128f2a3c8ed # v2.22.0
         with:
           egress-policy: ${{ inputs.egress-policy }}
           allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
@@ -356,7 +356,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+      - uses: step-security/harden-runner@351661ca32ac09a36dc5ee2d536e3128f2a3c8ed # v2.22.0
         with:
           egress-policy: ${{ inputs.egress-policy }}
           allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
@@ -384,7 +384,7 @@ jobs:
       id-token: write  # build provenance is signed with the job's identity
       attestations: write  # and recorded through GitHub's attestation API
     steps:
-      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+      - uses: step-security/harden-runner@351661ca32ac09a36dc5ee2d536e3128f2a3c8ed # v2.22.0
         with:
           egress-policy: ${{ inputs.egress-policy }}
           allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
