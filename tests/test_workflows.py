@@ -595,6 +595,28 @@ def test_tofu_plans_only_off_pull_requests_and_validates_without_a_backend():
             assert "id-token" not in (job.get("permissions") or {}), f"{job_name} holds a token it does not need"
 
 
+def test_tofu_test_and_policy_legs_are_opt_in_and_read_only():
+    """`tofu test` and `opa test` read only the checkout and run on pull requests, so neither may hold a token.
+
+    `test` is off by default: a caller's test file that reaches a real provider
+    needs a credential, and switching it on is the caller saying its tests are mocked.
+    """
+    doc = load(WORKFLOWS / "tofu-ci.yml")
+    inputs = triggers(doc)["workflow_call"]["inputs"]
+    assert inputs["test"]["default"] is False, "tests may reach a real provider; running them is the caller's choice"
+    assert inputs["policy-directories"]["default"] == "", "no policy job unless the caller names its policies"
+    test, policy = jobs(doc)["test"], jobs(doc)["policy"]
+    assert test["if"] == "inputs.test"
+    assert "inputs.policy-directories != ''" in policy["if"]
+    for job_name, job in (("test", test), ("policy", policy)):
+        assert job["permissions"] == {"contents": "read"}, f"tofu-ci.yml job {job_name!r} holds more than it reads"
+    run = [s for s in steps_of(test) if str(s.get("name", "")).startswith("init")][0]["run"]
+    assert "-backend=false" in run and '"$BINARY" test' in run, "the test job must init without a backend, then test"
+    opa = [s for s in steps_of(policy) if str(s.get("name", "")).startswith("opa ")][0]["run"]
+    for command in ("opa fmt --list --fail", "opa check --strict", "opa test"):
+        assert command in opa, f"the policy job no longer runs {command!r}"
+
+
 @pytest.mark.parametrize("name", ["bash-ci.yml", "arduino-ci.yml"])
 def test_a_workflow_that_fetches_nothing_holds_no_token_at_all(name):
     """A lint or a compile needs nothing; a job that fetches nothing has nothing to leak."""

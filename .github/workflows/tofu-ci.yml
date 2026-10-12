@@ -1,8 +1,10 @@
 # Reusable CI for OpenTofu (or Terraform) configuration: fmt, validate, tflint
 # and a Trivy configuration scan on every push and pull request, none of
-# which needs a cloud credential; and a plan on pushes to the default
-# branch only, with credentials fetched through the Doppler gate, which
-# refuses a pull request by design. Nothing applies from CI, ever.
+# which needs a cloud credential; optionally `tofu test` (whose mocked
+# providers need none either) and `opa test` over policy-as-code that lives
+# beside the configuration; and a plan on pushes to the default branch only,
+# with credentials fetched through the Doppler gate, which refuses a pull
+# request by design. Nothing applies from CI, ever.
 #
 # Call it from a repository with:
 #
@@ -16,11 +18,13 @@
 #         DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}   # optional fallback
 #       with:
 #         directories: infra/terraform/examples/ecs-fargate infra/terraform/examples/eks-cronjob
+#         test: true                          # tofu test in each directory
+#         policy-directories: policies        # opa test over the Rego there
 #
 # The binary is OpenTofu, downloaded at a pinned version and checked against
 # a pinned SHA-256; `binary: terraform` uses the Terraform the runner image
-# ships instead. tflint is downloaded the same way. The `ci-green` job at the
-# end is the one to name in branch protection.
+# ships instead. tflint and OPA are downloaded the same way. The `ci-green`
+# job at the end is the one to name in branch protection.
 #
 # Commands a caller supplies reach the shell through an environment
 # variable, never by template expansion into the script. The Doppler steps
@@ -60,6 +64,22 @@ on:
         description: SHA-256 of the tflint linux_amd64 zip for that version.
         type: string
         default: "cca9d13e2e1d7a2c627af60ff899a3c9b74212899416aeb96ec764d2ef954537"
+      test:
+        description: Run `tofu test` (or `terraform test`) in every directory, after `init -backend=false`. Off by default because a test file that reaches a real provider would need a credential this job never has; turn it on when the tests use mocked providers.
+        type: boolean
+        default: false
+      policy-directories:
+        description: Space-separated directories of Rego policies (Spacelift, Conftest, OPA) with their `_test.rego` files, relative to the repository root. Each gets `opa fmt`, `opa check --strict` and `opa test`; empty skips the job.
+        type: string
+        default: ""
+      opa-version:
+        description: OPA release to download (open-policy-agent/opa), without the `v`.
+        type: string
+        default: "1.21.0"
+      opa-sha256:
+        description: SHA-256 of the OPA linux_amd64_static binary for that version.
+        type: string
+        default: "5eef70644868bb04d0556bcc795ee42f2ab379e73f51d1bfa30f83e1305bc9b9"
       trivy:
         description: Run Trivy's configuration scan over the repository.
         type: boolean
@@ -265,6 +285,79 @@ jobs:
             (cd "$d" && "$BINARY" init -backend=false -input=false && "$BINARY" validate)
           done
 
+  # `tofu test` with whatever the caller's test files declare. Mocked providers
+  # need no credential and this job never has one, so a test file that reaches
+  # a real provider fails here, which is the point: that test belongs behind
+  # the plan's gate, not on a pull request. Opt-in for the same reason.
+  test:
+    name: test
+    if: inputs.test
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: ${{ inputs.egress-policy }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          disable-sudo: true
+          # The agent may only stop reporting to StepSecurity in block mode.
+          disable-telemetry: ${{ inputs.egress-policy == 'block' }}
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Restore the cached tofu archive
+        if: inputs.binary == 'tofu'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/tool-cache/tofu
+          key: tool-tofu-${{ inputs.tofu-version }}-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Install the binary at the pinned version
+        env:
+          BINARY: ${{ inputs.binary }}
+          VERSION: ${{ inputs.tofu-version }}
+          SHA256: ${{ inputs.tofu-sha256 }}
+          CACHE_DIR: ${{ runner.temp }}/tool-cache/tofu
+        run: |
+          set -euo pipefail
+          case "$BINARY" in
+            tofu)
+              mkdir -p "$CACHE_DIR"
+              # The cache holds only the downloaded archive, and the archive is
+              # checked against the pinned hash whether it came from the cache or
+              # the network; a cached file that fails is discarded and fetched again.
+              if [ -f "$CACHE_DIR/tofu.zip" ] && ! echo "${SHA256}  $CACHE_DIR/tofu.zip" | sha256sum --status -c -; then
+                echo "cached OpenTofu archive does not match the pinned hash; fetching it again"
+                rm -f "$CACHE_DIR/tofu.zip"
+              fi
+              if [ ! -f "$CACHE_DIR/tofu.zip" ]; then
+                curl -sSfL -o "$CACHE_DIR/tofu.zip" "https://github.com/opentofu/opentofu/releases/download/v${VERSION}/tofu_${VERSION}_linux_amd64.zip"
+              fi
+              echo "${SHA256}  $CACHE_DIR/tofu.zip" | sha256sum -c -
+              unzip -q -o "$CACHE_DIR/tofu.zip" tofu -d /tmp
+              install -m 0755 /tmp/tofu /usr/local/bin/tofu
+              ;;
+            terraform) command -v terraform ;;
+            *) echo "::error::binary must be tofu or terraform, not $BINARY"; exit 1 ;;
+          esac
+          "$BINARY" version
+
+      - name: init -backend=false, test
+        env:
+          BINARY: ${{ inputs.binary }}
+          DIRECTORIES: ${{ inputs.directories }}
+        run: |
+          set -euo pipefail
+          read -r -a dirs <<< "$DIRECTORIES"
+          for d in "${dirs[@]}"; do
+            echo "== $d"
+            (cd "$d" && "$BINARY" init -backend=false -input=false && "$BINARY" test)
+          done
+
   tflint:
     name: tflint
     if: inputs.tflint
@@ -352,6 +445,75 @@ jobs:
           severity: ${{ inputs.trivy-severity }}
           exit-code: ${{ inputs.trivy-exit-code }}
           format: table
+
+  # Policy-as-code beside the configuration: a Spacelift push or plan policy,
+  # Conftest rules over a plan. `opa fmt` and `opa check --strict` hold the
+  # files to one shape and catch unused variables and shadowed names that
+  # `opa test` would pass; `opa test` runs the `_test.rego` files. OPA reads
+  # only files here, so the job needs nothing but the checkout.
+  policy:
+    name: policy (OPA)
+    if: inputs.policy-directories != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: ${{ inputs.egress-policy }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          disable-sudo: true
+          # The agent may only stop reporting to StepSecurity in block mode.
+          disable-telemetry: ${{ inputs.egress-policy == 'block' }}
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Restore the cached OPA binary
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/tool-cache/opa
+          key: tool-opa-${{ inputs.opa-version }}-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Install OPA at the pinned version
+        env:
+          VERSION: ${{ inputs.opa-version }}
+          SHA256: ${{ inputs.opa-sha256 }}
+          CACHE_DIR: ${{ runner.temp }}/tool-cache/opa
+        run: |
+          set -euo pipefail
+          mkdir -p "$CACHE_DIR"
+          # The cache holds only the downloaded binary, and it is checked
+          # against the pinned hash whether it came from the cache or the
+          # network; a cached file that fails is discarded and fetched again.
+          if [ -f "$CACHE_DIR/opa" ] && ! echo "${SHA256}  $CACHE_DIR/opa" | sha256sum --status -c -; then
+            echo "cached OPA binary does not match the pinned hash; fetching it again"
+            rm -f "$CACHE_DIR/opa"
+          fi
+          if [ ! -f "$CACHE_DIR/opa" ]; then
+            curl -sSfL -o "$CACHE_DIR/opa" "https://github.com/open-policy-agent/opa/releases/download/v${VERSION}/opa_linux_amd64_static"
+          fi
+          echo "${SHA256}  $CACHE_DIR/opa" | sha256sum -c -
+          install -m 0755 "$CACHE_DIR/opa" /usr/local/bin/opa
+          opa version
+
+      - name: opa fmt, check --strict, test
+        env:
+          DIRECTORIES: ${{ inputs.policy-directories }}
+        run: |
+          set -euo pipefail
+          read -r -a dirs <<< "$DIRECTORIES"
+          for d in "${dirs[@]}"; do
+            echo "== $d"
+            if ! opa fmt --list --fail "$d"; then
+              echo "::error title=OPA::files above are not opa-formatted; run 'opa fmt -w $d'"
+              exit 1
+            fi
+            opa check --strict "$d"
+            opa test --verbose "$d"
+          done
 
   # Only off a pull request, with whatever the Doppler config holds: a plan
   # against a real cloud needs a credential, and the gate is where one may
@@ -536,7 +698,7 @@ jobs:
   ci-green:
     name: CI green
     if: always()
-    needs: [fmt, validate, tflint, trivy, plan, workflow-lint]
+    needs: [fmt, validate, test, tflint, trivy, policy, plan, workflow-lint]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}

@@ -67,7 +67,7 @@ Sixteen reusable workflows and one composite action:
 | `.github/workflows/python-ci.yml` | Lint, workflow lint, test matrix, coverage upload, optional CLI smoke test, single-arch container build with a check, one `CI green` gate job |
 | `.github/workflows/python-fuzz.yml` | Runs every Atheris target a repository keeps under `fuzz/` for a fixed time, fails on a crash or hang and uploads the input. The real fuzzing OpenSSF Scorecard's Fuzzing check looks for. Holds no token |
 | `.github/workflows/bash-ci.yml` | shellcheck and shfmt over every tracked script, an optional test command, an optional configuration lint (yamllint, ansible-lint), workflow lint, the same `CI green` gate. Holds no token |
-| `.github/workflows/tofu-ci.yml` | For OpenTofu or Terraform: fmt, validate without a backend, tflint and a Trivy configuration scan on every push and pull request; a plan on the default branch only, with credentials through the Doppler gate; the same `CI green` gate. Nothing applies |
+| `.github/workflows/tofu-ci.yml` | For OpenTofu or Terraform: fmt, validate without a backend, tflint and a Trivy configuration scan on every push and pull request, plus opt-in `tofu test` and `opa test` over policy-as-code; a plan on the default branch only, with credentials through the Doppler gate; the same `CI green` gate. Nothing applies |
 | `.github/workflows/arduino-ci.yml` | For firmware built with arduino-cli: compile every sketch for a board with pinned cores and libraries, keep the binaries as an artifact, host-side tests, workflow lint, the same `CI green` gate. Holds no token; the binaries reach a release through `artifact-release.yml` |
 | `.github/workflows/container-release.yml` | Build, test, Trivy-scan, then publish multi-arch to GHCR (and Docker Hub), sign with cosign, attach a syft SBOM, record SLSA provenance. Builds whatever the Dockerfile builds |
 | `.github/workflows/python-docker-release.yml` | The old name of the above: a thin caller that forwards every input, the secret and the outputs through a `./` reference at its own commit, so an existing pin keeps working. New callers use `container-release.yml` |
@@ -826,9 +826,14 @@ Inputs of `dast.yml`:
 ### Tofu CI
 
 For the infrastructure in a repository, which today is typo-sniper's
-`infra/terraform`. Everything that runs on a pull request runs without a
-cloud credential: `fmt -check`, `validate` with no backend, tflint, and
-Trivy's configuration scan. A plan needs a credential, so it runs only on a
+`infra/terraform` and Clouds-Against-Humanity's stacks and modules.
+Everything that runs on a pull request runs without a cloud credential:
+`fmt -check`, `validate` with no backend, tflint, Trivy's configuration
+scan, and two opt-in legs: `tofu test` in each directory (`test: true`, for
+tests whose providers are mocked) and `opa fmt`, `opa check --strict` and
+`opa test` over Rego policies kept beside the configuration
+(`policy-directories`, for a Spacelift push or plan policy or Conftest
+rules). A plan needs a credential, so it runs only on a
 push to the default branch, with whatever the Doppler config holds in its
 environment, which is the one place the gate lets a secret exist. Nothing
 applies from CI.
@@ -844,6 +849,8 @@ jobs:
       DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
     with:
       directories: infra/terraform/examples/ecs-fargate infra/terraform/examples/eks-cronjob
+      test: true                      # tofu test; only when the tests mock their providers
+      policy-directories: policies    # opa test over the Rego in policies/
       plan-command: |
         cd infra/terraform/examples/ecs-fargate
         tofu init -input=false && tofu plan -input=false
@@ -857,19 +864,22 @@ jobs:
 
 The binary is OpenTofu, downloaded at a pinned version and checked against
 a pinned hash; `binary: terraform` uses the Terraform the runner image ships
-instead. tflint is downloaded the same way. A repository with more than one
-root module lists them in `directories`; each is validated and linted on its
-own.
+instead. tflint and OPA are downloaded the same way. A repository with more
+than one root module lists them in `directories`; each is validated, linted
+and, with `test: true`, tested on its own.
 
 Inputs of `tofu-ci.yml`:
 
 | Input | Default | Meaning |
 |---|---|---|
-| `directories` | `.` | Space-separated root modules, validated and linted one by one |
+| `directories` | `.` | Space-separated root modules, validated and linted one by one (and tested, with `test`) |
 | `binary` | `tofu` | `tofu` (downloaded) or `terraform` (the runner's) |
 | `tofu-version`, `tofu-sha256` | `1.12.6` and its zip's hash | The OpenTofu release downloaded from opentofu/opentofu |
 | `tflint` | `true` | Run tflint over every directory |
 | `tflint-version`, `tflint-sha256` | `0.64.0` and its zip's hash | The tflint release downloaded from terraform-linters/tflint |
+| `test` | `false` | `tofu test` (or `terraform test`) in every directory after `init -backend=false`. Holds no credential, so turn it on when the tests use `mock_provider` |
+| `policy-directories` | empty (skips the job) | Space-separated directories of Rego policies with their `_test.rego` files; each gets `opa fmt --list --fail`, `opa check --strict` and `opa test` |
+| `opa-version`, `opa-sha256` | `1.21.0` and its binary's hash | The OPA release downloaded from open-policy-agent/opa (`opa_linux_amd64_static`) |
 | `trivy` | `true` | Trivy configuration scan over the repository |
 | `trivy-severity` | `CRITICAL,HIGH` | Severities the scan reports |
 | `trivy-exit-code` | `1` | `1` fails the job on a finding, `0` reports only. A migration aid |

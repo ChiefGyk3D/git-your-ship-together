@@ -59,7 +59,7 @@ publish).
 |---|---|---|
 | `python-ci.yml` | [CI](Which-workflow-do-I-need.md) | Lint, type check, test matrix, coverage, smoke test, container build, `CI green` |
 | `bash-ci.yml` | [CI](Which-workflow-do-I-need.md) | shellcheck, shfmt, tests, config lint, `CI green` |
-| `tofu-ci.yml` | [CI](Which-workflow-do-I-need.md) | fmt, validate, tflint, Trivy config scan, plan on default branch |
+| `tofu-ci.yml` | [CI](Which-workflow-do-I-need.md) | fmt, validate, tflint, Trivy config scan, opt-in `tofu test` and `opa test`, plan on default branch |
 | `arduino-ci.yml` | [CI](Which-workflow-do-I-need.md) | Compile every sketch with pinned cores, host tests |
 | `python-fuzz.yml` | [CI](Which-workflow-do-I-need.md) | Atheris fuzzing for a fixed time per target |
 | `container-release.yml` | [Release](Which-workflow-do-I-need.md) | Build, test, scan, push multi-arch, sign, SBOM, provenance |
