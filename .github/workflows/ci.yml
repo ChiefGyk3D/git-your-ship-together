@@ -224,7 +224,8 @@ jobs:
       egress-policy: block
 
   # tofu-ci.yml at this ref over the fixture's provider-free module: fmt,
-  # validate, tflint and the configuration scan; no plan command, so the
+  # validate, `tofu test` over fixture/tofu/tests, tflint, the configuration
+  # scan, and `opa test` over fixture/policy; no plan command, so the
   # Doppler-gated job is skipped. Block mode with the default list, which
   # is the tool downloads and Trivy's checks bundle.
   fixture-tofu:
@@ -235,6 +236,8 @@ jobs:
       id-token: write  # what a caller grants for the plan job's Doppler fetch; skipped here
     with:
       directories: fixture/tofu
+      test: true
+      policy-directories: fixture/policy
       workflow-lint: false
       egress-policy: block
 

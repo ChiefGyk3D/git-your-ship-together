@@ -20,7 +20,7 @@ cannot ship untried.
 
 `fixture/` is the smallest project that exercises every job: a Python package with a console script, a test, a
 linted tree, a non-root Dockerfile, a hash-pinned `requirements.txt`, an OpenTofu module with no provider (so `init`
-needs no network), an Arduino sketch, a shell script with its own test, a site source, and an Atheris target. It is
+needs no network) and a `tofu test` file for it, a Rego policy with its tests, an Arduino sketch, a shell script with its own test, a site source, and an Atheris target. It is
 **not an example to copy** (the real callers are); it is a test subject. `fixture/README.md` says how to regenerate the
 lock.
 

@@ -44,7 +44,7 @@ CACHE = "actions/cache@"
 # The tools fetched by URL, and the inputs naming their pinned version and hash.
 CACHED_DOWNLOADS = {
     "bash-ci.yml": {"shellcheck": "shellcheck-version", "shfmt": "shfmt-version"},
-    "tofu-ci.yml": {"tofu": "tofu-version", "tflint": "tflint-version"},
+    "tofu-ci.yml": {"tofu": "tofu-version", "tflint": "tflint-version", "opa": "opa-version"},
     "arduino-ci.yml": {"arduino-cli": "arduino-cli-version"},
 }
 
