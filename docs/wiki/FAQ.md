@@ -10,7 +10,7 @@ release workflows, and most of the design (baseline, Doppler, pinning, permissio
 [Which workflow do I need?](Which-workflow-do-I-need.md).
 
 ## Can I use these workflows in my own repository?
-Yes, it is MIT licensed. Call them with a pinned SHA ([Getting started](Getting-started.md)). If you want the whole pattern
+Yes, it is Apache-2.0 licensed. Call them with a pinned SHA ([Getting started](Getting-started.md)). If you want the whole pattern
 (your own baseline, your own Doppler), fork it and change the owner, project names and allow-list ([Adopting GYST in your own project](Adopting-GYST-in-your-own-project.md)).
 Be aware the defaults reflect these projects' choices, e.g. the Doppler project is named `ci`.
 

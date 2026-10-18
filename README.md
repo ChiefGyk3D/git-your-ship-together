@@ -2483,4 +2483,4 @@ same thing by hand with `python scripts/audit_baseline.py` and your own
 
 ## Licence
 
-MIT. See `LICENSE`.
+Apache-2.0. See `LICENSE` and `NOTICE`.
