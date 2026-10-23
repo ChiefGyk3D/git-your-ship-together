@@ -141,7 +141,7 @@ class TestIPv6(unittest.TestCase):
         self.assertEqual(cls_set("addr fc00::1"), {"ipv6-local"})
 
     def test_not_flagged(self):
-        for t in ("2001:db8::1", "::1", "time 12:30:45", "2606:4700::1111", "::"):
+        for t in ("2001:db8::1", "2001:db8:abcd::7", "::1", "time 12:30:45", "::", "ff02::1"):
             self.assertEqual(cls_set(t), set(), t)
 
     def test_mac_not_ipv6(self):
@@ -260,8 +260,9 @@ class TestRadio(unittest.TestCase):
     def test_callsign_allow(self):
         self.assertEqual(cls_set("callsign N0CALL and N0TST"), set())
 
-    def test_callsign_lowercase_not(self):
-        self.assertEqual(cls_set("callsign w1abc"), set())
+    def test_callsign_lowercase_is_found(self):
+        # fix round 1, item 5: the identifier matches in either case (the spike pinned the opposite)
+        self.assertEqual(cls_set("callsign w1abc"), {"callsign"})
 
     def test_grid_with_context(self):
         self.assertEqual(cls_set("Grid square: EM73ab"), {"grid"})
@@ -738,3 +739,344 @@ class TestRedaction(Tmp):
         self.assertEqual(code, 2)
         self.assertNotIn("secretbox17", out + err)
         self.assertNotIn("10.1.1.1", out + err)
+
+
+# ----------------------------------------------------------------- fix round 1
+def fnd(text, allow=None, deny=None, path=None):
+    return (
+        ids.scan_text(text, allow or ids.Allow(), path, deny)
+        if deny
+        else ids.scan_text(text, allow or ids.Allow(), path)
+    )
+
+
+class TestPublicIPv6(unittest.TestCase):
+    def test_public_v6_found(self):
+        for a in ("2606:4700:4700::1111", "2001:4860:4860::8888", "2606:4700::1111", "2a00:1450:4001:81b::200e"):
+            self.assertEqual(cls_set("resolver " + a), {"ipv6-public"}, a)
+
+    def test_mapped_hex_is_ipv4(self):
+        self.assertEqual(cls_set("peer ::ffff:a17:2d43"), {"private-ip"})
+        self.assertEqual(cls_set("peer ::ffff:2d21:209c"), {"public-ip"})
+        self.assertEqual(cls_set("peer ::ffff:cb00:7107"), set())  # 203.0.113.7
+
+    def test_documentation_and_special_not_found(self):
+        for a in ("2001:db8::1", "2001:db8:ffff::9", "::", "::1"):
+            self.assertEqual(cls_set("x " + a), set(), a)
+
+
+class TestNormalization(unittest.TestCase):
+    def test_encodings_of_a_private_address(self):
+        ip = "10.23.45.67"
+        forms = [
+            "10%2e23%2e45%2e67",
+            "10&#46;23&#46;45&#46;67",
+            "10&period;23&period;45&period;67",
+            "10\u200b.23\u200c.45\u200d.67\u2060\ufeff",
+            "\uff11\uff10\uff0e\uff12\uff13\uff0e\uff14\uff15\uff0e\uff16\uff17",
+            "10.23.**45**.67",
+            "10.__23__.`45`.67",
+            "10.23.*45*.67",
+        ]
+        for f in forms:
+            self.assertEqual(cls_set("host " + f), {"private-ip"}, f)
+        self.assertEqual(cls_set("host " + ip), {"private-ip"})
+
+    def test_single_integer_hex_and_octal_forms(self):
+        self.assertEqual(cls_set("host 3232235777"), {"private-ip"})  # 192.168.1.1
+        self.assertEqual(cls_set("host 0xC0A80101"), {"private-ip"})
+        self.assertEqual(cls_set("host 0xc0.0xa8.0x01.0x01"), {"private-ip"})
+        self.assertEqual(cls_set("host 0300.0250.01.01"), {"private-ip"})
+        self.assertEqual(cls_set("host 0xc0a80101."), {"private-ip"})
+        self.assertEqual(cls_set("host 0x2d21209c"), {"public-ip"})
+        self.assertEqual(cls_set("ip address 755437724"), {"public-ip"})  # public, with an address word before it
+
+    def test_ordinary_numbers_are_not_addresses(self):
+        for t in (
+            "ts 1700000000",
+            "total 123456789",
+            "id 4294967295",
+            "size 0x7fffffff bytes",
+            "code 0xdeadbeef01",
+            "n 3405803777 (doc)",
+            "color 0xFF00FF",
+            "x 3221225985",  # 192.0.2.1 documentation
+            "year 2024 and 12345678",
+            "ver 0.1.2.3",
+        ):
+            self.assertEqual(cls_set(t), set(), t)
+
+    def test_partial_run_split_across_lines(self):
+        self.assertEqual(classes("ssh to 10.23.\n45.67 now"), [(1, "private-ip")])
+        self.assertEqual(classes("see 192.168.\n  7.8\n"), [(1, "private-ip")])
+        self.assertEqual(classes("ssh to 10.23.\n45.67.89 now"), [])
+        self.assertEqual(classes("Section 1.2.\n3.4 continues"), [])
+        self.assertEqual(classes("v 10.23.\nhello"), [])
+
+    def test_normalization_keeps_line_numbers(self):
+        self.assertEqual(classes("a\nb\nip 10%2e1%2e1%2e1\n"), [(3, "private-ip")])
+
+
+class TestFilenames(Tmp):
+    def test_hostile_name_never_printed(self):
+        ip = ".".join(("10", "77", "13", "214"))
+        mail = "zqkv9" + "@" + "corp-mail." + "io"
+        fake = "identscan: files=0 findings=0 errors=0 exit=0"
+        name = "a\n" + fake + "\r\x1b[2J " + ip + " " + mail + ".md"
+        p = self.w("sub/" + name, "ip " + ip + "\n")
+        for fmt in ("text", "json"):
+            code, out, err = run(self.d, "--all", "--format", fmt)
+            blob = out + err
+            self.assertEqual(code, 1)
+            for frag in (ip, mail, "zqkv9", "\x1b", "\r", "77.13.214"):
+                self.assertNotIn(frag, blob, fmt)
+            if fmt == "text":
+                self.assertEqual(out.count("identscan: files="), 1, out)
+                self.assertEqual(sum(1 for x in out.splitlines() if x.startswith("identscan: files=0")), 0)
+                self.assertTrue(all(len(x.splitlines()) == 1 for x in out.splitlines()))
+                self.assertIn(":1:private-ip", out)
+            else:
+                j = json.loads(out)
+                self.assertEqual(len(j["findings"]), 1)
+                self.assertEqual(j["findings"][0]["class"], "private-ip")
+                self.assertNotIn("\n", j["findings"][0]["file"])
+        self.assertTrue(os.path.exists(p))
+
+    def test_plain_path_printed_as_is(self):
+        p = self.w("docs/page.md", "ip 10.1.1.1\n")
+        self.assertIn(p + ":1:private-ip", run(p)[1])
+
+    def test_error_lines_are_sanitized_too(self):
+        bad = self.w("b\nfake: error: x\x1b[0m.md", b"\xff\xfe")
+        code, out, err = run(bad)
+        self.assertEqual(code, 2)
+        self.assertNotIn("\x1b", out + err)
+        self.assertEqual(len(err.splitlines()), 1)
+
+
+class TestEmailMacRound1(unittest.TestCase):
+    def test_quoted_local_part(self):
+        self.assertEqual(cls_set('mail "bob smith"@corp-mail.io now'), {"email"})
+
+    def test_punycode_tld(self):
+        self.assertEqual(cls_set("mail bob@corp-mail.xn--p1ai"), {"email"})
+
+    def test_git_user_no_blanket_exemption(self):
+        self.assertEqual(cls_set("clone git@build-box.io:team/repo.git"), {"email"})
+        for t in ("git@github.com:o/r.git", "git@gitlab.com:o/r.git", "git@bitbucket.org:o/r.git"):
+            self.assertEqual(cls_set(t), set(), t)
+
+    def test_git_user_waived_with_reason(self):
+        a = ids.Allow()
+        a.strs.append((None, "git@build-box.io"))
+        self.assertEqual(cls_set("git@build-box.io:o/r.git", a), set())
+
+    def test_mac_dotted_quad(self):
+        self.assertEqual(cls_set("nic 3c52.82aa.105b"), {"mac"})
+        self.assertEqual(cls_set("nic 3C52.82AA.105B up"), {"mac"})
+        self.assertEqual(cls_set("date 2024.1231.1200"), set())
+
+    def test_mac_bare_with_context(self):
+        self.assertEqual(cls_set("mac 3c5282aa105b"), {"mac"})
+        self.assertEqual(cls_set("hwaddr=3C5282AA105B"), {"mac"})
+        self.assertEqual(cls_set("ether\n3c5282aa105b"), {"mac"})
+        self.assertEqual(cls_set("lladdr 123456789012"), {"mac"})
+
+    def test_mac_bare_standalone(self):
+        self.assertEqual(cls_set("device 3c5282aa105b ready"), {"mac"})
+
+    def test_mac_false_positives(self):
+        for t in (
+            "count 123456789012",  # 12-digit number, no context
+            "serial 123456789012 shipped",
+            "commit 3c5282aa105b fixes it",  # git short sha context
+            "sha 3c5282aa105b",
+            "word abcdefabcdef.",  # letters only
+            "id 3c5282aa105b5",  # longer token
+            "3c5282aa105",  # shorter token
+            "macOS 123456789012",
+        ):
+            self.assertEqual(cls_set(t), set(), t)
+
+
+class TestRadioRound1(unittest.TestCase):
+    def test_case_insensitive_identifier(self):
+        self.assertEqual(cls_set("callsign w1zqx"), {"callsign"})
+        self.assertEqual(cls_set("callsign W1zqx"), {"callsign"})
+
+    def test_digit_first_prefixes(self):
+        self.assertEqual(cls_set("callsign 3DA0ABC"), {"callsign"})
+        self.assertEqual(cls_set("my ham call 2E0ABC"), {"callsign"})
+        self.assertEqual(cls_set("callsign 9a1abc"), {"callsign"})
+
+    def test_context_on_previous_line(self):
+        self.assertEqual(classes("My callsign is:\nW1ZQX"), [(2, "callsign")])
+        self.assertEqual(classes("Grid square:\nEM73ab"), [(2, "grid")])
+        self.assertEqual(classes("callsign\n\nW1ZQX"), [])  # two lines back is out of range
+
+    def test_grid_either_case(self):
+        for g in ("EM73AB", "EM73ab", "em73ab", "em73AB", "EM73"):
+            self.assertEqual(cls_set("grid " + g), {"grid"}, g)
+
+    def test_placeholders_stay_clean(self):
+        for t in ("callsign N0CALL", "callsign n0call", "ham N0TST", "grid FN31pr", "grid fn31PR", "grid FN31"):
+            self.assertEqual(cls_set(t), set(), t)
+
+    def test_no_bare_callsign(self):
+        self.assertEqual(cls_set("the W1ZQX station"), set())
+
+
+class TestDeny(Tmp):
+    def df(self, body):
+        return self.w("deny.txt", body)
+
+    def test_hit_reports_deny_class_only(self):
+        secret = "zq" + "kv" + "9" + "ab"
+        d = ids.Deny.load(self.df("# comment\n\n" + secret + "\nr[a-z]{3}\\d\n"))
+        f = ids.scan_text("one\nthe " + secret.upper() + " here\nrabc7", ids.Allow(), None, d)
+        self.assertEqual([(x.line, x.cls) for x in f], [(2, "deny"), (3, "deny")])
+
+    def test_cli_never_prints_pattern_or_match(self):
+        secret = "zq" + "kv" + "9" + "ab"
+        pat = "xx" + secret + "[0-9]+"
+        match = "xx" + secret + "4417"
+        t = self.w("a.md", "line one\nuse " + match + " ok\n")
+        d = self.df(pat + "\n")
+        for fmt in ("text", "json"):
+            code, out, err = run(t, "--deny-file", d, "--format", fmt)
+            self.assertEqual(code, 1)
+            for frag in (secret, "4417", "[0-9]", pat, match):
+                self.assertNotIn(frag, out + err, fmt)
+            if fmt == "text":
+                self.assertIn(t + ":2:deny", out)
+            else:
+                self.assertEqual(json.loads(out)["findings"][0]["class"], "deny")
+
+    def test_literal_when_not_a_regex(self):
+        d = ids.Deny.load(self.df("a(b\n"))
+        self.assertEqual(len(ids.scan_text("xx a(b yy", ids.Allow(), None, d)), 1)
+
+    def test_empty_matching_pattern_refused(self):
+        code, out, err = run(self.w("a.md", "hello world\n"), "--deny-file", self.df("a*\n"))
+        self.assertEqual(code, 2)
+        self.assertNotIn("a*", out + err)
+
+    def test_deny_file_hardening(self):
+        t = self.w("a.md", "hello world\n")
+        self.assertEqual(run(t, "--deny-file", os.path.join(self.d, "nope"))[0], 2)
+        self.assertEqual(run(t, "--deny-file", self.d)[0], 2)
+        fifo = os.path.join(self.d, "f")
+        os.mkfifo(fifo)
+        self.assertEqual(run(t, "--deny-file", fifo, timeout=10)[0], 2)
+        self.assertEqual(run(t, "--deny-file", self.w("bad.txt", b"\xff\xfe\n"))[0], 2)
+        big = self.w("big.txt", "#" * (ids.CONFIG_MAX_BYTES + 1))
+        self.assertEqual(run(t, "--deny-file", big)[0], 2)
+
+    def test_deny_in_filename_is_redacted(self):
+        secret = "zq" + "kv" + "9" + "ab"
+        t = self.w("dir/" + secret + ".md", "x " + secret + " y\n")
+        code, out, err = run(t, "--deny-file", self.df(secret + "\n"))
+        self.assertEqual(code, 1)
+        self.assertNotIn(secret, out + err)
+
+
+class TestPathWaivers(unittest.TestCase):
+    def a(self, entry):
+        al = ids.Allow()
+        al.nets.append((entry, ids.ipaddress.ip_network("10.9.9.9/32")))
+        return al
+
+    def test_exact_path_only(self):
+        a = self.a("docs/a.md")
+        n = lambda path: len(ids.scan_text("ip 10.9.9.9", a, path))  # noqa: E731
+        self.assertEqual(n("docs/a.md"), 0)
+        self.assertEqual(n("./docs/a.md"), 0)
+        self.assertEqual(n("archive/docs/a.md"), 1)
+        self.assertEqual(n("unrelated/docs/a.md"), 1)
+        self.assertEqual(n("docs/a.md.bak"), 1)
+        self.assertEqual(n("xdocs/a.md"), 1)
+
+    def test_explicit_globs(self):
+        a = self.a("docs/*.md")
+        self.assertEqual(len(ids.scan_text("ip 10.9.9.9", a, "docs/a.md")), 0)
+        self.assertEqual(len(ids.scan_text("ip 10.9.9.9", a, "other/docs/a.md")), 1)
+        b = self.a("**/docs/a.md")
+        self.assertEqual(len(ids.scan_text("ip 10.9.9.9", b, "x/y/docs/a.md")), 0)
+
+    def test_cli_waiver_is_relative_to_cwd(self):
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, "docs"))
+            os.makedirs(os.path.join(d, "archive", "docs"))
+            for sub in ("docs", "archive/docs"):
+                with open(os.path.join(d, sub, "a.md"), "w") as fh:
+                    fh.write("ip 10.9.9.9\n")
+            with open(os.path.join(d, "allow.txt"), "w") as fh:
+                fh.write("docs/a.md | 10.9.9.9 | sample in a.md only\n")
+            p = subprocess.run(
+                [sys.executable, "-I", TOOL, "docs", "archive", "--allow", "allow.txt"],
+                capture_output=True,
+                cwd=d,
+            )
+            out = p.stdout.decode()
+            self.assertEqual(p.returncode, 1)
+            self.assertIn("archive/docs/a.md:1:private-ip", out)
+            self.assertNotIn("\ndocs/a.md:1", "\n" + out)
+
+
+class TestConfigFileLoading(Tmp):
+    def test_fifo_refused_no_hang(self):
+        t = self.w("a.md", "hello world\n")
+        fifo = os.path.join(self.d, "al")
+        os.mkfifo(fifo)
+        self.assertEqual(run(t, "--allow", fifo, timeout=10)[0], 2)
+
+    def test_directory_refused(self):
+        self.assertEqual(run(self.w("a.md", "hello world\n"), "--allow", self.d)[0], 2)
+
+    def test_device_refused(self):
+        if not os.path.exists("/dev/null"):
+            self.skipTest("no /dev/null")
+        self.assertEqual(run(self.w("a.md", "hello world\n"), "--allow", "/dev/null")[0], 2)
+
+    def test_over_cap_is_exit_2_not_truncated(self):
+        # a reasonless entry sits just past the cap; truncation would hide it
+        pad = "#" * (ids.CONFIG_MAX_BYTES - 1) + "\n"
+        body = pad + "10.1.1.1\n"
+        self.assertGreater(len(body), ids.CONFIG_MAX_BYTES)
+        t = self.w("a.md", "ip 10.1.1.1\n")
+        code, out, err = run(t, "--allow", self.w("big.txt", body))
+        self.assertEqual(code, 2)
+        self.assertNotIn("10.1.1.1", out + err)
+
+    def test_exactly_at_cap_is_read(self):
+        body = ("#" * (ids.CONFIG_MAX_BYTES - 1)) + "\n"
+        self.assertEqual(len(body), ids.CONFIG_MAX_BYTES)
+        self.assertEqual(run(self.w("a.md", "hello world\n"), "--allow", self.w("ok.txt", body))[0], 0)
+
+    def test_non_utf8_allow_file(self):
+        self.assertEqual(run(self.w("a.md", "hello world\n"), "--allow", self.w("b.txt", b"\xff\xfe\n"))[0], 2)
+
+
+class TestRound1Timing(unittest.TestCase):
+    def test_new_patterns_are_linear(self):
+        n = 200_000
+        d = ids.Deny()
+        d.pats.append(ids.re.compile("zz[0-9]+", ids.re.I))
+        hostile = {
+            "percent": "%2e" * (n // 3),
+            "entities": "&#46;" * (n // 5),
+            "zero width": "1\u200b" * (n // 2),
+            "fullwidth": "\uff11\uff0e" * (n // 2),
+            "emphasis": "1.*" * (n // 3),
+            "hex dots": "0x1." * (n // 4),
+            "octal dots": "01." * (n // 3),
+            "callsign run": "cq " + "1a" * (n // 2),
+            "mac run": "mac " + "ab12ab12ab12 " * (n // 13),
+            "quotes": '"a@' * (n // 3),
+            "split dotted": "1." * (n // 2) + "\n" + "1." * (n // 2),
+        }
+        for name, h in hostile.items():
+            t0 = time.monotonic()
+            ids.scan_text(h, ids.Allow(), None, d)
+            dt = time.monotonic() - t0
+            self.assertLess(dt, 1.0, f"{name} took {dt:.2f}s")

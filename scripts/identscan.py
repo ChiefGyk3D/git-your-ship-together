@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """identscan: fail a docs build on identifier-class leaks that secret scanners miss.
 
-Usage: python3 -I scripts/identscan.py <dir-or-files...> [--allow FILE] [--format text|json]
+Usage: python3 -I scripts/identscan.py <dir-or-files...> [--allow FILE] [--deny-file FILE] [--format text|json]
                                [--all] [--max-bytes N]
 
 Exit 0 clean, 1 findings, 2 cannot tell (unreadable, bad encoding, symlink, oversize,
@@ -14,15 +14,22 @@ construction (bounded quantifiers; hostnames are walked in code, not matched wit
 
 import argparse
 import fnmatch
+import html
 import ipaddress
 import json
 import math
 import os
+import posixpath
 import re
 import stat
 import sys
+import unicodedata
+import urllib.parse
 
 DEFAULT_MAX_BYTES = 2 * 1024 * 1024
+CONFIG_MAX_BYTES = 1024 * 1024  # --allow and --deny-file: over this is exit 2, never truncated
+MAX_DENY_PATTERNS = 500
+MAX_DENY_LEN = 256
 MD_EXT = (".md", ".markdown", ".mdx")
 
 
@@ -54,15 +61,74 @@ _BUILTIN_NETS = [
         "127.0.0.0/8",
         "2001:db8::/32",
         "::1/128",
+        "::/128",
     )
 ]
-_BUILTIN_STR = {"n0call", "n0tst", "fn31pr", "fn31", "00:11:22:33:44:55", "aa:bb:cc:dd:ee:ff"}
+_BUILTIN_STR = {
+    "n0call",
+    "n0tst",
+    "fn31pr",
+    "fn31",
+    "00:11:22:33:44:55",
+    "aa:bb:cc:dd:ee:ff",
+    # SSH clone URLs for three documented public hosts; any other git@host needs a waiver with a reason
+    "git@github.com",
+    "git@gitlab.com",
+    "git@bitbucket.org",
+}
+
+
+def _norm_path(p):
+    p = (p or "").replace(os.sep, "/")
+    return posixpath.normpath(p) if p else p
 
 
 def _path_match(path, pat):
-    p = (path or "").replace(os.sep, "/")
-    pat = pat.replace(os.sep, "/")
-    return p == pat or p.endswith("/" + pat) or fnmatch.fnmatchcase(p, pat) or fnmatch.fnmatchcase(p, "*/" + pat)
+    """A literal waiver path is the exact repo-relative path; only * ? [ in the entry widen it."""
+    p, q = _norm_path(path), _norm_path(pat)
+    if any(c in q for c in "*?["):
+        return fnmatch.fnmatchcase(p, q)
+    return p == q
+
+
+def _repo_rel(path):
+    """Path as the waiver file spells it: relative to the working directory when under it."""
+    if os.path.isabs(path):
+        try:
+            rel = os.path.relpath(path)
+        except ValueError:
+            return path
+        if not rel.startswith(".."):
+            return rel
+    return path
+
+
+def _read_config(path, what):
+    """Read a small config file: regular files only, strict UTF-8, over the cap is an error."""
+    try:
+        if not stat.S_ISREG(os.stat(path).st_mode):
+            raise AllowError(f"{what}: not a regular file")
+        flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0)
+        fd = os.open(path, flags)
+    except AllowError:
+        raise
+    except OSError:
+        raise AllowError(f"cannot read {what}") from None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise AllowError(f"{what}: not a regular file")
+        with os.fdopen(fd, "rb", closefd=False) as fh:
+            data = fh.read(CONFIG_MAX_BYTES + 1)
+    except OSError:
+        raise AllowError(f"cannot read {what}") from None
+    finally:
+        os.close(fd)
+    if len(data) > CONFIG_MAX_BYTES:
+        raise AllowError(f"{what}: exceeds size cap")
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        raise AllowError(f"{what}: not valid UTF-8") from None
 
 
 class Allow:
@@ -73,11 +139,7 @@ class Allow:
     @classmethod
     def load(cls, path):
         a = cls()
-        try:
-            with open(path, encoding="utf-8") as fh:
-                raw = fh.read(1024 * 1024)
-        except (OSError, UnicodeDecodeError):
-            raise AllowError("cannot read allow file") from None
+        raw = _read_config(path, "allow file")
         for n, line in enumerate(raw.splitlines(), 1):
             s = line.strip()
             if not s or s.startswith("#"):
@@ -123,6 +185,40 @@ class Allow:
         return False
 
 
+class Deny:
+    """Caller-private deny patterns (for example a real callsign fed in from a secret).
+
+    One literal-or-regex pattern per line, matched case-insensitively.  A line that is not a
+    valid regex is taken literally.  The file's content is never echoed: a hit reports only
+    file:line:deny.
+    """
+
+    def __init__(self):
+        self.pats = []
+
+    @classmethod
+    def load(cls, path):
+        d = cls()
+        raw = _read_config(path, "deny file")
+        for n, line in enumerate(raw.splitlines(), 1):
+            s = line.strip()
+            if not s or s.startswith("#"):
+                continue
+            if len(s) > MAX_DENY_LEN or len(d.pats) >= MAX_DENY_PATTERNS:
+                raise AllowError(f"deny file line {n}: pattern too long or too many patterns")
+            try:
+                rx = re.compile(s, re.I)
+            except re.error:
+                rx = re.compile(re.escape(s), re.I)
+            if rx.search(""):
+                raise AllowError(f"deny file line {n}: pattern matches the empty string")
+            d.pats.append(rx)
+        return d
+
+    def hit(self, *texts):
+        return any(rx.search(t) for rx in self.pats for t in texts)
+
+
 # --------------------------------------------------------------------- helpers
 _ANGLE = re.compile(r"<[A-Za-z_][A-Za-z_ -]{0,30}>")
 _PH = re.compile(
@@ -159,9 +255,27 @@ REMAC = re.compile(
     r"(?![0-9A-Fa-f]|[:-][0-9A-Fa-f])"
 )
 REMAIL = re.compile(
-    r"(?<![A-Za-z0-9._%+-])([A-Za-z0-9._%+-]{1,64})@"
-    r"((?:[A-Za-z0-9-]{1,63}\.)+[A-Za-z]{2,24})(?![A-Za-z0-9-])"
+    r"(?<![A-Za-z0-9._%+\"-])([A-Za-z0-9._%+-]{1,64}|\"[^\"\r\n]{1,64}\")@"
+    r"((?:[A-Za-z0-9-]{1,63}\.)+(?:xn--[A-Za-z0-9-]{2,59}|[A-Za-z]{2,24}))(?![A-Za-z0-9-])"
 )
+REMAC4 = re.compile(r"(?<![0-9A-Fa-f.])[0-9A-Fa-f]{4}\.[0-9A-Fa-f]{4}\.[0-9A-Fa-f]{4}(?![0-9A-Fa-f]|\.[0-9A-Fa-f])")
+REMAC12 = re.compile(r"(?<![\w.:-])[0-9A-Fa-f]{12}(?![\w.:-])")
+REMAC_CTX = re.compile(r"(?<![A-Za-z])(?:mac|ether|hwaddr|hw[\s_-]?addr(?:ess)?|lladdr)(?![a-z])", re.I)
+REMAC_NOT = re.compile(r"(?<![A-Za-z])(?:commit|sha\d*|hash|rev|checksum|digest|git|md5|tag)(?![A-Za-z])", re.I)
+RE4_DEC = re.compile(r"(?<![\w.:-])(\d{8,10})(?![\w-]|\.\w)")
+RE4_HEX = re.compile(r"(?<![\w.:-])0[xX]([0-9A-Fa-f]{8})(?![\w-]|\.\w)")
+RE4_HEXQ = re.compile(
+    r"(?<![\w.])0[xX]([0-9A-Fa-f]{1,2})\.0[xX]([0-9A-Fa-f]{1,2})\.0[xX]([0-9A-Fa-f]{1,2})\.0[xX]([0-9A-Fa-f]{1,2})(?![\w-]|\.\w)"
+)
+RE4_OCT = re.compile(r"(?<![\w.])(\d{1,4})\.(\d{1,4})\.(\d{1,4})\.(\d{1,4})(?![\w-]|\.\w)")
+RE_IPCTX = re.compile(
+    r"(?:\bip\b|\baddr(?:ess)?\b|\bhost(?:name)?\b|\bserver\b|\bgateway\b|\bpeer\b|https?://)\W{0,3}$", re.I
+)
+# emphasis markers sitting between digits/dots: 10.23.**45**.67
+REEMPH = re.compile(r"(?<=[0-9.])[*_`]+(?=[0-9.])")
+RETAIL = re.compile(r"(?<![\w.])(?:\d{1,3}\.){1,3}$")
+REHEAD = re.compile(r"^\s*(\d{1,3}(?:\.\d{1,3}){0,3})(?![\w-])")
+_ZW = dict.fromkeys(map(ord, "\u200b\u200c\u200d\u2060\ufeff"))
 # Hostnames are found in code, not with one nested-quantifier regex.  A pattern of
 # the shape (label\.)+tld goes quadratic on a long "a.a.a.a." line as soon as its
 # start guard is lost, and a guard the next edit can drop is a weak defense.  Here
@@ -170,13 +284,15 @@ REMAIL = re.compile(
 RERUN = re.compile(r"[\w.-]+")
 RELABEL = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?")
 _INTERNAL_TLDS = ("lan", "local", "home", "internal", "corp")
-RECALL = re.compile(r"(?<![A-Za-z0-9])[A-Z]{1,2}[0-9][A-Z]{1,3}(?![A-Za-z0-9])")
+RECALL = re.compile(
+    r"(?<![A-Za-z0-9])(?:[A-Za-z]{1,2}|[0-9][A-Za-z]{1,2}|[A-Za-z][0-9])[0-9][A-Za-z]{1,3}(?![A-Za-z0-9])"
+)
 RECALL_CTX = re.compile(
     r"(?<![A-Za-z])(?:call[\s_-]?signs?|ham|hams|amateur|qrz|qso|cq)"
     r"(?![A-Za-z])",
     re.I,
 )
-REGRID = re.compile(r"(?<![A-Za-z0-9])[A-R]{2}[0-9]{2}(?:[a-x]{2})?(?![A-Za-z0-9])")
+REGRID = re.compile(r"(?<![A-Za-z0-9])[A-Ra-r]{2}[0-9]{2}(?:[A-Xa-x]{2})?(?![A-Za-z0-9])")
 REGRID_CTX = re.compile(
     r"(?<![A-Za-z])(?:grid(?:[\s_-]?square)?|locator|maidenhead|qth)"
     r"(?![A-Za-z])",
@@ -230,6 +346,8 @@ SHAPES = {
     "public-ip": "<public-ipv4>",
     "ipv6-local-ula": "fc00::/7 address",
     "ipv6-local-ll": "fe80::/10 address",
+    "ipv6-public": "<public-ipv6>",
+    "deny": "<deny-pattern>",
     "mac": "xx:xx:xx:xx:xx:xx",
     "email": "<user>@<domain>",
     "internal-host": "<host>.<internal-tld>",
@@ -249,34 +367,79 @@ SHAPES = {
 }
 
 
-def _ipv4_findings(line, allow, path):
+def _classify_v4(ip, allow, path):
+    """(class, shape) for a routable or private address that is not allowed, else None."""
+    a, b = ip.packed[0], ip.packed[1]
+    if a == 0 or a == 127 or a >= 224 or allow.ip_ok(ip, path):
+        return None
+    if a == 10:
+        return "private-ip", SHAPES["private-10"]
+    if a == 172 and 16 <= b <= 31:
+        return "private-ip", SHAPES["private-172"]
+    if a == 192 and b == 168:
+        return "private-ip", SHAPES["private-192"]
+    if a == 169 and b == 254:
+        return "private-ip", SHAPES["private-169"]
+    if a == 100 and 64 <= b <= 127:
+        return "cgnat-ip", SHAPES["cgnat-ip"]
+    return "public-ip", SHAPES["public-ip"]
+
+
+def _ipv4_findings(line, allow, path, prev=""):
     for m in RE4.finditer(line):
         octs = [int(g) for g in m.groups()]
         if any(o > 255 for o in octs):
             continue
-        a, b = octs[0], octs[1]
-        if a == 255 and all(o in _MASK_OCT for o in octs):
+        if octs[0] == 255 and all(o in _MASK_OCT for o in octs):
             continue
-        if a == 0 or a == 127 or a >= 224:
-            continue
-        ip = ipaddress.IPv4Address(".".join(map(str, octs)))
-        if allow.ip_ok(ip, path):
-            continue
-        if a == 10:
-            yield "private-ip", SHAPES["private-10"]
-        elif a == 172 and 16 <= b <= 31:
-            yield "private-ip", SHAPES["private-172"]
-        elif a == 192 and b == 168:
-            yield "private-ip", SHAPES["private-192"]
-        elif a == 169 and b == 254:
-            yield "private-ip", SHAPES["private-169"]
-        elif a == 100 and 64 <= b <= 127:
-            yield "cgnat-ip", SHAPES["cgnat-ip"]
-        else:
-            yield "public-ip", SHAPES["public-ip"]
+        r = _classify_v4(ipaddress.IPv4Address(bytes(octs)), allow, path)
+        if r:
+            yield r
 
 
-def _ipv6_findings(line, allow, path):
+def _ipv4_alt_findings(line, allow, path, prev=""):
+    """IPv4 written as one integer, 0x hex, dotted hex or octal octets.
+
+    Only a token that stands alone counts, and an ordinary-looking number is an address
+    only when it decodes to a routable, non-documentation one.  Integers and bare hex that
+    decode to a public address additionally need an ip/host/server word just before them,
+    so timestamps, sizes and magic numbers stay quiet.
+    """
+    for m in RE4_DEC.finditer(line):
+        v = int(m.group(1))
+        if v > 0xFFFFFFFF:
+            continue
+        r = _classify_v4(ipaddress.IPv4Address(v), allow, path)
+        if not r:
+            continue
+        ctx = bool(RE_IPCTX.search(line[max(0, m.start() - 24) : m.start()]))
+        if ctx or (len(m.group(1)) == 10 and r[0] == "private-ip" and v >= 0xA9FE0000):
+            yield r
+    for m in RE4_HEX.finditer(line):
+        r = _classify_v4(ipaddress.IPv4Address(int(m.group(1), 16)), allow, path)
+        if r and (r[0] != "public-ip" or RE_IPCTX.search(line[max(0, m.start() - 24) : m.start()])):
+            yield r
+    for m in RE4_HEXQ.finditer(line):
+        octs = [int(g, 16) for g in m.groups()]
+        r = _classify_v4(ipaddress.IPv4Address(bytes(octs)), allow, path)
+        if r:
+            yield r
+    for m in RE4_OCT.finditer(line):
+        parts = m.groups()
+        if not any(len(x) > 1 and x[0] == "0" for x in parts):
+            continue
+        try:
+            octs = [int(x, 8) if x[0] == "0" and len(x) > 1 else int(x) for x in parts]
+        except ValueError:
+            continue
+        if any(o > 255 for o in octs):
+            continue
+        r = _classify_v4(ipaddress.IPv4Address(bytes(octs)), allow, path)
+        if r:
+            yield r
+
+
+def _ipv6_findings(line, allow, path, prev=""):
     if line.count(":") < 2:
         return
     for m in RE6.finditer(line):
@@ -284,19 +447,25 @@ def _ipv6_findings(line, allow, path):
             ip = ipaddress.IPv6Address(m.group(0))
         except ValueError:
             continue
+        if ip.ipv4_mapped is not None:
+            if allow.ip_ok(ip, path):
+                continue
+            r = _classify_v4(ip.ipv4_mapped, allow, path)
+            if r:
+                yield r
+            continue
+        if ip.is_unspecified or ip.is_loopback or ip.is_multicast or allow.ip_ok(ip, path):
+            continue
         n = int(ip)
         if n >> 121 == 0x7E:
-            kind = "ipv6-local-ula"
+            yield "ipv6-local", SHAPES["ipv6-local-ula"]
         elif n >> 118 == 0x3FA:
-            kind = "ipv6-local-ll"
+            yield "ipv6-local", SHAPES["ipv6-local-ll"]
         else:
-            continue
-        if allow.ip_ok(ip, path):
-            continue
-        yield "ipv6-local", SHAPES[kind]
+            yield "ipv6-public", SHAPES["ipv6-public"]
 
 
-def _mac_findings(line, allow, path):
+def _mac_findings(line, allow, path, prev=""):
     for m in REMAC.finditer(line):
         norm = m.group(0).lower().replace("-", ":")
         if len(set(norm.replace(":", ""))) == 1 and norm[0] in "0f":
@@ -304,12 +473,25 @@ def _mac_findings(line, allow, path):
         if norm.startswith(_MAC_DOC_PREFIX) or allow.str_ok(norm, path):
             continue
         yield "mac", SHAPES["mac"]
+    ctx = bool(REMAC_CTX.search(line) or REMAC_CTX.search(prev))
+    for m in REMAC4.finditer(line):
+        v = m.group(0).replace(".", "").lower()
+        if (any(c in "abcdef" for c in v) or ctx) and not allow.str_ok(v, path):
+            yield "mac", SHAPES["mac"]
+    if not REMAC_NOT.search(line):
+        for m in REMAC12.finditer(line):
+            v = m.group(0).lower()
+            if len(set(v)) == 1 or allow.str_ok(v, path):
+                continue
+            mixed = not v.isdigit() and not v.isalpha()
+            if ctx or mixed:
+                yield "mac", SHAPES["mac"]
 
 
-def _email_findings(line, allow, path):
+def _email_findings(line, allow, path, prev=""):
     for m in REMAIL.finditer(line):
-        local, dom = m.group(1).lower(), m.group(2).lower()
-        if dom in _DOC_EMAIL or dom.endswith(_DOC_EMAIL_SUFFIX) or local == "git":
+        dom = m.group(2).lower()
+        if dom in _DOC_EMAIL or dom.endswith(_DOC_EMAIL_SUFFIX):
             continue
         if allow.str_ok(m.group(0), path):
             continue
@@ -333,25 +515,25 @@ def _internal_hosts(line):
             yield ".".join(labels[: last + 1])
 
 
-def _host_findings(line, allow, path):
+def _host_findings(line, allow, path, prev=""):
     for host in _internal_hosts(line):
         if allow.str_ok(host, path):
             continue
         yield "internal-host", SHAPES["internal-host"]
 
 
-def _radio_findings(line, allow, path):
-    if RECALL_CTX.search(line):
+def _radio_findings(line, allow, path, prev=""):
+    if RECALL_CTX.search(line) or RECALL_CTX.search(prev):
         for m in RECALL.finditer(line):
             if not allow.str_ok(m.group(0), path):
                 yield "callsign", SHAPES["callsign"]
-    if REGRID_CTX.search(line):
+    if REGRID_CTX.search(line) or REGRID_CTX.search(prev):
         for m in REGRID.finditer(line):
             if not allow.str_ok(m.group(0), path):
                 yield "grid", SHAPES["grid"]
 
 
-def _secret_findings(line, allow, path):
+def _secret_findings(line, allow, path, prev=""):
     for m in REDISCORD.finditer(line):
         if not _is_placeholder(m.group(2)):
             yield "webhook", SHAPES["webhook-discord"]
@@ -384,7 +566,7 @@ def _secret_findings(line, allow, path):
         yield "secret-token", SHAPES["secret-token"]
 
 
-def _cloud_findings(line, allow, path):
+def _cloud_findings(line, allow, path, prev=""):
     for rx in (REARN, REAWSACCT):
         for m in rx.finditer(line):
             v = m.group(1)
@@ -404,6 +586,7 @@ def _cloud_findings(line, allow, path):
 
 _DETECTORS = (
     _ipv4_findings,
+    _ipv4_alt_findings,
     _ipv6_findings,
     _mac_findings,
     _email_findings,
@@ -414,20 +597,61 @@ _DETECTORS = (
 )
 
 
-def scan_text(text, allow, path=None):
+def _normalize(line):
+    """Undo the cheap disguises: zero-width characters, HTML entities, %XX, fullwidth forms."""
+    if line.isascii() and "&" not in line and "%" not in line:
+        return line
+    if not line.isascii():
+        line = line.translate(_ZW)
+    if "&" in line:
+        line = html.unescape(line)
+    if "%" in line:
+        line = urllib.parse.unquote(line)
+    if not line.isascii():
+        line = unicodedata.normalize("NFKC", line).translate(_ZW)
+    return line
+
+
+def _split_run_findings(ipline, nxt, allow, path):
+    """A dotted run that ends one line and starts the next: 10.23. / 45.67.
+
+    Only a private or shared-space result counts: a wrapped section number such as 1.2. / 3.4
+    would otherwise read as a public address.
+    """
+    tail = RETAIL.search(ipline.rstrip())
+    head = REHEAD.match(REEMPH.sub("", nxt))
+    if tail and head:
+        for cls, shape in _ipv4_findings(tail.group(0) + head.group(1), allow, path):
+            if cls != "public-ip":
+                yield cls, shape
+
+
+def scan_text(text, allow, path=None, deny=None):
     """Return a list of Finding (one per line+class).  Never retains matched text."""
     out = []
     text = text.replace("\r\n", "\n").replace("\r", "\n")
-    for n, raw in enumerate(text.split("\n"), 1):
-        if len(raw) < 6:
+    raws = text.split("\n")
+    norm = [_normalize(r) for r in raws]
+    for n, raw in enumerate(raws, 1):
+        line = norm[n - 1]
+        if deny is not None and deny.hit(raw, line):
+            out.append(Finding(n, "deny", SHAPES["deny"]))
+        if len(line) < 4 and len(raw) < 4:
             continue
-        line = _strip_angle(raw)
-        seen = set()
+        prev = norm[n - 2] if n > 1 else ""
+        nxt = norm[n] if n < len(norm) else ""
+        line = _strip_angle(line)
+        ipline = REEMPH.sub("", line) if ("*" in line or "_" in line or "`" in line) else line
+        seen, hits = set(), []
+
         for det in _DETECTORS:
-            for cls, shape in det(line, allow, path):
-                if cls not in seen:
-                    seen.add(cls)
-                    out.append(Finding(n, cls, shape))
+            view = ipline if det in (_ipv4_findings, _ipv4_alt_findings) else line
+            hits.extend(det(view, allow, path, prev))
+        hits.extend(_split_run_findings(ipline, nxt, allow, path))
+        for cls, shape in hits:
+            if cls not in seen:
+                seen.add(cls)
+                out.append(Finding(n, cls, shape))
     return out
 
 
@@ -469,8 +693,8 @@ def _read_file(path, max_bytes):
         raise ScanError("not valid UTF-8") from None
 
 
-def scan_file(path, allow, max_bytes=DEFAULT_MAX_BYTES):
-    return scan_text(_read_file(path, max_bytes), allow, path)
+def scan_file(path, allow, max_bytes=DEFAULT_MAX_BYTES, deny=None):
+    return scan_text(_read_file(path, max_bytes), allow, _repo_rel(path), deny)
 
 
 def _expand(arg, all_files, errors):
@@ -510,38 +734,68 @@ def _expand(arg, all_files, errors):
         stack.extend(reversed(subdirs))
 
 
-def run(paths, allow, all_files=False, max_bytes=DEFAULT_MAX_BYTES):
+def _safe_name(name):
+    return re.sub(r"[^A-Za-z0-9._-]", "?", name)
+
+
+def display_path(path, index, deny=None):
+    """A path that is safe to print: no control characters, no identifier from the name.
+
+    A path made only of [A-Za-z0-9._/-] that carries no identifier prints as is.  Anything else
+    prints as path#<index>/<basename> with every other character shown as '?', and the basename
+    becomes <redacted> when the name (original or escaped) looks like an identifier itself.
+    """
+    safe = re.fullmatch(r"[A-Za-z0-9._/-]*", path) is not None
+    probe = Allow()  # the caller's waivers do not apply to what we print
+    names = [path.replace("/", " ")]
+    if safe and not any(scan_text(x, probe, None, deny) for x in names) and not path.startswith("-"):
+        return path
+    base = path.rsplit("/", 1)[-1]
+    shown = _safe_name(base)
+    if any(scan_text(x, probe, None, deny) for x in (base, shown, path)):
+        shown = "<redacted>"
+    return f"path#{index}/{shown}"
+
+
+def run(paths, allow, all_files=False, max_bytes=DEFAULT_MAX_BYTES, deny=None):
     findings, errors, nfiles = [], [], 0
+    walk_errors = []
     for arg in paths:
-        for p in _expand(arg, all_files, errors):
+        for p in _expand(arg, all_files, walk_errors):
             nfiles += 1
             try:
-                for f in scan_file(p, allow, max_bytes):
-                    findings.append((p, f))
+                for f in scan_file(p, allow, max_bytes, deny):
+                    findings.append((p, nfiles, f))
             except ScanError as e:
-                errors.append((p, str(e)))
+                errors.append((p, str(e), nfiles))
+    errors.extend((p, r, 0) for p, r in walk_errors)
     return findings, errors, nfiles
 
 
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="identscan", description=__doc__.split("\n")[0])
     ap.add_argument("paths", nargs="+")
-    ap.add_argument("--allow", metavar="FILE")
+    ap.add_argument("--allow", metavar="FILE", help="waivers: 'value | reason' or 'path | value | reason'")
+    ap.add_argument("--deny-file", metavar="FILE", help="private patterns to flag, one literal-or-regex per line")
     ap.add_argument("--format", choices=("text", "json"), default="text")
     ap.add_argument("--all", action="store_true", help="scan every file in directories")
     ap.add_argument("--max-bytes", type=int, default=DEFAULT_MAX_BYTES)
     args = ap.parse_args(argv)
 
-    allow = Allow()
-    if args.allow:
-        try:
+    allow, deny = Allow(), None
+    try:
+        if args.allow:
             allow = Allow.load(args.allow)
-        except AllowError as e:
-            print(f"identscan: error: {e}", file=sys.stderr)
-            return 2
+        if args.deny_file:
+            deny = Deny.load(args.deny_file)
+    except AllowError as e:
+        print(f"identscan: error: {e}", file=sys.stderr)
+        return 2
 
-    findings, errors, nfiles = run(args.paths, allow, args.all, args.max_bytes)
+    findings, errors, nfiles = run(args.paths, allow, args.all, args.max_bytes, deny)
     code = 2 if errors else (1 if findings else 0)
+    fshow = [(display_path(p, i, deny), f) for p, i, f in findings]
+    eshow = [(display_path(p, i, deny), r) for p, r, i in errors]
     if args.format == "json":
         print(
             json.dumps(
@@ -549,16 +803,16 @@ def main(argv=None):
                     "tool": "identscan",
                     "exit": code,
                     "files_scanned": nfiles,
-                    "findings": [{"file": p, "line": f.line, "class": f.cls, "shape": f.shape} for p, f in findings],
-                    "errors": [{"file": p, "reason": r} for p, r in errors],
+                    "findings": [{"file": p, "line": f.line, "class": f.cls, "shape": f.shape} for p, f in fshow],
+                    "errors": [{"file": p, "reason": r} for p, r in eshow],
                 },
                 indent=1,
             )
         )
     else:
-        for p, f in findings:
+        for p, f in fshow:
             print(f"{p}:{f.line}:{f.cls}: {f.shape}")
-        for p, r in errors:
+        for p, r in eshow:
             print(f"{p}: error: {r}", file=sys.stderr)
         print(f"identscan: files={nfiles} findings={len(findings)} errors={len(errors)} exit={code}")
     return code
