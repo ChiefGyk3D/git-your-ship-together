@@ -1734,3 +1734,191 @@ class TestRound5(Tmp):
             contextlib.redirect_stderr(io.StringIO()),
         ):
             self.assertEqual(ids.main([t, "--deny-file", lit]), 0)
+
+
+_PATCHED_MAIN = (
+    "import importlib.util, sys\n"
+    "from unittest import mock\n"
+    "spec = importlib.util.spec_from_file_location('identscan', sys.argv[1])\n"
+    "m = importlib.util.module_from_spec(spec)\n"
+    "spec.loader.exec_module(m)\n"
+    "with (\n"
+    "    mock.patch.object(m, '_regex_is_safe', return_value=True),\n"
+    "    mock.patch.object(m, 'DENY_BUDGET_SECONDS', 1.0),\n"
+    "):\n"
+    "    sys.exit(m.main(sys.argv[2:]))\n"
+)
+
+
+def patched_main(*argv, timeout=30):
+    """Run main() in a subprocess with the regex-safety check off and a 1 s deny budget, under a hard
+    timeout, so a regression that runs a deny regex in the parent fails instead of hanging the suite."""
+    p = subprocess.run([sys.executable, "-I", "-c", _PATCHED_MAIN, TOOL, *argv], capture_output=True, timeout=timeout)
+    return p.returncode, p.stdout.decode("utf-8", "replace"), p.stderr.decode("utf-8", "replace")
+
+
+def j(*parts, sep=":"):
+    """Assemble an identifier at runtime so no literal address sits in this file."""
+    return sep.join(parts)
+
+
+class TestRound6(Tmp):
+    # ---- A: 2- and 3-part legacy IPv4 forms and version text
+    def test_version_text_is_not_an_address(self):
+        for t in (
+            "Ubuntu Server 24.04",
+            "Debian host 12.5",
+            "nginx server 1.25.3",
+            "Server 24.04",
+            "host 12.5",
+            "gateway 3.4",
+            "peer 5.6.7",
+            "hostname 7.2",
+        ):
+            self.assertEqual(cls_set(t), set(), t)
+
+    def test_short_legacy_forms_that_decode_private_still_count_after_any_word(self):
+        for t in ("server 10.1", "host 10.1.2", "gateway 192.168.1", "peer 100.64.1", "ip 10.1", "Server 172.16.5"):
+            self.assertTrue(cls_set(t) & {"private-ip", "cgnat-ip"}, t)
+
+    def test_short_legacy_public_needs_an_ip_or_url_word(self):
+        # the documented false negative: "server 8.8" is indistinguishable from a version number
+        self.assertEqual(cls_set("ip 8.8"), {"public-ip"})
+        self.assertEqual(cls_set("address 8.8.8"), {"public-ip"})
+        self.assertEqual(cls_set("http://8.8"), {"public-ip"})
+        self.assertEqual(cls_set("server 8.8"), set())
+
+    # ---- B1: hard-wrapped identifiers
+    def test_wrapped_email_after_the_dot(self):
+        a = "alice@" + "corp."
+        self.assertEqual(cls_set(f"contact {a}\nio"), {"email"})
+        self.assertEqual(cls_set(f"contact {a}\n  io"), {"email"})
+        self.assertEqual(cls_set("contact alice@" + "sub.mail.\nio"), {"email"})
+        self.assertEqual(cls_set("contact alice@" + "example.\ncom"), set())  # documentation domain
+        self.assertEqual(cls_set(f"mail bob@{'corp.'}\nThen we go"), set())  # sentence, capitalized
+
+    def test_wrapped_mac_inside_a_byte(self):
+        self.assertEqual(cls_set("MAC " + j("aa", "bb", "c") + "\n" + j("c", "dd", "ee", "12")), {"mac"})
+        self.assertEqual(cls_set("MAC " + j("aa", "bb", "cc", "dd", "ee", "1") + "\n2"), {"mac"})
+        self.assertEqual(cls_set("MAC " + j("aa", "bb", "cc", "dd", "e") + "\n" + j("e", "12")), {"mac"})
+        self.assertEqual(cls_set("time 12:30:5\n5 more"), set())
+        self.assertEqual(cls_set("ratio 1:2:3\nand more"), set())
+
+    def test_wrapped_ipv6_before_the_double_colon(self):
+        self.assertEqual(cls_set("address " + j("2606", "4700", "4700") + "\n::" + "1111"), {"ipv6-public"})
+        self.assertEqual(cls_set("address " + j("2606", "4700", "4700") + "\n  ::" + "1111"), {"ipv6-public"})
+        self.assertEqual(cls_set("address " + j("2001", "db8", "abcd") + "\n::7"), set())  # documentation range
+
+    # ---- B2: context-qualified two-group public IPv6
+    def test_two_group_public_ipv6_with_a_context(self):
+        for t in (
+            "address: " + j("2606", "") + ":1111",
+            "dns=" + j("2a00", "") + ":5",
+            "host " + j("2620", "") + ":1",
+            "ip6:" + j("2606", "") + ":1111",
+            "addr: " + j("2a00", "") + ":5",
+            "server " + j("2606", "") + ":1111",
+        ):
+            self.assertEqual(cls_set(t), {"ipv6-public"}, t)
+
+    def test_bare_double_colon_code_is_not_an_address(self):
+        for t in (
+            "std::vector<int> v;",
+            "Foo::bar()",
+            "use crate::fab::dead;",
+            "let x = a::b;",
+            "Beef::cafe",
+            "std::collections::HashMap",
+            "namespace fab::dead {",
+            "host: Foo::bar",
+            "server::dead::beef",
+            "x = " + j("2606", "") + ":1111",  # no context word, only two groups
+            "see " + j("2620", "") + ":1",
+        ):
+            self.assertEqual(cls_set(t), set(), t)
+
+    # ---- B3: --strict-deny and a malformed regex
+    def test_strict_deny_counts_a_malformed_regex(self):
+        t = self.w("a.md", "hello world\n")
+        for bad in ("(", "[a-", "a(b", "*abc"):
+            d = self.w("deny.txt", bad + "\n")
+            self.assertEqual(ids.Deny.load(d).literal_count, 1, bad)
+            code, out, err = run(t, "--deny-file", d, "--strict-deny")
+            self.assertEqual(code, 2, bad)
+            self.assertIn("1 deny pattern(s) treated as literal", err)
+            self.assertNotIn(bad, out)
+            if len(bad) > 1:
+                self.assertNotIn(bad, err)
+            self.assertEqual(run(t, "--deny-file", d)[0], 0, bad)  # not strict: still just a note
+
+    def test_strict_deny_counts_every_entry_taken_as_text(self):
+        d = self.w("deny.txt", "(\nplain words\n" + TestRound5.CODEX + "\nzz[0-9]+\n")
+        self.assertEqual(ids.Deny.load(d).literal_count, 2)
+
+    def test_malformed_regex_still_matches_as_text(self):
+        d = self.w("deny.txt", "a(b\n")
+        t = self.w("a.md", "has A(B inside\n")
+        self.assertEqual(run(t, "--deny-file", d)[0], 1)
+
+    # ---- B4: one-part hex IPv4 with fewer than eight digits
+    def test_short_hex_ipv4(self):
+        self.assertEqual(cls_set("ip: 0x" + "a000001"), {"private-ip"})
+        self.assertEqual(cls_set("host 0x" + "a000001"), {"private-ip"})
+        self.assertEqual(cls_set("ip 0x" + "2d4c803"), {"public-ip"})
+        self.assertEqual(cls_set("value 0x" + "a000001"), set())  # fewer than 8 digits needs an ip word
+        self.assertEqual(cls_set("0x" + "a000001"), set())
+        for small in ("ip: 0x1f", "ip 0xffffff", "ip 0x0a00001", "ip 0xdead", "addr 0x1"):
+            self.assertEqual(cls_set(small), set(), small)  # below 0x01000000 is no address
+        self.assertEqual(cls_set("addr 0x" + "0a000001"), {"private-ip"})  # eight digits: unchanged
+        self.assertEqual(cls_set("flags 0x" + "0a000001"), {"private-ip"})
+
+    # ---- C1: {,n} is a quantifier
+    def test_open_low_bound_quantifier(self):
+        self.assertFalse(ids._regex_is_safe("(a|aa){,40}"))
+        self.assertFalse(ids._regex_is_safe("(a+){,5}"))
+        self.assertFalse(ids._regex_is_safe("a{,64}a{,64}a{,64}b"))
+        self.assertFalse(ids._regex_is_safe("a{,}b{,}c{,}d"))
+        self.assertTrue(ids._regex_is_safe("foo[0-9]{,3}bar"))
+        self.assertTrue(ids._regex_is_safe("a{}b{}c{}d"))  # {} is literal text to re, not a quantifier
+        self.assertEqual(ids._max_width("a{,5}"), 5)
+
+    # ---- C2: a degraded file-name pass never prints the name
+    def test_degraded_name_pass_prints_only_the_redacted_form(self):
+        d = self.w("deny.txt", "(a?){32}a{32}\n")
+        t = self.w("a" * 32 + ".md", "ip 10.99.88.77\n")
+        code, out, err = patched_main(t, "--deny-file", d)
+        self.assertEqual(code, 2)
+        self.assertIn("deny matching degraded", err)
+        self.assertIn("path#1/<redacted>:1:private-ip", out)
+        self.assertNotIn("a" * 32, out + err)
+
+    def test_healthy_name_pass_still_prints_a_plain_name(self):
+        d = self.w("deny.txt", "zz[0-9]+\n")
+        t = self.w("plain-name.md", "ip 10.99.88.77\n")
+        code, out, err = patched_main(t, "--deny-file", d)
+        self.assertEqual(code, 1)
+        self.assertIn(t + ":1:private-ip", out)
+
+    # ---- C3: a leading (?i) is the case flag the matcher already applies
+    def test_leading_case_flag_is_stripped(self):
+        d = ids.Deny.load(self.w("deny.txt", "(?i)AbCd\n"))
+        self.assertIsNone(d.pats[0][0])
+        self.assertEqual(d.literal_count, 0)
+        self.assertEqual(d.pats[0][1], "abcd")
+        t = self.w("a.md", "has aBcD inside\n")
+        code, out, err = run(t, "--deny-file", self.w("deny2.txt", "(?i)AbCd\n"), "--strict-deny")
+        self.assertEqual(code, 1)
+        self.assertIn(":1:deny", out)
+        r = ids.Deny.load(self.w("deny3.txt", "(?i)zz[0-9]+\n"))
+        self.assertIsNotNone(r.pats[0][0])
+        self.assertEqual(r.literal_count, 0)
+        with self.assertRaises(ids.AllowError):
+            ids.Deny.load(self.w("deny4.txt", "(?i)\n"))
+
+    # ---- C4: the file-name pass runs under a timeout
+    def test_file_names_are_matched_in_the_worker_under_a_timeout(self):
+        d = self.w("deny.txt", TestRound5.CODEX + "\n")
+        t = self.w("a" * 200 + "!.md", "ip 10.99.88.77\n")
+        code, out, err = patched_main(t, "--deny-file", d, timeout=30)
+        self.assertEqual(code, 2)
+        self.assertIn(":1:private-ip", out)

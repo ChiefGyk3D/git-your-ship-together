@@ -101,7 +101,7 @@ publish).
 | `scripts/doppler-ci-set.sh` | Set one Doppler secret without the value touching a command line |
 | `.github/requirements/` | `pip-audit` and `semgrep`: the one-line `.in` and the hash lock `security.yml` carries inline |
 | `scripts/tool_locks.py` | Resolves those locks (`--relock`) and copies them into `security.yml`; `--check` fails on a difference |
-| `scripts/identscan.py` | Fails a docs build on leaked identifiers a secret scanner misses (private and public IPs, MACs, emails, internal hostnames, callsigns, tokens). Prints `file:line:class` and a fixed shape, never the value; `--allow FILE` takes `value \| reason` lines (or `path \| value \| reason`, the path exact unless it spells a `*`) and refuses an entry with no reason; `--deny-file FILE` flags caller-private patterns as `deny` without echoing them; exit 0 clean, 1 findings, 2 cannot tell |
+| `scripts/identscan.py` | Fails a docs build on leaked identifiers a secret scanner misses (private and public IPs, MACs, emails, internal hostnames, callsigns, tokens). Prints `file:line:class` and a fixed shape, never the value; `--allow FILE` takes `value \| reason` lines (or `path \| value \| reason`, the path exact unless it spells a `*`) and refuses an entry with no reason; `--deny-file FILE` flags caller-private patterns as `deny` without echoing them; a deny entry that is not a usable regex (invalid or unsafe) is matched as plain text, and `--strict-deny` makes that exit 2; exit 0 clean, 1 findings, 2 cannot tell |
 | `scripts/gen_wiki.py` | Builds this wiki from `docs/wiki/` and renders each workflow's inputs table from its YAML |
 | `fixture/` | The smallest project that exercises every job |
 | `tests/` | The [contract](Testing-and-the-contract.md), as pytest |

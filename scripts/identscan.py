@@ -208,7 +208,8 @@ class Allow:
         return False
 
 
-_QUANT = re.compile(r"\{(\d+)(,(\d*))?\}")
+# {n}, {n,}, {n,m}, {,m} (= {0,m}) and {,} (= {0,}); a bare {} is literal text to re
+_QUANT = re.compile(r"\{(?:(\d+)(,(\d*))?|,(\d*))\}")
 
 
 def _regex_is_safe(pat):
@@ -261,8 +262,11 @@ def _regex_is_safe(pat):
         elif c == "{":
             qm = _QUANT.match(pat, i)
             if qm:
-                lo = int(qm.group(1))
-                hi = lo if qm.group(2) is None else (None if qm.group(3) == "" else int(qm.group(3)))
+                if qm.group(4) is not None:  # {,m}
+                    lo, hi = 0, (None if qm.group(4) == "" else int(qm.group(4)))
+                else:
+                    lo = int(qm.group(1))
+                    hi = lo if qm.group(2) is None else (None if qm.group(3) == "" else int(qm.group(3)))
                 if hi is None or hi > 64:
                     unbounded += 1  # {n,} and wide {n,m} behave like * for backtracking cost
                 if hi is None or hi - lo >= 2:
@@ -386,6 +390,8 @@ class Deny:
                 continue
             if len(line) > MAX_CONFIG_LINE:
                 raise AllowError(f"deny file line {n}: line too long")
+            if s[:4].lower() == "(?i)":
+                s = s[4:]  # matching is case-insensitive already; keep a plain string a substring test
             if len(s) > MAX_DENY_LEN or len(d.pats) >= MAX_DENY_PATTERNS:
                 raise AllowError(f"deny file line {n}: pattern too long or too many patterns")
             rx = None
@@ -393,10 +399,10 @@ class Deny:
                 try:
                     rx = re.compile(s, re.I)
                 except re.error:
-                    pass
-            if rx is not None and not _regex_is_safe(s):
-                rx = None
-                d.literal_count += 1
+                    d.literal_count += 1  # looks like a regex, does not compile: taken as text
+                if rx is not None and not _regex_is_safe(s):
+                    rx = None
+                    d.literal_count += 1
             if (rx or re.compile(re.escape(s))).search(""):
                 raise AllowError(f"deny file line {n}: pattern matches the empty string")
             d.pats.append((rx, s.lower(), _max_width(s) if rx is not None else len(s)))
@@ -470,6 +476,10 @@ RE6_AFTER = re.compile(RE6_BODY)
 RE6_PREFIX = re.compile(
     r"(?<![\w])(?:ip6|ipv6|inet6|addr|address|aaaa|ip|via|dns|ns|gw|peer|host|server|a)[:=]\s?", re.I
 )
+RE6_CTX = re.compile(
+    r"(?:\b(?:ip6|ipv6|inet6|ip|addr(?:ess)?|host(?:name)?|server|gateway|peer|dns|nameserver|via|aaaa)\b)\W{0,3}$",
+    re.I,
+)
 REMAC = re.compile(
     r"(?<![0-9A-Fa-f:-])(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}(?:[:-][0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2})?"
     r"(?![0-9A-Fa-f]|[:-][0-9A-Fa-f])"
@@ -485,11 +495,14 @@ REMAC_CTX = re.compile(r"(?<![A-Za-z])(?:mac|ether|hwaddr|hw[\s_-]?addr(?:ess)?|
 REMAC_NOT = re.compile(r"(?<![A-Za-z])(?:commit|sha\d*|hash|rev|checksum|digest|git|md5|tag)(?![A-Za-z])", re.I)
 RE4_LONG = re.compile(r"(?<![\w.])(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(?=\.\d)")
 RE4_DEC = re.compile(r"(?<![\w.:-])(\d{8,10})(?![\w-]|\.\w)")
-RE4_HEX = re.compile(r"(?<![\w.:-])0[xX]([0-9A-Fa-f]{8})(?![\w-]|\.\w)")
+RE4_HEX = re.compile(r"(?<![\w.:-])0[xX]([0-9A-Fa-f]{1,8})(?![\w-]|\.\w)")
 RE4_HEXQ = re.compile(
     r"(?<![\w.])0[xX]([0-9A-Fa-f]{1,2})\.0[xX]([0-9A-Fa-f]{1,2})\.0[xX]([0-9A-Fa-f]{1,2})\.0[xX]([0-9A-Fa-f]{1,2})(?![\w-]|\.\w)"
 )
 RE4_OCT = re.compile(r"(?<![\w.])(\d{1,4})\.(\d{1,4})\.(\d{1,4})\.(\d{1,4})(?![\w-]|\.\w)")
+# the words that make a short (2- or 3-part) legacy form count when it decodes to a public address;
+# server/host/gateway/peer are left out because "Server 24.04" and "nginx server 1.25.3" are versions
+RE_IPCTX_STRONG = re.compile(r"(?:\bip\b|\baddr(?:ess)?\b|https?://)\W{0,3}$", re.I)
 RE_IPCTX = re.compile(
     r"(?:\bip\b|\baddr(?:ess)?\b|\bhost(?:name)?\b|\bserver\b|\bgateway\b|\bpeer\b|https?://)\W{0,3}$", re.I
 )
@@ -656,7 +669,12 @@ def _ipv4_alt_findings(line, allow, path, prev=""):
             yield r
     for m in RE4_HEX.finditer(line):
         r = _classify_v4(ipaddress.IPv4Address(int(m.group(1), 16)), allow, path)
-        if r and (r[0] != "public-ip" or RE_IPCTX.search(line[max(0, m.start() - 24) : m.start()])):
+        if not r:
+            continue  # includes every value below 0x01000000 (0.x.x.x): 0x1f, 0xdead, 0xffffff
+        ctx = RE_IPCTX.search(line[max(0, m.start() - 24) : m.start()])
+        # eight digits: public needs a word, private does not.  Fewer digits (0xa000001) is a
+        # magic number unless an ip word says otherwise, whatever it decodes to.
+        if ctx or (len(m.group(1)) == 8 and r[0] != "public-ip"):
             yield r
     for m in RE4_HEXQ.finditer(line):
         octs = [int(g, 16) for g in m.groups()]
@@ -696,10 +714,14 @@ def _ipv4_legacy_findings(line, allow, path, prev=""):
 
     These look like version numbers, so a token only counts after an ip/host/server/gateway/peer/addr
     word or http:// within 24 characters, and only when it decodes to a routable, non-documentation
-    address.
+    address.  A 2- or 3-part form that decodes to a public address needs the stronger ip/addr/address
+    word or http:// ("Server 24.04" and "nginx server 1.25.3" are versions; "server 8.8" is the
+    accepted false negative); one that decodes to a private, CGNAT or link-local address counts after
+    any of the words ("server 10.1").
     """
     for m in RE4_ATON.finditer(line):
-        if not RE_IPCTX.search(line[max(0, m.start() - 24) : m.start()]):
+        before = line[max(0, m.start() - 24) : m.start()]
+        if not RE_IPCTX.search(before):
             continue
         try:
             vals = [_aton_part(x) for x in m.group(1).split(".")]
@@ -713,7 +735,7 @@ def _ipv4_legacy_findings(line, allow, path, prev=""):
             v = (v << 8) | x
         v = (v << (8 * (5 - n))) | vals[-1]
         r = _classify_v4(ipaddress.IPv4Address(v), allow, path)
-        if r:
+        if r and (n == 4 or r[0] != "public-ip" or RE_IPCTX_STRONG.search(before)):
             yield r
     for m in RE4_OCTAL12.finditer(line):
         if RE_IPCTX.search(line[max(0, m.start() - 24) : m.start()]) and int(m.group(1), 8) <= 0xFFFFFFFF:
@@ -726,10 +748,12 @@ def _ipv6_findings(line, allow, path, prev=""):
     if line.count(":") < 2:
         return
     cands = list(RE6.finditer(line))
+    prefixed = []
     for pm in RE6_PREFIX.finditer(line):
         m = RE6_AFTER.match(line, pm.end())
         if m:
             cands.append(m)
+            prefixed.append(m)
     for m in cands:
         if REEUI64.fullmatch(m.group(0)):
             continue  # eight two-digit groups is an EUI-64 hardware address; the MAC detector owns it
@@ -738,6 +762,7 @@ def _ipv6_findings(line, allow, path, prev=""):
         except ValueError:
             continue
         groups = sum(1 for g in m.group(0).split(":") if g)
+        ctx = m in prefixed or bool(RE6_CTX.search(line[max(0, m.start() - 24) : m.start()]))
         if ip.ipv4_mapped is not None:
             if allow.ip_ok(ip, path):
                 continue
@@ -752,8 +777,9 @@ def _ipv6_findings(line, allow, path, prev=""):
             yield "ipv6-local", SHAPES["ipv6-local-ula"]
         elif n >> 118 == 0x3FA:
             yield "ipv6-local", SHAPES["ipv6-local-ll"]
-        elif groups >= 3:
-            # a global address needs three explicit groups: Beef::cafe and "use ::dead;" are code, not hosts
+        elif groups >= 3 or (groups == 2 and ctx):
+            # a global address needs three explicit groups, or two after an ip/addr/host/dns word or an
+            # ip6:/addr:/dns= prefix: Beef::cafe, std::vector and "use ::dead;" are code, not hosts
             yield "ipv6-public", SHAPES["ipv6-public"]
 
 
@@ -922,6 +948,12 @@ _JOIN_EMAIL_TAIL = re.compile(r"(?<![\w.%+\"-])[\w.%+-]{1,64}@$")
 _JOIN_EMAIL_HEAD = re.compile(r"^\s*((?:[\w-]{1,63}\.)+(?:xn--[A-Za-z0-9-]{2,59}|[^\W\d_]{2,24}))(?![\w-])")
 _JOIN_MAC_TAIL = re.compile(r"(?<![0-9A-Fa-f:-])(?:[0-9A-Fa-f]{2}[:-]){1,7}$")
 _JOIN_MAC_HEAD = re.compile(r"^\s*([0-9A-Fa-f]{2}(?:[:-][0-9A-Fa-f]{2}){0,6})(?![0-9A-Fa-f:-])")
+_JOIN_EMAIL_DOT_TAIL = re.compile(r"(?<![\w.%+\"-])[\w.%+-]{1,64}@(?:[\w-]{1,63}\.)+$")
+_JOIN_EMAIL_DOT_HEAD = re.compile(r"^\s*((?:[\w-]{1,63}\.)*(?:xn--[A-Za-z0-9-]{2,59}|[a-z]{2,24}))(?![\w-])")
+_JOIN_MAC_MID_TAIL = re.compile(r"(?<![0-9A-Fa-f:-])(?:[0-9A-Fa-f]{2}[:-]){1,6}[0-9A-Fa-f]$")
+_JOIN_MAC_MID_HEAD = re.compile(r"^\s*([0-9A-Fa-f](?:[:-][0-9A-Fa-f]{2}){0,6})(?![0-9A-Fa-f:-])")
+_JOIN_V6_COLON_TAIL = re.compile(r"(?<![\w:.])(?:[0-9A-Fa-f]{1,4}:){1,6}[0-9A-Fa-f]{1,4}$")
+_JOIN_V6_COLON_HEAD = re.compile(r"^\s*(::[0-9A-Fa-f:]{0,38})(?![\w:-])")
 _JOIN_V6_TAIL = re.compile(r"(?<![\w:.])(?:[0-9A-Fa-f]{1,4}:){1,7}$")
 _JOIN_V6_HEAD = re.compile(r"^\s*([0-9A-Fa-f:]{1,40})(?![\w:-])")
 _JOIN_HOST_TAIL = re.compile(r"(?<![\w.-])([a-z][a-z0-9-]{0,62}\.)$")
@@ -947,6 +979,18 @@ def _split_run_findings(ipline, nxt, allow, path):
     h = _JOIN_EMAIL_HEAD.match(nxt)
     if t and h:
         yield from _email_findings(t.group(0) + h.group(1), allow, path)
+    t = _JOIN_EMAIL_DOT_TAIL.search(stripped)
+    h = _JOIN_EMAIL_DOT_HEAD.match(nxt)
+    if t and h:
+        yield from _email_findings(t.group(0) + h.group(1), allow, path)
+    t = _JOIN_MAC_MID_TAIL.search(stripped)
+    h = _JOIN_MAC_MID_HEAD.match(nxt)
+    if t and h:
+        yield from _mac_findings(t.group(0) + h.group(1), allow, path)
+    t = _JOIN_V6_COLON_TAIL.search(stripped)
+    h = _JOIN_V6_COLON_HEAD.match(nxt)
+    if t and h:
+        yield from _ipv6_findings(t.group(0) + h.group(1), allow, path)
     t = _JOIN_MAC_TAIL.search(stripped)
     h = _JOIN_MAC_HEAD.match(nxt)
     if t and h:
@@ -1219,12 +1263,16 @@ def _main(argv=None):
 
     if deny is not None and deny.literal_count:
         print(
-            f"identscan: note: {deny.literal_count} deny pattern(s) treated as literal text (unsafe regex)",
+            f"identscan: note: {deny.literal_count} deny pattern(s) treated as literal text (invalid or unsafe regex)",
             file=sys.stderr,
         )
     findings, errors, nfiles = run(args.paths, allow, args.all, args.max_bytes, deny)
     shown_paths = sorted({p for p, _, _ in findings} | {p for p, _, _ in errors})
+    before_names = (deny.degraded, deny.no_guard) if deny is not None else (0, False)
     denied = _denied_paths(deny, shown_paths)
+    # a name pass that was killed, cut short or ran unguarded cannot say which names the deny file hits,
+    # so no name is printed in the clear
+    names_unsure = deny is not None and (deny.degraded, deny.no_guard) != before_names
     degraded = deny.degraded if deny is not None else 0
     no_guard = deny is not None and deny.no_guard
     strict = args.strict_deny and deny is not None and deny.literal_count > 0
@@ -1233,8 +1281,8 @@ def _main(argv=None):
         print(f"identscan: note: deny matching degraded (budget) in {degraded} file(s); cannot tell", file=sys.stderr)
     if no_guard:
         print("identscan: note: deny regex pass ran without a kill guard (no fork); cannot tell", file=sys.stderr)
-    fshow = [(display_path(p, i, p in denied), f) for p, i, f in findings]
-    eshow = [(display_path(p, i, p in denied), r) for p, r, i in errors]
+    fshow = [(display_path(p, i, names_unsure or p in denied), f) for p, i, f in findings]
+    eshow = [(display_path(p, i, names_unsure or p in denied), r) for p, r, i in errors]
     if args.format == "json":
         print(
             json.dumps(
