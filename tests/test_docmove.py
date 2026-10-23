@@ -88,13 +88,21 @@ def text(repo, p):
     return read(repo, p).decode()
 
 
-def row(src, page="", action="move", order="", section=""):
-    return f"{src},{section},{page},{action},{order}"
+def row(src, page="", action="move", order="", section="", notes=None):
+    base = f"{src},{section},{page},{action},{order}"
+    return base if notes is None else f'{base},"{notes}"'
 
 
-def run_tool(repo, rows, *extra, header=HEADER, raw=None):
-    mp = Path(repo).parent / "map.csv"
+NOTES_HEADER = HEADER + ",notes"
+
+
+def run_tool(repo, rows, *extra, header=HEADER, raw=None, mapfile=None):
+    mp = Path(repo).parent / "map.csv" if mapfile is None else Path(repo) / mapfile
+    mp.parent.mkdir(parents=True, exist_ok=True)
     mp.write_bytes(raw if raw is not None else (header + "\n" + "\n".join(rows) + ("\n" if rows else "")).encode())
+    if mapfile is not None:  # a map kept in the repo is tracked, as the migration keeps it
+        git(repo, "add", "-A")
+        git(repo, "commit", "-q", "-m", "plan files")
     r = subprocess.run(
         [sys.executable, "-I", str(TOOL), "--repo", str(repo), "--map", str(mp), *extra],
         capture_output=True,
@@ -750,10 +758,17 @@ def test_uncovered_blank_lines_are_fine(tmp_path):
     assert rc == 0, (out, err)  # line 3 is blank
 
 
-def test_link_to_a_split_source_is_ambiguous_and_exits_2(tmp_path):
-    repo = split_repo(tmp_path, {"docs/other.md": "see [big](big.md#part-b)\n"})
-    err = fails(repo, SPLIT_ROWS)
-    assert "big.md" in err
+def test_link_to_a_split_source_resolves_to_the_first_section_and_is_reported(tmp_path):
+    repo = split_repo(tmp_path, {"docs/other.md": "intro\nsee [big](big.md#part-b)\n"})
+    before = snapshot(repo)
+    rc, out, err = run_tool(repo, SPLIT_ROWS, "--dry-run")
+    assert rc == 0, (out, err)
+    assert "approximate link: docs/other.md:2" in out
+    assert snapshot(repo) == before
+    rc, out, err = run_tool(repo, SPLIT_ROWS)
+    assert rc == 0, (out, err)
+    assert "[big](../Part-One.md#part-b)" in text(repo, "docs/other.md")
+    assert "approximate link: docs/other.md:2" in text(repo, "where-did-it-go.md")
 
 
 def test_literal_reference_to_a_split_source_is_reported_and_strict_fails(tmp_path):
@@ -853,6 +868,293 @@ def test_copied_text_is_checked_by_splitcheck_in_copy_mode(tmp_path):
         capture_output=True,
     )
     assert r.returncode == 0, r.stdout + r.stderr
+
+
+# --------------------------------------------------------------------------- real-registry slice
+# A small synthetic slice shaped like the pfsense migration registry (docs-migration/registry.csv
+# plus stubs.csv, concatenated under one header): mixed split/merge/archive sources, pages that
+# already live in wiki/, a keep row beside copy-into rows, and stubs whose notes say where they point.
+SLICE_FILES = {
+    "README.md": (
+        "# Proj\n"  # 1
+        "front door\n"  # 2
+        "see [guide](docs/guide.md#part-b) and [dir](docs/pfsense/)\n"  # 3
+        "## Docs\n"  # 4
+        "doc link one [changes](CHANGELOG.md)\n"  # 5
+        "doc link two [notes](docs/pfsense/NOTES.md)\n"  # 6
+    ),
+    "CHANGELOG.md": "# Changelog\n- first entry\n- second entry\n",
+    "wiki/Home.md": "# Home\nlanding text\n",
+    "docs/INDEX.md": "# Index\nindex one\nindex two\n## Tree\ntree a\ntree b\n",
+    "wiki/Glossary.md": "# Glossary\nterm [notes](../docs/pfsense/NOTES.md)\n",
+    "wiki/_Sidebar.md": "* [Home](Home.md)\n* [Guide](../docs/guide.md)\n",
+    "wiki/New-Start.md": "# New start\nbegin here\n",
+    "wiki/faq.md": "# FAQ\nq and a\n",
+    "docs/guide.md": (
+        "# Guide\n"  # 1
+        "intro\n"  # 2
+        "```\n"  # 3
+        "code line\n"  # 4
+        "```\n"  # 5
+        "## Part B\n"  # 6
+        "b one\n"  # 7
+        "```\n"  # 8
+        "other code\n"  # 9
+        "```\n"  # 10
+    ),
+    "docs/pfsense/NOTES.md": "# Notes\nnote body\n",
+    "docs/old.md": "# Old\nold body\n",
+    "scripts/run.sh": "#!/bin/sh\ncat docs/old.md\n",
+    ".gitleaksignore": "docs/old.md:generic-api-key:2\n",
+}
+
+SLICE_ROWS = [
+    row("wiki/Home.md", "Home", "merge-into", "1", notes="landing page: hand-written, best content"),
+    row("docs/INDEX.md", "Home", "merge-into", "2", "L1-L3", "index retired; L1-L3 feed the intro"),
+    row("docs/INDEX.md", "Archive-Index", "archive-into", "1", "L4-L6", "tree is archive only"),
+    row("README.md", "", "keep", "1", notes="front door stays"),
+    row("README.md", "Home", "copy-into", "3", "L4-L6", "README documentation links"),
+    row("CHANGELOG.md", "", "keep", "1", notes="release tool reads root"),
+    row("CHANGELOG.md", "Project-Changelog", "copy-into", "1", notes="derived by copy"),
+    row("wiki/Glossary.md", "Glossary", "move", "1", notes="already in place"),
+    row("wiki/_Sidebar.md", "_Sidebar", "move", "1", notes="rewrite later"),
+    row("wiki/New-Start.md", "Start-Here", "move", "1", notes="renamed to the landing name"),
+    row("wiki/faq.md", "FAQ", "move", "1", notes="case-only rename"),
+    row("docs/guide.md", "Install-Guide", "split-into", "1", "L1-L5", "first part"),
+    row("docs/guide.md", "Operate-Guide", "split-into", "1", "L6-L10", "second part"),
+    row("docs/pfsense/NOTES.md", "Reference-Notes", "move", "1"),
+    row("docs/old.md", "Reference-Old", "move", "1"),
+]
+SLICE_STUBS = [
+    row("wiki/New-Start.md", "New-Start", "stub", "1", notes="old wiki name for one release; points to Start-Here"),
+    row("CHANGELOG.md", "Changelog", "stub", "1", notes="old wiki name for one release; points to Project-Changelog"),
+    row("docs/guide.md", "Guide", "stub", "1", notes="old wiki name; points to Install-Guide and Operate-Guide"),
+    row("scripts/run.sh", "Run-Script", "stub", "1", notes="old wiki name; points to repo file scripts/run.sh"),
+]
+
+
+def slice_repo(tmp_path):
+    return make_repo(tmp_path, SLICE_FILES)
+
+
+def run_slice(repo, *extra, stubs=True):
+    return run_tool(
+        repo,
+        SLICE_ROWS + (SLICE_STUBS if stubs else []),
+        "--subfolder",
+        "wiki",
+        *extra,
+        header=NOTES_HEADER,
+    )
+
+
+def test_slice_dry_run_is_exit_0_and_lists_what_needs_review(tmp_path):
+    repo = slice_repo(tmp_path)
+    before = snapshot(repo)
+    rc, out, err = run_slice(repo, "--dry-run")
+    assert rc == 0, (out, err)
+    assert "approximate link: README.md:3" in out  # [guide](docs/guide.md#part-b)
+    assert "dangling directory link" in out and "README.md:3" in out  # [dir](docs/pfsense/)
+    assert snapshot(repo) == before
+
+
+def test_slice_strict_exits_2_on_approximate_and_dangling_links(tmp_path):
+    repo = slice_repo(tmp_path)
+    err = fails(repo, SLICE_ROWS + SLICE_STUBS, "--subfolder", "wiki", "--strict", header=NOTES_HEADER)
+    assert "approximate" in err or "dangling" in err
+
+
+def test_slice_apply_pages_in_order_in_place_and_without_provenance_on_the_in_place_file(tmp_path):
+    repo = slice_repo(tmp_path)
+    rc, out, err = run_slice(repo)
+    assert rc == 0, (out, err)
+    home = text(repo, "wiki/Home.md")
+    assert home == (
+        "# Home\nlanding text\n"  # the in-place page keeps its text, no provenance comment
+        "\n<!-- docmove: merged from docs/INDEX.md L1-L3 -->\n# Index\nindex one\nindex two\n"
+        "\n<!-- docmove: copied from README.md L4-L6 -->\n## Docs\n"
+        "doc link one [changes](../CHANGELOG.md)\ndoc link two [notes](Reference-Notes.md)\n"
+    )
+    assert text(repo, "wiki/Archive-Index.md") == (
+        "<!-- docmove: archived from docs/INDEX.md L4-L6 -->\n## Tree\ntree a\ntree b\n"
+    )
+    assert not (repo / "docs/INDEX.md").exists()
+    assert text(repo, "wiki/Glossary.md") == "# Glossary\nterm [notes](Reference-Notes.md)\n"
+    assert read(repo, "wiki/_Sidebar.md") == b"* [Home](Home.md)\n* [Guide](Install-Guide.md)\n"
+    assert (repo / "wiki/FAQ.md").read_text() == "# FAQ\nq and a\n"
+    assert "faq.md" not in git(repo, "ls-files").decode().replace("FAQ.md", "")
+    # the keep rows left the sources byte-identical apart from link fixes
+    assert read(repo, "CHANGELOG.md") == SLICE_FILES["CHANGELOG.md"].encode()
+    assert text(repo, "wiki/Project-Changelog.md").startswith("<!-- docmove: copied from CHANGELOG.md -->\n# Changelog")
+
+
+def test_slice_stub_reuses_the_path_a_move_vacated(tmp_path):
+    repo = slice_repo(tmp_path)
+    rc, out, err = run_slice(repo)
+    assert rc == 0, (out, err)
+    assert text(repo, "wiki/Start-Here.md") == "# New start\nbegin here\n"
+    stub = text(repo, "wiki/New-Start.md")
+    assert "[Start-Here](Start-Here.md)" in stub and "../" not in stub
+
+
+def test_slice_stub_notes_name_the_targets(tmp_path):
+    repo = slice_repo(tmp_path)
+    rc, out, err = run_slice(repo, "--repo-url", "https://github.com/example/proj")
+    assert rc == 0, (out, err)
+    # a copy-into page, not the page that holds the source's first section
+    assert "[Project-Changelog](Project-Changelog.md)" in text(repo, "wiki/Changelog.md")
+    two = text(repo, "wiki/Guide.md")
+    assert "[Install-Guide](Install-Guide.md)" in two and "[Operate-Guide](Operate-Guide.md)" in two
+    assert "../" not in two
+    run = text(repo, "wiki/Run-Script.md")
+    assert "https://github.com/example/proj/blob/main/scripts/run.sh" in run and "../" not in run
+
+
+def test_slice_repo_file_stub_without_repo_url_is_plain_text_and_bad_url_is_64(tmp_path):
+    repo = slice_repo(tmp_path)
+    rc, out, err = run_slice(repo)
+    assert rc == 0, (out, err)
+    run = text(repo, "wiki/Run-Script.md")
+    assert "`scripts/run.sh`" in run and "http" not in run
+    (tmp_path / "again").mkdir()
+    fails(
+        make_repo(tmp_path / "again", SLICE_FILES),
+        SLICE_ROWS + SLICE_STUBS,
+        "--subfolder",
+        "wiki",
+        "--repo-url",
+        "javascript:alert(1)",
+        header=NOTES_HEADER,
+        code=64,
+    )
+
+
+def test_stub_without_points_to_falls_back_and_says_so(tmp_path):
+    repo = slice_repo(tmp_path)
+    rows = [row("docs/old.md", "Reference-Old", "move"), row("docs/old.md", "Old", "stub", notes="no target named")]
+    rc, out, err = run_tool(repo, rows, "--subfolder", "wiki", header=NOTES_HEADER)
+    assert rc == 0, (out, err)
+    assert "stub fallback: wiki/Old.md" in out
+    assert "[Reference-Old](Reference-Old.md)" in text(repo, "wiki/Old.md")
+    assert "stub fallback: wiki/Old.md" in text(repo, "wiki/where-did-it-go.md")
+
+
+def test_stub_pointing_at_an_unknown_page_exits_2(tmp_path):
+    repo = slice_repo(tmp_path)
+    rows = [row("docs/old.md", "Reference-Old", "move"), row("docs/old.md", "Old", "stub", notes="points to Nowhere")]
+    fails(repo, rows, "--subfolder", "wiki", header=NOTES_HEADER)
+
+
+def test_link_map_overrides_the_default_page_for_a_split_source(tmp_path):
+    repo = slice_repo(tmp_path)
+    lm = tmp_path / "links.csv"
+    lm.write_text("source,page\ndocs/guide.md,Operate-Guide\n")
+    rc, out, err = run_slice(repo, "--link-map", str(lm), "--strict", "--dry-run")
+    assert "approximate link: README.md" not in out
+    # the directory link still dangles, so strict still stops; without it the override is what is rewritten
+    assert rc == 2
+    rc, out, err = run_slice(repo, "--link-map", str(lm))
+    assert rc == 0, (out, err)
+    assert "[guide](wiki/Operate-Guide.md#part-b)" in text(repo, "README.md")
+    assert "approximate link: README.md" not in out
+
+
+def test_link_map_errors(tmp_path):
+    repo = slice_repo(tmp_path)
+    bad = tmp_path / "bad.csv"
+    bad.write_text("source,page,extra\ndocs/guide.md,Operate-Guide,x\n")
+    fails(repo, SLICE_ROWS, "--subfolder", "wiki", "--link-map", str(bad), header=NOTES_HEADER, code=64)
+    bad.write_text("source,page\ndocs/guide.md,Reference-Notes\n")  # not one of the source's pages
+    fails(repo, SLICE_ROWS, "--subfolder", "wiki", "--link-map", str(bad), header=NOTES_HEADER)
+    bad.write_text("source,page\ndocs/unknown.md,Operate-Guide\n")
+    fails(repo, SLICE_ROWS, "--subfolder", "wiki", "--link-map", str(bad), header=NOTES_HEADER)
+
+
+def test_exclude_defaults_leave_gitleaks_fingerprints_and_the_map_alone(tmp_path):
+    files = dict(SLICE_FILES)
+    files["docs-migration/registry.csv"] = "docs/old.md,,Reference-Old,move\n"
+    files["plan/links.csv"] = "source,page\ndocs/guide.md,Install-Guide\n"
+    repo = make_repo(tmp_path, files)
+    lm = repo / "plan" / "links.csv"
+    rc, out, err = run_tool(
+        repo, SLICE_ROWS, "--subfolder", "wiki", "--link-map", str(lm), header=NOTES_HEADER, mapfile="plan/map.csv"
+    )
+    assert rc == 0, (out, err)
+    assert text(repo, ".gitleaksignore") == "docs/old.md:generic-api-key:2\n"  # a fingerprint, not a path
+    assert text(repo, "docs-migration/registry.csv") == "docs/old.md,,Reference-Old,move\n"
+    assert "docs/old.md,,Reference-Old,move,1" in text(repo, "plan/map.csv")  # the map names the old path
+    assert text(repo, "plan/links.csv") == "source,page\ndocs/guide.md,Install-Guide\n"
+    assert "wiki/Reference-Old.md" in text(repo, "scripts/run.sh")  # ordinary files are still rewritten
+
+
+def test_explicit_exclude_glob_keeps_matching_files_unrewritten(tmp_path):
+    repo = slice_repo(tmp_path)
+    rc, out, err = run_slice(repo, "--exclude", "scripts/*")
+    assert rc == 0, (out, err)
+    assert text(repo, "scripts/run.sh") == "#!/bin/sh\ncat docs/old.md\n"
+
+
+def test_reference_definition_inside_a_blockquote_or_list_item_is_rewritten(tmp_path):
+    files = {
+        "docs/old.md": "# Old\n",
+        "README.md": '> quote [r][a]\n>\n> [a]: docs/old.md\n\n- item [r][b]\n\n  [b]: docs/old.md "T"\n',
+    }
+    repo = make_repo(tmp_path, files)
+    rc, out, err = run_tool(repo, [row("docs/old.md", "Old.md")])
+    assert rc == 0, (out, err)
+    assert text(repo, "README.md") == '> quote [r][a]\n>\n> [a]: Old.md\n\n- item [r][b]\n\n  [b]: Old.md "T"\n'
+
+
+def test_links_inside_html_comments_are_rewritten(tmp_path):
+    files = {"docs/old.md": "# Old\n", "README.md": "text\n<!-- see [old](docs/old.md) later -->\n"}
+    repo = make_repo(tmp_path, files)
+    rc, out, err = run_tool(repo, [row("docs/old.md", "Old.md")])
+    assert rc == 0, (out, err)
+    assert text(repo, "README.md") == "text\n<!-- see [old](Old.md) later -->\n"
+
+
+def test_merging_chunks_normalizes_line_endings_and_interior_bom(tmp_path):
+    files = {"a.md": b"# A\r\nalpha\r\n", "b.md": b"\xef\xbb\xbf# B\nbeta\n", "c.md": b"# C\r\ngamma\r\n"}
+    repo = make_repo(tmp_path, files)
+    rows = [row(f"{n}.md", "All.md", "merge-into", str(i)) for i, n in enumerate("abc", 1)]
+    rc, out, err = run_tool(repo, rows)
+    assert rc == 0, (out, err)
+    data = read(repo, "All.md")
+    assert data.count(b"\r\n") == data.count(b"\n")  # first chunk is CRLF, so every line ending is
+    assert data.count(b"\xef\xbb\xbf") == 0
+    assert b"# B\r\nbeta\r\n" in data and b"# C\r\ngamma\r\n" in data
+
+
+def test_underscore_landing_pages_and_noop_move_are_valid(tmp_path):
+    files = {"wiki/_Sidebar.md": "* [Home](Home.md)\n", "wiki/_Footer.md": "footer\n", "wiki/Home.md": "# Home\n"}
+    repo = make_repo(tmp_path, files)
+    rows = [row("wiki/_Sidebar.md", "_Sidebar"), row("wiki/_Footer.md", "_Footer"), row("wiki/Home.md", "Home")]
+    rc, out, err = run_tool(repo, rows, "--subfolder", "wiki")
+    assert rc == 0, (out, err)
+    assert text(repo, "wiki/_Footer.md") == "footer\n"
+    repo2 = make_repo(tmp_path / "again", files) if (tmp_path / "again").mkdir() is None else None
+    fails(repo2, [row("wiki/Home.md", "_Other")], "--subfolder", "wiki")
+
+
+def test_a_destination_that_is_an_existing_file_outside_the_map_is_still_a_collision(tmp_path):
+    files = {"wiki/Home.md": "# Home\n", "docs/a.md": "# A\n"}
+    repo = make_repo(tmp_path, files)
+    fails(repo, [row("docs/a.md", "Home")], "--subfolder", "wiki")
+    fails(repo, [row("docs/a.md", "Home"), row("wiki/Home.md", "", "keep")], "--subfolder", "wiki")
+
+
+def test_a_source_mixing_split_merge_and_archive_rows_must_cover_every_line(tmp_path):
+    files = {"docs/x.md": "a\nb\nc\nd\n", "wiki/Home.md": "# Home\n"}
+    repo = make_repo(tmp_path, files)
+    rows = [
+        row("docs/x.md", "Home", "merge-into", "1", "L1-L2"),
+        row("docs/x.md", "Archive-X", "archive-into", "1", "L3-L3"),
+    ]
+    fails(repo, rows, "--subfolder", "wiki")  # line 4 is in no row
+    rows.append(row("docs/x.md", "Operate-X", "split-into", "1", "L4-L4"))
+    rows.append(row("wiki/Home.md", "Home", "merge-into", "0"))
+    rc, out, err = run_tool(repo, rows, "--subfolder", "wiki")
+    assert rc == 0, (out, err)
 
 
 # --------------------------------------------------------------------------- post-check guards

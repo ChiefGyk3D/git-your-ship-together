@@ -23,6 +23,7 @@ map file. Python 3 standard library only.
 import argparse
 import collections
 import csv
+import fnmatch
 import hashlib
 import io
 import os
@@ -125,10 +126,14 @@ def _refdef(text, pos, end, n):
     Returns (Ref, end offset of the last line used) or None."""
     line = text[pos:end].rstrip("\r")
     ln = len(line)
-    i = 0
-    while i < ln and i < 4 and line[i] == " ":
-        i += 1
-    if i > 3 or i >= ln or line[i] != "[" or line[i + 1 : i + 2] == "^":
+    pm = _PREFIX.match(line)  # a definition may sit in a blockquote or a list item
+    i = pm.end()
+    if (
+        i >= ln
+        or line[i] != "["
+        or line[i + 1 : i + 2] == "^"
+        or (i > 3 and not any(c in pm.group(0) for c in ">-*+0123456789"))
+    ):
         return None
     j = i + 1
     lim = min(ln, i + 1001)
@@ -146,9 +151,7 @@ def _refdef(text, pos, end, n):
             return None
         line = text[nx[0] : nx[1]].rstrip("\r")
         ln = len(line)
-        j = 0
-        while j < ln and line[j] in " \t":
-            j += 1
+        j = _PREFIX.match(line).end()
         if j >= ln:
             return None
         pos, cur_end = nx[0], nx[1]
@@ -473,18 +476,20 @@ def _wiki_fold(name):
 
 
 class LinkCtx:
-    def __init__(self, files, loc, split=frozenset()):
+    def __init__(self, files, loc, approx=frozenset()):
         self.files = files
         self.dirs = _parents(files)
-        self.loc = loc  # whole-file moves: old path -> new path
-        self.split = frozenset(split)  # sources whose lines go to several pages
+        # old path -> new path. For a source whose lines go to several pages this is the page that
+        # holds its first section (or the --link-map page): a link to it is only approximately right.
+        self.loc = loc
+        self.approx = frozenset(approx)
         self.wiki = {}  # folded page name -> tracked markdown files with that name
         for f in files:
             if _is_md(f):
                 self.wiki.setdefault(_wiki_fold(posixpath.splitext(posixpath.basename(f))[0]), []).append(f)
 
 
-def _rewrite_wiki(inner, ctx, st, where):
+def _rewrite_wiki(inner, ctx, st, where, lineno):
     """New text for the inside of a [[...]] link, or None to leave it alone. The page name is the
     second half of `[[text|Page]]` (GitHub order); a one-part link is the page name itself."""
     parts = inner.split("|")
@@ -499,17 +504,18 @@ def _rewrite_wiki(inner, ctx, st, where):
     if not hits:
         return None
     if len(hits) > 1:
-        if any(h[3] and any(c in ctx.loc or c in ctx.split for c in h[3]) for h in hits):
+        if any(h[3] and any(c in ctx.loc for c in h[3]) for h in hits):
             st["amb"].append(f"{where}: wiki link [[{inner}]] could name either half as the page")
         return None
     k, name, frag, cands = hits[0]
-    involved = [c for c in cands if c in ctx.loc or c in ctx.split]
+    involved = [c for c in cands if c in ctx.loc]
     if not involved:
         return None
-    if len(cands) > 1 or involved[0] in ctx.split:
-        why = "several pages share that name" if len(cands) > 1 else "that page is split across several pages"
-        st["amb"].append(f"{where}: ambiguous wiki link [[{inner}]]: {why}")
+    if len(cands) > 1:
+        st["amb"].append(f"{where}: ambiguous wiki link [[{inner}]]: several pages share that name")
         return None
+    if involved[0] in ctx.approx:
+        st["approx"].append((where, lineno, f"[[{inner}]]", ctx.loc[involved[0]]))
     new_name = posixpath.splitext(posixpath.basename(ctx.loc[involved[0]]))[0]
     if name.strip().replace(" ", "-") == new_name:
         return None
@@ -523,11 +529,11 @@ def rewrite_md(text, old_path, new_path, ctx):
     refs = scan(text)
     out = []
     last = 0
-    st = {"edits": 0, "broken": [], "bad": [], "amb": []}
+    st = {"edits": 0, "broken": [], "bad": [], "amb": [], "approx": []}
     for r in refs:
         raw = text[r.start : r.end]
         if r.kind == "wiki":
-            new = _rewrite_wiki(raw, ctx, st, old_path)
+            new = _rewrite_wiki(raw, ctx, st, old_path, text.count("\n", 0, r.start) + 1)
             if new is not None and new != raw:
                 out.append(text[last : r.start])
                 out.append(new)
@@ -546,6 +552,8 @@ def rewrite_md(text, old_path, new_path, ctx):
             st["broken"].append(raw)
             continue
         tgt2 = ctx.loc.get(tgt, tgt)
+        if tgt in ctx.approx:
+            st["approx"].append((old_path, text.count("\n", 0, r.start) + 1, raw, tgt2))
         if tgt2 == tgt and posixpath.dirname(old_path) == posixpath.dirname(new_path):
             continue
         if p.startswith("/"):
@@ -642,7 +650,7 @@ def _neutralize(text, stems=frozenset()):
 
 def _lines(text, stems=frozenset()):
     for ln in _neutralize(text, stems).split("\n"):
-        ln = ln.rstrip("\r")
+        ln = ln.rstrip("\r").lstrip("\ufeff")
         if ln.strip():
             yield ln
 
@@ -665,7 +673,8 @@ def line_multiset_diff(before, after, comments, stems=frozenset()):
     return ([(_h(k), v) for k, v in lost.items()], [(_h(k), v) for k, v in extra.items()])
 
 
-def unresolved_links(md_texts, files):
+def unresolved_links(md_texts, files, detail=False):
+    """Links whose target is not in `files`. [(file, raw)], or with detail [(file, raw, target, line)]."""
     dirs = _parents(files)
     bad = []
     for f in sorted(md_texts):
@@ -679,13 +688,13 @@ def unresolved_links(md_texts, files):
                 continue
             tgt = resolve(info[0], f)
             if tgt is None or not _exists(tgt, files, dirs):
-                bad.append((f, raw))
+                bad.append((f, raw, tgt, t.count("\n", 0, r.start) + 1) if detail else (f, raw))
     return bad
 
 
 def verify(v, tree_files, md_texts, nonmd_texts):
     """v: dict with entries, before_md, before_broken, comments, report, nonmd_before,
-    nonmd_lines (and optionally stems). Returns (errors, warnings, accounted)."""
+    nonmd_lines (and optionally stems, dangling). Returns (errors, warnings, accounted)."""
     errs, warns = [], []
     bad_src = set()
     sources = []
@@ -696,33 +705,31 @@ def verify(v, tree_files, md_texts, nonmd_texts):
             continue
         if e["src"] not in sources:
             sources.append(e["src"])
-        if e["action"] == "keep":
-            ok = e["src"] in tree_files
-        elif e["action"] == "copy-into":
-            ok = e["src"] in tree_files and e["dest"] in tree_files and e["comment"] in md_texts.get(e["dest"], "")
-        elif e["action"] == "move":
-            ok = e["src"] not in tree_files and e["dest"] in tree_files
-        else:
-            ok = (
-                e["src"] not in tree_files
-                and e["dest"] in tree_files
-                and e.get("comment", f"<!-- docmove: merged from {e['src']} -->") in md_texts.get(e["dest"], "")
-            )
+        gone = e.get("expect_gone", e["action"] not in ("keep", "copy-into"))
+        comment = e.get("comment", f"<!-- docmove: merged from {e['src']} -->" if e["action"] != "move" else None)
+        ok = ((e["src"] not in tree_files) == gone or e.get("reused", False)) and e["dest"] in tree_files
+        if ok and comment and e["action"] not in ("keep", "move"):
+            ok = comment in md_texts.get(e["dest"], "")
         if not ok:
             bad_src.add(e["src"])
             errs.append(f"source not accounted for: {e['src']} ({e['action']})")
     accounted = len([s for s in sources if s not in bad_src])
     bad = unresolved_links(md_texts, tree_files)
     budget = collections.Counter(v["before_broken"])
-    pre = 0
+    dangling = v.get("dangling", set())
+    pre = dang = 0
     for f, raw in bad:
         if budget[raw] > 0:
             budget[raw] -= 1
             pre += 1
+        elif (f, raw) in dangling:
+            dang += 1  # a directory the move emptied; reported, and failed only by --strict
         else:
             errs.append(f"link broken by the move: {f} -> {raw}")
     if pre:
         warns.append(f"pre-existing unresolved links: {pre}")
+    if dang:
+        warns.append(f"dangling directory links: {dang}")
     after = {p: t for p, t in md_texts.items() if p != v["report"]}
     lost, extra = line_multiset_diff(v["before_md"], after, v["comments"], v.get("stems", frozenset()))
     for h, c in lost:
@@ -858,6 +865,70 @@ def _title(stem):
     return stem.replace("-", " ").replace("_", " ")
 
 
+_POINTS = re.compile(r"points to (.+?)\s*$")
+_URL = re.compile(r"https://[A-Za-z0-9.\-]+(?::\d{1,5})?(?:/[A-Za-z0-9._~%/\-]*)?")
+_ORDER = re.compile(r"-?\d{1,9}")
+_LANDING = ("_Sidebar", "_Footer")
+CONSUME = ("merge-into", "split-into", "archive-into")
+DEFAULT_EXCLUDES = (".gitleaksignore", "docs-migration/**")
+
+
+def stub_targets(notes):
+    """Targets named by a stub row's notes ("points to PageA and PageB", "points to repo file PATH"),
+    or None when the notes name none."""
+    m = _POINTS.search(notes or "")
+    if not m:
+        return None
+    out = [t.strip() for t in re.split(r"\s+and\s+|\s*,\s*", m.group(1)) if t.strip()]
+    return out or None
+
+
+def load_link_map(path):
+    """source,page rows that pick the page a link to a multi-page source is rewritten to."""
+    try:
+        with open(path, "rb") as f:
+            data = f.read(MAXMAP + 1)
+        text = data.decode("utf-8-sig")
+        rd = list(csv.reader(io.StringIO(text, newline=""), strict=True))
+    except (OSError, UnicodeDecodeError, csv.Error) as e:
+        raise MapFormatError(f"cannot read the link map: {e}") from None
+    rows = [(i + 1, r) for i, r in enumerate(rd) if any(c.strip() for c in r)]
+    if not rows or rows[0][1] != ["source", "page"]:
+        raise MapFormatError("link map header must be source,page")
+    out = {}
+    for ln, r in rows[1:]:
+        if len(r) != 2 or not r[0] or not r[1] or r[0] != r[0].strip() or r[1] != r[1].strip():
+            raise MapFormatError(f"link map line {ln}: expected source,page")
+        if r[0] in out:
+            raise MapFormatError(f"link map line {ln}: duplicate source {r[0]!r}")
+        out[r[0]] = r[1]
+    return out
+
+
+def _excluded(path, patterns):
+    return any(
+        fnmatch.fnmatchcase(path, pat) if "/" in pat else fnmatch.fnmatchcase(posixpath.basename(path), pat)
+        for pat in patterns
+    )
+
+
+def _rel_in_repo(root, p):
+    """Repo-relative path of `p` when it lies inside the repository, else None."""
+    try:
+        rel = os.path.relpath(os.path.realpath(p), root)
+    except ValueError:
+        return None
+    return None if rel.startswith("..") else rel.replace(os.sep, "/")
+
+
+def _norm_chunk(t, eol, first):
+    """Give a chunk the first chunk's line ending and drop a BOM that is not at the start of the page."""
+    if not first:
+        t = t.lstrip("﻿")
+    t = t.replace("\r\n", "\n")
+    return t.replace("\n", "\r\n") if eol == "\r\n" else t
+
+
 def build(root, rows, opts):
     errs = []
     top = git(root, "rev-parse", "--show-toplevel").decode().strip()
@@ -883,7 +954,7 @@ def build(root, rows, opts):
             errs.append(f"{what}: {page!r} is outside the configured subfolder {sub!r}")
             return None
         name = parts[-1]
-        if not _NAME.match(name):
+        if not (_NAME.match(name) or name.split(".")[0] in _LANDING):
             errs.append(f"{what}: {page!r} is not a flat wiki name (Topic-Words.ext)")
             return None
         if "." not in name:
@@ -913,12 +984,17 @@ def build(root, rows, opts):
         if mode == "160000":
             errs.append(f"{w}: {src!r} is a submodule")
             continue
-        if act == "split-into" or (act == "copy-into" and section):
-            if not _SECTION.fullmatch(section):
-                errs.append(f"{w}: {act} needs a section like L1-L20, got {section!r}")
-                continue
-        elif section:
-            errs.append(f"{w}: section is only for split-into and copy-into")
+        if order and not _ORDER.fullmatch(order):
+            errs.append(f"{w}: order must be an integer, got {order!r}")
+            continue
+        if act == "split-into" and not section:
+            errs.append(f"{w}: split-into needs a section like L1-L20")
+            continue
+        if section and act not in ASSEMBLE:
+            errs.append(f"{w}: section is only for split-into, merge-into, archive-into and copy-into")
+            continue
+        if section and not _SECTION.fullmatch(section):
+            errs.append(f"{w}: {act} needs a section like L1-L20, got {section!r}")
             continue
         if act in ASSEMBLE and not _is_md(src):
             errs.append(f"{w}: only markdown can be merged, split, copied or archived ({src!r})")
@@ -936,23 +1012,34 @@ def build(root, rows, opts):
                 continue
             if act == "move" and posixpath.splitext(dest)[1].lower() != posixpath.splitext(src)[1].lower():
                 errs.append(f"{w}: extension change {src!r} -> {dest!r}")
-            if act == "move" and dest == src:
-                errs.append(f"{w}: move to itself (use keep)")
         entries.append(
-            {"src": src, "dest": dest, "action": act, "order": order, "line": ln, "section": section, "span": None}
+            {
+                "src": src,
+                "dest": dest,
+                "action": act,
+                "order": order,
+                "line": ln,
+                "section": section,
+                "span": None,
+                "notes": r.get("notes", ""),
+            }
         )
 
-    # one action per source (a split source may have many split-into rows, and any number of stubs)
+    # which combinations of rows one source may have
     real = [e for e in entries if e["action"] != "stub"]
     by_src = collections.OrderedDict()
     for e in real:
         by_src.setdefault(e["src"], []).append(e)
     for src, es in by_src.items():
         acts = [e["action"] for e in es]
-        if len(es) > 1 and not (
-            all(a == "split-into" for a in acts)
-            or (all(a in ("keep", "copy-into") for a in acts) and acts.count("keep") <= 1)
-        ):
+        consuming = [e for e in es if e["action"] in CONSUME]
+        bad = (
+            ("move" in acts and len(es) > 1)
+            or acts.count("keep") > 1
+            or ("keep" in acts and consuming)
+            or len([e for e in consuming if not e["section"]]) > 1
+        )
+        if bad:
             errs.append(f"line {es[1]['line']}: duplicate source {src!r} (first on line {es[0]['line']})")
         seen = set()
         for e in es:
@@ -961,15 +1048,12 @@ def build(root, rows, opts):
                 if key in seen:
                     errs.append(f"line {e['line']}: {src!r} is copied to {e['dest']!r} twice")
                 seen.add(key)
-    for e in entries:
-        if e["action"] == "stub" and e["src"] not in by_src:
-            errs.append(f"line {e['line']}: stub for {e['src']!r} needs a mapping row for the same source")
 
-    # section ranges: read the split sources now, so every error is reported before anything is written
-    split_srcs = [s for s, es in by_src.items() if es[0]["action"] == "split-into"]
-    copy_srcs = [s for s, es in by_src.items() if any(e["action"] == "copy-into" for e in es)]
+    # section ranges: read the sources now, so every error is reported before anything is written
     texts = {}
-    for src in split_srcs + copy_srcs:
+    for src, es in by_src.items():
+        if not any(e["action"] in CONSUME + ("copy-into",) for e in es):
+            continue
         try:
             texts[src] = read_text(_read(os.path.join(root, src)))
         except OSError as exc:
@@ -977,11 +1061,16 @@ def build(root, rows, opts):
             continue
         lines = texts[src].split("\n")
         total = len(lines) - (1 if texts[src].endswith("\n") else 0)
-        spans = []
-        rows_here = [e for e in by_src[src] if e["action"] in ("split-into", "copy-into")]
-        for e in rows_here:
+        spans = []  # rows that must not overlap: consuming rows and ranged copies
+        covered = set()
+        for e in es:
+            if e["action"] not in CONSUME + ("copy-into",):
+                continue
             if not e["section"]:
-                e["span"] = (1, total)  # a whole-file copy
+                e["span"] = (1, total)
+                covered.update(range(1, total + 1))
+                if e["action"] != "copy-into":
+                    spans.append((1, total, e["line"]))
                 continue
             a, b = (int(x) for x in _SECTION.fullmatch(e["section"]).groups())
             if not 1 <= a <= b <= total:
@@ -989,15 +1078,13 @@ def build(root, rows, opts):
                 continue
             e["span"] = (a, b)
             spans.append((a, b, e["line"]))
+            covered.update(range(a, b + 1))
         spans.sort()
         for (_, b1, l1), (a2, _, l2) in zip(spans, spans[1:], strict=False):
             if a2 <= b1:
                 errs.append(f"lines {l1} and {l2}: sections of {src!r} overlap")
-        covered = set()
-        for a, b, _ in spans:
-            covered.update(range(a, b + 1))
         gaps = [i for i in range(1, total + 1) if i not in covered and lines[i - 1].strip()]
-        if src in split_srcs and gaps and len(spans) == len(rows_here):
+        if gaps and any(e["action"] in CONSUME for e in es) and all(e["span"] for e in es if e["action"] in CONSUME):
             errs.append(f"{src!r}: non-blank lines not in any section: " + ", ".join(f"L{i}" for i in gaps[:10]))
 
     # tracked symlinks pointing at a source
@@ -1036,37 +1123,126 @@ def build(root, rows, opts):
         orders = [e["order"] for e in g]
         need = any(orders) or (len(g) > 1 and any(e["action"] != "archive-into" for e in g))
         if need:
-            if not all(re.fullmatch(r"\d{1,9}", o) for o in orders) or len({int(o) for o in orders}) != len(orders):
+            if not all(_ORDER.fullmatch(o) for o in orders) or len({int(o) for o in orders}) != len(orders):
                 errs.append(f"merge group {d!r}: every row needs a unique integer order")
                 continue
-            g.sort(key=lambda e: int(e["order"]))
+            g.sort(key=lambda e: (int(e["order"]), e["line"]))
         else:
             g.sort(key=lambda e: e["line"])
+
+    noop = {e["src"] for e in real if e["action"] == "move" and e["dest"] == e["src"]}
+    inplace_dests = {e["src"] for e in real if e["action"] == "move" and e["dest"] == e["src"]}
+    inplace_srcs = set()
+    for d, g in groups.items():
+        for e in g:
+            if e["src"] == d and e["action"] in CONSUME:
+                inplace_dests.add(d)
+                inplace_srcs.add(d)
+    vanish = {s for s, es in by_src.items() if any(e["action"] in CONSUME for e in es)} | {
+        e["src"] for e in real if e["action"] == "move" and e["dest"] != e["src"]
+    }
+    vanish_eff = vanish - inplace_srcs
+
+    # stub targets (the page names that exist in this run)
+    page_dest = {posixpath.splitext(posixpath.basename(d))[0]: d for d, k in owner.items() if k != "stub"}
+    page_dest.update(
+        {posixpath.splitext(posixpath.basename(e["dest"]))[0]: e["dest"] for e in real if e["action"] == "keep"}
+    )
+    stub_links = {}
+    fallbacks = []
+    for e in entries:
+        if e["action"] != "stub":
+            continue
+        tg = stub_targets(e["notes"])
+        items = []
+        if tg is None:
+            fallbacks.append(e["dest"])
+            es = [x for x in by_src.get(e["src"], []) if x["action"] != "copy-into"]
+            if not by_src.get(e["src"]):
+                errs.append(f"line {e['line']}: stub {e['dest']!r} has no 'points to' note and {e['src']!r} has no row")
+                continue
+            es.sort(key=lambda x: (x["span"] or (0, 0), x["line"]))
+            items = [("page", es[0]["dest"] if es else e["src"])]
+        else:
+            for t in tg:
+                if t.startswith("repo file "):
+                    path = t[len("repo file ") :]
+                    if path not in tracked:
+                        errs.append(f"line {e['line']}: stub points to repo file {path!r}, which is not tracked")
+                    else:
+                        items.append(("file", path))
+                elif t in page_dest:
+                    items.append(("page", page_dest[t]))
+                else:
+                    errs.append(
+                        f"line {e['line']}: stub {e['dest']!r} points to {t!r}, which is not a page in this run"
+                    )
+        stub_links[id(e)] = items
+
     report = place(opts["report"], None, "--report", True)
     dests = list(owner) + ([report] if report else [])
-    tracked_fold = {_fold(p) for p in tracked} | {_fold(p) for p in _parents(tracked)}
+    fold_tracked = collections.defaultdict(list)
+    for t in tracked:
+        fold_tracked[_fold(t)].append(t)
+    dirs_fold = {_fold(p) for p in _parents(tracked)}
+    file_fold = {_fold(p) for p in tracked}
     byfold = {}
     for d in dests:
         byfold.setdefault(_fold(d), []).append(d)
-        if _fold(d) in tracked_fold or os.path.lexists(os.path.join(root, d)):
+        conflicts = fold_tracked.get(_fold(d), [])
+        for t in conflicts:
+            if (t == d and d in inplace_dests) or t in vanish_eff:
+                continue  # the file is itself a source: it stays in place, or it is gone by then
+            errs.append(f"destination {d!r} collides with an existing path (case-insensitive)")
+        if not conflicts and (_fold(d) in dirs_fold or os.path.lexists(os.path.join(root, d))):
             errs.append(f"destination {d!r} collides with an existing path (case-insensitive)")
         par = posixpath.dirname(d)
-        if par and _fold(par) in {_fold(p) for p in tracked}:
+        if par and _fold(par) in file_fold:
             errs.append(f"destination folder {par!r} is a file")
         if not _real_dirs_only(root, d):
             errs.append(f"destination {d!r} is under a symlink or a non-directory")
     for v in byfold.values():
         if len(v) > 1:
             errs.append(f"destinations collide case-insensitively: {sorted(v)}")
+
+    # where a link to a source that goes to several pages is rewritten to
+    first_dest = {}
+    multi_dest = set()
+    for src, es in by_src.items():
+        cs = [e for e in es if e["action"] in CONSUME and e["span"]]
+        if len({e["dest"] for e in cs}) > 1:
+            multi_dest.add(src)
+            first_dest[src] = sorted(cs, key=lambda e: (e["span"][0], e["line"]))[0]["dest"]
+    override = {}
+    for src, page in (opts.get("link_map") or {}).items():
+        if src not in multi_dest:
+            errs.append(f"link map: {src!r} is not a source that goes to several pages")
+            continue
+        want = place(page, None, f"link map {src!r}", True)
+        if want not in {e["dest"] for e in by_src[src] if e["action"] in CONSUME}:
+            errs.append(f"link map: {page!r} is not one of the pages {src!r} goes to")
+            continue
+        override[src] = want
     if errs:
         raise DocmoveError("\n  ".join(["validation failed:"] + sorted(set(errs))))
 
     # ---------------- compute the new tree in memory
-    moved = {e["src"]: e["dest"] for e in real if e["action"] not in ("keep", "split-into", "copy-into")}
-    split_set = set(split_srcs)
-    vanish = set(moved) | split_set
-    ctx = LinkCtx(set(tracked), moved, split_set)
+    moved = {}
+    for src, es in by_src.items():
+        ds = {e["dest"] for e in es if e["action"] == "move" or e["action"] in CONSUME}
+        if len(ds) == 1:
+            d = next(iter(ds))
+            if d != src:
+                moved[src] = d
+    loc = dict(moved)
+    for src in multi_dest:
+        loc[src] = override.get(src, first_dest[src])
+    approx = multi_dest - set(override)
+    ctx = LinkCtx(set(tracked), loc, approx)
     md_old, nonmd_old = {}, {}
+    excl = tuple(DEFAULT_EXCLUDES) + tuple(opts.get("excludes", ())) + tuple(opts.get("exclude_paths", ()))
+    if report:
+        excl += (report,)
     for p, mode in tracked.items():
         if mode not in ("100644", "100755"):
             continue
@@ -1074,45 +1250,61 @@ def build(root, rows, opts):
         st = os.lstat(full)
         if _is_md(p):
             md_old[p] = texts[p] if p in texts else read_text(_read(full))
-        elif p not in moved and st.st_size <= 2 * 1024 * 1024:
+        elif p not in moved and not _excluded(p, excl) and st.st_size <= 2 * 1024 * 1024:
             data = _read(full)
             if b"\0" not in data:
                 nonmd_old[p] = read_text(data)
     pieces = {}
     stats = {}
     for p, t in md_old.items():
-        if p in split_set:
-            continue
         pieces[p], stats[p] = rewrite_md(t, p, moved.get(p, p), ctx)
-    # a split source is rewritten once per destination folder, then cut by line
+    # a source that feeds a page with a part of itself, or several pages, or a copy, is rewritten once
+    # per destination folder and cut by line
+    multi = {
+        s
+        for s, es in by_src.items()
+        if any(e["action"] == "copy-into" or e["span"] and (len(es) > 1 or e["section"]) for e in es)
+        or (len(es) > 1 and any(e["action"] in CONSUME for e in es))
+    }
     chunk_text = {}
-    for src in split_srcs + copy_srcs:
+    for src in multi:
         by_dir = {}
         for e in by_src[src]:
-            if e["action"] not in ("split-into", "copy-into"):
+            if e["action"] not in CONSUME + ("copy-into",):
                 continue
             dd = posixpath.dirname(e["dest"])
             if dd not in by_dir:
-                by_dir[dd], s = rewrite_md(md_old[src], src, e["dest"], ctx)
-                stats.setdefault(src, s)
-            if e["action"] == "copy-into" and not e["section"]:
+                by_dir[dd], _ = rewrite_md(md_old[src], src, e["dest"], ctx)
+            if not e["section"]:
                 chunk_text[id(e)] = by_dir[dd]
                 continue
             lines = by_dir[dd].split("\n")
             a, b = e["span"]
             chunk_text[id(e)] = "\n".join(lines[a - 1 : b]) + "\n"
     final_md = {}
-    comments = []
+    allowed = []  # lines the loss check may see beyond the sources: provenance comments, copies, stub text
     for p, t in pieces.items():
-        if p not in vanish:
+        if p not in vanish_eff:
             final_md[p] = t
     for e in real:
-        if e["action"] == "move" and _is_md(e["src"]):
+        if e["action"] == "move" and _is_md(e["src"]) and e["dest"] != e["src"]:
             final_md[e["dest"]] = pieces[e["src"]]
     for d, g in groups.items():
-        chunks = []
-        for e in g:
-            t = chunk_text[id(e)] if e["action"] in ("split-into", "copy-into") else pieces[e["src"]]
+        parts = []
+        first_t = chunk_text.get(id(g[0]), pieces.get(g[0]["src"]))
+        eol = "\r\n" if "\r\n" in first_t else "\n"
+        for k, e in enumerate(g):
+            t = chunk_text[id(e)] if id(e) in chunk_text else pieces[e["src"]]
+            if len(g) > 1:
+                t = _norm_chunk(t, eol, k == 0)
+            elif t and not t.endswith("\n"):
+                t += "\r\n" if "\r\n" in t else "\n"
+            if t and not t.endswith("\n"):
+                t += eol
+            if e["src"] == d and not e["section"]:
+                e["comment"] = None  # the page's own text: it carries no provenance
+                parts.append(t)
+                continue
             verb = {
                 "merge-into": "merged from",
                 "archive-into": "archived from",
@@ -1122,30 +1314,32 @@ def build(root, rows, opts):
             where = f"{e['src']} {e['section']}" if e["section"] else e["src"]
             c = f"<!-- docmove: {verb} {where} -->"
             e["comment"] = c
-            comments.append(c)
-            if e["action"] == "copy-into":  # the source keeps these lines, so the copy is an allowed extra
-                comments.extend(ln for ln in t.split("\n") if ln.strip())
-            eol = "\r\n" if "\r\n" in t else "\n"
-            if t and not t.endswith("\n"):
-                t += eol
-            chunks.append((c, t, eol))
-        joiner = "\r\n" if any(eol == "\r\n" for _, _, eol in chunks) else "\n"
-        final_md[d] = joiner.join(c + eol + t for c, t, eol in chunks)
-    # stubs: the old name points at the first page its source went to
+            allowed.append(c)
+            if e["action"] == "copy-into" and e["src"] not in vanish_eff:
+                allowed.extend(ln for ln in t.split("\n") if ln.strip())  # the source keeps these lines
+            parts.append(c + eol + t)
+        final_md[d] = eol.join(parts) if len(parts) > 1 else parts[0]
     for e in entries:
         if e["action"] != "stub":
             continue
-        tg = [x for x in by_src[e["src"]] if x["action"] != "copy-into"]
-        tg = sorted(tg, key=lambda x: x["span"] or (0, 0))[0]["dest"] if tg else e["src"]
-        rel = _rel(tg, posixpath.dirname(e["dest"]))
+        links = []
+        for kind, target in stub_links[id(e)]:
+            if kind == "page":
+                rel = _rel(target, posixpath.dirname(e["dest"]))
+                links.append(f"[{posixpath.splitext(posixpath.basename(target))[0]}]({_enc(rel, False)})")
+            elif opts.get("repo_url"):
+                links.append(f"[{target}]({opts['repo_url'].rstrip('/')}/blob/main/{_enc(target, False)})")
+            else:
+                links.append(f"`{target}`")
+        said = links[0] if len(links) == 1 else ", ".join(links[:-1]) + " and " + links[-1]
         stem = posixpath.splitext(posixpath.basename(e["dest"]))[0]
-        label = posixpath.splitext(posixpath.basename(tg))[0]
-        body = f"# {_title(stem)}\n\nThis page moved. See [{label}]({_enc(rel, False)}).\n"
+        body = f"# {_title(stem)}\n\nThis page moved. See {said}.\n"
         final_md[e["dest"]] = body
-        comments.extend(ln for ln in body.split("\n") if ln.strip())
+        allowed.extend(ln for ln in body.split("\n") if ln.strip())
     nonmd_new, nonmd_edits, nonmd_lines, ambiguous = {}, {}, {}, []
     lit = dict(moved)
-    lit.update({s: None for s in split_set})
+    for src in multi_dest:
+        lit[src] = override.get(src)
     for p, t in nonmd_old.items():
         nt, done, amb = rewrite_nonmd(t, lit)
         ambiguous += [(p, ln, o) for ln, o in amb]
@@ -1153,21 +1347,39 @@ def build(root, rows, opts):
             nonmd_new[p] = nt
             nonmd_edits[p] = done
             nonmd_lines[p] = {ln - 1 for ln, _, _ in done}
+    tree = (set(tracked) - vanish_eff) | set(final_md) | set(moved.values()) | {report}
+    old_dirs = _parents(set(tracked))
+    approx_links = sorted(
+        {(f, ln, raw, dest) for st in stats.values() for f, ln, raw, dest in st["approx"]},
+        key=lambda x: (x[0], x[1], x[2]),
+    )
+    dangling = []
+    for f, t in final_md.items():
+        for _, raw, tgt, ln in unresolved_links({f: t}, tree, detail=True):
+            if tgt in old_dirs:
+                dangling.append((f, ln, raw))
     # report page
-    cnt = collections.Counter(e["action"] for e in real if e["action"] != "split-into")
-    cnt["split-into"] = len(split_srcs)
-    cnt["copy-into"] = sum(1 for e in real if e["action"] == "copy-into")
+    cnt = collections.Counter(e["action"] for e in real)
+    cnt["split-into"] = len({e["src"] for e in real if e["action"] == "split-into"})
     rows_md = ["| Old path | New page | Action |", "|---|---|---|"]
     for e in entries:
         act = e["action"]
-        if act in ("merge-into", "split-into", "copy-into"):
-            act += f" ({e['order']})" if e["order"] else ""
+        if act in ("merge-into", "split-into", "copy-into") and e["order"]:
+            act += f" ({e['order']})"
         if e["section"]:
             act += f" {e['section']}"
         rel = _rel(e["dest"], posixpath.dirname(report))
         rows_md.append(f"| `{e['src']}` | [{e['dest']}]({_enc(rel, False)}) | {act} |")
     total_src = len(by_src)
     n_stubs = sum(1 for e in entries if e["action"] == "stub")
+    review = [
+        f"- approximate link: {f}:{ln} -> {raw} now points at {dest} (line as before the move)"
+        for f, ln, raw, dest in approx_links
+    ]
+    review += [f"- dangling directory link: {f}:{ln} -> {raw}" for f, ln, raw in sorted(dangling)]
+    review += [
+        f"- stub fallback: {d} (no 'points to' in its notes; pointed at where its source went)" for d in fallbacks
+    ]
     final_md[report] = (
         "# Where did it go\n\nOld documentation paths and where each one lives now.\n\n"
         + "\n".join(rows_md)
@@ -1175,21 +1387,31 @@ def build(root, rows, opts):
         + f"Files in: {total_src}. Accounted for: {total_src} "
         f"(moved {cnt['move']}, merged {cnt['merge-into']}, split {cnt['split-into']}, "
         f"archived {cnt['archive-into']}, kept {cnt['keep']}, copied {cnt['copy-into']}). Stubs: {n_stubs}.\n"
+        + ("\n## Links to review\n\n" + "\n".join(review) + "\n" if review else "")
     )
     plan = Plan()
-    plan.entries, plan.groups, plan.moved, plan.split = entries, groups, moved, split_set
+    plan.entries, plan.groups, plan.moved = entries, groups, moved
     plan.final_md, plan.nonmd_new, plan.nonmd_edits = final_md, nonmd_new, nonmd_edits
     plan.stats, plan.ambiguous, plan.report = stats, ambiguous, report
     plan.tracked = tracked
-    plan.vanish = vanish
-    plan.tree = (set(tracked) - vanish) | set(final_md) | set(moved.values())
-    stems = {_wiki_fold(posixpath.splitext(posixpath.basename(p))[0]) for p in list(moved) + list(moved.values())}
+    plan.vanish = vanish_eff
+    plan.noop = noop
+    plan.tree = tree
+    plan.approx = approx_links
+    plan.dangling = sorted(dangling)
+    plan.fallbacks = fallbacks
+    stub_dests = {e["dest"] for e in entries if e["action"] == "stub"}
+    stems = {_wiki_fold(posixpath.splitext(posixpath.basename(p))[0]) for p in list(loc) + list(loc.values())}
+    for e in entries:
+        e["expect_gone"] = e["src"] in vanish_eff
+        e["reused"] = e["src"] in stub_dests  # a stub may reuse the path a move vacated
     plan.verify_ctx = {
         "entries": entries,
         "before_md": md_old,
-        "comments": comments,
+        "comments": allowed,
         "report": report,
         "stems": stems,
+        "dangling": {(f, raw) for f, _, raw in dangling},
         "before_broken": [r for s in stats.values() for r in s["broken"]],
         "nonmd_before": {p: nonmd_old[p] for p in nonmd_new},
         "nonmd_lines": nonmd_lines,
@@ -1200,24 +1422,29 @@ def build(root, rows, opts):
     plan.write_md = {
         p for p, t in final_md.items() if p == report or p in new_pages or p in moved.values() or md_old.get(p) != t
     }
+    plan.by_src = by_src
     return plan
 
 
 def apply(root, plan):
     done = set()
     for e in plan.entries:
-        if e["action"] == "move":
+        if e["action"] == "move" and e["dest"] != e["src"]:
             os.makedirs(os.path.dirname(os.path.join(root, e["dest"])), exist_ok=True)
             git(root, "mv", "--", e["src"], e["dest"])
             done.add(e["src"])
     for d, g in plan.groups.items():
         os.makedirs(os.path.dirname(os.path.join(root, d)), exist_ok=True)
-        if g[0]["action"] in (
-            "merge-into",
-            "archive-into",
-        ):  # the first whole file keeps its history through the rename
-            git(root, "mv", "--", g[0]["src"], d)
-            done.add(g[0]["src"])
+        first = g[0]
+        # a whole file that becomes the first part of a page keeps its history through the rename
+        if (
+            first["action"] in ("merge-into", "archive-into")
+            and not first["section"]
+            and first["src"] != d
+            and len(plan.by_src[first["src"]]) == 1
+        ):
+            git(root, "mv", "--", first["src"], d)
+            done.add(first["src"])
     gone = sorted(plan.vanish - done)
     if gone:
         git(root, "rm", "-q", "--", *gone)
@@ -1259,11 +1486,35 @@ def verify_disk(root, plan):
     return errs, warns, acc
 
 
-def run(repo, map_path, dry_run=False, subfolder="", report="where-did-it-go.md", strict=False, out=None):
+def run(
+    repo,
+    map_path,
+    dry_run=False,
+    subfolder="",
+    report="where-did-it-go.md",
+    strict=False,
+    out=None,
+    excludes=(),
+    link_map=None,
+    repo_url="",
+):
     out = out or sys.stdout
     root = os.path.realpath(repo)
     rows = load_mapping(map_path)
-    plan = build(root, rows, {"subfolder": subfolder, "report": report})
+    lm = load_link_map(link_map) if link_map else None
+    exclude_paths = [p for p in (_rel_in_repo(root, x) for x in (map_path, link_map) if x) if p]
+    plan = build(
+        root,
+        rows,
+        {
+            "subfolder": subfolder,
+            "report": report,
+            "excludes": excludes,
+            "exclude_paths": exclude_paths,
+            "link_map": lm,
+            "repo_url": repo_url,
+        },
+    )
     errs, warns, acc = verify(plan.verify_ctx, plan.tree, plan.final_md, {p: plan.nonmd_new[p] for p in plan.nonmd_new})
 
     def pr(*a):
@@ -1294,6 +1545,12 @@ def run(repo, map_path, dry_run=False, subfolder="", report="where-did-it-go.md"
         pr(f"links with backslash escapes NOT rewritten: {len(plan.bad)}")
     for m in plan.wiki_amb:
         pr(f"ambiguous wiki link: {m}")
+    for f, ln, raw, dest in plan.approx:
+        pr(f"approximate link: {f}:{ln} -> {raw} now points at {dest}")
+    for f, ln, raw in plan.dangling:
+        pr(f"dangling directory link: {f}:{ln} -> {raw}")
+    for d in plan.fallbacks:
+        pr(f"stub fallback: {d}")
     for w in warns:
         pr(w)
     pr(f"files in: {len({e['src'] for e in plan.entries if e['action'] != 'stub'})}, accounted for: {acc}")
@@ -1303,7 +1560,11 @@ def run(repo, map_path, dry_run=False, subfolder="", report="where-did-it-go.md"
             fail.append("strict: ambiguous literal references present")
         if plan.bad:
             fail.append("strict: un-rewritable links present")
-        if warns:
+        if plan.approx:
+            fail.append("strict: approximate links to a split source present")
+        if plan.dangling:
+            fail.append("strict: dangling directory links present")
+        if any(w.startswith("pre-existing") for w in warns):
             fail.append("strict: pre-existing unresolved links present")
     if fail:
         raise DocmoveError("post-check failed (nothing written):\n  " + "\n  ".join(fail[:50]))
@@ -1329,11 +1590,34 @@ def main(argv=None):
     ap.add_argument("--subfolder", default="")
     ap.add_argument("--report", default="where-did-it-go.md")
     ap.add_argument("--strict", action="store_true")
+    ap.add_argument("--link-map", help="CSV source,page: the page a link to a multi-page source is rewritten to")
+    ap.add_argument(
+        "--exclude",
+        action="append",
+        default=[],
+        metavar="GLOB",
+        help="non-markdown files whose literal doc paths are left alone (repeatable); defaults: "
+        + ", ".join(DEFAULT_EXCLUDES)
+        + ", the map, the link map and the report",
+    )
+    ap.add_argument("--repo-url", default="", help="https URL of the repository, for stubs that point at a repo file")
     a = ap.parse_args(argv)
     try:
         if a.subfolder and (not _NAME.match(a.subfolder) or "." in a.subfolder):
             raise DocmoveError(f"bad --subfolder {a.subfolder!r}")
-        return run(a.repo, a.map, a.dry_run, a.subfolder, a.report, a.strict)
+        if a.repo_url and not _URL.fullmatch(a.repo_url):
+            raise MapFormatError("--repo-url must be an https URL")
+        return run(
+            a.repo,
+            a.map,
+            a.dry_run,
+            a.subfolder,
+            a.report,
+            a.strict,
+            excludes=tuple(a.exclude),
+            link_map=a.link_map,
+            repo_url=a.repo_url,
+        )
     except MapFormatError as e:
         print(f"docmove: error: {e}", file=sys.stderr)
         return 64

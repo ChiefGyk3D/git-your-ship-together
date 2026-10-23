@@ -154,3 +154,87 @@ def test_copy_mode_needs_the_copied_lines_only(tmp_path):
 def test_bad_lines_range_is_exit_2(tmp_path):
     rc, _, err = run(tmp_path, SOURCE, PAGE1, PAGE2, extra=["--copy", "--lines", "4-9"])
     assert rc == 2
+
+
+# --- provenance chunks: shared pages and common lines must not give false duplicates -----------
+CODE_SOURCE = (
+    "# Guide\n"  # 1
+    "intro\n"  # 2
+    "```\n"  # 3
+    "code line\n"  # 4
+    "```\n"  # 5
+    "| a | b |\n"  # 6
+    "|---|---|\n"  # 7
+    "## Part B\n"  # 8
+    "```\n"  # 9
+    "other code\n"  # 10
+    "```\n"  # 11
+    "|---|---|\n"  # 12
+)
+OTHER_SOURCE_CHUNK = (
+    "<!-- docmove: merged from docs/other.md -->\n```\nunrelated\n```\n|---|---|\n"  # shares fence and separator lines
+)
+CH1 = "<!-- docmove: split from docs/guide.md L1-L7 -->\n" + "".join(CODE_SOURCE.splitlines(True)[:7])
+CH2 = "<!-- docmove: archived from docs/guide.md L8-L12 -->\n" + "".join(CODE_SOURCE.splitlines(True)[7:])
+
+
+def run_chunks(tmp_path, source, *pages, extra=("--source-name", "docs/guide.md")):
+    return run(tmp_path, source, *pages, extra=extra)
+
+
+def test_chunk_mode_ignores_other_sources_and_common_lines_on_shared_pages(tmp_path):
+    rc, out, _ = run_chunks(tmp_path, CODE_SOURCE, OTHER_SOURCE_CHUNK + CH1, CH2)
+    assert rc == 0, out
+    # the same pages in whole-page mode count the shared fence and separator lines twice
+    rc, _, _ = run(tmp_path, CODE_SOURCE, OTHER_SOURCE_CHUNK + CH1, CH2)
+    assert rc == 1
+
+
+def test_chunk_mode_source_name_defaults_to_a_path_suffix_match(tmp_path):
+    src = tmp_path / "docs" / "guide.md"
+    src.parent.mkdir()
+    src.write_text(CODE_SOURCE)
+    pages = []
+    for k, t in enumerate((OTHER_SOURCE_CHUNK + CH1, CH2)):
+        p = tmp_path / f"P{k}.md"
+        p.write_text(t)
+        pages.append(str(p))
+    r = subprocess.run(
+        [sys.executable, "-I", str(TOOL), "--source", str(src), "--out", *pages], capture_output=True, text=True
+    )
+    assert r.returncode == 0, r.stdout
+
+
+def test_chunk_mode_still_sees_a_deleted_line_in_the_chunk(tmp_path):
+    rc, out, _ = run_chunks(tmp_path, CODE_SOURCE, OTHER_SOURCE_CHUNK + CH1.replace("code line\n", ""), CH2)
+    assert rc == 1 and "source line 4" in out
+    assert "code line" not in out
+
+
+def test_chunk_mode_still_sees_a_duplicated_line_in_the_chunk(tmp_path):
+    rc, out, _ = run_chunks(tmp_path, CODE_SOURCE, OTHER_SOURCE_CHUNK + CH1, CH2 + "other code\n")
+    assert rc == 1 and "duplicated" in out
+
+
+def test_chunk_mode_sees_lines_in_no_chunk_range_and_overlapping_ranges(tmp_path):
+    gap = CH2.replace("L8-L12", "L9-L12").replace("## Part B\n", "")
+    rc, out, _ = run_chunks(tmp_path, CODE_SOURCE, CH1, gap)
+    assert rc == 1 and "source line 8" in out
+    overlap = CH2.replace("L8-L12", "L7-L12") + "|---|---|\n"
+    rc, out, _ = run_chunks(tmp_path, CODE_SOURCE, CH1, overlap)
+    assert rc == 1 and "duplicated" in out
+
+
+def test_chunk_mode_copy_comments_belong_to_copy_mode_only(tmp_path):
+    copy = "<!-- docmove: copied from docs/guide.md L1-L7 -->\n" + "".join(CODE_SOURCE.splitlines(True)[:7])
+    rc, out, _ = run_chunks(tmp_path, CODE_SOURCE, CH1, CH2, copy)
+    assert rc == 0, out  # a copy elsewhere is not a duplicate of the split
+    rc, out, _ = run_chunks(
+        tmp_path, CODE_SOURCE, copy, extra=("--copy", "--lines", "L1-L7", "--source-name", "docs/guide.md")
+    )
+    assert rc == 0, out
+
+
+def test_bom_does_not_matter(tmp_path):
+    rc, out, _ = run(tmp_path, "﻿# Guide\nbody\n", "# Guide\nbody\n")
+    assert rc == 0, out
