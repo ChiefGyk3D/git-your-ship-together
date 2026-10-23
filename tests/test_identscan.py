@@ -8,8 +8,10 @@ the JSON report; the timing tests feed it 200 KB hostile lines.
 import contextlib
 import importlib.util
 import io
+import itertools
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -38,13 +40,19 @@ def run(*args, timeout=30):
     return p.returncode, p.stdout.decode("utf-8", "replace"), p.stderr.decode("utf-8", "replace")
 
 
+_DIRS = itertools.count()
+
+
 class Tmp(unittest.TestCase):
+    """A scratch directory with a name that is plainly safe to print (idt-<pid>-<n>): a random
+    mkdtemp name can look like a callsign or locator to the file-name redaction."""
+
     def setUp(self):
-        self._td = tempfile.TemporaryDirectory()
-        self.d = self._td.name
+        self.d = os.path.join(tempfile.gettempdir(), f"idt-{os.getpid()}-{next(_DIRS)}")
+        os.mkdir(self.d)
 
     def tearDown(self):
-        self._td.cleanup()
+        shutil.rmtree(self.d, ignore_errors=True)
 
     def w(self, name, data, mode="w"):
         p = os.path.join(self.d, name)
@@ -1338,18 +1346,19 @@ class TestRound4(Tmp):
         self.assertIn(":1:deny", out)
 
     def test_match_straddling_a_window_boundary_is_found(self):
-        step = ids.DENY_WINDOW - ids.DENY_OVERLAP
-        for edge in (ids.DENY_WINDOW, ids.DENY_WINDOW + step, ids.DENY_WINDOW + 2 * step):
-            for off in range(edge - 12, edge + 1, 4):
+        window, step = ids._window_params(len("sneakyword7"))
+        d = ids.Deny.load(self.w("d.txt", "sneakyword[0-9]\n"))
+        for edge in (window, window + step, window + 2 * step):
+            for off in range(edge - 14, edge + 1, 2):
                 text = "x" * off + "sneakyword7" + "y" * 50
-                d = ids.Deny.load(self.w("d.txt", "sneakyword[0-9]\n"))
                 self.assertEqual(len(ids.scan_text(text, ids.Allow(), None, d)), 1, off)
 
     def test_a_wide_pattern_is_not_missed_at_a_boundary(self):
         wide = "q" * 250 + "!"
-        d = ids.Deny.load(self.w("d.txt", wide + "\n"))
+        d = ids.Deny.load(self.w("d.txt", "q" * 250 + "[!]\n"))
         self.assertTrue(d.pats[0][0] is not None)
-        for off in range(ids.DENY_WINDOW - 260, ids.DENY_WINDOW + 5, 7):
+        window, _ = ids._window_params(251)
+        for off in range(window - 260, window + 5, 7):
             text = "x" * off + wide + "y" * 40
             self.assertEqual(len(ids.scan_text(text, ids.Allow(), None, d)), 1, off)
 
@@ -1385,7 +1394,8 @@ class TestRound4(Tmp):
         self.assertIn("deny matching degraded", err.getvalue())
         self.assertNotIn("(a?)", out.getvalue() + err.getvalue())
 
-    def test_degraded_with_a_finding_is_exit_1_with_the_note(self):
+    def test_degraded_with_a_finding_is_exit_2_and_still_prints_the_finding(self):
+        # round 5: 2 wins over 1 (round 4 pinned exit 1 here)
         filler = "plain filler line number one\n" * 400
         d = self.w("deny.txt", "(a?){32}a{32}\nzzmarker\n")
         t = self.w("a.md", "a" * 32 + "!\nzzmarker here\n" + filler)
@@ -1397,7 +1407,7 @@ class TestRound4(Tmp):
             contextlib.redirect_stderr(err),
         ):
             code = ids.main([t, "--deny-file", d])
-        self.assertEqual(code, 1)
+        self.assertEqual(code, 2)
         self.assertIn(":2:deny", out.getvalue())
         self.assertIn("deny matching degraded", err.getvalue())
 
@@ -1481,3 +1491,246 @@ class TestRound4(Tmp):
         for n in ("docs/getting-started.md", "docs/page-2-of-3.md", "a/b_c-d.md"):
             p = self.w(n, "ip 10.99.88.77\n")
             self.assertIn(p + ":1:private-ip", run(p)[1], n)
+
+
+class TestRound5(Tmp):
+    CODEX = "a{0,64}a{0,64}a{0,64}a{0,64}a{0,64}a{0,64}b"
+
+    def guarded_main(self, argv, budget="1.0"):
+        out, err = io.StringIO(), io.StringIO()
+        with (
+            mock.patch.object(ids, "_regex_is_safe", return_value=True),
+            mock.patch.object(ids, "DENY_BUDGET_SECONDS", float(budget)),
+            contextlib.redirect_stdout(out),
+            contextlib.redirect_stderr(err),
+        ):
+            t0 = time.monotonic()
+            code = ids.main(argv)
+        return code, out.getvalue(), err.getvalue(), time.monotonic() - t0
+
+    # ---- 1: no deny regex runs in the parent
+    def test_codex_pattern_is_refused_as_a_regex(self):
+        self.assertFalse(ids._regex_is_safe(self.CODEX))
+        self.assertFalse(ids._regex_is_safe("a{0,10}b{0,10}c{0,10}d"))
+        self.assertFalse(ids._regex_is_safe("[0-9]{1,100}x[0-9]{1,100}"))
+        for ok in ("foo[0-9]{1,3}bar", "a{1,5}b{1,5}", "sneak.*end", "W1[A-Z]{3}", "p0001[0-9]"):
+            self.assertTrue(ids._regex_is_safe(ok), ok)
+
+    def test_codex_pattern_cli_stays_fast_as_literal(self):
+        d = self.w("deny.txt", self.CODEX + "\n")
+        t = self.w("a.md", ("a" * 384 + "!\n") * 5)
+        t0 = time.monotonic()
+        q = subprocess.run([sys.executable, "-I", TOOL, t, "--deny-file", d], capture_output=True, timeout=20)
+        self.assertLess(time.monotonic() - t0, 5)
+        self.assertEqual(q.returncode, 0)
+        self.assertIn(b"treated as literal", q.stderr)
+
+    def test_short_text_with_a_slipped_regex_is_killed_not_run_in_the_parent(self):
+        d = self.w("deny.txt", self.CODEX + "\n")
+        t = self.w("a.md", "a" * 384 + "!\n")  # far under any in-process size threshold
+        code, out, err, dt = self.guarded_main([t, "--deny-file", d])
+        self.assertEqual(code, 2)
+        self.assertLess(dt, 3.0)
+        self.assertIn("deny matching degraded", err)
+
+    def test_file_names_are_matched_in_the_worker_too(self):
+        d = self.w("deny.txt", self.CODEX + "\n")
+        t = self.w("a" * 200 + "!.md", "ip 10.99.88.77\n")
+        code, out, err, dt = self.guarded_main([t, "--deny-file", d])
+        self.assertEqual(code, 2)
+        self.assertLess(dt, 4.0)
+        self.assertIn(":1:private-ip", out)
+
+    # ---- 2: degraded wins over findings
+    # (test_degraded_with_a_finding_is_exit_2_and_still_prints_the_finding is in TestRound4)
+
+    # ---- 3: pattern width decides the window
+    def test_wide_match_across_window_edges(self):
+        d = ids.Deny.load(self.w("d.txt", "Z{400}\n"))
+        window, step = ids._window_params(400)
+        for edge in (window, window + step):
+            for off in range(edge - 410, edge + 1, 23):
+                text = "x" * off + "Z" * 400 + "y" * 30
+                self.assertEqual(len(ids.scan_text(text, ids.Allow(), None, d)), 1, off)
+
+    def test_wider_than_the_overlap_cap_matches_the_whole_line(self):
+        d = ids.Deny.load(self.w("d.txt", "x{1000}sneak\nsneak.*end\n"))
+        self.assertEqual(len(ids.scan_text("x" * 3000 + "sneak", ids.Allow(), None, d)), 1)
+        self.assertEqual(len(ids.scan_text("sneak" + "-" * 5000 + "end", ids.Allow(), None, d)), 1)
+        # wider than the biggest window: only a whole-line search can see it
+        self.assertEqual(len(ids.scan_text("sneak" + "-" * 20000 + "end", ids.Allow(), None, d)), 1)
+
+    def test_widths_come_from_the_regex_parser(self):
+        self.assertEqual(ids._max_width("Z{400}"), 400)
+        self.assertEqual(ids._max_width("ab[0-9]"), 3)
+        self.assertGreater(ids._max_width("sneak.*end"), 4096)
+        self.assertIsNone(ids._max_width("("))
+
+    def test_over_one_mib_line_with_an_unbounded_pattern_is_degraded(self):
+        d = self.w("deny.txt", "sneak.*end\n")
+        t = self.w("a.md", "x" * (1024 * 1024 + 10) + "\n")
+        q = subprocess.run(
+            [sys.executable, "-I", TOOL, t, "--deny-file", d, "--max-bytes", "3000000"], capture_output=True, timeout=60
+        )
+        self.assertEqual(q.returncode, 2)
+        self.assertIn(b"deny matching degraded", q.stderr)
+
+    # ---- 4: printed names
+    def test_names_that_are_not_plainly_safe_are_redacted(self):
+        names = {
+            "VE3ABC-notes.md": "VE3ABC",
+            "FN31pr-station.md": "FN31pr",
+            "2606::1.md": "2606",
+            "jos\u00e9@corp.example.biz.md": "corp.example",
+            "notes-v2-1-3.md": "v2-1-3",
+            "gw-c0a80709.md": "c0a80709",
+            "0xC0A80709.md": "C0A80709",
+            "192x168x7x9.md": "192x168",
+        }
+        for n in names:
+            self.w("d/" + n, "ip 10.99.88.77\n")
+        keep = self.w("d/getting-started.md", "ip 10.99.88.77\n")
+        for fmt in ("text", "json"):
+            code, out, err = run(self.d, "--format", fmt)
+            self.assertEqual(code, 1)
+            self.assertEqual(out.count("private-ip"), len(names) + 1, out)
+            for frag in names.values():
+                self.assertNotIn(frag, out + err, (fmt, frag))
+            self.assertNotIn("jos", out + err)
+            self.assertIn("getting-started.md", out)
+        del keep
+
+    def test_directory_components_follow_the_same_rule(self):
+        p = self.w("VE3ABC/page.md", "ip 10.99.88.77\n")
+        code, out, err = run(p)
+        self.assertEqual(code, 1)
+        self.assertNotIn("VE3ABC", out + err)
+        self.assertIn("/page.md:1:private-ip", out)
+
+    def test_regex_deny_hit_in_a_file_name_redacts_it(self):
+        secret = "zq" + "kv" + "9ab"
+        d = self.w("deny.txt", "zqkv9[a-z]+\n")
+        t = self.w("dir/" + secret + ".md", "ip 10.99.88.77\n")
+        q = subprocess.run([sys.executable, "-I", TOOL, t, "--deny-file", d], capture_output=True, timeout=30)
+        self.assertEqual(q.returncode, 1)
+        self.assertNotIn(secret.encode(), q.stdout + q.stderr)
+        self.assertIn(b"/<redacted>:1:private-ip", q.stdout)
+
+    def test_plain_names_still_print(self):
+        for n in ("docs/getting-started.md", "docs/Testing-and-the-contract.md", "a/b_c-d.md"):
+            p = self.w(n, "ip 10.99.88.77\n")
+            self.assertIn(p + ":1:private-ip", run(p)[1], n)
+
+    # ---- 5: inet_aton spellings
+    def test_legacy_ipv4_spellings_with_context(self):
+        for t in (
+            "server 10.1",
+            "host 10.65535",
+            "gateway 10.1.65535",
+            "ip 030052000001",
+            "host 0xc0.168.0.1",
+            "peer 0300.0xa8.0.1",
+            "http://10.1/",
+            "addr 172.16.7",
+        ):
+            self.assertEqual(cls_set(t), {"private-ip"}, t)
+
+    def test_legacy_spellings_without_context_or_in_safe_ranges(self):
+        for t in (
+            "version 10.1",
+            "Python 3.12",
+            "release 10.65535",
+            "server 127.1",
+            "host 0.0.1",
+            "ip 4294967296",
+            "see 10.1 for details",
+        ):
+            self.assertEqual(cls_set(t), set(), t)
+
+    # ---- 6: eight-character locators
+    def test_eight_character_grid(self):
+        for t in ("grid: FN31pr12", "qth em73ab55", "locator EM73AB55", "Maidenhead: em73"):
+            self.assertEqual(cls_set(t), {"grid"}, t)
+        for t in ("grid FN31pr", "grid fn31PR", "grid FN31", "grid: FN31pr1"):
+            self.assertEqual(cls_set(t), set(), t)
+
+    # ---- 7: wrapped lines
+    def test_wrapped_identifiers_are_reported_at_the_first_line(self):
+        self.assertEqual(classes("mail me at bob@\ncorp-mail.io soon"), [(1, "email")])
+        self.assertEqual(classes("write to bob.smith@\n  corp-mail.io"), [(1, "email")])
+        self.assertEqual(classes("nic 3c:52:82:\naa:10:5b ok"), [(1, "mac")])
+        self.assertEqual(classes("dns 2606:4700:\n4700::1111"), [(1, "ipv6-public")])
+        self.assertEqual(classes("see printer.\ncorp for details"), [(1, "internal-host")])
+
+    def test_prose_at_a_line_end_stays_clean(self):
+        for t in (
+            "Note:\nbe careful here",
+            "Example.\nHome page is next",
+            "See below.\nLocal copies differ",
+            "1.\nlocal setup",
+            "Items:\n- a b c",
+            "Face:\nb00c cafe",
+            "Added:\ndead beef",
+            "1. Install\n2. Run it",
+            "Email:\nuser@ and then",
+            "email me at:\nbob",
+            "Steps.\ncorp",
+            "see below\ncorp later",
+        ):
+            self.assertEqual(classes(t), [], t)
+
+    # ---- 8: internationalized email
+    def test_unicode_email(self):
+        self.assertEqual(cls_set("mail jos\u00e9@corp.example.biz now"), {"email"})
+        self.assertEqual(cls_set("mail user@\u4f8b\u5b50.\u516c\u53f8 now"), {"email"})
+        self.assertEqual(cls_set("mail jos\u00e9@example.com now"), set())
+        self.assertEqual(cls_set("mail \u00fcser@sub.example.org now"), set())
+
+    # ---- 9: flags
+    def test_strict_deny_makes_a_literal_fallback_exit_2(self):
+        d = self.w("deny.txt", self.CODEX + "\n")
+        t = self.w("a.md", "hello world\n")
+        q = subprocess.run([sys.executable, "-I", TOOL, t, "--deny-file", d, "--strict-deny"], capture_output=True)
+        self.assertEqual(q.returncode, 2)
+        self.assertIn(b"1 deny pattern(s) treated as literal", q.stderr)
+        self.assertNotIn(b"a{0,64}", q.stderr + q.stdout)
+        q = subprocess.run([sys.executable, "-I", TOOL, t, "--deny-file", d], capture_output=True)
+        self.assertEqual(q.returncode, 0)
+
+    def test_deny_budget_flag(self):
+        d = self.w("deny.txt", "(a?){32}a{32}\n")
+        t = self.w("a.md", "a" * 32 + "!\n" + "plain filler line\n" * 50)
+        out, err = io.StringIO(), io.StringIO()
+        with (
+            mock.patch.object(ids, "_regex_is_safe", return_value=True),
+            contextlib.redirect_stdout(out),
+            contextlib.redirect_stderr(err),
+        ):
+            t0 = time.monotonic()
+            code = ids.main([t, "--deny-file", d, "--deny-budget", "1"])
+        self.assertEqual(code, 2)
+        self.assertLess(time.monotonic() - t0, 3.0)
+        for bad in ("0", "-1", "61", "abc"):
+            self.assertEqual(run(t, "--deny-budget", bad)[0], 2, bad)
+        self.assertEqual(run(t, "--deny-budget", "60")[0], 0)
+
+    def test_no_fork_platform_is_exit_2_with_a_note(self):
+        d = self.w("deny.txt", "zz[0-9]+\n")
+        t = self.w("a.md", "hello world zz1\n")
+        out, err = io.StringIO(), io.StringIO()
+        with (
+            mock.patch.object(ids.multiprocessing, "get_all_start_methods", return_value=["spawn"]),
+            contextlib.redirect_stdout(out),
+            contextlib.redirect_stderr(err),
+        ):
+            code = ids.main([t, "--deny-file", d])
+        self.assertEqual(code, 2)
+        self.assertIn("without a kill guard", err.getvalue())
+        # literal-only deny files need no worker
+        lit = self.w("lit.txt", "plain words\n")
+        with (
+            mock.patch.object(ids.multiprocessing, "get_all_start_methods", return_value=["spawn"]),
+            contextlib.redirect_stdout(io.StringIO()),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            self.assertEqual(ids.main([t, "--deny-file", lit]), 0)
