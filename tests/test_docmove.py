@@ -1553,3 +1553,122 @@ def test_verify_reports_loss_and_unaccounted():
 def test_unresolved_links_found():
     bad = docmove.unresolved_links({"a.md": "[x](b.md) [y](nope.md) [z](https://example.com/q)\n"}, {"a.md", "b.md"})
     assert bad == [("a.md", "nope.md")]
+
+
+# Hostile single lines: the heading and anchor scan must stay linear (issue 181). Each shape is repeated 16000
+# times; the quadratic version takes 4 to 19 seconds on every one of these, the linear one well under 1.
+_HOSTILE = [
+    "<a ",
+    "<a x=",
+    "- <a ",
+    "# <a ",
+    "# [",
+    "# [[",
+    "# ![",
+    "# `",
+    "# <!--",
+    "# <",
+    "[",
+    "[[",
+    "![",
+    "](",
+    "`",
+    "<!--",
+    "<a>",
+    '<a name="',
+    "<a id ",
+    "# a #",
+    "# [a](",
+    "# [a][",
+    "# " + " " * 7 + "x",
+]
+
+
+@pytest.mark.parametrize("unit", _HOSTILE)
+def test_headings_stay_linear_on_a_hostile_line(unit):
+    text = unit * 16000 + "\n"
+    t0 = time.time()
+    docmove.headings(text)
+    took = time.time() - t0
+    assert took < 2, f"{unit!r} x 16000 took {took:.1f}s"
+
+
+def test_the_linear_bound_bites_on_the_old_quadratic_pattern():
+    # the guard bites: the pre-fix pattern, at a third of the size, is already far over a proportionate bound
+    import re
+
+    old = re.compile(r'<a\s[^>]*?\b(?:name|id)\s*=\s*"([^"]+)"', re.I)
+    t0 = time.time()
+    list(old.finditer("<a " * 6000))
+    assert time.time() - t0 > 0.25
+
+
+def test_long_line_still_yields_its_html_anchors():
+    pad = "<a " * 8000
+    text = f'{pad}<a name="x"> text {pad}<A  href="u" ID = "y">\n'
+    got = [(h["slug"], h["kind"]) for h in docmove.headings(text)]
+    assert got == [("x", "id"), ("y", "id")]
+
+
+def test_html_anchor_edge_cases_are_unchanged():
+    def ids(line):
+        return [h["slug"] for h in docmove.headings(line + "\n") if h["kind"] == "id"]
+
+    assert ids('<a name="a"><a id="b">') == ["a", "b"]
+    assert ids('<a href="x">t</a> <a id="z">') == ["z"]
+    assert ids('<a name="">') == []
+    assert ids('<a name="" id="q">') == ["q"]
+    assert ids('<a class=x name="n>m">') == ["n>m"]
+    assert ids('<a href="x"> name="no"') == []
+    assert ids('<a data-id="no">') == ["no"]  # \b sits after the hyphen: unchanged behavior
+    assert ids('<a\tID = "t">') == ["t"]
+    assert ids('<a name="u') == []
+    assert ids('<a name="b" name="c">') == ["b"]
+
+
+def test_slug_of_matches_the_old_rules_on_ordinary_titles():
+    cases = {
+        "A [link](http://x) here": "a-link-here",
+        "![alt text](img.png) pic": "alt-text-pic",
+        "[ref][id] and [two][]": "ref-and-two",
+        "<b>bold</b> `code`": "bold-code",
+        "[x] not a link (y)": "x-not-a-link-y",
+        "[[wiki]] [a](b)(c)": "wiki-ac",
+        "[a](unclosed [b](c)": "a",
+        "a < b > c": "a--c",
+        "<>x<y": "xy",
+        "[a]x[b](c)": "axb",
+        "![a](b) [c](d)": "a-c",
+    }
+    for title, want in cases.items():
+        assert docmove.slug_of(title) == want, title
+
+
+def _old_slug_of(title):
+    """slug_of as it was before the linear rewrite: the oracle for the differential test."""
+    import re
+
+    t = re.sub(r"!\[([^\]]*)\]\([^)]*\)", r"\1", title)
+    t = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", t)
+    t = re.sub(r"\[([^\]]*)\]\[[^\]]*\]", r"\1", t)
+    t = re.sub(r"<[^>]+>", "", t)
+    return re.sub(r"[^\w\- ]", "", t.strip().lower()).replace(" ", "-")
+
+
+def _old_ids(line):
+    import re
+
+    pat = re.compile(r'<a\s[^>]*?\b(?:name|id)\s*=\s*"([^"]+)"', re.I)
+    return [m.group(1) for m in pat.finditer(line)]
+
+
+def test_slug_and_anchor_scans_match_the_old_regexes_on_random_text():
+    import random
+
+    rng = random.Random(181)
+    alpha = ["[", "]", "(", ")", "<", ">", "!", "a", " ", "x", "<a ", "name=", 'id="', '"', "=", "\t", "A", "`"]
+    for _ in range(4000):
+        t = "".join(rng.choice(alpha) for _ in range(rng.randint(0, 24)))
+        assert docmove.slug_of(t) == _old_slug_of(t), repr(t)
+        got = [h["slug"] for h in docmove.headings("p " + t + "\n") if h["kind"] == "id"]
+        assert got == _old_ids(t), repr(t)

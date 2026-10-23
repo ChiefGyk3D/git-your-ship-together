@@ -481,14 +481,99 @@ def _enc(path, angle):
 # Headings inside fenced or indented code do not count; `<a name="x">` and `id="x"` are anchors as well.
 _ATX_H = re.compile(r" {0,3}(#{1,6})(?:[ \t]+(.*?))?(?:[ \t]+#+)?[ \t]*$")
 _SETEXT_H = re.compile(r" {0,3}(=+|-+)[ \t]*$")
-_ID_ATTR = re.compile(r'<a\s[^>]*?\b(?:name|id)\s*=\s*"([^"]+)"', re.I)
+# The anchor scan is `<a` + whitespace, then (inside the same tag, i.e. before the next `>`) a `name=` or `id=`
+# attribute with a quoted, non-empty value. It is done by hand, not by one regex with a lazy `[^>]*?` prefix:
+# that regex rescans the rest of the line from every `<a ` and is quadratic on a line of repeated `<a `.
+_A_OPEN = re.compile(r"<a\s", re.I)
+_ID_KEY = re.compile(r'\b(?:name|id)\s*=\s*"', re.I)
+
+
+def _id_attrs(ln):
+    """Values of the name/id attributes of every `<a ...>` tag in one line, in order, in linear time."""
+    out = []
+    pos = 0
+    n = len(ln)
+    while True:
+        m = _A_OPEN.search(ln, pos)
+        if not m:
+            return out
+        gt = ln.find(">", m.end())
+        stop = n if gt < 0 else gt
+        # A start that finds no attribute before the next `>` leaves every later start in that stretch
+        # with fewer places to look, so the scan resumes after the `>`.
+        pos = stop
+        for k in _ID_KEY.finditer(ln, m.end(), stop):
+            close = ln.find('"', k.end())
+            if close < 0:
+                break  # no closing quote anywhere ahead: no later key can succeed either
+            if close > k.end():
+                out.append(ln[k.end() : close])
+                pos = close + 1
+                break
+        if pos >= n:
+            return out
+
+
+def _unwrap(t, opener, mid, close):
+    r"""Replace every `<opener>text]<mid>...<close>` by `text`, left to right: the linear form of
+    re.sub(opener + r"([^\]]*)\]" + mid + "[^" + close + "]*" + close, r"\1", t). The regexes rescan the rest
+    of the title from every opener, which is quadratic on a title of repeated `[`."""
+    out = []
+    pos = 0  # start of the text not yet copied
+    at = 0  # where the next opener is searched for
+    first = last = -1  # the first `]` and the first `close` found ahead of the opener, reused while still ahead
+    while True:
+        i = t.find(opener, at)
+        if i < 0:
+            break
+        b = i + len(opener)
+        if first < b:
+            first = t.find("]", b)
+            if first < 0:
+                break
+        if t[first + 1 : first + 1 + len(mid)] != mid:
+            at = i + 1
+            continue
+        c = first + 1 + len(mid)
+        if last < c:
+            last = t.find(close, c)
+            if last < 0:
+                break
+        out.append(t[pos:i])
+        out.append(t[b:first])
+        pos = at = last + 1
+    out.append(t[pos:])
+    return "".join(out)
+
+
+def _drop_tags(t):
+    """re.sub(r"<[^>]+>", "", t) without rescanning to the end of the title from every `<`."""
+    out = []
+    pos = 0  # start of the text not yet copied
+    at = 0  # where the next `<` is searched for
+    gt = -1
+    while True:
+        i = t.find("<", at)
+        if i < 0:
+            break
+        if gt <= i:
+            gt = t.find(">", i + 1)
+            if gt < 0:
+                break
+        if gt == i + 1:  # `<>`: at least one character must sit between
+            at = i + 1
+            continue
+        out.append(t[pos:i])
+        pos = at = gt + 1
+    out.append(t[pos:])
+    return "".join(out)
 
 
 def slug_of(title):
-    t = re.sub(r"!\[([^\]]*)\]\([^)]*\)", r"\1", title)
-    t = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", t)
-    t = re.sub(r"\[([^\]]*)\]\[[^\]]*\]", r"\1", t)
-    t = re.sub(r"<[^>]+>", "", t)
+    t = _unwrap(title, "![", "(", ")")
+    t = _unwrap(t, "[", "(", ")")
+    t = _unwrap(t, "[", "[", "]")
+    t = _drop_tags(t)
     return re.sub(r"[^\w\- ]", "", t.strip().lower()).replace(" ", "-")
 
 
@@ -538,8 +623,8 @@ def headings(text):
             out.append(
                 {"line": i, "level": level, "base": base, "slug": base if n == 0 else f"{base}-{n}", "kind": "h"}
             )
-        for idm in _ID_ATTR.finditer(ln):
-            out.append({"line": i, "level": 0, "base": idm.group(1), "slug": idm.group(1), "kind": "id"})
+        for val in _id_attrs(ln):
+            out.append({"line": i, "level": 0, "base": val, "slug": val, "kind": "id"})
         prev_blank = False
     return out
 
