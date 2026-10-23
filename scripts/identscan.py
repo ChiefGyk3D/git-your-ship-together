@@ -7,6 +7,9 @@ Usage: python3 -I scripts/identscan.py <dir-or-files...> [--allow FILE] [--deny-
 Placeholder-looking emails such as you@your-domain.com are findings unless the allow file
 waives them with a reason.
 
+Residual risk (not caught): an address split by HTML tags or comments between the octets, text
+encoded more than three levels deep, and a public IPv4 split across a line break.
+
 Exit 0 clean, 1 findings, 2 cannot tell (unreadable, bad encoding, symlink, oversize,
 bad allow file).  Exit 2 wins over 1 when both occur.
 
@@ -26,6 +29,7 @@ import posixpath
 import re
 import stat
 import sys
+import time
 import unicodedata
 import urllib.parse
 
@@ -33,6 +37,8 @@ DEFAULT_MAX_BYTES = 2 * 1024 * 1024
 CONFIG_MAX_BYTES = 1024 * 1024  # --allow and --deny-file: over this is exit 2, never truncated
 MAX_DENY_PATTERNS = 500
 MAX_CONFIG_LINE = 4096
+DENY_REGEX_LINE = 1024  # regex deny patterns run on lines up to this long; longer lines get literal matching
+DENY_BUDGET_SECONDS = 2.0
 MAX_DENY_LEN = 256
 MD_EXT = (".md", ".markdown", ".mdx")
 
@@ -191,16 +197,84 @@ class Allow:
         return False
 
 
+_QUANT = re.compile(r"\{(\d+)(,(\d*))?\}")
+
+
+def _regex_is_safe(pat):
+    """Conservative check that a pattern cannot backtrack catastrophically.
+
+    Refuses backreferences, conditionals and lookarounds, a quantified group whose body holds a
+    quantifier or an alternation ((a+)+, (a*)*, (a|aa)*, (.*)*), and more than two unbounded
+    quantifiers.  A refused pattern is used as plain text instead.
+    """
+    if re.search(r"\\[1-9]|\(\?(?!:)", pat):
+        return False
+    stack, unbounded, i, n = [], 0, 0, len(pat)
+    while i < n:
+        c = pat[i]
+        if c == "\\":
+            i += 2
+            continue
+        if c == "[":
+            i += 1
+            if i < n and pat[i] == "^":
+                i += 1
+            if i < n and pat[i] == "]":
+                i += 1
+            while i < n and pat[i] != "]":
+                i += 2 if pat[i] == "\\" else 1
+            i += 1
+            continue
+        if c == "(":
+            stack.append(False)
+            i += 3 if pat.startswith("(?:", i) else 1
+            continue
+        if c == "|" and stack:
+            stack[-1] = True
+        elif c == ")" and stack:
+            body = stack.pop()
+            nxt = pat[i + 1 : i + 2]
+            qm = _QUANT.match(pat, i + 1) if nxt == "{" else None
+            if nxt in ("*", "+") or qm:
+                if body:
+                    return False
+                if stack:
+                    stack[-1] = True
+            elif body and stack:
+                stack[-1] = True
+        elif c in "*+":
+            unbounded += 1
+            if stack:
+                stack[-1] = True
+        elif c == "{":
+            qm = _QUANT.match(pat, i)
+            if qm:
+                if qm.group(2) is not None and qm.group(3) == "":
+                    unbounded += 1
+                if stack:
+                    stack[-1] = True
+                i = qm.end()
+                continue
+        i += 1
+    return unbounded <= 2
+
+
 class Deny:
     """Caller-private deny patterns (for example a real callsign fed in from a secret).
 
-    One literal-or-regex pattern per line, matched case-insensitively.  A line that is not a
-    valid regex is taken literally.  The file's content is never echoed: a hit reports only
+    One literal-or-regex pattern per line, matched case-insensitively.  A line is a regex only
+    when it compiles and passes _regex_is_safe (no nested quantifiers, backreferences or
+    lookarounds); otherwise it is taken as literal text and the count is reported once on
+    stderr, never the pattern.  Regexes run only on lines up to DENY_REGEX_LINE characters and
+    within DENY_BUDGET_SECONDS of total matching time; beyond either, the literal text of each
+    pattern is searched for instead.  The file's content is never echoed: a hit reports only
     file:line:deny.
     """
 
     def __init__(self):
-        self.pats = []
+        self.pats = []  # (compiled regex or None, lowercase literal text)
+        self.literal_count = 0
+        self.spent = 0.0
 
     @classmethod
     def load(cls, path):
@@ -214,17 +288,32 @@ class Deny:
                 raise AllowError(f"deny file line {n}: line too long")
             if len(s) > MAX_DENY_LEN or len(d.pats) >= MAX_DENY_PATTERNS:
                 raise AllowError(f"deny file line {n}: pattern too long or too many patterns")
+            rx = None
             try:
                 rx = re.compile(s, re.I)
             except re.error:
-                rx = re.compile(re.escape(s), re.I)
-            if rx.search(""):
+                pass
+            if rx is not None and not _regex_is_safe(s):
+                rx = None
+                d.literal_count += 1
+            if (rx or re.compile(re.escape(s))).search(""):
                 raise AllowError(f"deny file line {n}: pattern matches the empty string")
-            d.pats.append(rx)
+            d.pats.append((rx, s.lower()))
         return d
 
     def hit(self, *texts):
-        return any(rx.search(t) for rx in self.pats for t in texts)
+        for rx, lit in self.pats:
+            for t in texts:
+                if rx is None or len(t) > DENY_REGEX_LINE or self.spent > DENY_BUDGET_SECONDS:
+                    if lit in t.lower():
+                        return True
+                else:
+                    t0 = time.monotonic()
+                    found = rx.search(t)
+                    self.spent += time.monotonic() - t0
+                    if found:
+                        return True
+        return False
 
 
 # --------------------------------------------------------------------- helpers
@@ -285,7 +374,15 @@ RE_IPCTX = re.compile(
 REEMPH = re.compile(r"(?<=[0-9.])[*_`]+(?=[0-9.])")
 RETAIL = re.compile(r"(?<![\w.])(?:\d{1,3}\.){1,3}$")
 REHEAD = re.compile(r"^\s*(\d{1,3}(?:\.\d{1,3}){0,3})(?![\w-])")
-_ZW = dict.fromkeys(map(ord, "\u200b\u200c\u200d\u2060\ufeff"))
+# every Unicode category Cf character (soft hyphen, LRM/RLM, bidi controls, U+2061-2064, ZWSP/ZWNJ/ZWJ,
+# word joiner, BOM, tag characters ...) plus the combining grapheme joiner and the Mongolian vowel separator
+_INVISIBLE = re.compile(
+    "[\u00ad\u034f\u0600-\u0605\u061c\u06dd\u070f\u0890\u0891\u08e2\u180e\u200b-\u200f\u202a-\u202e"
+    "\u2060-\u2064\u2066-\u206f\ufeff\ufff9-\ufffb\U000110bd\U000110cd\U00013430-\U0001343f"
+    "\U0001bca0-\U0001bca3\U0001d173-\U0001d17a\U000e0001\U000e0020-\U000e007f]"
+)
+_DOTS = {0x3002: ".", 0xFE52: ".", 0xFF0E: ".", 0xFF61: "."}
+_DEFANG = re.compile(r"(?<=[0-9])[\[({]\.[\])}](?=[0-9])")
 # Hostnames are found in code, not with one nested-quantifier regex.  A pattern of
 # the shape (label\.)+tld goes quadratic on a long "a.a.a.a." line as soon as its
 # start guard is lost, and a guard the next edit can drop is a weak defense.  Here
@@ -464,10 +561,13 @@ def _ipv6_findings(line, allow, path, prev=""):
     for m in RE6.finditer(line):
         if REEUI64.fullmatch(m.group(0)):
             continue  # eight two-digit groups is an EUI-64 hardware address; the MAC detector owns it
+        if line[m.end() : m.end() + 1] == "-":
+            continue  # ::add-mask:: and friends are not addresses
         try:
             ip = ipaddress.IPv6Address(m.group(0))
         except ValueError:
             continue
+        groups = sum(1 for g in m.group(0).split(":") if g)
         if ip.ipv4_mapped is not None:
             if allow.ip_ok(ip, path):
                 continue
@@ -482,7 +582,8 @@ def _ipv6_findings(line, allow, path, prev=""):
             yield "ipv6-local", SHAPES["ipv6-local-ula"]
         elif n >> 118 == 0x3FA:
             yield "ipv6-local", SHAPES["ipv6-local-ll"]
-        else:
+        elif groups >= 3:
+            # a global address needs three explicit groups: Beef::cafe and "use ::dead;" are code, not hosts
             yield "ipv6-public", SHAPES["ipv6-public"]
 
 
@@ -619,17 +720,30 @@ _DETECTORS = (
 
 
 def _normalize(line):
-    """Undo the cheap disguises: zero-width characters, HTML entities, %XX, fullwidth forms."""
-    if line.isascii() and "&" not in line and "%" not in line:
-        return line
-    if not line.isascii():
-        line = line.translate(_ZW)
-    if "&" in line:
-        line = html.unescape(line)
-    if "%" in line:
-        line = urllib.parse.unquote(line)
-    if not line.isascii():
-        line = unicodedata.normalize("NFKC", line).translate(_ZW)
+    """Undo the cheap disguises before matching.
+
+    Invisible (Cf) characters, HTML entities, %XX, fullwidth forms and dot lookalikes are undone in
+    up to three passes (so %252e and &amp;#46; decode), then [.] (.) {.} between digits become dots.
+    Not undone, and so residual risk: HTML tags or comments between octets, and encodings nested more
+    than three deep.
+    """
+    if line.isascii() and "&" not in line and "%" not in line and ".]" not in line and ".)" not in line:
+        if ".}" not in line:
+            return line
+    for _ in range(3):
+        before = line
+        if not line.isascii():
+            line = _INVISIBLE.sub("", line)
+        if "&" in line:
+            line = html.unescape(line)
+        if "%" in line:
+            line = urllib.parse.unquote(line)
+        if not line.isascii():
+            line = _INVISIBLE.sub("", unicodedata.normalize("NFKC", line)).translate(_DOTS)
+        if line == before:
+            break
+    if "." in line:
+        line = _DEFANG.sub(".", line)
     return line
 
 
@@ -768,12 +882,16 @@ def display_path(path, index, deny=None):
     """
     safe = re.fullmatch(r"[A-Za-z0-9._/-]*", path) is not None
     probe = Allow()  # the caller's waivers do not apply to what we print
-    names = [path.replace("/", " ")]
-    if safe and not any(scan_text(x, probe, None, deny) for x in names) and not path.startswith("-"):
+    # a digit.digit run is never printed: the scanner's own address pattern refuses a match followed by
+    # ".md" (as in gw-10.1.2.3.md), so any name with one is treated as an identifier
+    risky = re.search(r"[0-9]\.[0-9]", path) is not None
+    spaced = path.replace("/", " ")
+    names = [spaced, spaced + " ", re.sub(r"\.[A-Za-z0-9]{1,8}$", "", path).replace("/", " ") + " "]
+    if safe and not risky and not any(scan_text(x, probe, None, deny) for x in names) and not path.startswith("-"):
         return path
     base = path.rsplit("/", 1)[-1]
     shown = _safe_name(base)
-    if any(scan_text(x, probe, None, deny) for x in (base, shown, path)):
+    if risky or any(scan_text(x, probe, None, deny) for x in (base, base + " ", shown, path, *names)):
         shown = "<redacted>"
     return f"path#{index}/{shown}"
 
@@ -834,6 +952,11 @@ def _main(argv=None):
         print(f"identscan: error: {e}", file=sys.stderr)
         return 2
 
+    if deny is not None and deny.literal_count:
+        print(
+            f"identscan: note: {deny.literal_count} deny pattern(s) treated as literal text (unsafe regex)",
+            file=sys.stderr,
+        )
     findings, errors, nfiles = run(args.paths, allow, args.all, args.max_bytes, deny)
     code = 2 if errors else (1 if findings else 0)
     fshow = [(display_path(p, i, deny), f) for p, i, f in findings]

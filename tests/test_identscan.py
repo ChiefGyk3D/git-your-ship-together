@@ -1186,3 +1186,144 @@ class TestRound2(Tmp):
         a = ids.Allow()
         a.strs.append((None, "you@your-domain.com"))
         self.assertEqual(cls_set("mail you@your-domain.com", a), set())
+
+
+class TestRound3(Tmp):
+    def test_ip_in_file_name_is_never_printed(self):
+        names = ("k/router-10.23.45.67.md", "e/gw-192.168.7.9.md", "e/gw-52.1.2.3.md", "e/10.23.45.67.md")
+        for n in names:
+            self.w(n, "ip 10.99.88.77\n")
+        frags = ("10.23.45.67", "192.168.7.9", "52.1.2.3", "23.45.67", "168.7.9", "1.2.3")
+        for fmt in ("text", "json"):
+            code, out, err = run(self.d, "--format", fmt)
+            self.assertEqual(code, 1)
+            self.assertEqual(out.count("private-ip"), 4)
+            for frag in frags:
+                self.assertNotIn(frag, out + err, (fmt, frag))
+
+    def test_ip_in_error_line_file_name_is_never_printed(self):
+        p = self.w("e/gw-52.1.2.3.md", b"\xff\xfe")
+        code, out, err = run(p)
+        self.assertEqual(code, 2)
+        self.assertNotIn("52.1.2.3", out + err)
+
+    def test_any_digit_dot_digit_name_is_redacted(self):
+        # even a name the address patterns would not match, such as a version
+        p = self.w("docs/release-1.2.md", "ip 10.99.88.77\n")
+        out = run(p)[1]
+        self.assertNotIn("1.2", out)
+        self.assertIn("/<redacted>:1:private-ip", out)
+
+    def test_ordinary_names_still_print(self):
+        p = self.w("docs/page-one.md", "ip 10.99.88.77\n")
+        self.assertIn(p + ":1:private-ip", run(p)[1])
+
+    # ---- deny file: no catastrophic regex
+    def test_regex_safety_check(self):
+        for bad in ("(a+)+$", "(a*)*", "(a+)*", "(.*)*", "(a|aa)+", "(a|a)*b", "(a)\\1", "(?P<x>a)(?P=x)", "a*a*a*"):
+            self.assertFalse(ids._regex_is_safe(bad), bad)
+        for ok in ("W1[A-Z]{3}", "zz[0-9]+", "foo\\d+bar", "r[a-z]{3}\\d", "(ab)c", "(?:ab){2}", "x[+*]y"):
+            self.assertTrue(ids._regex_is_safe(ok), ok)
+
+    def test_catastrophic_deny_pattern_finishes(self):
+        d = self.w("deny.txt", "(a+)+$\nzzmarker\n")
+        p = self.w("a.md", ("a" * 30 + "!\n") + ("aaa!" * 50_000 + "\n") + "zzmarker\n")
+        try:
+            q = subprocess.run([sys.executable, "-I", TOOL, p, "--deny-file", d], capture_output=True, timeout=5)
+        except subprocess.TimeoutExpired:
+            self.fail("catastrophic deny pattern hung the scan")
+        out, err = q.stdout.decode(), q.stderr.decode()
+        self.assertEqual(q.returncode, 1)
+        self.assertIn(":3:deny", out)
+        self.assertIn("treated as literal", err)
+        self.assertNotIn("(a+)", out + err)
+
+    def test_long_lines_get_literal_matching_only(self):
+        d = ids.Deny.load(self.w("deny.txt", "zz[0-9]+\n"))
+        short = "x zz42 y"
+        self.assertLess(ids.DENY_REGEX_LINE, 2000)
+        long_ = "x" * 2000 + " zz42"
+        self.assertEqual(len(ids.scan_text(short, ids.Allow(), None, d)), 1)
+        self.assertEqual(ids.scan_text(long_, ids.Allow(), None, d), [])
+        self.assertEqual(len(ids.scan_text(long_ + " zz[0-9]+", ids.Allow(), None, d)), 1)
+
+    # ---- invisible characters and dot lookalikes
+    def test_invisible_characters_are_stripped(self):
+        invisibles = ("\u00ad", "\u200e", "\u200f", "\u2061", "\u2062", "\u2063", "\u2064", "\u034f", "\u180e")
+        invisibles += ("\u202a", "\u202c", "\u2066", "\u2069", "\u061c", "\u200b", "\ufeff")
+        for ch in invisibles:
+            self.assertEqual(cls_set("host 10.23.45." + ch + "67"), {"private-ip"}, hex(ord(ch)))
+            self.assertEqual(cls_set("host 10" + ch + ".23.45.67"), {"private-ip"}, hex(ord(ch)))
+            self.assertEqual(cls_set("host " + ch + "10.23.45.67" + ch), {"private-ip"}, hex(ord(ch)))
+
+    def test_dot_lookalikes_and_defanging(self):
+        for f in (
+            "10\u300223\u300245\u300267",
+            "10\ufe5223\ufe5245\ufe5267",
+            "10\uff0e23\uff0e45\uff0e67",
+            "10\uff6123\uff6145\uff6167",
+            "10[.]23[.]45[.]67",
+            "10(.)23(.)45(.)67",
+            "10{.}23{.}45{.}67",
+            "10[.]23.45(.)67",
+        ):
+            self.assertEqual(cls_set("host " + f), {"private-ip"}, f)
+
+    def test_defang_is_limited_to_numeric_runs(self):
+        for t in ("see a[.]b and [.] here", "list(.)map and x[.]y", "arr[.]length"):
+            self.assertEqual(cls_set(t), set(), t)
+
+    # ---- double encoding
+    def test_double_encoding(self):
+        for f in (
+            "10%252e23%252e45%252e67",
+            "10&amp;#46;23&amp;#46;45&amp;#46;67",
+            "10%26%2346%3B23.45.67",
+            "10%25252e23%25252e45%25252e67",
+            "10&amp;amp;#46;23.45.67",
+        ):
+            self.assertEqual(cls_set("host " + f), {"private-ip"}, f)
+
+    def test_zero_width_inside_an_entity(self):
+        self.assertEqual(cls_set("host 10&#4\u200b6;23.45.67"), {"private-ip"})
+        self.assertEqual(cls_set("host 10%2\u200be23.45.67"), {"private-ip"})
+        self.assertEqual(cls_set("host 10&#8203;.23.45.67"), {"private-ip"})
+
+    # ---- IPv6 false positives
+    def test_ipv6_lookalikes_are_not_findings(self):
+        for t in (
+            "::add-mask::secret",
+            "::add-path::/x",
+            "::error file=a::b",
+            "use ::dead;",
+            "Beef::cafe",
+            "call Cafe::bad()",
+            "::set-output name=x::y",
+            "::cafe-",
+            "word ::beef-x",
+        ):
+            self.assertEqual(cls_set(t), set(), t)
+
+    def test_ipv6_real_ones_still_found(self):
+        self.assertEqual(cls_set("r 2606:4700:4700::1111"), {"ipv6-public"})
+        self.assertEqual(cls_set("r 2001:4860:4860::8888"), {"ipv6-public"})
+        self.assertEqual(cls_set("r ::ffff:a17:2d43"), {"private-ip"})
+        self.assertEqual(cls_set("r fc00::1 and fe80::1"), {"ipv6-local"})
+        for t in ("r 2001:db8::1", "r ::", "r ::1", "r ff02::1"):
+            self.assertEqual(cls_set(t), set(), t)
+
+    def test_ipv6_followed_by_a_hyphen_is_not_an_address(self):
+        self.assertEqual(cls_set("r 2606:4700:4700::1111-x"), set())
+        self.assertEqual(cls_set("r fc00::1-x"), set())
+
+    def test_invisible_table_covers_every_cf_character(self):
+        import unicodedata
+
+        missing = [
+            hex(c)
+            for c in range(sys.maxunicode + 1)
+            if unicodedata.category(chr(c)) == "Cf" and not ids._INVISIBLE.fullmatch(chr(c))
+        ]
+        self.assertEqual(missing, [])
+        self.assertTrue(ids._INVISIBLE.fullmatch("\u034f") and ids._INVISIBLE.fullmatch("\u180e"))
+        self.assertIsNone(ids._INVISIBLE.fullmatch("a"))
