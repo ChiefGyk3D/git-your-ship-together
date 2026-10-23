@@ -97,7 +97,7 @@ def row(src, page="", action="move", order="", section="", notes=None):
 NOTES_HEADER = HEADER + ",notes"
 
 
-def run_tool(repo, rows, *extra, header=HEADER, raw=None, mapfile=None, env=None):
+def run_tool(repo, rows, *extra, header=HEADER, raw=None, mapfile=None, env=None, timeout=None):
     mp = Path(repo).parent / "map.csv" if mapfile is None else Path(repo) / mapfile
     mp.parent.mkdir(parents=True, exist_ok=True)
     mp.write_bytes(raw if raw is not None else (header + "\n" + "\n".join(rows) + ("\n" if rows else "")).encode())
@@ -108,6 +108,7 @@ def run_tool(repo, rows, *extra, header=HEADER, raw=None, mapfile=None, env=None
         [sys.executable, "-I", str(TOOL), "--repo", str(repo), "--map", str(mp), *extra],
         capture_output=True,
         env=env,
+        timeout=timeout,
     )
     return r.returncode, r.stdout.decode(errors="replace"), r.stderr.decode(errors="replace")
 
@@ -708,6 +709,8 @@ def test_splitcheck_agrees_with_docmove_split(tmp_path):
             str(SPLITCHECK),
             "--source",
             str(src),
+            "--source-name",
+            "docs/big.md",
             "--out",
             str(repo / "Part-One.md"),
             str(repo / "Part-Two.md"),
@@ -1365,6 +1368,94 @@ def test_the_report_suggests_home_for_a_dangling_directory_link(tmp_path):
     rep = text(repo, "wiki/where-did-it-go.md")
     line = next(ln for ln in rep.splitlines() if "dangling directory link" in ln)
     assert "README.md:3" in line and "docs/pfsense/" in line and "`Home`" in line
+
+
+# --------------------------------------------------------------------------- Codex findings
+def test_a_hardlinked_file_that_would_be_moved_or_rewritten_is_refused(tmp_path):
+    repo = make_repo(tmp_path, BASE)
+    for n, victim in enumerate(("docs/setup.md", "README.md", "src/main.py")):
+        outside = tmp_path / f"outside{n}.txt"
+        os.link(repo / victim, outside)
+        before = outside.read_bytes()
+        # setup.md is moved; README.md links to it (a markdown rewrite); main.py names it (a literal rewrite)
+        err = fails(repo, [row("docs/setup.md", "Setup.md")])
+        assert "hard link" in err and victim in err
+        assert outside.read_bytes() == before
+        os.unlink(outside)
+        assert os.stat(repo / victim).st_nlink == 1
+
+
+def make_swap_shim(tmp_path, repo, outside):
+    """A `git` that, on the first `git mv`, swaps README.md for a symlink to `outside` (a swap after validation)."""
+    import shutil
+
+    shim = tmp_path / "shim"
+    shim.mkdir()
+    (shim / "git").write_text(
+        "#!/bin/sh\n"
+        'case " $* " in *" mv "*)\n'
+        '  if [ ! -e "$SHIM_DONE" ]; then : > "$SHIM_DONE"; rm -f "$SHIM_REPO/README.md"; '
+        'ln -s "$SHIM_OUTSIDE" "$SHIM_REPO/README.md"; fi;;\n'
+        "esac\n"
+        f'exec {shutil.which("git")} "$@"\n'
+    )
+    (shim / "git").chmod(0o755)
+    return {
+        **os.environ,
+        "PATH": f"{shim}{os.pathsep}{os.environ['PATH']}",
+        "SHIM_DONE": str(tmp_path / "done"),
+        "SHIM_REPO": str(repo),
+        "SHIM_OUTSIDE": str(outside),
+    }
+
+
+def test_a_file_swapped_for_a_symlink_after_validation_is_never_written_through(tmp_path):
+    repo = make_repo(tmp_path, BASE)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("do not touch\n")
+    rc, out, err = run_tool(repo, [row("docs/setup.md", "Setup.md")], env=make_swap_shim(tmp_path, repo, outside))
+    assert rc == 2, (out, err)
+    assert "git reset --hard HEAD && git clean -fd" in err and "README.md" in err
+    assert outside.read_text() == "do not touch\n"
+
+
+def test_rewritten_files_are_replaced_not_truncated_and_keep_their_mode(tmp_path):
+    repo = make_repo(tmp_path, {**BASE, "scripts/tool.sh": "#!/bin/sh\ncat docs/setup.md\n"})
+    os.chmod(repo / "scripts/tool.sh", 0o755)
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "mode")
+    inode = os.stat(repo / "scripts/tool.sh").st_ino
+    rc, out, err = run_tool(repo, [row("docs/setup.md", "Setup.md")])
+    assert rc == 0, (out, err)
+    st = os.stat(repo / "scripts/tool.sh")
+    assert st.st_mode & 0o777 == 0o755 and "Setup.md" in text(repo, "scripts/tool.sh")
+    assert st.st_ino != inode  # a new file took the name; a shared inode would have been truncated
+    assert not [p for p in os.listdir(repo / "scripts") if p.startswith(".docmove")]
+
+
+def test_a_stub_target_with_markup_in_its_file_name_is_refused(tmp_path):
+    evil = "x`<img src=x onerror=alert(1)>.txt"
+    repo = make_repo(tmp_path, {**BASE, evil: "payload\n"})
+    rows = [
+        row("docs/setup.md", "Setup.md"),
+        row("docs/setup.md", "Old-Setup", "stub", notes=f"points to repo file {evil}"),
+    ]
+    err = fails(repo, rows, header=NOTES_HEADER)
+    assert "unsafe" in err
+
+
+@pytest.mark.parametrize(
+    "name,line,probe",
+    [("big.txt", "x docs/old.md\n", "x Old.md\n"), ("big.md", "[a](docs/old.md)\n", "[a](Old.md)\n")],
+)
+def test_sixty_thousand_matches_do_not_make_the_rewrite_quadratic(tmp_path, name, line, probe):
+    repo = make_repo(tmp_path, {"docs/old.md": "# Old\n", name: line * 60000})
+    t0 = time.time()
+    rc, out, err = run_tool(repo, [row("docs/old.md", "Old.md")], timeout=120)
+    took = time.time() - t0
+    assert rc == 0, (out, err)
+    assert text(repo, name).count(probe) == 60000
+    assert took < 5, took  # the quadratic version took 15 s or more
 
 
 # --------------------------------------------------------------------------- post-check guards

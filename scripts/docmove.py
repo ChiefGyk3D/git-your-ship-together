@@ -21,6 +21,7 @@ map file. Python 3 standard library only.
 """
 
 import argparse
+import bisect
 import collections
 import csv
 import fnmatch
@@ -29,6 +30,7 @@ import io
 import os
 import posixpath
 import re
+import stat
 import subprocess
 import sys
 import unicodedata
@@ -564,6 +566,11 @@ class LinkCtx:
                 self.wiki.setdefault(_wiki_fold(posixpath.splitext(posixpath.basename(f))[0]), []).append(f)
 
 
+def _newlines(text):
+    """Offsets of every newline, so that the line of an offset is bisect_left(offsets, offset) + 1."""
+    return [m.start() for m in re.finditer("\n", text)]
+
+
 def _frag_of(suffix):
     """(query part, fragment or None) of a link suffix such as `?x=1#frag`."""
     q, sep, f = suffix.partition("#")
@@ -640,12 +647,13 @@ def rewrite_md(text, old_path, new_path, ctx, span=None):
     containing file moved are touched; everything else stays byte-identical. `span` is the (first, last)
     line of `old_path` that `new_path` holds, when it holds only a part."""
     refs = scan(text)
+    nls = _newlines(text)
     out = []
     last = 0
     st = {"edits": 0, "broken": [], "bad": [], "amb": [], "approx": [], "anch": [], "pre": []}
     for r in refs:
         raw = text[r.start : r.end]
-        lineno = text.count("\n", 0, r.start) + 1
+        lineno = bisect.bisect_left(nls, r.start) + 1
         if r.kind == "wiki":
             new = _rewrite_wiki(raw, ctx, st, old_path, lineno)
             if new is not None and new != raw:
@@ -755,6 +763,7 @@ def rewrite_nonmd(text, moved):
     if not moved:
         return text, [], []
     pat = re.compile("|".join(re.escape(p) for p in sorted(moved, key=len, reverse=True)))
+    nls = _newlines(text)
     out = []
     last = 0
     done = []
@@ -771,7 +780,7 @@ def rewrite_nonmd(text, moved):
                     text[s - 2 : s] == "./" and (s < 3 or not (text[s - 3].isalnum() or text[s - 3] in "_-."))
                 ) or text[s - 2 : s - 1] == "}"
                 if not ok:
-                    amb.append((text.count("\n", 0, s) + 1, m.group()))
+                    amb.append((bisect.bisect_left(nls, s) + 1, m.group()))
                     continue
         if e < n:
             c = text[e]
@@ -779,12 +788,12 @@ def rewrite_nonmd(text, moved):
                 continue
         new = moved[m.group()]
         if new is None:
-            amb.append((text.count("\n", 0, s) + 1, m.group()))
+            amb.append((bisect.bisect_left(nls, s) + 1, m.group()))
             continue
         out.append(text[last:s])
         out.append(new)
         last = e
-        done.append((text.count("\n", 0, s) + 1, m.group(), new))
+        done.append((bisect.bisect_left(nls, s) + 1, m.group(), new))
     out.append(text[last:])
     return "".join(out), done, amb
 
@@ -794,10 +803,9 @@ def _wiki_mask(inner, stems):
     parts = inner.split("|")
     if len(parts) > 2:
         return inner
-    for k, part in enumerate(parts):
-        name, sep, frag = part.partition("#")
-        if _wiki_fold(name) in stems:
-            parts[k] = "\x00"  # the page name and its fragment may both change
+    name = parts[-1].partition("#")[0]  # only the page side is rewritten; the display text must not change
+    if _wiki_fold(name) in stems:
+        parts[-1] = "\x00"  # the page name and its fragment may both change
     return "|".join(parts)
 
 
@@ -1040,6 +1048,7 @@ def _title(stem):
 
 
 _POINTS = re.compile(r"points to (.+?)\s*$")
+_SAFE_TARGET = re.compile(r"[A-Za-z0-9._/ @+~=,-]+")
 _URL = re.compile(r"https://[A-Za-z0-9.\-]+(?::\d{1,5})?(?:/[A-Za-z0-9._~%/\-]*)?")
 _ORDER = re.compile(r"-?\d{1,9}")
 _LANDING = ("_Sidebar", "_Footer")
@@ -1343,6 +1352,8 @@ def build(root, rows, opts):
                     path = t[len("repo file ") :]
                     if path not in tracked:
                         errs.append(f"line {e['line']}: stub points to repo file {path!r}, which is not tracked")
+                    elif not _SAFE_TARGET.fullmatch(path):
+                        errs.append(f"line {e['line']}: stub target {path!r} has unsafe characters in its name")
                     else:
                         items.append(("file", path))
                 elif t in page_dest:
@@ -1656,16 +1667,63 @@ def build(root, rows, opts):
         p for p, t in final_md.items() if p == report or p in new_pages or p in moved.values() or md_old.get(p) != t
     }
     plan.by_src = by_src
+    # a file that is written must not share its inode with another name (a hard link outside the repository
+    # would be changed through us); remember what each file was so apply() can notice a swap
+    plan.ident = {}
+    for p, mode in tracked.items():
+        if mode in ("100644", "100755"):
+            lst = os.lstat(os.path.join(root, p))
+            plan.ident[p] = (lst.st_ino, lst.st_dev)
+            touched = p in plan.write_md or p in nonmd_new or p in moved or p in vanish_eff
+            if touched and lst.st_nlink > 1:
+                errs.append(f"{p!r} has {lst.st_nlink} hard links and would be changed or moved")
+    if errs:
+        raise DocmoveError("\n  ".join(["validation failed:"] + sorted(set(errs))))
     return plan
+
+
+def _write_file(root, rel, data, expect):
+    """Write `data` to `rel` through a temporary file in the same directory and os.replace, so a name that
+    shares its inode with another is never truncated. `expect` is the (inode, device) the file had when it
+    was validated, or None for a page that must not exist yet; anything else (a swap for a symlink, a
+    different file) stops the run."""
+    full = os.path.join(root, rel)
+    try:
+        st = os.lstat(full)
+    except FileNotFoundError:
+        st = None
+    if st is None:
+        if expect is not None:
+            raise DocmoveError(f"{rel}: vanished before it was written")
+        mode = 0o644
+    else:
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink > 1:
+            raise DocmoveError(f"{rel}: is no longer a plain file with one name")
+        if expect is None or (st.st_ino, st.st_dev) != expect:
+            raise DocmoveError(f"{rel}: changed since it was validated")
+        mode = st.st_mode & 0o777
+    tmp = os.path.join(os.path.dirname(full), f".docmove-{os.getpid()}-{os.urandom(6).hex()}")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            os.fchmod(f.fileno(), mode)
+        os.replace(tmp, full)
+    except BaseException:
+        if os.path.lexists(tmp):
+            os.unlink(tmp)
+        raise
 
 
 def apply(root, plan):
     done = set()
+    renamed = {}  # destination -> the source whose file it now is
     for e in plan.entries:
         if e["action"] == "move" and e["dest"] != e["src"]:
             os.makedirs(os.path.dirname(os.path.join(root, e["dest"])), exist_ok=True)
             git(root, "mv", "--", e["src"], e["dest"])
             done.add(e["src"])
+            renamed[e["dest"]] = e["src"]
     for d, g in plan.groups.items():
         os.makedirs(os.path.dirname(os.path.join(root, d)), exist_ok=True)
         first = g[0]
@@ -1678,18 +1736,23 @@ def apply(root, plan):
         ):
             git(root, "mv", "--", first["src"], d)
             done.add(first["src"])
+            renamed[d] = first["src"]
     gone = sorted(plan.vanish - done)
     if gone:
         git(root, "rm", "-q", "--", *gone)
+
+    def expect(p):
+        if p in renamed:
+            return plan.ident.get(renamed[p])
+        return plan.ident.get(p) if p in plan.tracked and p not in plan.vanish else None
+
     paths = []
     for p in sorted(plan.write_md):
         os.makedirs(os.path.dirname(os.path.join(root, p)), exist_ok=True)
-        with open(os.path.join(root, p), "wb") as f:
-            f.write(plan.final_md[p].encode("utf-8", "surrogateescape"))
+        _write_file(root, p, plan.final_md[p].encode("utf-8", "surrogateescape"), expect(p))
         paths.append(p)
     for p, t in plan.nonmd_new.items():
-        with open(os.path.join(root, p), "wb") as f:
-            f.write(t.encode("utf-8", "surrogateescape"))
+        _write_file(root, p, t.encode("utf-8", "surrogateescape"), expect(p))
         paths.append(p)
     git(
         root,

@@ -83,7 +83,7 @@ def test_wiki_link_edit_passes(tmp_path):
 
 def test_provenance_comments_are_ignored(tmp_path):
     p1 = "<!-- from: docs/guide.md L1-L7 -->\n" + PAGE1
-    p2 = "<!-- docmove: split from docs/guide.md L8-L10 -->\n" + PAGE2
+    p2 = "<!-- from: docs/guide.md L8-L10 -->\n" + PAGE2
     rc, out, _ = run(tmp_path, SOURCE, p1, p2)
     assert rc == 0, out
     # a provenance comment cannot stand in for a missing line
@@ -178,7 +178,7 @@ CH1 = "<!-- docmove: split from docs/guide.md L1-L7 -->\n" + "".join(CODE_SOURCE
 CH2 = "<!-- docmove: archived from docs/guide.md L8-L12 -->\n" + "".join(CODE_SOURCE.splitlines(True)[7:])
 
 
-def run_chunks(tmp_path, source, *pages, extra=("--source-name", "docs/guide.md")):
+def run_chunks(tmp_path, source, *pages, extra=("--source-name", "docs/guide.md", "--known-source", "docs/other.md")):
     return run(tmp_path, source, *pages, extra=extra)
 
 
@@ -200,7 +200,9 @@ def test_chunk_mode_source_name_defaults_to_a_path_suffix_match(tmp_path):
         p.write_text(t)
         pages.append(str(p))
     r = subprocess.run(
-        [sys.executable, "-I", str(TOOL), "--source", str(src), "--out", *pages], capture_output=True, text=True
+        [sys.executable, "-I", str(TOOL), "--source", str(src), "--known-source", "docs/other.md", "--out", *pages],
+        capture_output=True,
+        text=True,
     )
     assert r.returncode == 0, r.stdout
 
@@ -254,7 +256,19 @@ def run_home(tmp_path, source, page, name):
     pg.parent.mkdir(exist_ok=True)
     pg.write_text(page)
     r = subprocess.run(
-        [sys.executable, "-I", str(TOOL), "--source", str(src), "--source-name", name, "--out", str(pg)],
+        [
+            sys.executable,
+            "-I",
+            str(TOOL),
+            "--source",
+            str(src),
+            "--source-name",
+            name,
+            "--known-source",
+            "docs/INDEX.md",
+            "--out",
+            str(pg),
+        ],
         capture_output=True,
         text=True,
     )
@@ -284,3 +298,60 @@ def test_a_later_chunk_deleted_on_a_page_whose_first_chunk_is_in_place_fails(tmp
     cut = HOME_PAGE.replace("index one\n", "")
     rc, out = run_home(tmp_path, INDEX_SOURCE, cut, "docs/INDEX.md")
     assert rc == 1 and "source line 2" in out
+
+
+# --- hardening against forged or misleading provenance comments --------------------------------
+def test_a_range_outside_the_source_is_refused_and_a_copy_must_cover_the_requested_lines(tmp_path):
+    forged = "<!-- docmove: copied from source.md L99-L100 -->\nPAYLOAD\n"
+    rc, out, _ = run(tmp_path, "A\nB\n", forged, extra=["--copy", "--lines", "L1-L2"])
+    assert rc == 1 and "is outside the source" in out
+    forged = "<!-- docmove: copied from source.md L99-L100 -->\nA\nB\n"  # right payload, impossible range
+    rc, out, _ = run(tmp_path, "A\nB\n", forged, extra=["--copy", "--lines", "L1-L2"])
+    assert rc == 1 and "is outside the source" in out
+    short = "<!-- docmove: copied from source.md L1-L1 -->\nA\n"  # a valid range that is not the requested one
+    rc, out, _ = run(tmp_path, "A\nB\n", short, extra=["--copy", "--lines", "L1-L2"])
+    assert rc == 1 and "source line 2" in out
+    good = "<!-- docmove: copied from source.md L1-L2 -->\nA\nB\n"
+    rc, out, _ = run(tmp_path, "A\nB\n", good, extra=["--copy", "--lines", "L1-L2"])
+    assert rc == 0, out
+
+
+def test_wiki_link_display_text_stays_visible_and_only_the_page_side_is_masked(tmp_path):
+    src = "See [[Keep this warning|Page]] now\n"
+    rc, out, _ = run(tmp_path, src, "See [[PAYLOAD|Page]] now\n")
+    assert rc == 1
+    rc, out, _ = run(tmp_path, src, "See [[Keep this warning|New-Page]] now\n")
+    assert rc == 0, out
+    rc, out, _ = run(tmp_path, "See [[Name#frag]] now\n", "See [[Other#x]] now\n")
+    assert rc == 0, out
+
+
+def test_a_forged_provenance_comment_cannot_hide_a_duplicate(tmp_path):
+    page = "<!-- docmove: split from source.md L1-L1 -->\nA\n\n<!-- docmove: split from fake.md L1-L1 -->\nA\n"
+    rc, out, _ = run(tmp_path, "A\n", page)
+    assert rc == 1 and "unknown provenance source" in out and "fake.md" in out
+    rc, out, _ = run(tmp_path, "A\n", page, extra=["--known-source", "fake.md"])
+    assert rc == 0, out  # a source the caller names is known: a shared page is fine
+    rc, out, _ = run(tmp_path, "A\n", "<!-- docmove: bogus -->\nA\n")
+    assert rc == 1 and "unknown provenance" in out
+
+
+def test_known_sources_come_from_a_map_too(tmp_path):
+    reg = tmp_path / "registry.csv"
+    reg.write_text("repo_path,section,page,action,order\nfake.md,,Page,merge-into,1\n")
+    page = "<!-- docmove: split from source.md L1-L1 -->\nA\n\n<!-- docmove: merged from fake.md -->\nOther\n"
+    rc, out, _ = run(tmp_path, "A\n", page, extra=["--map", str(reg)])
+    assert rc == 0, out
+
+
+def test_a_chunk_must_hold_exactly_the_lines_of_its_range(tmp_path):
+    src = "A\nB\nC\n"
+    ok = "<!-- docmove: split from source.md L1-L2 -->\nA\nB\n\n<!-- docmove: split from source.md L3-L3 -->\nC\n"
+    rc, out, _ = run(tmp_path, src, ok)
+    assert rc == 0, out
+    padded = ok.replace("A\nB\n", "A\nB\nsmuggled\n")
+    rc, out, _ = run(tmp_path, src, padded)
+    assert rc == 1 and "non-blank lines" in out
+    overlap = ok.replace("L3-L3", "L2-L3")
+    rc, out, _ = run(tmp_path, src, overlap)
+    assert rc == 1
