@@ -1128,6 +1128,7 @@ class TestRound2(Tmp):
             self.assertEqual(code, 2, v)
             self.assertNotIn("Traceback", out + err)
             self.assertNotIn("192.168", out + err)
+            self.assertIn("non-negative", err, v)
 
     def test_unexpected_exception_is_exit_2_without_content(self):
         p = self.w("a.md", "ip 192.168.9.9\n")
