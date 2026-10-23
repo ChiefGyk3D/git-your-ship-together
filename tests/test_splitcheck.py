@@ -238,3 +238,49 @@ def test_chunk_mode_copy_comments_belong_to_copy_mode_only(tmp_path):
 def test_bom_does_not_matter(tmp_path):
     rc, out, _ = run(tmp_path, "﻿# Guide\nbody\n", "# Guide\nbody\n")
     assert rc == 0, out
+
+
+# --- a source that is its own destination page: its text sits above the first provenance comment --
+HOME_SOURCE = "# Home\nlanding text\n```\ncode\n```\n"
+INDEX_SOURCE = "# Index\nindex one\n```\nindex code\n```\n"
+HOME_PAGE = HOME_SOURCE + "\n<!-- docmove: merged from docs/INDEX.md L1-L5 -->\n" + INDEX_SOURCE
+
+
+def run_home(tmp_path, source, page, name):
+    """Run splitcheck for `source` against a page written at wiki/Home.md under tmp_path."""
+    src = tmp_path / "orig.md"
+    src.write_text(source)
+    pg = tmp_path / "wiki" / "Home.md"
+    pg.parent.mkdir(exist_ok=True)
+    pg.write_text(page)
+    r = subprocess.run(
+        [sys.executable, "-I", str(TOOL), "--source", str(src), "--source-name", name, "--out", str(pg)],
+        capture_output=True,
+        text=True,
+    )
+    return r.returncode, r.stdout
+
+
+def test_in_place_chunk_passes_and_ignores_the_chunks_below(tmp_path):
+    rc, out = run_home(tmp_path, HOME_SOURCE, HOME_PAGE, "wiki/Home.md")
+    assert rc == 0, out  # the fences repeat in the merged chunk; they are not the in_place source's duplicates
+    rc, out = run_home(tmp_path, INDEX_SOURCE, HOME_PAGE, "docs/INDEX.md")
+    assert rc == 0, out
+
+
+def test_in_place_chunk_sees_a_deleted_line_in_the_page_text(tmp_path):
+    rc, out = run_home(tmp_path, HOME_SOURCE, HOME_PAGE.replace("landing text\n", "", 1), "wiki/Home.md")
+    assert rc == 1 and "source line 2" in out
+
+
+def test_in_place_chunk_sees_a_duplicated_line_in_the_page_text(tmp_path):
+    rc, out = run_home(
+        tmp_path, HOME_SOURCE, HOME_PAGE.replace("landing text\n", "landing text\nlanding text\n", 1), "wiki/Home.md"
+    )
+    assert rc == 1 and "duplicated" in out
+
+
+def test_a_later_chunk_deleted_on_a_page_whose_first_chunk_is_in_place_fails(tmp_path):
+    cut = HOME_PAGE.replace("index one\n", "")
+    rc, out = run_home(tmp_path, INDEX_SOURCE, cut, "docs/INDEX.md")
+    assert rc == 1 and "source line 2" in out

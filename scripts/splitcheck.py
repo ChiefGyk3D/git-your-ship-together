@@ -20,7 +20,9 @@ against the source lines of its own range), so a page shared with other sources,
 repeat across sources (code fences, table separators), give no false duplicates; lines of the
 source that are in no chunk are missing, and lines in two chunks are duplicated. The source is
 recognized by `--source-name SRC` (the path as docmove wrote it) or, by default, when SRC is the
-tail of the --source path. With no such chunk the whole pages are compared.
+tail of the --source path. A source that is its own destination page (a merge-into row onto its
+own file) has no comment of its own: the lines above the page's first comment are its chunk, found
+when the page's path ends with --source-name. With no such chunk the whole pages are compared.
 
 Exit 0: ok. Exit 1: lines missing or duplicated (listed by number, never echoed). Exit 2:
 usage or unreadable input. Python 3 standard library only.
@@ -109,7 +111,8 @@ def check(source, pages, dm, copy=False, lines=None):
 def chunks_of(page, text, dm):
     """[(verb, src, (a, b) or None, [(page line number, normalized line)])] for each docmove chunk."""
     out = []
-    cur = None
+    cur = ("inplace", None, None, [])  # the lines above the first comment are the page's own text
+    out.append(cur)
     for i, ln in enumerate(_mask(text, dm).split("\n"), 1):
         ln = ln.rstrip("\r").lstrip("\ufeff")
         if _DOCMOVE.match(ln):
@@ -122,7 +125,7 @@ def chunks_of(page, text, dm):
             continue
         if cur is not None and ln.strip() and not _PROVENANCE.match(ln):
             cur[3].append((i, ln))
-    return [(v, s, r, ls) for v, s, r, ls in out]
+    return [c for c in out if c[0] != "inplace" or c[3]]
 
 
 def check_chunks(source, chunks, dm, copy):
@@ -178,7 +181,13 @@ def main(argv=None):
     tail = os.path.abspath(a.source).replace(os.sep, "/")
     chunks = []
     for name, text in pages:
+        page_abs = os.path.abspath(name).replace(os.sep, "/")
+        own_page = (a.source_name and page_abs.endswith("/" + a.source_name)) or page_abs == tail
         for verb, src, crng, lines in chunks_of(name, text, dm):
+            if verb == "inplace":  # a source that is its own destination page: its text sits above the comments
+                if own_page and not a.copy:
+                    chunks.append((name, a.source_name or tail, None, lines))
+                continue
             ours = src == a.source_name if a.source_name else tail.endswith("/" + src)
             if ours and verb in verbs:
                 chunks.append((name, src, crng, lines))
