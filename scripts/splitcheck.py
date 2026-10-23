@@ -172,21 +172,38 @@ def check_chunks(source, chunks, dm, copy, want_lines=None):
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(prog="splitcheck", description=__doc__.splitlines()[0])
+    ap = argparse.ArgumentParser(
+        prog="splitcheck",
+        description=__doc__.splitlines()[0]
+        + "\n\nA page shared with other sources carries their provenance comments too: name those sources with "
+        "--map (the registry docmove ran) or --known-source, or every one of them is reported as an "
+        "`unknown provenance source` and the run exits 1. Use --source-name to say which path the source "
+        "has in the comments.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     ap.add_argument("--source", required=True)
     ap.add_argument("--out", required=True, nargs="+", metavar="PAGE")
     ap.add_argument(
         "--copy", action="store_true", help="the source stays in place; check only that the lines were copied"
     )
-    ap.add_argument("--source-name", help="the source's path as docmove wrote it in its provenance comments")
+    ap.add_argument(
+        "--source-name",
+        help="the source's path as docmove wrote it in its provenance comments (default: a comment matches when "
+        "its path is the tail of --source)",
+    )
     ap.add_argument(
         "--known-source",
         action="append",
         default=[],
         metavar="SRC",
-        help="another source path whose provenance comments may appear on the pages (repeatable)",
+        help="another source path whose provenance comments may appear on the pages (repeatable); a shared page "
+        "needs this or --map, or its other comments are an `unknown provenance source` (exit 1)",
     )
-    ap.add_argument("--map", help="a docmove registry CSV: its repo_path column lists the known sources")
+    ap.add_argument(
+        "--map",
+        help="a docmove registry CSV: its repo_path column lists the known sources; a shared page needs this or "
+        "--known-source, or its other comments are an `unknown provenance source` (exit 1)",
+    )
     ap.add_argument("--lines", help="only the source lines L<a>-L<b> (for a ranged copy)")
     a = ap.parse_args(argv)
     rng = None

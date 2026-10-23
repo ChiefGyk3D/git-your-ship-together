@@ -1048,7 +1048,8 @@ def _title(stem):
 
 
 _POINTS = re.compile(r"points to (.+?)\s*$")
-_SAFE_TARGET = re.compile(r"[A-Za-z0-9._/ @+~=,-]+")
+# characters a stub may put into a link or a code span; no underscore or tilde, which can render as styling
+_SAFE_TARGET = re.compile(r"[A-Za-z0-9./ @+=,-]+")
 _URL = re.compile(r"https://[A-Za-z0-9.\-]+(?::\d{1,5})?(?:/[A-Za-z0-9._~%/\-]*)?")
 _ORDER = re.compile(r"-?\d{1,9}")
 _LANDING = ("_Sidebar", "_Footer")
@@ -1357,7 +1358,10 @@ def build(root, rows, opts):
                     else:
                         items.append(("file", path))
                 elif t in page_dest:
-                    items.append(("page", page_dest[t]))
+                    if not _SAFE_TARGET.fullmatch(page_dest[t]):
+                        errs.append(f"line {e['line']}: stub target {page_dest[t]!r} has unsafe characters in its name")
+                    else:
+                        items.append(("page", page_dest[t]))
                 else:
                     errs.append(
                         f"line {e['line']}: stub {e['dest']!r} points to {t!r}, which is not a page in this run"
@@ -1695,7 +1699,9 @@ def _write_file(root, rel, data, expect):
     if st is None:
         if expect is not None:
             raise DocmoveError(f"{rel}: vanished before it was written")
-        mode = 0o644
+        umask = os.umask(0)
+        os.umask(umask)
+        mode = 0o666 & ~umask
     else:
         if not stat.S_ISREG(st.st_mode) or st.st_nlink > 1:
             raise DocmoveError(f"{rel}: is no longer a plain file with one name")

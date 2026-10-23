@@ -355,3 +355,12 @@ def test_a_chunk_must_hold_exactly_the_lines_of_its_range(tmp_path):
     overlap = ok.replace("L3-L3", "L2-L3")
     rc, out, _ = run(tmp_path, src, overlap)
     assert rc == 1
+
+
+def test_help_says_a_shared_page_needs_a_map_or_known_sources():
+    r = subprocess.run([sys.executable, "-I", str(TOOL), "--help"], capture_output=True, text=True)
+    assert r.returncode == 0
+    flat = " ".join(r.stdout.split())
+    assert "unknown provenance source" in flat and "--map" in flat and "--known-source" in flat
+    assert "--source-name" in flat
+    assert "shared with other sources" in flat  # the description, not only the option help

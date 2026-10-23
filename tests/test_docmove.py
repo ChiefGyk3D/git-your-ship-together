@@ -97,7 +97,7 @@ def row(src, page="", action="move", order="", section="", notes=None):
 NOTES_HEADER = HEADER + ",notes"
 
 
-def run_tool(repo, rows, *extra, header=HEADER, raw=None, mapfile=None, env=None, timeout=None):
+def run_tool(repo, rows, *extra, header=HEADER, raw=None, mapfile=None, env=None, timeout=None, umask=None):
     mp = Path(repo).parent / "map.csv" if mapfile is None else Path(repo) / mapfile
     mp.parent.mkdir(parents=True, exist_ok=True)
     mp.write_bytes(raw if raw is not None else (header + "\n" + "\n".join(rows) + ("\n" if rows else "")).encode())
@@ -109,6 +109,7 @@ def run_tool(repo, rows, *extra, header=HEADER, raw=None, mapfile=None, env=None
         capture_output=True,
         env=env,
         timeout=timeout,
+        preexec_fn=(lambda: os.umask(umask)) if umask is not None else None,
     )
     return r.returncode, r.stdout.decode(errors="replace"), r.stderr.decode(errors="replace")
 
@@ -1456,6 +1457,59 @@ def test_sixty_thousand_matches_do_not_make_the_rewrite_quadratic(tmp_path, name
     assert rc == 0, (out, err)
     assert text(repo, name).count(probe) == 60000
     assert took < 5, took  # the quadratic version took 15 s or more
+
+
+def test_the_line_loss_check_sees_a_changed_display_label_but_accepts_the_rewritten_page_side():
+    stems = {"label", "other", "b", "new"}  # the label happens to be the name of a moved page too
+    before = {"a.md": "See [[label|b]] now\n"}
+    ok = {"a.md": "See [[label|new]] now\n"}
+    assert [len(x) for x in docmove.line_multiset_diff(before, ok, [], stems)] == [0, 0]
+    swapped = {"a.md": "See [[other|new]] now\n"}  # a different label that is also a page name
+    assert [len(x) for x in docmove.line_multiset_diff(before, swapped, [], stems)] == [1, 1]
+    gone = {"a.md": "See [[|new]] now\n"}
+    assert [len(x) for x in docmove.line_multiset_diff(before, gone, [], stems)] == [1, 1]
+
+
+@pytest.mark.parametrize(
+    "target",
+    ["my_file.txt", "tilde~file.txt"],
+)
+def test_stub_targets_with_underscores_or_tildes_are_refused(tmp_path, target):
+    repo = make_repo(tmp_path, {**BASE, target: "x\n"})
+    rows = [
+        row("docs/setup.md", "Setup.md"),
+        row("docs/setup.md", "Old-Setup", "stub", notes=f"points to repo file {target}"),
+    ]
+    assert "unsafe" in fails(repo, rows, header=NOTES_HEADER)
+
+
+def test_a_stub_page_target_with_an_underscore_is_refused_but_hyphens_are_fine(tmp_path):
+    repo = make_repo(tmp_path, BASE)
+    rows = [
+        row("docs/setup.md", "Under_Score.md"),
+        row("docs/setup.md", "Old-Setup", "stub", notes="points to Under_Score"),
+    ]
+    assert "unsafe" in fails(repo, rows, header=NOTES_HEADER)
+    (tmp_path / "ok").mkdir()
+    repo = make_repo(tmp_path / "ok", BASE)
+    rows = [
+        row("docs/setup.md", "Troubleshoot-Forwarder.md"),
+        row("docs/setup.md", "Old-Setup", "stub", notes="points to Troubleshoot-Forwarder"),
+    ]
+    rc, out, err = run_tool(repo, rows, header=NOTES_HEADER)
+    assert rc == 0, (out, err)
+    assert "[Troubleshoot-Forwarder](Troubleshoot-Forwarder.md)" in text(repo, "Old-Setup.md")
+
+
+def test_new_pages_get_the_mode_the_umask_allows_and_existing_files_keep_theirs(tmp_path):
+    repo = make_repo(tmp_path, {**BASE, "scripts/tool.sh": "#!/bin/sh\ncat docs/setup.md\n"})
+    os.chmod(repo / "scripts/tool.sh", 0o755)
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "mode")
+    rc, out, err = run_tool(repo, [row("docs/setup.md", "Setup.md")], umask=0o077)
+    assert rc == 0, (out, err)
+    assert os.stat(repo / "where-did-it-go.md").st_mode & 0o777 == 0o600  # 0o666 & ~umask
+    assert os.stat(repo / "scripts/tool.sh").st_mode & 0o777 == 0o755
 
 
 # --------------------------------------------------------------------------- post-check guards
