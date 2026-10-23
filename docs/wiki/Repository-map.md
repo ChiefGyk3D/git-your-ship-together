@@ -101,6 +101,8 @@ publish).
 | `scripts/doppler-ci-set.sh` | Set one Doppler secret without the value touching a command line |
 | `.github/requirements/` | `pip-audit` and `semgrep`: the one-line `.in` and the hash lock `security.yml` carries inline |
 | `scripts/tool_locks.py` | Resolves those locks (`--relock`) and copies them into `security.yml`; `--check` fails on a difference |
+| `scripts/docmove.py` | Moves documentation inside a repository from a CSV page registry (`move`, `merge-into`, `split-into`, `archive-into`, `copy-into`, `keep`, `stub`): validates every row, `git mv`s, rewrites relative links, wiki links and literal doc paths in tracked files, writes `where-did-it-go.md`, and checks no non-blank line was lost; `--dry-run` writes nothing. Exit 0 ok, 2 on any ambiguity, 64 on a malformed map |
+| `scripts/splitcheck.py` | Proves a split dropped and duplicated nothing: every non-blank source line must appear in the output pages as often as in the source, after link edits and provenance comments are set aside; exit 1 lists the line numbers |
 | `scripts/gen_wiki.py` | Builds this wiki from `docs/wiki/` and renders each workflow's inputs table from its YAML |
 | `fixture/` | The smallest project that exercises every job |
 | `tests/` | The [contract](Testing-and-the-contract.md), as pytest |
