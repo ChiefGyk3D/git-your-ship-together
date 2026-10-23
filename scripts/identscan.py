@@ -7,8 +7,14 @@ Usage: python3 -I scripts/identscan.py <dir-or-files...> [--allow FILE] [--deny-
 Placeholder-looking emails such as you@your-domain.com are findings unless the allow file
 waives them with a reason.
 
-Residual risk (not caught): an address split by HTML tags or comments between the octets, text
-encoded more than three levels deep, and a public IPv4 split across a line break.
+Residual risk (not caught):
+  * an address split by HTML tags or comments between the octets, text encoded more than three
+    levels deep, and a public IPv4 split across a line break;
+  * a public IPv6 address with only two explicit groups (2001::1, 2a00::5, 2620::1);
+  * spelled-out or defanged forms other than [.] (.) {.} between digits: "10 dot 23", "[dot]";
+  * the deny file is trusted input.  A deny entry is a regex only if it passes a nested-quantifier
+    check, and the regex pass is killed after a per-file budget; a killed pass is a degraded run
+    and exits 2 (cannot tell), never 0.
 
 Exit 0 clean, 1 findings, 2 cannot tell (unreadable, bad encoding, symlink, oversize,
 bad allow file).  Exit 2 wins over 1 when both occur.
@@ -24,12 +30,12 @@ import html
 import ipaddress
 import json
 import math
+import multiprocessing
 import os
 import posixpath
 import re
 import stat
 import sys
-import time
 import unicodedata
 import urllib.parse
 
@@ -37,8 +43,10 @@ DEFAULT_MAX_BYTES = 2 * 1024 * 1024
 CONFIG_MAX_BYTES = 1024 * 1024  # --allow and --deny-file: over this is exit 2, never truncated
 MAX_DENY_PATTERNS = 500
 MAX_CONFIG_LINE = 4096
-DENY_REGEX_LINE = 1024  # regex deny patterns run on lines up to this long; longer lines get literal matching
-DENY_BUDGET_SECONDS = 2.0
+DENY_WINDOW = 1024  # a longer line is searched in windows this wide, overlapping by DENY_OVERLAP
+DENY_OVERLAP = 256  # so a pattern up to MAX_DENY_LEN (256) characters wide is never split by a boundary
+DENY_BUDGET_SECONDS = 5.0  # per file; the regex pass runs in a worker that is killed at this point
+DENY_INPROC_MAX = 4096  # total characters at or under which the regex pass runs in-process (file names)
 MAX_DENY_LEN = 256
 MD_EXT = (".md", ".markdown", ".mdx")
 
@@ -242,15 +250,15 @@ def _regex_is_safe(pat):
                     stack[-1] = True
             elif body and stack:
                 stack[-1] = True
-        elif c in "*+":
-            unbounded += 1
+        elif c in "*+?":
+            unbounded += c != "?"
             if stack:
                 stack[-1] = True
         elif c == "{":
             qm = _QUANT.match(pat, i)
             if qm:
-                if qm.group(2) is not None and qm.group(3) == "":
-                    unbounded += 1
+                if qm.group(2) is not None and (qm.group(3) == "" or int(qm.group(3)) > 64):
+                    unbounded += 1  # {n,} and wide {n,m} behave like * for backtracking cost
                 if stack:
                     stack[-1] = True
                 i = qm.end()
@@ -259,22 +267,67 @@ def _regex_is_safe(pat):
     return unbounded <= 2
 
 
+def _window_search(rx, text):
+    """Search text, in overlapping windows when it is long.  Never skips a long line."""
+    if len(text) <= DENY_WINDOW:
+        return rx.search(text) is not None
+    step = DENY_WINDOW - DENY_OVERLAP
+    for start in range(0, len(text), step):
+        if rx.search(text[start : start + DENY_WINDOW]):
+            return True
+        if start + DENY_WINDOW >= len(text):
+            break
+    return False
+
+
+def _deny_lines(pats, raws, norms):
+    """1-based numbers of the lines any pattern hits.  A pattern with no regex is a substring test."""
+    hits = set()
+    lits = [lit for rx, lit in pats if rx is None]
+    rxs = [rx for rx, _ in pats if rx is not None]
+    for n, (raw, norm) in enumerate(zip(raws, norms, strict=True), 1):
+        views = (raw,) if norm == raw else (raw, norm)
+        if lits:
+            lows = [v.lower() for v in views]
+            if any(lit in low for low in lows for lit in lits):
+                hits.add(n)
+                continue
+        if any(_window_search(rx, v) for rx in rxs for v in views):
+            hits.add(n)
+    return hits
+
+
+def _deny_worker(conn, pats, raws, norms):
+    try:
+        conn.send(sorted(_deny_lines(pats, raws, norms)))
+    finally:
+        conn.close()
+
+
 class Deny:
     """Caller-private deny patterns (for example a real callsign fed in from a secret).
 
-    One literal-or-regex pattern per line, matched case-insensitively.  A line is a regex only
-    when it compiles and passes _regex_is_safe (no nested quantifiers, backreferences or
-    lookarounds); otherwise it is taken as literal text and the count is reported once on
-    stderr, never the pattern.  Regexes run only on lines up to DENY_REGEX_LINE characters and
-    within DENY_BUDGET_SECONDS of total matching time; beyond either, the literal text of each
-    pattern is searched for instead.  The file's content is never echoed: a hit reports only
-    file:line:deny.
+    One literal-or-regex pattern per line, matched case-insensitively.  The operator wrote the
+    file and is trusted; the guards below are there so a mistake cannot hang or silently blind the
+    scan.
+
+    * A line is a regex only when it compiles and passes _regex_is_safe (no nested quantifiers,
+      backreferences or lookarounds); otherwise it is taken as literal text and the count is
+      reported once on stderr, never the pattern.  That note does not change the exit code.
+    * Long lines are searched in overlapping windows (DENY_WINDOW wide, DENY_OVERLAP overlap), never
+      skipped.
+    * The regex pass over one file runs in a worker process that is killed after
+      DENY_BUDGET_SECONDS.  A killed pass falls back to the literal text of each pattern and counts
+      the file as degraded; main() then prints a note (counts only) and exits 2 (cannot tell), or 1
+      when there are findings.  A degraded deny pass is never a clean exit.
+
+    The file's content is never echoed: a hit reports only file:line:deny.
     """
 
     def __init__(self):
         self.pats = []  # (compiled regex or None, lowercase literal text)
         self.literal_count = 0
-        self.spent = 0.0
+        self.degraded = 0  # files whose regex pass was killed at the budget
 
     @classmethod
     def load(cls, path):
@@ -301,19 +354,30 @@ class Deny:
             d.pats.append((rx, s.lower()))
         return d
 
-    def hit(self, *texts):
-        for rx, lit in self.pats:
-            for t in texts:
-                if rx is None or len(t) > DENY_REGEX_LINE or self.spent > DENY_BUDGET_SECONDS:
-                    if lit in t.lower():
-                        return True
-                else:
-                    t0 = time.monotonic()
-                    found = rx.search(t)
-                    self.spent += time.monotonic() - t0
-                    if found:
-                        return True
-        return False
+    def lines_hit(self, raws, norms):
+        """Set of 1-based line numbers with a deny hit.  See the class docstring for the guards."""
+        total = sum(len(x) for x in raws)
+        has_regex = any(rx is not None for rx, _ in self.pats)
+        if not has_regex or total <= DENY_INPROC_MAX or "fork" not in multiprocessing.get_all_start_methods():
+            return _deny_lines(self.pats, raws, norms)
+        ctx = multiprocessing.get_context("fork")
+        recv, send = ctx.Pipe(duplex=False)
+        proc = ctx.Process(target=_deny_worker, args=(send, self.pats, raws, norms), daemon=True)
+        proc.start()
+        send.close()
+        got = None
+        try:
+            if recv.poll(DENY_BUDGET_SECONDS):
+                got = recv.recv()
+        except (EOFError, OSError):
+            got = None
+        if got is None:
+            proc.kill()
+            proc.join()
+            self.degraded += 1
+            return _deny_lines([(None, lit) for _, lit in self.pats], raws, norms)
+        proc.join()
+        return set(got)
 
 
 # --------------------------------------------------------------------- helpers
@@ -346,7 +410,13 @@ def _entropy(s):
 
 # --------------------------------------------------------------------- patterns
 RE4 = re.compile(r"(?<![\w.])(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(?!\w|\.\w)")
-RE6 = re.compile(r"(?<![\w:.])(?:[0-9A-Fa-f]{0,4}:){2,7}[0-9A-Fa-f]{0,4}(?![\w:])")
+RE6_BODY = r"(?:[0-9A-Fa-f]{0,4}:){2,7}[0-9A-Fa-f]{0,4}(?![\w:])"
+RE6 = re.compile(r"(?<![\w:.])" + RE6_BODY)
+RE6_AFTER = re.compile(RE6_BODY)
+# word + colon or equals in front of an address: SPF ip6:, addr:, dns=
+RE6_PREFIX = re.compile(
+    r"(?<![\w])(?:ip6|ipv6|inet6|addr|address|aaaa|ip|via|dns|ns|gw|peer|host|server|a)[:=]\s?", re.I
+)
 REMAC = re.compile(
     r"(?<![0-9A-Fa-f:-])(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}(?:[:-][0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2})?"
     r"(?![0-9A-Fa-f]|[:-][0-9A-Fa-f])"
@@ -558,11 +628,14 @@ def _ipv4_alt_findings(line, allow, path, prev=""):
 def _ipv6_findings(line, allow, path, prev=""):
     if line.count(":") < 2:
         return
-    for m in RE6.finditer(line):
+    cands = list(RE6.finditer(line))
+    for pm in RE6_PREFIX.finditer(line):
+        m = RE6_AFTER.match(line, pm.end())
+        if m:
+            cands.append(m)
+    for m in cands:
         if REEUI64.fullmatch(m.group(0)):
             continue  # eight two-digit groups is an EUI-64 hardware address; the MAC detector owns it
-        if line[m.end() : m.end() + 1] == "-":
-            continue  # ::add-mask:: and friends are not addresses
         try:
             ip = ipaddress.IPv6Address(m.group(0))
         except ValueError:
@@ -767,9 +840,10 @@ def scan_text(text, allow, path=None, deny=None):
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     raws = text.split("\n")
     norm = [_normalize(r) for r in raws]
+    deny_hits = deny.lines_hit(raws, norm) if deny is not None else ()
     for n, raw in enumerate(raws, 1):
         line = norm[n - 1]
-        if deny is not None and deny.hit(raw, line):
+        if n in deny_hits:
             out.append(Finding(n, "deny", SHAPES["deny"]))
         if len(line) < 4 and len(raw) < 4:
             continue
@@ -873,6 +947,18 @@ def _safe_name(name):
     return re.sub(r"[^A-Za-z0-9._-]", "?", name)
 
 
+_SEP_NUMS = re.compile(r"(?<![0-9])[0-9]{1,3}(?:[-_][0-9]{1,3}){3,}(?![0-9])")
+_HEX_RUN = re.compile(r"(?<![0-9A-Za-z])(?:[0-9A-Fa-f]{1,4}-){3,}-?[0-9A-Fa-f]{0,4}(?![0-9A-Za-z])")
+
+
+def _spells_an_address(path):
+    """True for a name that looks like an address in any separator: a.b, a-b-c-d, a_b_c_d, one long
+    decimal run, or a hyphenated hex-group run.  Over-redacts on purpose (versions, dates)."""
+    if re.search(r"[0-9]\.[0-9]|[0-9]{8}", path) or _SEP_NUMS.search(path):
+        return True
+    return any(any(c in "abcdefABCDEF" for c in m.group(0)) or "--" in m.group(0) for m in _HEX_RUN.finditer(path))
+
+
 def display_path(path, index, deny=None):
     """A path that is safe to print: no control characters, no identifier from the name.
 
@@ -884,7 +970,7 @@ def display_path(path, index, deny=None):
     probe = Allow()  # the caller's waivers do not apply to what we print
     # a digit.digit run is never printed: the scanner's own address pattern refuses a match followed by
     # ".md" (as in gw-10.1.2.3.md), so any name with one is treated as an identifier
-    risky = re.search(r"[0-9]\.[0-9]", path) is not None
+    risky = _spells_an_address(path)
     spaced = path.replace("/", " ")
     names = [spaced, spaced + " ", re.sub(r"\.[A-Za-z0-9]{1,8}$", "", path).replace("/", " ") + " "]
     if safe and not risky and not any(scan_text(x, probe, None, deny) for x in names) and not path.startswith("-"):
@@ -958,7 +1044,10 @@ def _main(argv=None):
             file=sys.stderr,
         )
     findings, errors, nfiles = run(args.paths, allow, args.all, args.max_bytes, deny)
-    code = 2 if errors else (1 if findings else 0)
+    degraded = deny.degraded if deny is not None else 0
+    code = 2 if errors else (1 if findings else (2 if degraded else 0))
+    if degraded:
+        print(f"identscan: note: deny matching degraded (budget) in {degraded} file(s); cannot tell", file=sys.stderr)
     fshow = [(display_path(p, i, deny), f) for p, i, f in findings]
     eshow = [(display_path(p, i, deny), r) for p, r, i in errors]
     if args.format == "json":
@@ -968,6 +1057,7 @@ def _main(argv=None):
                     "tool": "identscan",
                     "exit": code,
                     "files_scanned": nfiles,
+                    "deny_degraded_files": degraded,
                     "findings": [{"file": p, "line": f.line, "class": f.cls, "shape": f.shape} for p, f in fshow],
                     "errors": [{"file": p, "reason": r} for p, r in eshow],
                 },

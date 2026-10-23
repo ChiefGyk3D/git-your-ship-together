@@ -13,6 +13,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -1238,15 +1239,6 @@ class TestRound3(Tmp):
         self.assertIn("treated as literal", err)
         self.assertNotIn("(a+)", out + err)
 
-    def test_long_lines_get_literal_matching_only(self):
-        d = ids.Deny.load(self.w("deny.txt", "zz[0-9]+\n"))
-        short = "x zz42 y"
-        self.assertLess(ids.DENY_REGEX_LINE, 2000)
-        long_ = "x" * 2000 + " zz42"
-        self.assertEqual(len(ids.scan_text(short, ids.Allow(), None, d)), 1)
-        self.assertEqual(ids.scan_text(long_, ids.Allow(), None, d), [])
-        self.assertEqual(len(ids.scan_text(long_ + " zz[0-9]+", ids.Allow(), None, d)), 1)
-
     # ---- invisible characters and dot lookalikes
     def test_invisible_characters_are_stripped(self):
         invisibles = ("\u00ad", "\u200e", "\u200f", "\u2061", "\u2062", "\u2063", "\u2064", "\u034f", "\u180e")
@@ -1312,9 +1304,10 @@ class TestRound3(Tmp):
         for t in ("r 2001:db8::1", "r ::", "r ::1", "r ff02::1"):
             self.assertEqual(cls_set(t), set(), t)
 
-    def test_ipv6_followed_by_a_hyphen_is_not_an_address(self):
-        self.assertEqual(cls_set("r 2606:4700:4700::1111-x"), set())
-        self.assertEqual(cls_set("r fc00::1-x"), set())
+    def test_ipv6_followed_by_a_hyphen_is_still_an_address(self):
+        # round 4, item 3: a trailing hyphen must not hide a real address (round 3 pinned the opposite)
+        self.assertEqual(cls_set("r 2606:4700:4700::1111-x"), {"ipv6-public"})
+        self.assertEqual(cls_set("r fc00::1-x"), {"ipv6-local"})
 
     def test_invisible_table_covers_every_cf_character(self):
         import unicodedata
@@ -1327,3 +1320,164 @@ class TestRound3(Tmp):
         self.assertEqual(missing, [])
         self.assertTrue(ids._INVISIBLE.fullmatch("\u034f") and ids._INVISIBLE.fullmatch("\u180e"))
         self.assertIsNone(ids._INVISIBLE.fullmatch("a"))
+
+
+class TestRound4(Tmp):
+    def deny_run(self, text, patterns, *extra, timeout=60):
+        d = self.w("deny.txt", "\n".join(patterns) + "\n")
+        t = self.w("a.md", text)
+        q = subprocess.run(
+            [sys.executable, "-I", TOOL, t, "--deny-file", d, *extra], capture_output=True, timeout=timeout
+        )
+        return q.returncode, q.stdout.decode(), q.stderr.decode()
+
+    # ---- long lines are windowed, never skipped
+    def test_match_after_a_long_prefix_is_found(self):
+        code, out, err = self.deny_run("x" * 1100 + " sneakyword7 tail\n", ["sneakyword[0-9]"])
+        self.assertEqual(code, 1, err)
+        self.assertIn(":1:deny", out)
+
+    def test_match_straddling_a_window_boundary_is_found(self):
+        step = ids.DENY_WINDOW - ids.DENY_OVERLAP
+        for edge in (ids.DENY_WINDOW, ids.DENY_WINDOW + step, ids.DENY_WINDOW + 2 * step):
+            for off in range(edge - 12, edge + 1, 4):
+                text = "x" * off + "sneakyword7" + "y" * 50
+                d = ids.Deny.load(self.w("d.txt", "sneakyword[0-9]\n"))
+                self.assertEqual(len(ids.scan_text(text, ids.Allow(), None, d)), 1, off)
+
+    def test_a_wide_pattern_is_not_missed_at_a_boundary(self):
+        wide = "q" * 250 + "!"
+        d = ids.Deny.load(self.w("d.txt", wide + "\n"))
+        self.assertTrue(d.pats[0][0] is not None)
+        for off in range(ids.DENY_WINDOW - 260, ids.DENY_WINDOW + 5, 7):
+            text = "x" * off + wide + "y" * 40
+            self.assertEqual(len(ids.scan_text(text, ids.Allow(), None, d)), 1, off)
+
+    # ---- a weakened deny pass is never a clean exit
+    def test_reviewer_case_499_regexes_on_a_big_file_is_never_clean(self):
+        pats = [f"p{i:04d}[0-9]" for i in range(499)] + ["sneakyword[0-9]"]
+        filler = ("lorem ipsum dolor sit amet " * 4)[:100] + "\n"
+        text = filler * 105_000 + "SNEAKYWORD2\n"
+        self.assertGreater(len(text), 10_500_000)
+        t0 = time.monotonic()
+        code, out, err = self.deny_run(text, pats, "--max-bytes", "20000000")
+        self.assertIn(code, (1, 2), (out[-200:], err))
+        self.assertLess(time.monotonic() - t0, ids.DENY_BUDGET_SECONDS + 55)
+        if code == 2:
+            self.assertIn("deny matching degraded", err)
+
+    def test_catastrophic_pattern_the_check_misses_is_killed(self):
+        filler = "plain filler line number one\n" * 400
+        d = self.w("deny.txt", "(a?){32}a{32}\n")
+        t = self.w("a.md", "a" * 32 + "!\n" + filler)
+        out, err = io.StringIO(), io.StringIO()
+        t0 = time.monotonic()
+        with (
+            mock.patch.object(ids, "_regex_is_safe", return_value=True),
+            mock.patch.object(ids, "DENY_BUDGET_SECONDS", 1.0),
+            contextlib.redirect_stdout(out),
+            contextlib.redirect_stderr(err),
+        ):
+            code = ids.main([t, "--deny-file", d])
+        dt = time.monotonic() - t0
+        self.assertEqual(code, 2, out.getvalue())
+        self.assertLess(dt, 2.0)
+        self.assertIn("deny matching degraded", err.getvalue())
+        self.assertNotIn("(a?)", out.getvalue() + err.getvalue())
+
+    def test_degraded_with_a_finding_is_exit_1_with_the_note(self):
+        filler = "plain filler line number one\n" * 400
+        d = self.w("deny.txt", "(a?){32}a{32}\nzzmarker\n")
+        t = self.w("a.md", "a" * 32 + "!\nzzmarker here\n" + filler)
+        out, err = io.StringIO(), io.StringIO()
+        with (
+            mock.patch.object(ids, "_regex_is_safe", return_value=True),
+            mock.patch.object(ids, "DENY_BUDGET_SECONDS", 1.0),
+            contextlib.redirect_stdout(out),
+            contextlib.redirect_stderr(err),
+        ):
+            code = ids.main([t, "--deny-file", d])
+        self.assertEqual(code, 1)
+        self.assertIn(":2:deny", out.getvalue())
+        self.assertIn("deny matching degraded", err.getvalue())
+
+    def test_unsafe_entry_is_literal_with_a_note_and_stays_fast(self):
+        t0 = time.monotonic()
+        code, out, err = self.deny_run(("a" * 32 + "!\n") + "plain filler line\n" * 400, ["(a?){32}a{32}"])
+        self.assertLess(time.monotonic() - t0, 5)
+        self.assertEqual(code, 0)
+        self.assertIn("treated as literal", err)
+
+    def test_degraded_is_per_file_and_reported_in_json(self):
+        filler = "plain filler line number one\n" * 400
+        d = self.w("deny.txt", "(a?){32}a{32}\n")
+        bad = self.w("bad.md", "a" * 32 + "!\n" + filler)
+        good = self.w("good.md", "hello world\n" + filler)
+        out, err = io.StringIO(), io.StringIO()
+        with (
+            mock.patch.object(ids, "_regex_is_safe", return_value=True),
+            mock.patch.object(ids, "DENY_BUDGET_SECONDS", 1.0),
+            contextlib.redirect_stdout(out),
+            contextlib.redirect_stderr(err),
+        ):
+            code = ids.main([bad, good, "--deny-file", d, "--format", "json"])
+        self.assertEqual(code, 2)
+        self.assertEqual(json.loads(out.getvalue())["deny_degraded_files"], 1)
+
+    # ---- regex safety, round 4
+    def test_more_unsafe_shapes(self):
+        for bad in ("(a?){32}a{32}", "(x?){3}", "(ab?){2,5}", "a{1,500}b{1,500}c{1,500}", "(a{2,5}){2,5}", "(a|b){2}"):
+            self.assertFalse(ids._regex_is_safe(bad), bad)
+        for ok in ("W1[A-Z]{3}", "(?:ab){2}", "(ab){2}", "a{1,5}b{1,5}", "foo[0-9]{1,3}bar", "x?y"):
+            self.assertTrue(ids._regex_is_safe(ok), ok)
+
+    # ---- IPv6 after a prefix, and trailing hyphens
+    def test_ipv6_after_a_word_and_colon_prefix(self):
+        for t in (
+            "v=spf1 ip6:2a00:1450:4001:81b::200e -all",
+            "addr:2606:4700:4700::1111",
+            "ip6=2606:4700:4700::1111",
+            "inet6 2606:4700:4700::1111/64",
+            "AAAA 2606:4700:4700::1111",
+            "dns:2001:4860:4860::8888",
+            "ipv6:fd12:3456:789a::1",
+        ):
+            self.assertIn(cls_set(t), ({"ipv6-public"}, {"ipv6-local"}), t)
+
+    def test_trailing_hyphen_does_not_hide_a_real_address(self):
+        for t in ("r 2a00:1450:4001:81b::200e-", "r 2a00:1450:4001:81b::200e-extra", "r 2a00:1450:4001:81b::200e - x"):
+            self.assertEqual(cls_set(t), {"ipv6-public"}, t)
+
+    def test_prefixes_do_not_create_false_positives(self):
+        for t in ("::add-mask::secret", "::set-output name=x::y", "addr:beef", "ip6:", "key:cafe::bad"):
+            self.assertEqual(cls_set(t), set(), t)
+
+    # ---- file names that spell an address with separators
+    def test_separator_spelled_names_are_redacted(self):
+        names = (
+            "a/gw-192-168-7-9.md",
+            "b/gw-10_23_45_67.md",
+            "c/x-3232235777.md",
+            "d/h-2a00-1450-4001-81b--200e.md",
+            "e/report-20240115.md",  # accepted false redaction, pinned
+        )
+        for n in names:
+            self.w(n, "ip 10.99.88.77\n")
+        frags = ("192-168-7-9", "10_23_45_67", "3232235777", "2a00-1450", "81b--200e", "20240115")
+        for fmt in ("text", "json"):
+            code, out, err = run(self.d, "--format", fmt)
+            self.assertEqual(code, 1)
+            self.assertEqual(out.count("private-ip"), 5, out)
+            for frag in frags:
+                self.assertNotIn(frag, out + err, (fmt, frag))
+        for n in names:
+            p = self.w("err/" + n.replace("/", "_"), b"\xff\xfe")
+            code, out, err = run(p)
+            self.assertEqual(code, 2)
+            for frag in frags:
+                self.assertNotIn(frag, out + err, (n, frag))
+
+    def test_plain_hyphenated_names_still_print(self):
+        for n in ("docs/getting-started.md", "docs/page-2-of-3.md", "a/b_c-d.md"):
+            p = self.w(n, "ip 10.99.88.77\n")
+            self.assertIn(p + ":1:private-ip", run(p)[1], n)
