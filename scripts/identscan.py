@@ -4,6 +4,9 @@
 Usage: python3 -I scripts/identscan.py <dir-or-files...> [--allow FILE] [--deny-file FILE] [--format text|json]
                                [--all] [--max-bytes N]
 
+Placeholder-looking emails such as you@your-domain.com are findings unless the allow file
+waives them with a reason.
+
 Exit 0 clean, 1 findings, 2 cannot tell (unreadable, bad encoding, symlink, oversize,
 bad allow file).  Exit 2 wins over 1 when both occur.
 
@@ -29,6 +32,7 @@ import urllib.parse
 DEFAULT_MAX_BYTES = 2 * 1024 * 1024
 CONFIG_MAX_BYTES = 1024 * 1024  # --allow and --deny-file: over this is exit 2, never truncated
 MAX_DENY_PATTERNS = 500
+MAX_CONFIG_LINE = 4096
 MAX_DENY_LEN = 256
 MD_EXT = (".md", ".markdown", ".mdx")
 
@@ -141,10 +145,12 @@ class Allow:
         a = cls()
         raw = _read_config(path, "allow file")
         for n, line in enumerate(raw.splitlines(), 1):
+            if len(line) > MAX_CONFIG_LINE:
+                raise AllowError(f"allow file line {n}: line too long")
             s = line.strip()
             if not s or s.startswith("#"):
                 continue
-            parts = [p.strip() for p in s.split("|", 2)]
+            parts = [p.strip() for p in s.split("|", 2)]  # only the first two bars separate; a reason may hold more
             if len(parts) == 2:
                 where, value, reason = None, parts[0], parts[1]
             elif len(parts) == 3:
@@ -204,6 +210,8 @@ class Deny:
             s = line.strip()
             if not s or s.startswith("#"):
                 continue
+            if len(line) > MAX_CONFIG_LINE:
+                raise AllowError(f"deny file line {n}: line too long")
             if len(s) > MAX_DENY_LEN or len(d.pats) >= MAX_DENY_PATTERNS:
                 raise AllowError(f"deny file line {n}: pattern too long or too many patterns")
             try:
@@ -251,17 +259,19 @@ def _entropy(s):
 RE4 = re.compile(r"(?<![\w.])(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(?!\w|\.\w)")
 RE6 = re.compile(r"(?<![\w:.])(?:[0-9A-Fa-f]{0,4}:){2,7}[0-9A-Fa-f]{0,4}(?![\w:])")
 REMAC = re.compile(
-    r"(?<![0-9A-Fa-f:-])(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}"
+    r"(?<![0-9A-Fa-f:-])(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}(?:[:-][0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2})?"
     r"(?![0-9A-Fa-f]|[:-][0-9A-Fa-f])"
 )
 REMAIL = re.compile(
     r"(?<![A-Za-z0-9._%+\"-])([A-Za-z0-9._%+-]{1,64}|\"[^\"\r\n]{1,64}\")@"
     r"((?:[A-Za-z0-9-]{1,63}\.)+(?:xn--[A-Za-z0-9-]{2,59}|[A-Za-z]{2,24}))(?![A-Za-z0-9-])"
 )
+REEUI64 = re.compile(r"(?:[0-9A-Fa-f]{2}:){7}[0-9A-Fa-f]{2}")
 REMAC4 = re.compile(r"(?<![0-9A-Fa-f.])[0-9A-Fa-f]{4}\.[0-9A-Fa-f]{4}\.[0-9A-Fa-f]{4}(?![0-9A-Fa-f]|\.[0-9A-Fa-f])")
 REMAC12 = re.compile(r"(?<![\w.:-])[0-9A-Fa-f]{12}(?![\w.:-])")
 REMAC_CTX = re.compile(r"(?<![A-Za-z])(?:mac|ether|hwaddr|hw[\s_-]?addr(?:ess)?|lladdr)(?![a-z])", re.I)
 REMAC_NOT = re.compile(r"(?<![A-Za-z])(?:commit|sha\d*|hash|rev|checksum|digest|git|md5|tag)(?![A-Za-z])", re.I)
+RE4_LONG = re.compile(r"(?<![\w.])(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(?=\.\d)")
 RE4_DEC = re.compile(r"(?<![\w.:-])(\d{8,10})(?![\w-]|\.\w)")
 RE4_HEX = re.compile(r"(?<![\w.:-])0[xX]([0-9A-Fa-f]{8})(?![\w-]|\.\w)")
 RE4_HEXQ = re.compile(
@@ -283,7 +293,7 @@ _ZW = dict.fromkeys(map(ord, "\u200b\u200c\u200d\u2060\ufeff"))
 # run's dot-separated labels, so the work is one pass over the line by construction.
 RERUN = re.compile(r"[\w.-]+")
 RELABEL = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?")
-_INTERNAL_TLDS = ("lan", "local", "home", "internal", "corp")
+_INTERNAL_TLDS = ("lan", "local", "localdomain", "home", "internal", "intranet", "corp")
 RECALL = re.compile(
     r"(?<![A-Za-z0-9])(?:[A-Za-z]{1,2}|[0-9][A-Za-z]{1,2}|[A-Za-z][0-9])[0-9][A-Za-z]{1,3}(?![A-Za-z0-9])"
 )
@@ -395,6 +405,15 @@ def _ipv4_findings(line, allow, path, prev=""):
         r = _classify_v4(ipaddress.IPv4Address(bytes(octs)), allow, path)
         if r:
             yield r
+    # 10.1.2.3.4: five or more octets is malformed but suspicious.  The first four count when they
+    # are private or shared space; a public-looking prefix is left alone (version and OID strings).
+    for m in RE4_LONG.finditer(line):
+        octs = [int(g) for g in m.groups()]
+        if any(o > 255 for o in octs):
+            continue
+        r = _classify_v4(ipaddress.IPv4Address(bytes(octs)), allow, path)
+        if r and r[0] != "public-ip":
+            yield r
 
 
 def _ipv4_alt_findings(line, allow, path, prev=""):
@@ -443,6 +462,8 @@ def _ipv6_findings(line, allow, path, prev=""):
     if line.count(":") < 2:
         return
     for m in RE6.finditer(line):
+        if REEUI64.fullmatch(m.group(0)):
+            continue  # eight two-digit groups is an EUI-64 hardware address; the MAC detector owns it
         try:
             ip = ipaddress.IPv6Address(m.group(0))
         except ValueError:
@@ -772,14 +793,35 @@ def run(paths, allow, all_files=False, max_bytes=DEFAULT_MAX_BYTES, deny=None):
     return findings, errors, nfiles
 
 
+def _nonneg_int(text):
+    try:
+        v = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError("must be a non-negative integer") from None
+    if v < 0:
+        raise argparse.ArgumentTypeError("must be a non-negative integer")
+    return v
+
+
 def main(argv=None):
+    """Run the scan; anything unexpected is exit 2 (cannot tell) with no traceback and no content."""
+    try:
+        return _main(argv)
+    except SystemExit:
+        raise
+    except Exception:
+        print("identscan: error: internal error, cannot tell", file=sys.stderr)
+        return 2
+
+
+def _main(argv=None):
     ap = argparse.ArgumentParser(prog="identscan", description=__doc__.split("\n")[0])
     ap.add_argument("paths", nargs="+")
     ap.add_argument("--allow", metavar="FILE", help="waivers: 'value | reason' or 'path | value | reason'")
     ap.add_argument("--deny-file", metavar="FILE", help="private patterns to flag, one literal-or-regex per line")
     ap.add_argument("--format", choices=("text", "json"), default="text")
     ap.add_argument("--all", action="store_true", help="scan every file in directories")
-    ap.add_argument("--max-bytes", type=int, default=DEFAULT_MAX_BYTES)
+    ap.add_argument("--max-bytes", type=_nonneg_int, default=DEFAULT_MAX_BYTES)
     args = ap.parse_args(argv)
 
     allow, deny = Allow(), None
