@@ -12,6 +12,7 @@ definition continued over two lines, and a wiki-style [[Name]] link) always is.
 
 from __future__ import annotations
 
+import collections
 import importlib.util
 import os
 import subprocess
@@ -96,7 +97,7 @@ def row(src, page="", action="move", order="", section="", notes=None):
 NOTES_HEADER = HEADER + ",notes"
 
 
-def run_tool(repo, rows, *extra, header=HEADER, raw=None, mapfile=None):
+def run_tool(repo, rows, *extra, header=HEADER, raw=None, mapfile=None, env=None):
     mp = Path(repo).parent / "map.csv" if mapfile is None else Path(repo) / mapfile
     mp.parent.mkdir(parents=True, exist_ok=True)
     mp.write_bytes(raw if raw is not None else (header + "\n" + "\n".join(rows) + ("\n" if rows else "")).encode())
@@ -106,6 +107,7 @@ def run_tool(repo, rows, *extra, header=HEADER, raw=None, mapfile=None):
     r = subprocess.run(
         [sys.executable, "-I", str(TOOL), "--repo", str(repo), "--map", str(mp), *extra],
         capture_output=True,
+        env=env,
     )
     return r.returncode, r.stdout.decode(errors="replace"), r.stderr.decode(errors="replace")
 
@@ -759,7 +761,7 @@ def test_uncovered_blank_lines_are_fine(tmp_path):
 
 
 def test_link_to_a_split_source_resolves_to_the_first_section_and_is_reported(tmp_path):
-    repo = split_repo(tmp_path, {"docs/other.md": "intro\nsee [big](big.md#part-b)\n"})
+    repo = split_repo(tmp_path, {"docs/other.md": "intro\nsee [big](big.md) and [part](big.md#part-b)\n"})
     before = snapshot(repo)
     rc, out, err = run_tool(repo, SPLIT_ROWS, "--dry-run")
     assert rc == 0, (out, err)
@@ -767,7 +769,8 @@ def test_link_to_a_split_source_resolves_to_the_first_section_and_is_reported(tm
     assert snapshot(repo) == before
     rc, out, err = run_tool(repo, SPLIT_ROWS)
     assert rc == 0, (out, err)
-    assert "[big](../Part-One.md#part-b)" in text(repo, "docs/other.md")
+    # the fragment-less link goes to the first section's page; the anchored one to the page holding its heading
+    assert "[big](../Part-One.md) and [part](../Part-Two.md#part-b)" in text(repo, "docs/other.md")
     assert "approximate link: docs/other.md:2" in text(repo, "where-did-it-go.md")
 
 
@@ -877,8 +880,8 @@ def test_copied_text_is_checked_by_splitcheck_in_copy_mode(tmp_path):
 SLICE_FILES = {
     "README.md": (
         "# Proj\n"  # 1
-        "front door\n"  # 2
-        "see [guide](docs/guide.md#part-b) and [dir](docs/pfsense/)\n"  # 3
+        "front door, see [part B](docs/guide.md#part-b)\n"  # 2
+        "see [guide](docs/guide.md) and [dir](docs/pfsense/)\n"  # 3
         "## Docs\n"  # 4
         "doc link one [changes](CHANGELOG.md)\n"  # 5
         "doc link two [notes](docs/pfsense/NOTES.md)\n"  # 6
@@ -1042,7 +1045,8 @@ def test_stub_without_points_to_falls_back_and_says_so(tmp_path):
 def test_stub_pointing_at_an_unknown_page_exits_2(tmp_path):
     repo = slice_repo(tmp_path)
     rows = [row("docs/old.md", "Reference-Old", "move"), row("docs/old.md", "Old", "stub", notes="points to Nowhere")]
-    fails(repo, rows, "--subfolder", "wiki", header=NOTES_HEADER)
+    err = fails(repo, rows, "--subfolder", "wiki", header=NOTES_HEADER)
+    assert "points to 'Nowhere', which is not a page in this run" in err
 
 
 def test_link_map_overrides_the_default_page_for_a_split_source(tmp_path):
@@ -1055,7 +1059,8 @@ def test_link_map_overrides_the_default_page_for_a_split_source(tmp_path):
     assert rc == 2
     rc, out, err = run_slice(repo, "--link-map", str(lm))
     assert rc == 0, (out, err)
-    assert "[guide](wiki/Operate-Guide.md#part-b)" in text(repo, "README.md")
+    assert "[guide](wiki/Operate-Guide.md)" in text(repo, "README.md")
+    assert "[part B](wiki/Operate-Guide.md#part-b)" in text(repo, "README.md")
     assert "approximate link: README.md" not in out
 
 
@@ -1155,6 +1160,211 @@ def test_a_source_mixing_split_merge_and_archive_rows_must_cover_every_line(tmp_
     rows.append(row("wiki/Home.md", "Home", "merge-into", "0"))
     rc, out, err = run_tool(repo, rows, "--subfolder", "wiki")
     assert rc == 0, (out, err)
+
+
+# --------------------------------------------------------------------------- anchors
+GUIDE = (
+    "# Guide\n"  # 1
+    "intro\n"  # 2
+    "## Setup\n"  # 3
+    "setup text\n"  # 4
+    "## Usage\n"  # 5
+    "usage text, back to [setup](#setup) and on to [usage](#usage) and [again](#usage-1)\n"  # 6
+    "```\n"  # 7
+    "# Not a heading\n"  # 8
+    "```\n"  # 9
+    "## Usage\n"  # 10
+    "more usage\n"  # 11
+)
+GUIDE_ROWS = [
+    row("docs/guide.md", "Install-Guide", "split-into", "1", "L1-L4"),
+    row("docs/guide.md", "Operate-Guide", "split-into", "1", "L5-L11"),
+]
+
+
+def anchor_repo(tmp_path):
+    return make_repo(
+        tmp_path,
+        {
+            "docs/guide.md": GUIDE,
+            "docs/a.md": "# A\n## Notes\nnote a\n",
+            "docs/b.md": "# B\n## Notes\nnote b\n",
+            "docs/other.md": (
+                "[s](guide.md#setup) [u](guide.md#usage) [u1](guide.md#usage-1) [g](guide.md)\n"  # 1
+                "[fenced](guide.md#not-a-heading) [gone](guide.md#nope)\n"  # 2
+                "[na](a.md#notes) [nb](b.md#notes)\n"  # 3
+                "[[Guide#setup]] and [[Guide#usage-1]] and [[Guide]]\n"  # 4
+            ),
+        },
+    )
+
+
+MERGE_ROWS = [
+    row("docs/a.md", "Reference-All", "merge-into", "1"),
+    row("docs/b.md", "Reference-All", "merge-into", "2"),
+]
+
+
+def test_anchor_links_follow_the_heading_to_the_page_that_now_holds_it(tmp_path):
+    repo = anchor_repo(tmp_path)
+    rc, out, err = run_tool(repo, GUIDE_ROWS + MERGE_ROWS, "--subfolder", "wiki")
+    assert rc == 0, (out, err)
+    other = text(repo, "docs/other.md").split("\n")
+    assert "[s](../wiki/Install-Guide.md#setup)" in other[0]
+    assert "[u](../wiki/Operate-Guide.md#usage)" in other[0]
+    assert "[u1](../wiki/Operate-Guide.md#usage-1)" in other[0]
+    assert "[g](../wiki/Install-Guide.md)" in other[0]  # no fragment: the first section's page
+    # a heading inside a fence is not a heading; a missing one stays as it was
+    assert "[fenced](../wiki/Install-Guide.md#not-a-heading) [gone](../wiki/Install-Guide.md#nope)" in other[1]
+    # two merged sources both have "## Notes": the second gets GitHub's -1 suffix on the merged page
+    assert "[na](../wiki/Reference-All.md#notes) [nb](../wiki/Reference-All.md#notes-1)" in other[2]
+
+
+def test_wiki_style_links_with_a_fragment_follow_the_heading(tmp_path):
+    repo = anchor_repo(tmp_path)
+    rc, out, err = run_tool(repo, GUIDE_ROWS + MERGE_ROWS, "--subfolder", "wiki")
+    assert rc == 0, (out, err)
+    line4 = text(repo, "docs/other.md").split("\n")[3]
+    assert line4 == "[[Install-Guide#setup]] and [[Operate-Guide#usage-1]] and [[Install-Guide]]"
+
+
+def test_same_page_toc_anchors_are_rewritten_only_when_the_heading_moved_page(tmp_path):
+    repo = anchor_repo(tmp_path)
+    rc, out, err = run_tool(repo, GUIDE_ROWS + MERGE_ROWS, "--subfolder", "wiki")
+    assert rc == 0, (out, err)
+    page = text(repo, "wiki/Operate-Guide.md")
+    assert "back to [setup](Install-Guide.md#setup) and on to [usage](#usage) and [again](#usage-1)" in page
+
+
+def test_anchors_are_counted_and_pre_existing_broken_ones_reported_not_fatal(tmp_path):
+    repo = anchor_repo(tmp_path)
+    rc, out, err = run_tool(repo, GUIDE_ROWS + MERGE_ROWS, "--subfolder", "wiki", "--dry-run")
+    assert rc == 0, (out, err)
+    assert "pre-existing broken anchor: docs/other.md:2" in out
+    assert "anchors: 8 rewritten, 0 unresolved, 2 pre-existing broken" in out
+    # the exact anchors are not "approximate"; only the fragment-less links are
+    assert "approximate link: docs/other.md:1 -> guide.md now points" in out
+    assert "approximate link: docs/other.md:1 -> guide.md#setup" not in out
+    rc, out, err = run_tool(repo, GUIDE_ROWS + MERGE_ROWS, "--subfolder", "wiki", "--dry-run", "--strict")
+    assert rc == 2  # the fragment-less links are still approximate
+    assert "anchor unresolved" not in out
+
+
+def test_pre_existing_broken_anchors_inside_a_split_source_are_reported_with_their_own_line(tmp_path):
+    text_ = "# Top\nintro\n## Mid\nsee [dead](#nowhere) and [dead2](other.md#nope) and [ok](#mid)\n## End\nend\n"
+    repo = make_repo(tmp_path, {"docs/s.md": text_, "docs/other.md": "# Other\n"})
+    rows = [
+        row("docs/s.md", "Part-A", "split-into", "1", "L1-L2"),
+        row("docs/s.md", "Part-B", "split-into", "1", "L3-L6"),
+    ]
+    rc, out, err = run_tool(repo, rows, "--subfolder", "wiki", "--dry-run", "--strict")
+    assert rc == 0, (out, err)  # already broken before the move: reported, never fatal
+    assert "pre-existing broken anchor: docs/s.md:4 -> #nowhere" in out
+    assert (
+        "pre-existing broken anchor: docs/s.md:4 -> Other.md#nope" in out
+        or "docs/s.md:4 -> ../docs/other.md#nope" in out
+    )
+    assert "anchors: 0 rewritten, 0 unresolved, 2 pre-existing broken" in out
+
+
+def test_anchor_check_on_the_final_pages_finds_a_broken_fragment():
+    pages = {"A.md": "# A\n## Real\n[ok](#real) [bad](#gone) [x](B.md#top) [y](B.md#nowhere)\n", "B.md": "# Top\n"}
+    pre = collections.Counter()
+    bad = docmove.unresolved_anchors(pages, set(pages), pre)
+    assert [(f, ln, raw) for f, ln, raw in bad] == [("A.md", 3, "#gone"), ("A.md", 3, "B.md#nowhere")]
+    pre[("A.md", "#gone")] += 1  # already broken before the move
+    assert [raw for _, _, raw in docmove.unresolved_anchors(pages, set(pages), pre)] == ["B.md#nowhere"]
+
+
+def test_heading_slugs_follow_githubs_rules():
+    text = (
+        "# Hello, World! (v2)\n## Setup\n## Setup\n## Setup\n### 🚀 Launch\n"
+        "```\n# in fence\n```\n    # indented code\nSetext\n======\n## Under_score & `code`\n"
+    )
+    slugs = [h["slug"] for h in docmove.headings(text)]
+    assert slugs == ["hello-world-v2", "setup", "setup-1", "setup-2", "-launch", "setext", "under_score--code"]
+
+
+def test_strict_stops_on_an_unresolved_anchor_and_lists_it(tmp_path, monkeypatch):
+    import io
+
+    repo = anchor_repo(tmp_path)
+    mp = tmp_path / "map.csv"
+    mp.write_text(HEADER + "\n" + "\n".join(MERGE_ROWS) + "\n")
+    monkeypatch.setattr(docmove, "unresolved_anchors", lambda *a: [("wiki/Reference-All.md", 4, "#gone")])
+    out = io.StringIO()
+    docmove.run(repo, str(mp), dry_run=True, subfolder="wiki", out=out)  # not strict: listed, exit 0
+    assert "anchor unresolved: wiki/Reference-All.md:4 -> #gone" in out.getvalue()
+    assert "1 unresolved" in out.getvalue()
+    with pytest.raises(docmove.DocmoveError, match="anchors that no longer resolve"):
+        docmove.run(repo, str(mp), dry_run=True, subfolder="wiki", strict=True, out=io.StringIO())
+
+
+# --------------------------------------------------------------------------- recovery and findings
+def make_git_shim(tmp_path, fail_from):
+    """A `git` ahead of the real one in PATH that fails every `git mv` from the `fail_from`-th on."""
+    import shutil
+
+    shim = tmp_path / "shim"
+    shim.mkdir()
+    (shim / "git").write_text(
+        "#!/bin/sh\n"
+        'case " $* " in *" mv "*)\n'
+        '  n=$(cat "$SHIM_COUNT" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "$SHIM_COUNT"\n'
+        f'  if [ "$n" -ge {fail_from} ]; then echo "shim: git mv refused" >&2; exit 1; fi;;\n'
+        "esac\n"
+        f'exec {shutil.which("git")} "$@"\n'
+    )
+    (shim / "git").chmod(0o755)
+    return {**os.environ, "PATH": f"{shim}{os.pathsep}{os.environ['PATH']}", "SHIM_COUNT": str(tmp_path / "count")}
+
+
+def test_a_failure_inside_apply_prints_the_recovery_hint_and_exits_nonzero(tmp_path):
+    files = {f"docs/{n}.md": f"# {n}\n" for n in "abcd"}
+    repo = make_repo(tmp_path, files)
+    rows = [row(f"docs/{n}.md", f"Page-{n}.md") for n in "abcd"]
+    rc, out, err = run_tool(repo, rows, env=make_git_shim(tmp_path, 3))
+    assert rc != 0 and rc != 64
+    assert "git reset --hard HEAD && git clean -fd" in err
+    assert "shim: git mv refused" in err
+    assert "post-check failed" not in err  # it was apply() that stopped, after the post-check passed
+
+
+def test_a_destination_that_is_an_ignored_file_outside_the_map_exits_2(tmp_path):
+    repo = make_repo(tmp_path, BASE, gitignore="Foo.md\n", ignored={"Foo.md": "local scratch\n"})
+    err = fails(repo, [row("docs/setup.md", "Foo.md")])
+    assert "collides with an existing path" in err
+    assert (repo / "Foo.md").read_text() == "local scratch\n"
+
+
+def test_wiki_links_rewrite_only_the_page_side_in_githubs_form(tmp_path):
+    files = {
+        "docs/b.md": "# B\n",
+        "docs/label.md": "# Label\n",
+        "docs/Home.md": "[[b|label]] [[label|b]] [[b]] [[b#x|b]]\n",
+    }
+    repo = make_repo(tmp_path, files)
+    rows = [
+        row("docs/b.md", "Reference-B.md"),
+        row("docs/label.md", "Reference-Label.md"),
+        row("docs/Home.md", "Home.md"),
+    ]
+    rc, out, err = run_tool(repo, rows, "--subfolder", "wiki")
+    assert rc == 0, (out, err)
+    # [[text|page]]: the left side is display text and is never a page, even if a page has that name
+    assert (
+        text(repo, "wiki/Home.md")
+        == "[[b|Reference-Label]] [[label|Reference-B]] [[Reference-B]] [[b#x|Reference-B]]\n"
+    )
+
+
+def test_the_report_suggests_home_for_a_dangling_directory_link(tmp_path):
+    repo = slice_repo(tmp_path)
+    rc, out, err = run_slice(repo)
+    assert rc == 0, (out, err)
+    rep = text(repo, "wiki/where-did-it-go.md")
+    line = next(ln for ln in rep.splitlines() if "dangling directory link" in ln)
+    assert "README.md:3" in line and "docs/pfsense/" in line and "`Home`" in line
 
 
 # --------------------------------------------------------------------------- post-check guards

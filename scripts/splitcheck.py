@@ -60,7 +60,7 @@ def _mask(text, dm):
     last = 0
     for r in dm.scan(text):
         raw = text[r.start : r.end]
-        if r.kind == "link" and dm.parse_target(raw)[0] != "path":
+        if r.kind == "link" and not raw.startswith("#") and dm.parse_target(raw)[0] != "path":
             continue
         out.append(text[last : r.start])
         out.append("\x00")

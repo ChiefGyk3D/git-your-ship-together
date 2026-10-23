@@ -471,72 +471,194 @@ def _enc(path, angle):
     return path
 
 
+# --------------------------------------------------------------------------- heading anchors
+# GitHub's slug for a heading: the rendered text (links reduced to their text, images to their alt text,
+# HTML tags and code marks dropped), lowercased, every character that is not a letter, digit, underscore,
+# hyphen or space removed, spaces turned into hyphens. The text is stripped before the removal, so an emoji
+# at the start leaves a leading hyphen. A repeated slug in one document gets -1, -2, ... in order.
+# Headings inside fenced or indented code do not count; `<a name="x">` and `id="x"` are anchors as well.
+_ATX_H = re.compile(r" {0,3}(#{1,6})(?:[ \t]+(.*?))?(?:[ \t]+#+)?[ \t]*$")
+_SETEXT_H = re.compile(r" {0,3}(=+|-+)[ \t]*$")
+_ID_ATTR = re.compile(r'<a\s[^>]*?\b(?:name|id)\s*=\s*"([^"]+)"', re.I)
+
+
+def slug_of(title):
+    t = re.sub(r"!\[([^\]]*)\]\([^)]*\)", r"\1", title)
+    t = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", t)
+    t = re.sub(r"\[([^\]]*)\]\[[^\]]*\]", r"\1", t)
+    t = re.sub(r"<[^>]+>", "", t)
+    return re.sub(r"[^\w\- ]", "", t.strip().lower()).replace(" ", "-")
+
+
+def headings(text):
+    """[{line, level, base, slug, kind}] in document order; `base` is the slug before the duplicate suffix."""
+    lines = text.split("\n")
+    out = []
+    counts = {}
+    fence = None
+    prev_blank = True
+    in_icode = False
+    for i, raw in enumerate(lines, 1):
+        ln = raw.rstrip("\r")
+        fi = _fence_info(ln)
+        if fence:
+            closed = bool(fi and fi[0] == fence[0] and fi[1] >= fence[1] and not fi[2].strip())
+            if closed:
+                fence = None
+            prev_blank = closed  # a block ends where the fence closes
+            continue
+        if fi:
+            fence = (fi[0], fi[1])
+            prev_blank = False
+            continue
+        if not ln.strip():
+            prev_blank = True
+            continue
+        if (ln.startswith("    ") or ln.startswith("\t")) and (prev_blank or in_icode):
+            in_icode = True
+            prev_blank = False
+            continue
+        if in_icode:
+            prev_blank = True  # a block that is not code starts here
+        in_icode = False
+        title = level = None
+        m = _ATX_H.fullmatch(ln)
+        if m:
+            level, title = len(m.group(1)), m.group(2) or ""
+        elif prev_blank and i < len(lines) and not ln.lstrip().startswith((">", "|", "-", "*", "+", "<")):
+            u = _SETEXT_H.fullmatch(lines[i].rstrip("\r"))
+            if u:
+                level, title = (1 if u.group(1)[0] == "=" else 2), ln.strip()
+        if title is not None:
+            base = slug_of(title)
+            n = counts.get(base, 0)
+            counts[base] = n + 1
+            out.append(
+                {"line": i, "level": level, "base": base, "slug": base if n == 0 else f"{base}-{n}", "kind": "h"}
+            )
+        for idm in _ID_ATTR.finditer(ln):
+            out.append({"line": i, "level": 0, "base": idm.group(1), "slug": idm.group(1), "kind": "id"})
+        prev_blank = False
+    return out
+
+
 def _wiki_fold(name):
     return unicodedata.normalize("NFC", name).strip().replace(" ", "-").casefold()
 
 
 class LinkCtx:
-    def __init__(self, files, loc, approx=frozenset()):
+    def __init__(self, files, loc, approx=frozenset(), amap=None, orig=None):
         self.files = files
         self.dirs = _parents(files)
         # old path -> new path. For a source whose lines go to several pages this is the page that
         # holds its first section (or the --link-map page): a link to it is only approximately right.
         self.loc = loc
         self.approx = frozenset(approx)
+        # heading anchors: amap[src][slug] = (page, slug on that page) for a source whose text is spread
+        # over pages; orig[file][slug] = line of that heading in the file as it was before the move
+        self.amap = amap or {}
+        self.orig = orig or {}
         self.wiki = {}  # folded page name -> tracked markdown files with that name
         for f in files:
             if _is_md(f):
                 self.wiki.setdefault(_wiki_fold(posixpath.splitext(posixpath.basename(f))[0]), []).append(f)
 
 
+def _frag_of(suffix):
+    """(query part, fragment or None) of a link suffix such as `?x=1#frag`."""
+    q, sep, f = suffix.partition("#")
+    return q, (unquote(f, errors="surrogateescape") if sep else None)
+
+
 def _rewrite_wiki(inner, ctx, st, where, lineno):
-    """New text for the inside of a [[...]] link, or None to leave it alone. The page name is the
-    second half of `[[text|Page]]` (GitHub order); a one-part link is the page name itself."""
+    """New text for the inside of a [[...]] link, or None to leave it alone. In GitHub's form
+    `[[text|Page]]` the left side is display text and the right side is the page: only the page side
+    is ever rewritten. A one-part link is the page name itself. A `#fragment` follows its heading."""
     parts = inner.split("|")
     if len(parts) > 2:
         return None
-    hits = []
-    for k, part in enumerate(parts):
-        name, sep, frag = part.partition("#")
-        cands = ctx.wiki.get(_wiki_fold(name), [])
-        if cands:
-            hits.append((k, name, sep + frag, cands))
-    if not hits:
-        return None
-    if len(hits) > 1:
-        if any(h[3] and any(c in ctx.loc for c in h[3]) for h in hits):
-            st["amb"].append(f"{where}: wiki link [[{inner}]] could name either half as the page")
-        return None
-    k, name, frag, cands = hits[0]
+    name, sep, frag = parts[-1].partition("#")
+    cands = ctx.wiki.get(_wiki_fold(name), [])
     involved = [c for c in cands if c in ctx.loc]
     if not involved:
         return None
     if len(cands) > 1:
         st["amb"].append(f"{where}: ambiguous wiki link [[{inner}]]: several pages share that name")
         return None
-    if involved[0] in ctx.approx:
-        st["approx"].append((where, lineno, f"[[{inner}]]", ctx.loc[involved[0]]))
-    new_name = posixpath.splitext(posixpath.basename(ctx.loc[involved[0]]))[0]
+    tgt = involved[0]
+    hit = None
+    fl = unquote(frag).lower() if sep else ""
+    if fl:
+        if fl not in ctx.orig.get(tgt, {}):
+            st["pre"].append((lineno, f"[[{inner}]]", False))
+        else:
+            hit = ctx.amap.get(tgt, {}).get(fl)
+    if hit:
+        new_name = posixpath.splitext(posixpath.basename(hit[0]))[0]
+        parts[-1] = new_name + "#" + hit[1]
+        st["anch"].append(lineno)
+        return "|".join(parts)
+    if tgt in ctx.approx:
+        st["approx"].append((where, lineno, f"[[{inner}]]", ctx.loc[tgt]))
+    new_name = posixpath.splitext(posixpath.basename(ctx.loc[tgt]))[0]
     if name.strip().replace(" ", "-") == new_name:
         return None
-    parts[k] = new_name + frag
+    parts[-1] = new_name + sep + frag
     return "|".join(parts)
 
 
-def rewrite_md(text, old_path, new_path, ctx):
+def _same_page_anchor(raw, old_path, new_path, ctx, st, lineno, span):
+    """New destination for `#fragment` (a link inside the file `old_path`, which now reads as
+    `new_path`), or None to leave it. A heading that moved to another page gets a link to that page."""
+    frag = unquote(raw[1:], errors="surrogateescape")
+    fl = frag.lower()
+    if not fl:
+        return None
+    heads = ctx.orig.get(old_path)
+    if heads is None:
+        return None
+    if fl not in heads:
+        st["pre"].append((lineno, raw, True))
+        return None
+    am = ctx.amap.get(old_path)
+    if am is not None:
+        dest, slug = am.get(fl, (None, None))
+        if dest is None:
+            return None
+        if dest == new_path:
+            return None if slug == fl else "#" + slug
+        st["anch"].append(lineno)
+        return _rel(dest, posixpath.dirname(new_path)) + "#" + slug
+    if new_path != old_path and span is not None and not span[0] <= heads[fl] <= span[1]:
+        st["anch"].append(lineno)  # copied text whose heading was not copied: point at the file that stays
+        return _rel(old_path, posixpath.dirname(new_path)) + "#" + frag
+    return None
+
+
+def rewrite_md(text, old_path, new_path, ctx, span=None):
     """Return (new_text, stats). Only destinations that resolve and whose target or
-    containing file moved are touched; everything else stays byte-identical."""
+    containing file moved are touched; everything else stays byte-identical. `span` is the (first, last)
+    line of `old_path` that `new_path` holds, when it holds only a part."""
     refs = scan(text)
     out = []
     last = 0
-    st = {"edits": 0, "broken": [], "bad": [], "amb": [], "approx": []}
+    st = {"edits": 0, "broken": [], "bad": [], "amb": [], "approx": [], "anch": [], "pre": []}
     for r in refs:
         raw = text[r.start : r.end]
+        lineno = text.count("\n", 0, r.start) + 1
         if r.kind == "wiki":
-            new = _rewrite_wiki(raw, ctx, st, old_path, text.count("\n", 0, r.start) + 1)
+            new = _rewrite_wiki(raw, ctx, st, old_path, lineno)
             if new is not None and new != raw:
                 out.append(text[last : r.start])
                 out.append(new)
+                last = r.end
+                st["edits"] += 1
+            continue
+        if raw.startswith("#"):
+            new = _same_page_anchor(raw, old_path, new_path, ctx, st, lineno, span)
+            if new is not None and new != raw:
+                out.append(text[last : r.start])
+                out.append(_enc(new, r.angle))
                 last = r.end
                 st["edits"] += 1
             continue
@@ -552,9 +674,22 @@ def rewrite_md(text, old_path, new_path, ctx):
             st["broken"].append(raw)
             continue
         tgt2 = ctx.loc.get(tgt, tgt)
-        if tgt in ctx.approx:
-            st["approx"].append((old_path, text.count("\n", 0, r.start) + 1, raw, tgt2))
-        if tgt2 == tgt and posixpath.dirname(old_path) == posixpath.dirname(new_path):
+        query, frag = _frag_of(suffix)
+        hit = None
+        if frag and tgt in ctx.orig:
+            fl = frag.lower()
+            if fl not in ctx.orig[tgt]:
+                pass  # recorded below once the destination is known
+            else:
+                hit = ctx.amap.get(tgt, {}).get(fl)
+        if hit:
+            tgt2 = hit[0]
+            suffix = query + "#" + hit[1]
+        elif tgt in ctx.approx:
+            st["approx"].append((old_path, lineno, raw, tgt2))
+        if tgt2 == tgt and posixpath.dirname(old_path) == posixpath.dirname(new_path) and not hit:
+            if frag and tgt in ctx.orig and frag.lower() not in ctx.orig[tgt]:
+                st["pre"].append((lineno, raw, True))
             continue
         if p.startswith("/"):
             newp = "/" + tgt2
@@ -562,16 +697,55 @@ def rewrite_md(text, old_path, new_path, ctx):
             newp = _rel(tgt2, posixpath.dirname(new_path))
             if p.endswith("/") and not newp.endswith("/"):
                 newp += "/"
-        if newp == p:
+        new_raw = _enc(newp, r.angle) + suffix
+        if frag and tgt in ctx.orig and frag.lower() not in ctx.orig[tgt]:
+            st["pre"].append((lineno, new_raw, True))
+        if hit and new_raw != raw:
+            st["anch"].append(lineno)
+        if newp == p and suffix == info[1]:
             continue
         if r.angle and ("<" in newp or ">" in newp):
             raise DocmoveError(f"{new_path}: cannot encode new link target for {raw!r}")
         out.append(text[last : r.start])
-        out.append(_enc(newp, r.angle) + suffix)
+        out.append(new_raw)
         last = r.end
         st["edits"] += 1
     out.append(text[last:])
     return "".join(out), st
+
+
+def unresolved_anchors(pages, tree, pre):
+    """Links in the final markdown `pages` whose `#fragment` names no heading of the page they point at.
+    `pre` counts [(file, destination)] that were already broken before the move; those are not reported.
+    Returns [(file, line, destination)]."""
+    slugs = {}
+    for f, t in pages.items():
+        slugs[f] = {h["slug"].lower() for h in headings(t)}
+    left = collections.Counter(pre)
+    bad = []
+    for f in sorted(pages):
+        t = pages[f]
+        for r in scan(t):
+            if r.kind != "link":
+                continue
+            raw = t[r.start : r.end]
+            if raw.startswith("#"):
+                tgt, frag = f, raw[1:]
+            else:
+                kind, info = parse_target(raw)
+                if kind != "path":
+                    continue
+                tgt = resolve(info[0], f)
+                frag = _frag_of(info[1])[1]
+            if not frag or tgt not in slugs:
+                continue
+            if unquote(frag, errors="surrogateescape").lower() in slugs[tgt]:
+                continue
+            if left[(f, raw)] > 0:
+                left[(f, raw)] -= 1
+                continue
+            bad.append((f, t.count("\n", 0, r.start) + 1, raw))
+    return bad
 
 
 def rewrite_nonmd(text, moved):
@@ -623,7 +797,7 @@ def _wiki_mask(inner, stems):
     for k, part in enumerate(parts):
         name, sep, frag = part.partition("#")
         if _wiki_fold(name) in stems:
-            parts[k] = "\x00" + sep + frag
+            parts[k] = "\x00"  # the page name and its fragment may both change
     return "|".join(parts)
 
 
@@ -640,7 +814,7 @@ def _neutralize(text, stems=frozenset()):
                 out.append(text[last : r.start])
                 out.append(masked)
                 last = r.end
-        elif parse_target(raw)[0] == "path":
+        elif raw.startswith("#") or parse_target(raw)[0] == "path":
             out.append(text[last : r.start])
             out.append("\x00")
             last = r.end
@@ -1238,7 +1412,6 @@ def build(root, rows, opts):
     for src in multi_dest:
         loc[src] = override.get(src, first_dest[src])
     approx = multi_dest - set(override)
-    ctx = LinkCtx(set(tracked), loc, approx)
     md_old, nonmd_old = {}, {}
     excl = tuple(DEFAULT_EXCLUDES) + tuple(opts.get("excludes", ())) + tuple(opts.get("exclude_paths", ()))
     if report:
@@ -1254,12 +1427,36 @@ def build(root, rows, opts):
             data = _read(full)
             if b"\0" not in data:
                 nonmd_old[p] = read_text(data)
+    # heading anchors: where each heading of a source lands, and the slug it has on that page
+    heads = {f: headings(t) for f, t in md_old.items()}
+    orig = {f: {h["slug"].lower(): h["line"] for h in reversed(hs)} for f, hs in heads.items()}
+    regs = []
+    for d, g in groups.items():
+        counts = {}
+        for e in g:
+            if e["action"] == "copy-into" and e["src"] not in vanish:
+                continue  # the source stays: its headings stay where they are
+            a, b = e["span"]
+            for h in heads[e["src"]]:
+                if not a <= h["line"] <= b:
+                    continue
+                if h["kind"] == "id":
+                    final = h["slug"]
+                else:
+                    n = counts.get(h["base"], 0)
+                    counts[h["base"]] = n + 1
+                    final = h["base"] if n == 0 else f"{h['base']}-{n}"
+                regs.append((e["action"] == "copy-into", e["src"], h["slug"].lower(), d, final))
+    amap = {}
+    for _, src, slug, d, final in sorted(regs, key=lambda x: x[0]):
+        amap.setdefault(src, {}).setdefault(slug, (d, final))
+    ctx = LinkCtx(set(tracked), loc, approx, amap, orig)
     pieces = {}
     stats = {}
     for p, t in md_old.items():
         pieces[p], stats[p] = rewrite_md(t, p, moved.get(p, p), ctx)
     # a source that feeds a page with a part of itself, or several pages, or a copy, is rewritten once
-    # per destination folder and cut by line
+    # per page it feeds and cut by line
     multi = {
         s
         for s, es in by_src.items()
@@ -1267,20 +1464,28 @@ def build(root, rows, opts):
         or (len(es) > 1 and any(e["action"] in CONSUME for e in es))
     }
     chunk_text = {}
+    via_rows = {s for s in multi if any(e["action"] in CONSUME for e in by_src[s])}
+    row_stats = []  # (final page, stats of the lines that page holds)
     for src in multi:
-        by_dir = {}
         for e in by_src[src]:
             if e["action"] not in CONSUME + ("copy-into",):
                 continue
-            dd = posixpath.dirname(e["dest"])
-            if dd not in by_dir:
-                by_dir[dd], _ = rewrite_md(md_old[src], src, e["dest"], ctx)
-            if not e["section"]:
-                chunk_text[id(e)] = by_dir[dd]
-                continue
-            lines = by_dir[dd].split("\n")
+            rw, rst = rewrite_md(md_old[src], src, e["dest"], ctx, span=e["span"] if e["section"] else None)
             a, b = e["span"]
-            chunk_text[id(e)] = "\n".join(lines[a - 1 : b]) + "\n"
+            row_stats.append(
+                (
+                    e["dest"],
+                    {
+                        "anch": [ln for ln in rst["anch"] if a <= ln <= b],
+                        "pre": [x for x in rst["pre"] if a <= x[0] <= b],
+                        "src": src,
+                    },
+                )
+            )
+            if not e["section"]:
+                chunk_text[id(e)] = rw
+                continue
+            chunk_text[id(e)] = "\n".join(rw.split("\n")[a - 1 : b]) + "\n"
     final_md = {}
     allowed = []  # lines the loss check may see beyond the sources: provenance comments, copies, stub text
     for p, t in pieces.items():
@@ -1358,6 +1563,25 @@ def build(root, rows, opts):
         for _, raw, tgt, ln in unresolved_links({f: t}, tree, detail=True):
             if tgt in old_dirs:
                 dangling.append((f, ln, raw))
+    # anchors: rewritten, already broken before the move, broken by it
+    n_anch = 0
+    pre_anchors = []
+    pre_keys = collections.Counter()
+    for p, st in stats.items():
+        if p in via_rows:
+            continue  # its lines are counted per page below
+        n_anch += len(st["anch"])
+        for ln, raw_out, is_path in st["pre"]:
+            pre_anchors.append((p, ln, raw_out))
+            if is_path:
+                pre_keys[(moved.get(p, p), raw_out)] += 1
+    for dest, rs in row_stats:
+        n_anch += len(rs["anch"])
+        for ln, raw_out, is_path in rs["pre"]:
+            pre_anchors.append((rs["src"], ln, raw_out))
+            if is_path:
+                pre_keys[(dest, raw_out)] += 1
+    unresolved = unresolved_anchors(final_md, tree, pre_keys)
     # report page
     cnt = collections.Counter(e["action"] for e in real)
     cnt["split-into"] = len({e["src"] for e in real if e["action"] == "split-into"})
@@ -1376,7 +1600,12 @@ def build(root, rows, opts):
         f"- approximate link: {f}:{ln} -> {raw} now points at {dest} (line as before the move)"
         for f, ln, raw, dest in approx_links
     ]
-    review += [f"- dangling directory link: {f}:{ln} -> {raw}" for f, ln, raw in sorted(dangling)]
+    review += [
+        f"- dangling directory link: {f}:{ln} -> {raw} (directory gone: link `Home` or a page)"
+        for f, ln, raw in sorted(dangling)
+    ]
+    review += [f"- anchor unresolved: {f}:{ln} -> {raw}" for f, ln, raw in unresolved]
+    review += [f"- pre-existing broken anchor: {f}:{ln} -> {raw}" for f, ln, raw in sorted(pre_anchors)]
     review += [
         f"- stub fallback: {d} (no 'points to' in its notes; pointed at where its source went)" for d in fallbacks
     ]
@@ -1399,9 +1628,13 @@ def build(root, rows, opts):
     plan.tree = tree
     plan.approx = approx_links
     plan.dangling = sorted(dangling)
+    plan.anchors = {"rewritten": n_anch, "unresolved": unresolved, "pre": sorted(pre_anchors)}
     plan.fallbacks = fallbacks
     stub_dests = {e["dest"] for e in entries if e["action"] == "stub"}
-    stems = {_wiki_fold(posixpath.splitext(posixpath.basename(p))[0]) for p in list(loc) + list(loc.values())}
+    stems = {
+        _wiki_fold(posixpath.splitext(posixpath.basename(p))[0])
+        for p in list(loc) + [e["dest"] for e in entries if e["action"] != "stub"]
+    }
     for e in entries:
         e["expect_gone"] = e["src"] in vanish_eff
         e["reused"] = e["src"] in stub_dests  # a stub may reuse the path a move vacated
@@ -1549,6 +1782,14 @@ def run(
         pr(f"approximate link: {f}:{ln} -> {raw} now points at {dest}")
     for f, ln, raw in plan.dangling:
         pr(f"dangling directory link: {f}:{ln} -> {raw}")
+    for f, ln, raw in plan.anchors["unresolved"]:
+        pr(f"anchor unresolved: {f}:{ln} -> {raw}")
+    for f, ln, raw in plan.anchors["pre"]:
+        pr(f"pre-existing broken anchor: {f}:{ln} -> {raw}")
+    pr(
+        f"anchors: {plan.anchors['rewritten']} rewritten, {len(plan.anchors['unresolved'])} unresolved, "
+        f"{len(plan.anchors['pre'])} pre-existing broken"
+    )
     for d in plan.fallbacks:
         pr(f"stub fallback: {d}")
     for w in warns:
@@ -1564,6 +1805,8 @@ def run(
             fail.append("strict: approximate links to a split source present")
         if plan.dangling:
             fail.append("strict: dangling directory links present")
+        if plan.anchors["unresolved"]:
+            fail.append("strict: anchors that no longer resolve")
         if any(w.startswith("pre-existing") for w in warns):
             fail.append("strict: pre-existing unresolved links present")
     if fail:
@@ -1571,13 +1814,17 @@ def run(
     pr("post-check: ok")
     if dry_run:
         return 0
-    apply(root, plan)
-    errs, _, acc = verify_disk(root, plan)
+    hint = (
+        "the tree in --repo is partly modified. To undo it, run this in that repository (it discards ALL "
+        "uncommitted work there): git reset --hard HEAD && git clean -fd"
+    )
+    try:
+        apply(root, plan)
+        errs, _, acc = verify_disk(root, plan)
+    except Exception as exc:  # anything that stops the apply leaves a half-moved tree
+        raise DocmoveError(f"APPLY FAILED ({type(exc).__name__}): {exc}\n  {hint}") from None
     if errs:
-        raise DocmoveError(
-            "POST-APPLY CHECK FAILED; tree is modified, run `git reset --hard HEAD && git clean -fd`:\n  "
-            + "\n  ".join(errs[:50])
-        )
+        raise DocmoveError("POST-APPLY CHECK FAILED: " + hint + "\n  " + "\n  ".join(errs[:50]))
     pr(f"applied and staged (not committed); post-apply check ok, accounted for: {acc}")
     return 0
 
