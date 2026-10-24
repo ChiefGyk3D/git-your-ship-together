@@ -53,3 +53,4 @@
 - [docs-pages](Workflow-docs-pages.md)
 - [wiki-publish](Workflow-wiki-publish.md)
 - [project-sync](Workflow-project-sync.md)
+- [threat-model](Workflow-threat-model.md)
