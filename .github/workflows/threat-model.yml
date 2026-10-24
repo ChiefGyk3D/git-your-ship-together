@@ -1,0 +1,327 @@
+# Reusable check that a repository with AI components keeps an OWASP Threat
+# Dragon threat model, and keeps it current.
+#
+# Call it from a repository with:
+#
+#   on:
+#     push: { branches: [main] }
+#     pull_request:
+#   jobs:
+#     threat-model:
+#       uses: ChiefGyk3D/git-your-ship-together/.github/workflows/threat-model.yml@<sha> # vX.Y.Z
+#       permissions:
+#         contents: read
+#       with:
+#         ai-paths: |
+#           prompts/**
+#           **/mcp*.json
+#           agents.yaml
+#         required-topics: prompt injection, data leakage, tool abuse
+#
+# Two checks, both stdlib Python run from this file (a reusable workflow cannot
+# check out its own scripts, so the script is inline and tests/test_threat_model.py
+# runs this exact text):
+#
+#   The model     Every file matching `model-glob` is parsed as a Threat Dragon
+#                 v2 model and checked for shape: unique ids, flows between
+#                 cells that exist, a trust boundary, a status, severity and
+#                 (for Mitigated) mitigation on every threat, no unresolved
+#                 TBD severity. `fail-on-open-severity` fails on an Open threat
+#                 at or above a severity. `required-topics` fails unless each
+#                 topic appears in some threat, so an AI model cannot omit the
+#                 threats an AI system has.
+#   The change    On a pull request, when a changed file matches `ai-paths`, the
+#                 pull request must also change a model file, or carry a line of
+#                 its own in its description: `threat-model: n/a - <reason>`.
+#
+# What the check cannot do: it cannot tell that the model is true of the running
+# system, or that an edit to the model is a good one. It makes "nobody looked"
+# a red check instead of a silent state. The n/a line is written by the pull
+# request's author, so it is a recorded decision for the reviewer to read, not
+# a control the author cannot bypass.
+#
+# The pull request description and every value from the model reach the script
+# through environment variables or files, never by template expansion into the
+# script, so they can only be data.
+
+name: Threat model (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      model-glob:
+        description: Threat Dragon model files, space-separated globs relative to the repository root (`**` crosses directories).
+        type: string
+        default: "docs/threat-model/*.threat-dragon.json"
+      require-model:
+        description: Fail when no file matches `model-glob`. Turn it off only while a repository has no AI surface yet and is trying the workflow.
+        type: boolean
+        default: true
+      ai-paths:
+        description: Globs, space- or newline-separated, of the files that make up the AI surface (prompts, tool and agent configs, model clients). On a pull request, a change to one needs a model change or a `threat-model - n/a` line. Empty turns the pull request rule off.
+        type: string
+        default: ""
+      required-topics:
+        description: Comma-separated topics (for example `prompt injection, data leakage`); each must appear, case-insensitively, in the title, type, description or mitigation of some threat in the model. Empty requires none.
+        type: string
+        default: ""
+      fail-on-open-severity:
+        description: Fail when a threat with status Open has this severity or higher - `High`, `Medium`, `Low` or `none`. A model that records an unmitigated High is honest; this input is for a repository that will not ship one.
+        type: string
+        default: none
+      egress-policy:
+        description: harden-runner egress policy for every job - `audit` logs outbound connections, `block` allows only `allowed-endpoints`.
+        type: string
+        default: audit
+      allowed-endpoints:
+        description: harden-runner allow-list for `block`, space-separated host:port entries. Wildcards are not supported and a newline-separated list matches nothing. The runner's own infrastructure needs no entry.
+        type: string
+        default: "api.github.com:443 files.pythonhosted.org:443 github.com:443 pypi.org:443"
+      extra-allowed-endpoints:
+        description: Appended to `allowed-endpoints`, for hosts only this repository reaches. Same format.
+        type: string
+        default: ""
+      timeout-minutes:
+        description: Per-job timeout.
+        type: number
+        default: 10
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Threat model
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: ${{ inputs.egress-policy }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}
+          disable-sudo: true
+          # The agent may only stop reporting to StepSecurity in block mode.
+          disable-telemetry: ${{ inputs.egress-policy == 'block' }}
+
+      # The full history, so the pull request's diff against its base resolves.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Check the threat model
+        env:
+          MODEL_GLOB: ${{ inputs.model-glob }}
+          REQUIRE_MODEL: ${{ inputs.require-model }}
+          AI_PATHS: ${{ inputs.ai-paths }}
+          REQUIRED_TOPICS: ${{ inputs.required-topics }}
+          FAIL_ON_OPEN: ${{ inputs.fail-on-open-severity }}
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          python3 -I - <<'PY'
+          import glob
+          import json
+          import os
+          import re
+          import subprocess
+          import sys
+
+          STATUSES = {"Open", "Mitigated", "NotApplicable"}
+          SEVERITIES = {"TBD": 0, "Low": 1, "Medium": 2, "High": 3, "Critical": 4}
+          failures = []
+
+
+          def fail(file, message):
+              """A GitHub annotation; a value from the model cannot add a command."""
+              clean = re.sub(r"[\r\n]+", " ", str(message)).replace("%", "%25")
+              where = f"file={file}," if file else ""
+              print(f"::error {where}title=Threat model::{clean}")
+              failures.append(message)
+
+
+          def rx(pattern):
+              """A glob with `**` across directories, `*` and `?` within one."""
+              out, i = "", 0
+              while i < len(pattern):
+                  if pattern.startswith("**/", i):
+                      out += "(?:.*/)?"
+                      i += 3
+                  elif pattern.startswith("**", i):
+                      out += ".*"
+                      i += 2
+                  elif pattern[i] == "*":
+                      out += "[^/]*"
+                      i += 1
+                  elif pattern[i] == "?":
+                      out += "[^/]"
+                      i += 1
+                  else:
+                      out += re.escape(pattern[i])
+                      i += 1
+              return re.compile(out + r"\Z")
+
+
+          def matches(path, patterns):
+              return any(rx(p).match(path) for p in patterns)
+
+
+          def check_model(path):
+              try:
+                  with open(path, encoding="utf-8") as handle:
+                      model = json.load(handle)
+              except (OSError, ValueError) as exc:
+                  fail(path, f"cannot read the model as JSON: {exc}")
+                  return []
+              if not isinstance(model, dict):
+                  fail(path, "the model is not a JSON object")
+                  return []
+              if not str(model.get("version", "")).startswith("2."):
+                  fail(path, f"not a Threat Dragon v2 model (version is {model.get('version')!r})")
+              summary = model.get("summary")
+              if not isinstance(summary, dict) or not str(summary.get("title", "")).strip():
+                  fail(path, "summary.title is missing or empty")
+              detail = model.get("detail")
+              diagrams = detail.get("diagrams") if isinstance(detail, dict) else None
+              if not isinstance(diagrams, list) or not diagrams:
+                  fail(path, "detail.diagrams is missing or empty")
+                  return []
+              threats, ids, numbers = [], set(), []
+              boundaries = flows = 0
+              for diagram in diagrams:
+                  if not isinstance(diagram, dict):
+                      fail(path, "a diagram is not an object")
+                      continue
+                  name = diagram.get("title") or "(untitled diagram)"
+                  for key in ("id", "title", "diagramType"):
+                      if diagram.get(key) in (None, ""):
+                          fail(path, f"diagram {name!r} has no {key}")
+                  cells = diagram.get("cells")
+                  if not isinstance(cells, list) or not cells:
+                      fail(path, f"diagram {name!r} has no cells")
+                      continue
+                  cell_ids = {c.get("id") for c in cells if isinstance(c, dict)}
+                  for cell in cells:
+                      if not isinstance(cell, dict) or not cell.get("id"):
+                          fail(path, f"diagram {name!r} has a cell with no id")
+                          continue
+                      cid = cell["id"]
+                      if cid in ids:
+                          fail(path, f"duplicate cell id {cid!r}")
+                      ids.add(cid)
+                      shape = str(cell.get("shape", ""))
+                      if shape.startswith("trust-boundary"):
+                          boundaries += 1
+                      data = cell.get("data") if isinstance(cell.get("data"), dict) else {}
+                      if shape == "flow":
+                          flows += 1
+                          for end in ("source", "target"):
+                              ref = cell.get(end)
+                              target = ref.get("cell") if isinstance(ref, dict) else None
+                              if target not in cell_ids:
+                                  fail(path, f"flow {cid!r} {end} {target!r} is not a cell in diagram {name!r}")
+                      for threat in data.get("threats") or []:
+                          if not isinstance(threat, dict):
+                              fail(path, f"cell {cid!r} has a threat that is not an object")
+                              continue
+                          threats.append(threat)
+                          tid = threat.get("id") or "(no id)"
+                          label = f"threat {tid!r} on {cid!r}"
+                          if not threat.get("id"):
+                              fail(path, f"{label} has no id")
+                          elif threat["id"] in ids:
+                              fail(path, f"duplicate id {threat['id']!r}")
+                          else:
+                              ids.add(threat["id"])
+                          if "number" in threat:
+                              numbers.append(threat["number"])
+                          if not str(threat.get("title", "")).strip():
+                              fail(path, f"{label} has no title")
+                          status, severity = threat.get("status"), threat.get("severity")
+                          if status not in STATUSES:
+                              fail(path, f"{label} has status {status!r}; use one of {sorted(STATUSES)}")
+                          if severity not in SEVERITIES:
+                              fail(path, f"{label} has severity {severity!r}; use one of {sorted(SEVERITIES)}")
+                          elif severity == "TBD" and status != "NotApplicable":
+                              fail(path, f"{label} has severity TBD: triage it before it ships")
+                          if status == "Mitigated" and not str(threat.get("mitigation", "")).strip():
+                              fail(path, f"{label} is Mitigated with no mitigation text")
+              if not boundaries:
+                  fail(path, "the model has no trust boundary; a threat model without one has not found where trust changes")
+              if not flows:
+                  fail(path, "the model has no data flow")
+              if not threats:
+                  fail(path, "the model records no threat")
+              if len(numbers) != len(set(numbers)):
+                  fail(path, "threat numbers are not unique")
+              top = detail.get("threatTop")
+              if numbers and isinstance(top, int) and top < max(numbers):
+                  fail(path, f"detail.threatTop is {top} but a threat is numbered {max(numbers)}")
+              return threats
+
+
+          patterns = os.environ["MODEL_GLOB"].split()
+          files = sorted({f for p in patterns for f in glob.glob(p, recursive=True) if os.path.isfile(f)})
+          all_threats = []
+          if not files:
+              if os.environ["REQUIRE_MODEL"] == "true":
+                  fail(None, f"no threat model found for {' '.join(patterns) or '(empty model-glob)'}; add an OWASP Threat Dragon model or set require-model to false")
+          for path in files:
+              all_threats += check_model(path)
+
+          floor = os.environ["FAIL_ON_OPEN"].strip()
+          if floor and floor.lower() != "none":
+              if floor not in SEVERITIES or floor == "TBD":
+                  fail(None, f"fail-on-open-severity {floor!r} is not High, Medium, Low or none")
+              else:
+                  for t in all_threats:
+                      if t.get("status") == "Open" and SEVERITIES.get(t.get("severity"), 0) >= SEVERITIES[floor]:
+                          fail(None, f"threat {t.get('id')!r} is Open at severity {t.get('severity')}: mitigate it or lower the bar")
+
+          topics = [t.strip().lower() for t in os.environ["REQUIRED_TOPICS"].split(",") if t.strip()]
+          if topics and files:
+              text = " ".join(
+                  f"{t.get('title', '')} {t.get('type', '')} {t.get('description', '')} {t.get('mitigation', '')}".lower()
+                  for t in all_threats
+              )
+              for topic in topics:
+                  if topic not in text:
+                      fail(None, f"no threat in the model covers {topic!r}")
+
+          ai_paths = os.environ["AI_PATHS"].split()
+          if ai_paths and os.environ["EVENT_NAME"] == "pull_request":
+              base = os.environ["BASE_REF"]
+              diff = subprocess.run(
+                  ["git", "diff", "--name-only", f"origin/{base}...HEAD"],
+                  capture_output=True, text=True, check=False,
+              )
+              if diff.returncode != 0:
+                  fail(None, f"cannot diff against origin/{base}: {diff.stderr.strip()}")
+              else:
+                  changed = [line for line in diff.stdout.splitlines() if line]
+                  touched = [c for c in changed if matches(c, ai_paths)]
+                  model_changed = any(matches(c, patterns) for c in changed)
+                  exempt = re.search(
+                      r"^[ \t]*threat-model:[ \t]*n/a[ \t]*[-–—][ \t]*\S.{6,}$",
+                      os.environ["PR_BODY"], re.IGNORECASE | re.MULTILINE,
+                  )
+                  if touched and not model_changed and not exempt:
+                      fail(None, "this pull request changes the AI surface (" + ", ".join(touched[:5])
+                           + (" ..." if len(touched) > 5 else "")
+                           + ") but not the threat model; update the model, or add a line "
+                           "'threat-model: n/a - <reason>' to the description")
+                  elif touched:
+                      print(f"AI surface changed ({len(touched)} files): " + ("model updated" if model_changed else "n/a recorded"))
+
+          if failures:
+              print(f"{len(failures)} problem(s) found")
+              sys.exit(1)
+          print(f"threat model ok: {len(files)} file(s), {len(all_threats)} threat(s)")
+          PY

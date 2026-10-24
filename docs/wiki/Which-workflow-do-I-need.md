@@ -23,6 +23,7 @@ the workflow's YAML so it cannot drift; the README is the authority.
 | A GitHub Projects v2 board (organization) | `project-sync.yml` | [project-sync](Workflow-project-sync.md) |
 | A static docs site | `docs-pages.yml` | [docs-pages](Workflow-docs-pages.md) |
 | A wiki generated from docs | `wiki-publish.yml` | [wiki-publish](Workflow-wiki-publish.md) |
+| An AI component whose threat model must stay current | `threat-model.yml` | [threat-model](Workflow-threat-model.md) |
 
 A repository with several languages calls **one CI workflow per language**, each
 from its own caller job, and requires every gate. See
@@ -47,6 +48,7 @@ from its own caller job, and requires every gate. See
 | `project-sync.yml` | App token via Doppler; checks nothing out | Yes (the App's key) | `pull_request_target` | Board updates |
 | `docs-pages.yml` | `pages`/`id-token` on the deploy job only | No | Builds only | GitHub Pages |
 | `wiki-publish.yml` | `contents: write` on the publish job only | No | Generates only | The wiki |
+| `threat-model.yml` | No (`contents: read`) | No | Yes | No |
 
 (The README's input tables are authoritative for defaults; this table is the
 shape, not the contract.)

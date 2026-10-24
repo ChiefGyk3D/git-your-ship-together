@@ -48,6 +48,7 @@ REUSABLE = [
         "wiki-publish.yml",
         "project-sync.yml",
         "dast.yml",
+        "threat-model.yml",
     )
 ]
 # The subset that fetches CI secrets. The Doppler rules are about those steps,
@@ -70,6 +71,7 @@ DOPPLER = [
         "docs-pages.yml",
         "wiki-publish.yml",
         "dast.yml",
+        "threat-model.yml",
     )
 ]
 # The language CI workflows: each ends in the `CI green` gate branch protection requires.
@@ -109,7 +111,7 @@ def all_steps(path: Path):
 
 
 def test_there_is_something_to_check():
-    assert len(REUSABLE) == 16, "expected the sixteen callable workflows"
+    assert len(REUSABLE) == 17, "expected the seventeen callable workflows"
     assert len(DOPPLER) == 5, "expected five of them to fetch CI secrets"
     assert [p.name for p in LANGUAGE_CI] == ["arduino-ci.yml", "bash-ci.yml", "python-ci.yml", "tofu-ci.yml"]
     assert ACTION_FILES, "no composite actions found"

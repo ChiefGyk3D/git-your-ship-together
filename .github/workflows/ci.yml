@@ -487,10 +487,26 @@ jobs:
           pip install --require-hashes -r requirements-dev.txt
           pytest tests/test_sbom.py
 
+  # threat-model.yml at this ref over a one-model fixture: the model check in
+  # block mode with the workflow's own default list, and a required topic so
+  # the topic rule runs too. ai-paths stays empty, because this repository has
+  # no AI surface of its own; the pull request rule is run against real git
+  # repositories in tests/test_threat_model.py.
+  fixture-threat-model:
+    name: fixture threat model
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    uses: ./.github/workflows/threat-model.yml # zizmor: ignore[self-repository]
+    permissions:
+      contents: read
+    with:
+      model-glob: fixture/threat-model/*.threat-dragon.json
+      required-topics: prompt injection
+      egress-policy: block
+
   ci-green:
     name: CI green
     if: always()
-    needs: [actionlint, zizmor, test, fixture-ci, fixture-bash, fixture-fuzz, fixture-tofu, fixture-arduino, fixture-package, fixture-sbom, fixture-artifact, fixture-pages, fixture-wiki, fixture-release, fixture-verify, fixture-rescan, rescan-live, fixture-project-sync, fixture-dast, dast-live]
+    needs: [actionlint, zizmor, test, fixture-ci, fixture-bash, fixture-fuzz, fixture-tofu, fixture-arduino, fixture-package, fixture-sbom, fixture-artifact, fixture-pages, fixture-wiki, fixture-release, fixture-verify, fixture-rescan, rescan-live, fixture-project-sync, fixture-dast, dast-live, fixture-threat-model]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}
