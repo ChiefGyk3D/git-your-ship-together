@@ -423,6 +423,19 @@ def test_a_stated_reason_satisfies_the_rule(pr_repo, body):
         "see threat-model: n/a - because I said so, trust me",
     ],
 )
+@pytest.mark.parametrize(
+    "body",
+    [
+        "Some text\r\n\r\nthreat-model: n/a - reviewed, nothing new crosses a boundary\r\nMore\r\n",
+        "threat-model: n/a - reviewed, nothing new crosses a boundary\r",
+    ],
+)
+def test_a_windows_line_ending_does_not_hide_a_stated_reason(pr_repo, body):
+    change(pr_repo, "tools/mcp.json")
+    out = pr(pr_repo, body)
+    assert out.returncode == 0 and "n/a recorded" in out.stdout
+
+
 def test_a_bare_or_buried_note_does_not(pr_repo, body):
     change(pr_repo, "agents.yaml")
     assert pr(pr_repo, body).returncode == 1
