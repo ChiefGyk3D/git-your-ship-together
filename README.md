@@ -60,7 +60,7 @@ Read in this order. Each one is short.
 
 ## What is in the repository
 
-Sixteen reusable workflows and one composite action:
+Seventeen reusable workflows and one composite action:
 
 | File | What it does |
 |---|---|
@@ -75,6 +75,7 @@ Sixteen reusable workflows and one composite action:
 | `.github/workflows/python-package-release.yml` | Build the sdist and wheel, `twine check`, refuse a tag that disagrees with the packaged version, smoke-test from the wheel, then publish to the GitHub release with SHA256SUMS and build provenance; PyPI is published from a job in the caller's own workflow with a download step and the pypa publish action as direct steps (Trusted Publishing cannot use a reusable workflow). No secret anywhere |
 | `.github/workflows/artifact-release.yml` | For a file rather than an image (a `.deb`, a firmware binary, a bundle): build it with a command, then publish it to the GitHub release with SHA256SUMS, a keyless cosign signature bundle per file and build provenance. No secret anywhere |
 | `.github/workflows/docs-pages.yml` | Build a static documentation site with a command you supply (MkDocs strict by default) on every pull request; upload it and deploy it to GitHub Pages from the default branch only. The two Pages writes sit on the deploy job alone |
+| `.github/workflows/threat-model.yml` | Validate an OWASP Threat Dragon v2 model (shape, ids, flows, trust boundary, a status, severity and mitigation on every threat, required AI topics, an optional bar on Open threats), and on a pull request fail when the AI surface changes with no model change and no recorded `threat-model: n/a - <reason>`. Reads only; holds `contents: read` |
 | `.github/workflows/wiki-publish.yml` | Run a command that generates a wiki tree, then replace the repository's GitHub wiki with it, as `github-actions[bot]`, only when something changed, from the default branch only. The write token sits on a job that runs none of your code |
 | `.github/workflows/project-sync.yml` | Keeps a GitHub Projects v2 board current: adds an issue or pull request when it opens, moves it to Done with a date when it closes or merges, and a weekly reconcile repairs what an event missed. The token comes from Doppler over OIDC; nothing from a pull request is checked out. See [Keeping a project current](#keeping-a-project-current) |
 | `.github/workflows/dast.yml` | OWASP ZAP against a loopback service the caller starts: the `baseline` scan (spider and passive rules, no attack traffic), the `full` scan (the active rules too: injection, cross-site scripting, traversal) or the `api` scan (the active rules over an OpenAPI, SOAP or GraphQL definition), optionally signed in through a ZAP context file and user, with a `fail-on` threshold; reports kept as an artifact, findings uploaded as SARIF under category `zap`. The caller's service runs in a job that holds only `contents: read`; the upload is a second job that runs none of it. See [DAST](#dast-owasp-zap) |
@@ -87,7 +88,7 @@ project before any caller pins them:
 
 | File | What it does |
 |---|---|
-| `.github/workflows/ci.yml` | actionlint, zizmor, the pytest contract, then `python-ci.yml`, `bash-ci.yml`, `tofu-ci.yml`, `arduino-ci.yml`, `python-package-release.yml`, `artifact-release.yml`, `docs-pages.yml`, `wiki-publish.yml` and `python-docker-release.yml` called at the pull request's own ref against `fixture/` (bash-ci over the whole repository; bash-ci and the package build in block mode), and a `CI green` gate that needs all of it |
+| `.github/workflows/ci.yml` | actionlint, zizmor, the pytest contract, then `python-ci.yml`, `bash-ci.yml`, `tofu-ci.yml`, `arduino-ci.yml`, `python-package-release.yml`, `artifact-release.yml`, `docs-pages.yml`, `wiki-publish.yml`, `threat-model.yml` and `python-docker-release.yml` called at the pull request's own ref against `fixture/` (bash-ci over the whole repository; bash-ci and the package build in block mode), and a `CI green` gate that needs all of it |
 | `.github/workflows/security-self.yml` | `security.yml` called the same way, on push, pull request and a Monday schedule |
 | `.github/workflows/dependabot-auto-merge-self.yml` | `dependabot-auto-merge.yml` called the same way, so this repository's own bumps exercise it |
 | `.github/workflows/wiki.yml` | `wiki-publish.yml` called the same way for this repository's own wiki: `docs/wiki/` is the source and `scripts/gen_wiki.py` the generator, which renders every reusable workflow's inputs table from its YAML. Publishes from `main` only. See [`docs/wiki/Maintaining-this-wiki.md`](docs/wiki/Maintaining-this-wiki.md) |
@@ -1502,6 +1503,80 @@ jobs:
 
 It came from Hammunition's `wiki.yml`, split into two jobs so the write token
 is never beside the generator.
+
+### Threat model
+
+Keeps an [OWASP Threat Dragon](https://owasp.org/www-project-threat-dragon/) model
+for a repository with AI components, and keeps it current. It checks two things.
+The model file is well formed and complete enough to mean something, and a pull
+request that changes the AI surface changes the model too, or says why not.
+
+```yaml
+name: Threat model
+on:
+  push: { branches: [main] }
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  threat-model:
+    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/threat-model.yml@<sha> # vX.Y.Z
+    permissions:
+      contents: read
+    with:
+      ai-paths: |
+        prompts/**
+        **/mcp*.json
+        agents.yaml
+      required-topics: prompt injection, data leakage, tool abuse
+```
+
+- **The model.** Every file matching `model-glob` is read as a Threat Dragon v2
+  model. It fails on: a file that is not a v2 model, a missing title, diagram or
+  cells, duplicate cell or threat ids, a flow whose source or target is not a
+  cell, no trust boundary, no flow, no threat, a status other than `Open`,
+  `Mitigated` or `NotApplicable`, a severity outside `TBD`, `Low`, `Medium`,
+  `High`, `Critical`, a `TBD` severity on a live threat, a `Mitigated` threat with
+  no mitigation text, non-unique threat numbers, and a `threatTop` below the
+  highest number. Each failure is an annotation on the file naming the cell or
+  threat.
+- **The topics.** `required-topics` fails unless each topic appears in the
+  title, type, description or mitigation of some threat. It is how a model of an
+  AI system is held to containing the threats an AI system has, instead of
+  passing as a tidy diagram of nothing.
+- **The change.** On a pull request, when a changed file matches `ai-paths` the
+  pull request must also change a file matching `model-glob`, or carry a line of
+  its own in its description, `threat-model: n/a - <reason>` (at least a short
+  sentence; a bare `n/a` does not count). The line is the author's, so it is a
+  recorded decision for the reviewer, not a control the author cannot bypass.
+  Leave `ai-paths` empty and only the model is checked.
+- **What it cannot do.** It cannot tell that the model is true of the running
+  system or that an edit to it is a good one. It turns "nobody looked" into a red
+  check.
+- The script is inline (a reusable workflow cannot check out its own files) and
+  `tests/test_threat_model.py` runs that exact text against models and git
+  repositories built on the spot. The pull request description and every model
+  value reach it through environment variables, never template expansion, and a
+  model value cannot inject a workflow command into the log.
+- `CI green` is not part of this workflow; branch protection requires the caller
+  job's own check, `threat-model / Threat model`.
+
+| Input | Default | Meaning |
+|---|---|---|
+| `model-glob` | `docs/threat-model/*.threat-dragon.json` | Model files, space-separated globs; `**` crosses directories |
+| `require-model` | `true` | Fail when no file matches. `false` only while a repository has no AI surface yet |
+| `ai-paths` | empty | Globs, space- or newline-separated, of the AI surface. Empty turns the pull request rule off |
+| `required-topics` | empty | Comma-separated topics each of which must appear in some threat |
+| `fail-on-open-severity` | `none` | Fail on an `Open` threat at or above `High`, `Medium` or `Low` |
+| `egress-policy` | `audit` | harden-runner on the job |
+| `allowed-endpoints` | `api.github.com`, `files.pythonhosted.org`, `github.com`, `pypi.org` | The allow-list for `block` |
+| `extra-allowed-endpoints` | empty | Appended to the list |
+| `timeout-minutes` | `10` | Job timeout |
+
+The reference model's shape comes from Clouds Against Humanity's
+`docs/threat-model/`, which is a teaching exercise; yours records your own system.
 
 ### Security
 

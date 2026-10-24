@@ -1,0 +1,89 @@
+{
+  "version": "2.6.2",
+  "summary": {
+    "title": "Fixture assistant",
+    "description": "Reference shape for threat-model.yml. Not a model of any real system."
+  },
+  "detail": {
+    "diagrams": [
+      {
+        "id": 0,
+        "title": "Main",
+        "diagramType": "STRIDE",
+        "cells": [
+          {
+            "id": "user",
+            "shape": "actor",
+            "data": {
+              "name": "user",
+              "threats": []
+            }
+          },
+          {
+            "id": "agent",
+            "shape": "process",
+            "data": {
+              "name": "agent",
+              "threats": [
+                {
+                  "id": "t1",
+                  "number": 1,
+                  "status": "Mitigated",
+                  "severity": "High",
+                  "title": "Prompt injection through a fetched page",
+                  "type": "Tampering",
+                  "description": "Untrusted text reaches the model as instructions.",
+                  "mitigation": "Fetched text is wrapped as data and never reaches a tool call unreviewed."
+                }
+              ]
+            }
+          },
+          {
+            "id": "store",
+            "shape": "store",
+            "data": {
+              "name": "store",
+              "threats": []
+            }
+          },
+          {
+            "id": "f1",
+            "shape": "flow",
+            "data": {
+              "name": "f1",
+              "threats": []
+            },
+            "source": {
+              "cell": "user"
+            },
+            "target": {
+              "cell": "agent"
+            }
+          },
+          {
+            "id": "f2",
+            "shape": "flow",
+            "data": {
+              "name": "f2",
+              "threats": []
+            },
+            "source": {
+              "cell": "agent"
+            },
+            "target": {
+              "cell": "store"
+            }
+          },
+          {
+            "id": "b1",
+            "shape": "trust-boundary-box",
+            "data": {
+              "name": "model boundary"
+            }
+          }
+        ]
+      }
+    ],
+    "threatTop": 1
+  }
+}
