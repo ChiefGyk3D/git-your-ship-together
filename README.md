@@ -1090,10 +1090,12 @@ It runs, in order, and stops at the first failure:
 ```
 cosign verify <image> \
   --certificate-identity-regexp '<identity-regexp>' \
-  --certificate-oidc-issuer <oidc-issuer>
+  --certificate-oidc-issuer <oidc-issuer> \
+  --certificate-github-workflow-repository <source-repository>
 cosign verify-attestation --type spdxjson <image> \
   --certificate-identity-regexp '<identity-regexp>' \
-  --certificate-oidc-issuer <oidc-issuer>
+  --certificate-oidc-issuer <oidc-issuer> \
+  --certificate-github-workflow-repository <source-repository>
 gh attestation verify oci://<image> --owner <owner of the image>
 ```
 
@@ -1144,6 +1146,19 @@ is the reusable workflow's ref, so the default `identity-regexp` (any workflow
 in the owner's repositories) matches it. Narrow it to pin one workflow, for
 example `^https://github.com/ChiefGyk3D/git-your-ship-together/\.github/workflows/container-release\.yml@refs/tags/v`.
 
+**Which repository built it.** That identity is the same for every repository
+that calls `container-release.yml`, so a regexp alone accepts an image signed by
+any of them. Both cosign commands therefore also pin the certificate's
+repository claim with `--certificate-github-workflow-repository`, set from
+`source-repository`. Empty means the calling repository, which is right when a
+repository verifies its own image (the common case: a nightly caller next to the
+release). **A caller that verifies an image another repository built must set
+it**, for example `source-repository: ChiefGyk3D/Star-Daemon`; otherwise the
+check fails, by design. cosign compares the value exactly and case-sensitively,
+so use the repository's own spelling. The value is checked against
+`^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$` and reaches cosign only through the
+environment.
+
 Inputs of `verify-published.yml`:
 
 | Input | Default | Meaning |
@@ -1152,6 +1167,7 @@ Inputs of `verify-published.yml`:
 | `release-tag` | empty | GitHub release tag whose assets are verified. Empty skips the release checks; set this, `image` or both |
 | `release-repository` | empty (the calling repository) | `owner/name` holding the release |
 | `verify-release-sbom` | `true` | Require the two SBOMs among the release assets, listed in `SHA256SUMS` |
+| `source-repository` | empty (the calling repository) | `owner/name` of the repository whose workflow built and signed the image; the certificate must name it. Set it when another repository built the image. Exact, case-sensitive |
 | `identity-regexp` | `^https://github.com/ChiefGyk3D/` | Regular expression the certificate identity must match |
 | `oidc-issuer` | `https://token.actions.githubusercontent.com` | OIDC issuer the certificate must name |
 | `verify-sbom` | `true` | `cosign verify-attestation --type spdxjson` |
