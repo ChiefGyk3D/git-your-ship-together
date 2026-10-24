@@ -435,6 +435,28 @@ def test_a_file_name_git_would_quote_still_matches_the_ai_paths(pr_repo, name):
     assert out.returncode == 1 and "changes the AI surface" in out.stdout
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        "threat-model: n/a - " + " " * 60000 + "!",
+        "threat-model:" + "\t" * 60000 + "n/a",
+        "threat-model: n/a" + " " * 60000 + "x",
+        "\n".join("threat-model: n/a -" + " " * 40 for _ in range(1500)),
+        "threat-model: n/a - " + "- " * 30000,
+    ],
+    ids=["spaces", "tabs", "after-na", "many-lines", "dashes"],
+)
+def test_a_hostile_description_is_matched_in_linear_time(pr_repo, body):
+    import time
+
+    change(pr_repo, "agents.yaml")
+    start = time.monotonic()
+    out = pr(pr_repo, body)
+    elapsed = time.monotonic() - start
+    assert elapsed < 5, f"matching a hostile description took {elapsed:.1f}s"
+    assert "Traceback" not in out.stderr
+
+
 def test_the_rule_applies_only_to_pull_requests(pr_repo):
     change(pr_repo, "prompts/system.md")
     out = run(pr_repo, EVENT_NAME="push", AI_PATHS="prompts/**")
