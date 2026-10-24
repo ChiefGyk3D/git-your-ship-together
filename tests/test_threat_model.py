@@ -212,6 +212,41 @@ def test_an_unmitigated_or_not_applicable_threat_needs_no_mitigation_text(repo):
     assert run(repo).returncode == 0
 
 
+MALFORMED = {
+    "list id": lambda m: cells_of(m).append({"id": ["a"], "shape": "process", "data": {}}),
+    "number id": lambda m: cells_of(m).append({"id": 7, "shape": "process", "data": {}}),
+    "threats not a list": lambda m: cells_of(m)[1]["data"].update(threats=5),
+    "threats a string": lambda m: cells_of(m)[1]["data"].update(threats="x"),
+    "threat id a list": lambda m: cells_of(m)[1]["data"]["threats"][0].update(id=[1]),
+    "number a list": lambda m: cells_of(m)[1]["data"]["threats"][0].update(number=[1]),
+    "number a string": lambda m: cells_of(m)[1]["data"]["threats"][0].update(number="2"),
+    "number a bool": lambda m: cells_of(m)[1]["data"]["threats"][0].update(number=True),
+    "status a list": lambda m: cells_of(m)[1]["data"]["threats"][0].update(status=["Open"]),
+    "severity a dict": lambda m: cells_of(m)[1]["data"]["threats"][0].update(severity={"a": 1}),
+    "flow target a list": lambda m: cells_of(m).append(
+        {"id": "f9", "shape": "flow", "data": {}, "source": {"cell": "user"}, "target": {"cell": ["x"]}}
+    ),
+    "flow ends not objects": lambda m: cells_of(m).append(
+        {"id": "f8", "shape": "flow", "data": {}, "source": "user", "target": 3}
+    ),
+    "cells not objects": lambda m: cells_of(m).extend([1, "a", None, [2]]),
+    "diagram not an object": lambda m: m["detail"]["diagrams"].append("x"),
+    "detail a list": lambda m: m.update(detail=[]),
+    "summary a list": lambda m: m.update(summary=[]),
+    "threatTop a string": lambda m: m["detail"].update(threatTop="1"),
+}
+
+
+@pytest.mark.parametrize("name", MALFORMED)
+def test_a_wrongly_typed_value_is_reported_never_a_traceback(repo, name):
+    model = good_model()
+    MALFORMED[name](model)
+    write_model(repo, model)
+    out = run(repo, FAIL_ON_OPEN="Low", REQUIRED_TOPICS="x")
+    assert "Traceback" not in out.stderr, out.stderr
+    assert out.returncode == 1 and "::error" in out.stdout
+
+
 @pytest.mark.parametrize("body", ["", "[1, 2]", "not json at all", "{"])
 def test_a_file_that_is_not_a_model_fails_cleanly(repo, body):
     (repo / "docs" / "threat-model" / "app.threat-dragon.json").write_text(body)

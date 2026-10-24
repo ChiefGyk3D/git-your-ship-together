@@ -73,7 +73,7 @@ publish).
 | `project-sync.yml` | [Automation](Which-workflow-do-I-need.md) | Keep a GitHub Projects v2 board current |
 | `docs-pages.yml` | [Automation](Which-workflow-do-I-need.md) | Build docs, deploy to GitHub Pages |
 | `wiki-publish.yml` | [Automation](Which-workflow-do-I-need.md) | Replace a repository's wiki from a generated tree |
-| `threat-model.yml` | [Security](Workflow-security.md) | Validate an OWASP Threat Dragon model; on a pull request, require it to move with the AI surface |
+| `threat-model.yml` | [threat-model](Workflow-threat-model.md) | Validate an OWASP Threat Dragon model; on a pull request, require it to move with the AI surface |
 
 ### This repository's own pipeline (not reusable)
 

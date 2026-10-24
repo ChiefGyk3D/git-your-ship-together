@@ -58,7 +58,7 @@ on:
         type: boolean
         default: true
       ai-paths:
-        description: Globs, space- or newline-separated, of the files that make up the AI surface (prompts, tool and agent configs, model clients). On a pull request, a change to one needs a model change or a `threat-model - n/a` line. Empty turns the pull request rule off.
+        description: "Globs, space- or newline-separated, of the files that make up the AI surface (prompts, tool and agent configs, model clients). On a pull request, a change to one needs a model change or a `threat-model: n/a - <reason>` line in the description. Empty turns the pull request rule off."
         type: string
         default: ""
       required-topics:
@@ -111,10 +111,8 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.12"
-
+      # No setup-python: the check is standard library only and runs on the runner's own python3, so it
+      # downloads nothing and needs no host beyond the checkout's.
       - name: Check the threat model
         env:
           MODEL_GLOB: ${{ inputs.model-glob }}
@@ -213,10 +211,10 @@ jobs:
                   if not isinstance(cells, list) or not cells:
                       fail(path, f"diagram {name!r} has no cells")
                       continue
-                  cell_ids = {c.get("id") for c in cells if isinstance(c, dict)}
+                  cell_ids = {c["id"] for c in cells if isinstance(c, dict) and isinstance(c.get("id"), str)}
                   for cell in cells:
-                      if not isinstance(cell, dict) or not cell.get("id"):
-                          fail(path, f"diagram {name!r} has a cell with no id")
+                      if not isinstance(cell, dict) or not isinstance(cell.get("id"), str) or not cell["id"]:
+                          fail(path, f"diagram {name!r} has a cell whose id is missing or not a string")
                           continue
                       cid = cell["id"]
                       if cid in ids:
@@ -231,29 +229,37 @@ jobs:
                           for end in ("source", "target"):
                               ref = cell.get(end)
                               target = ref.get("cell") if isinstance(ref, dict) else None
-                              if target not in cell_ids:
+                              if not isinstance(target, str) or target not in cell_ids:
                                   fail(path, f"flow {cid!r} {end} {target!r} is not a cell in diagram {name!r}")
-                      for threat in data.get("threats") or []:
+                      found = data.get("threats") or []
+                      if not isinstance(found, list):
+                          fail(path, f"cell {cid!r} has threats that are not a list")
+                          found = []
+                      for threat in found:
                           if not isinstance(threat, dict):
                               fail(path, f"cell {cid!r} has a threat that is not an object")
                               continue
                           threats.append(threat)
                           tid = threat.get("id") or "(no id)"
                           label = f"threat {tid!r} on {cid!r}"
-                          if not threat.get("id"):
-                              fail(path, f"{label} has no id")
+                          if not isinstance(threat.get("id"), str) or not threat["id"]:
+                              fail(path, f"{label} has an id that is missing or not a string")
                           elif threat["id"] in ids:
                               fail(path, f"duplicate id {threat['id']!r}")
                           else:
                               ids.add(threat["id"])
                           if "number" in threat:
-                              numbers.append(threat["number"])
+                              number = threat["number"]
+                              if isinstance(number, int) and not isinstance(number, bool):
+                                  numbers.append(number)
+                              else:
+                                  fail(path, f"{label} has a number that is not an integer")
                           if not str(threat.get("title", "")).strip():
                               fail(path, f"{label} has no title")
                           status, severity = threat.get("status"), threat.get("severity")
-                          if status not in STATUSES:
+                          if not isinstance(status, str) or status not in STATUSES:
                               fail(path, f"{label} has status {status!r}; use one of {sorted(STATUSES)}")
-                          if severity not in SEVERITIES:
+                          if not isinstance(severity, str) or severity not in SEVERITIES:
                               fail(path, f"{label} has severity {severity!r}; use one of {sorted(SEVERITIES)}")
                           elif severity == "TBD" and status != "NotApplicable":
                               fail(path, f"{label} has severity TBD: triage it before it ships")
@@ -267,8 +273,10 @@ jobs:
                   fail(path, "the model records no threat")
               if len(numbers) != len(set(numbers)):
                   fail(path, "threat numbers are not unique")
-              top = detail.get("threatTop")
-              if numbers and isinstance(top, int) and top < max(numbers):
+              top = detail.get("threatTop") if isinstance(detail, dict) else None
+              if numbers and (not isinstance(top, int) or isinstance(top, bool)):
+                  fail(path, "detail.threatTop is missing or not an integer")
+              elif numbers and top < max(numbers):
                   fail(path, f"detail.threatTop is {top} but a threat is numbered {max(numbers)}")
               return threats
 
@@ -288,7 +296,8 @@ jobs:
                   fail(None, f"fail-on-open-severity {floor!r} is not High, Medium, Low or none")
               else:
                   for t in all_threats:
-                      if t.get("status") == "Open" and SEVERITIES.get(t.get("severity"), 0) >= SEVERITIES[floor]:
+                      severity = t.get("severity")
+                      if t.get("status") == "Open" and isinstance(severity, str) and SEVERITIES.get(severity, 0) >= SEVERITIES[floor]:
                           fail(None, f"threat {t.get('id')!r} is Open at severity {t.get('severity')}: mitigate it or lower the bar")
 
           topics = [t.strip().lower() for t in os.environ["REQUIRED_TOPICS"].split(",") if t.strip()]
