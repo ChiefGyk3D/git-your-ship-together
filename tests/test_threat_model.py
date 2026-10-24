@@ -253,6 +253,20 @@ def test_a_model_value_cannot_inject_a_workflow_command(repo):
     assert "%250A" in out.stdout
 
 
+def test_a_file_name_cannot_inject_a_property_or_a_command(tmp_path):
+    folder = tmp_path / "docs" / "threat-model"
+    folder.mkdir(parents=True)
+    hostile = "a,title=x::error b%.threat-dragon.json"
+    (folder / hostile).write_text("{")
+    out = run(tmp_path)
+    assert out.returncode == 1
+    annotated = [line for line in out.stdout.splitlines() if line.startswith("::error file=")]
+    assert annotated, out.stdout
+    prefix = annotated[0].split(",title=Threat model::")[0]
+    assert "," not in prefix.removeprefix("::error file=") and "::" not in prefix.removeprefix("::error ")
+    assert "a%2Ctitle=x%3A%3Aerror b%25.threat-dragon.json" in prefix
+
+
 # --- topics and the open-threat bar -----------------------------------------
 
 
@@ -377,6 +391,13 @@ def test_a_stated_reason_satisfies_the_rule(pr_repo, body):
 def test_a_bare_or_buried_note_does_not(pr_repo, body):
     change(pr_repo, "agents.yaml")
     assert pr(pr_repo, body).returncode == 1
+
+
+@pytest.mark.parametrize("name", ["prompts/caf\u00e9 prompt.md", 'prompts/say "hi".md', "prompts/\u65e5\u672c.md"])
+def test_a_file_name_git_would_quote_still_matches_the_ai_paths(pr_repo, name):
+    change(pr_repo, name)
+    out = pr(pr_repo)
+    assert out.returncode == 1 and "changes the AI surface" in out.stdout
 
 
 def test_the_rule_applies_only_to_pull_requests(pr_repo):

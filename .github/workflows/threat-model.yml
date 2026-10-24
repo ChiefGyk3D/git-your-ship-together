@@ -139,10 +139,16 @@ jobs:
           failures = []
 
 
+          def prop(value):
+              """A workflow-command property: the characters that end or split one are escaped."""
+              out = str(value).replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+              return out.replace(":", "%3A").replace(",", "%2C")
+
+
           def fail(file, message):
-              """A GitHub annotation; a value from the model cannot add a command."""
+              """A GitHub annotation; neither a model value nor a file name can add a command or a property."""
               clean = re.sub(r"[\r\n]+", " ", str(message)).replace("%", "%25")
-              where = f"file={file}," if file else ""
+              where = f"file={prop(file)}," if file else ""
               print(f"::error {where}title=Threat model::{clean}")
               failures.append(message)
 
@@ -298,14 +304,16 @@ jobs:
           ai_paths = os.environ["AI_PATHS"].split()
           if ai_paths and os.environ["EVENT_NAME"] == "pull_request":
               base = os.environ["BASE_REF"]
+              # NUL-separated, so a name with a space, a quote or a non-ASCII character reaches the glob raw
+              # (the default output quotes such a name, which no glob would match).
               diff = subprocess.run(
-                  ["git", "diff", "--name-only", f"origin/{base}...HEAD"],
-                  capture_output=True, text=True, check=False,
+                  ["git", "diff", "--name-only", "-z", f"origin/{base}...HEAD"],
+                  capture_output=True, check=False,
               )
               if diff.returncode != 0:
-                  fail(None, f"cannot diff against origin/{base}: {diff.stderr.strip()}")
+                  fail(None, f"cannot diff against origin/{base}: {diff.stderr.decode('utf-8', 'replace').strip()}")
               else:
-                  changed = [line for line in diff.stdout.splitlines() if line]
+                  changed = [name.decode("utf-8", "surrogateescape") for name in diff.stdout.split(b"\0") if name]
                   touched = [c for c in changed if matches(c, ai_paths)]
                   model_changed = any(matches(c, patterns) for c in changed)
                   exempt = re.search(
