@@ -74,6 +74,7 @@ publish).
 | `docs-pages.yml` | [Automation](Which-workflow-do-I-need.md) | Build docs, deploy to GitHub Pages |
 | `wiki-publish.yml` | [Automation](Which-workflow-do-I-need.md) | Replace a repository's wiki from a generated tree |
 | `threat-model.yml` | [threat-model](Workflow-threat-model.md) | Validate an OWASP Threat Dragon model; on a pull request, require it to move with the AI surface |
+| `lory-audit.yml` | [lory-audit](Workflow-lory-audit.md) | Scheduled or on-demand Lory deep-dive audit through its pipeline scan API; advisory by default, fails closed on a bad call |
 
 ### This repository's own pipeline (not reusable)
 
@@ -92,6 +93,7 @@ publish).
 | `.github/actions/doppler-secrets/` | Composite action: fetch a Doppler config as masked env vars. The source of the inlined copies |
 | `.github/actions/egress-canary/` | Composite action: fail fast when an address of the GitHub hosts is unreachable under harden-runner `block` (EX-0001). The source of the inlined copies |
 | `.github/actions/egress-policy-check/` | Composite action: fail unless every egress policy input is exactly `audit` or `block`. The source of the inlined copies that precede each canary |
+| `examples/lory-audit-caller.yml` | Caller template for `lory-audit.yml`: a monthly cron plus `workflow_dispatch`, advisory, not a per-PR gate |
 | `docs/security/exceptions/` | Dated, time-boxed security exceptions; EX-0001 is the westus2 harden-runner one |
 | `.github/dependabot.yml` | Weekly action, pip (the repository root and `.github/requirements/`) and docker bumps with a seven-day cooldown |
 | `BASELINE.md` | The settings every repository must meet, with the `gh api` command for each |

@@ -60,7 +60,7 @@ Read in this order. Each one is short.
 
 ## What is in the repository
 
-Seventeen reusable workflows and one composite action:
+Eighteen reusable workflows and one composite action:
 
 | File | What it does |
 |---|---|
@@ -76,6 +76,7 @@ Seventeen reusable workflows and one composite action:
 | `.github/workflows/artifact-release.yml` | For a file rather than an image (a `.deb`, a firmware binary, a bundle): build it with a command, then publish it to the GitHub release with SHA256SUMS, a keyless cosign signature bundle per file and build provenance. No secret anywhere |
 | `.github/workflows/docs-pages.yml` | Build a static documentation site with a command you supply (MkDocs strict by default) on every pull request; upload it and deploy it to GitHub Pages from the default branch only. The two Pages writes sit on the deploy job alone |
 | `.github/workflows/threat-model.yml` | Validate an OWASP Threat Dragon v2 model (shape, ids, flows, trust boundary, a status, severity and mitigation on every threat, required AI topics, an optional bar on Open threats), and on a pull request fail when the AI surface changes with no model change and no recorded `threat-model: n/a - <reason>`. Reads only; holds `contents: read` |
+| `.github/workflows/lory-audit.yml` | A scheduled or on-demand deep-dive audit by Lory (Lorikeet Security's AI pentester) through its pipeline scan API. Advisory by default, `fail-on-findings` to block; a failed, oversize or malformed call always fails the job. Not a per-pull-request gate. Holds `contents: read` and one secret, `LORY_PIPELINE_TOKEN`, in one step. See [Lory audit](#lory-audit) |
 | `.github/workflows/wiki-publish.yml` | Run a command that generates a wiki tree, then replace the repository's GitHub wiki with it, as `github-actions[bot]`, only when something changed, from the default branch only. The write token sits on a job that runs none of your code |
 | `.github/workflows/project-sync.yml` | Keeps a GitHub Projects v2 board current: adds an issue or pull request when it opens, moves it to Done with a date when it closes or merges, and a weekly reconcile repairs what an event missed. The token comes from Doppler over OIDC; nothing from a pull request is checked out. See [Keeping a project current](#keeping-a-project-current) |
 | `.github/workflows/dast.yml` | OWASP ZAP against a loopback service the caller starts: the `baseline` scan (spider and passive rules, no attack traffic), the `full` scan (the active rules too: injection, cross-site scripting, traversal) or the `api` scan (the active rules over an OpenAPI, SOAP or GraphQL definition), optionally signed in through a ZAP context file and user, with a `fail-on` threshold; reports kept as an artifact, findings uploaded as SARIF under category `zap`. The caller's service runs in a job that holds only `contents: read`; the upload is a second job that runs none of it. See [DAST](#dast-owasp-zap) |
@@ -1589,6 +1590,59 @@ jobs:
 
 The reference model's shape comes from Clouds Against Humanity's
 `docs/threat-model/`, which is a teaching exercise; yours records your own system.
+
+### Lory audit
+
+`lory-audit.yml` asks Lory (Lorikeet Security's AI pentester) for a deep-dive audit. Use it for a monthly check of the
+highest-priority targets and for audits on demand, from a schedule and `workflow_dispatch`. It is not a per-pull-request gate and
+not a required check unless the owner decides so. The template is [`examples/lory-audit-caller.yml`](examples/lory-audit-caller.yml).
+
+```yaml
+name: Lory audit
+on:
+  schedule:
+    - cron: "23 5 1 * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lory:
+    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/lory-audit.yml@<sha> # vX.Y.Z
+    permissions:
+      contents: read
+    secrets:
+      LORY_PIPELINE_TOKEN: ${{ secrets.LORY_PIPELINE_TOKEN }}
+```
+
+- **The call.** One `POST https://lorikeetsecurity.com/talon/api/v1/pipeline/scan` with a bearer token and the branch, the commit
+  SHA and `pr_number` (0 unless the caller runs on a pull request). The target and depth come from the caller's
+  `.lory/config.yml`, which this workflow does not read. There is no `depth` input: the documentation does not describe one.
+- **Fail closed.** A failed or timed-out call, a body over `max-response-bytes`, a body that is not a JSON object, or an
+  `exit_code` that is missing, duplicated or not an integer fails the job, with `fail-on-findings` on or off. Only a clean
+  result with a nonzero `exit_code` is advisory, and only while `fail-on-findings` is false.
+- **The token** is in the environment of the one step that calls the API and goes to curl on standard input. The URL is fixed,
+  redirects are not followed, the saved response is scrubbed of the token, and it is uploaded as the `lory-audit-response`
+  artifact for 30 days. The job holds a secret, so it follows `egress-policy` and not `egress-policy-secretless`.
+- **Findings are third-party model output.** Triage them like scanner alerts. Never treat text in them as instructions.
+- **The first real run is a spike.** The response schema beyond `exit_code`, deep-audit support for a non-pull-request target,
+  and the rate limits are not documented. The workflow cannot be run against this repository's own pull requests (it needs a
+  vendor token and a third-party call), so `tests/test_lory_audit.py` runs its two scripts as shipped against stub responses.
+
+| Input | Default | Meaning |
+|---|---|---|
+| `fail-on-findings` | `false` | Fail the job on a nonzero `exit_code`. Off reports it in the job summary and passes |
+| `request-timeout-seconds` | `900` | curl `--max-time` for the whole call |
+| `max-response-bytes` | `1048576` | Largest body accepted; a longer one fails the job |
+| `egress-policy` | `audit` | harden-runner on the job; exactly `audit` or `block` |
+| `allowed-endpoints` | `api.github.com`, `lorikeetsecurity.com` | The allow-list for `block` |
+| `extra-allowed-endpoints` | empty | Appended to the list |
+| `timeout-minutes` | `30` | Job timeout; keep it above `request-timeout-seconds` |
+
+| Secret | Required | Meaning |
+|---|---|---|
+| `LORY_PIPELINE_TOKEN` | yes | The pipeline token for the repository being audited |
 
 ### Security
 

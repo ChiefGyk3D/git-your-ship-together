@@ -49,6 +49,7 @@ REUSABLE = [
         "project-sync.yml",
         "dast.yml",
         "threat-model.yml",
+        "lory-audit.yml",
     )
 ]
 # The subset that fetches CI secrets. The Doppler rules are about those steps,
@@ -72,6 +73,7 @@ DOPPLER = [
         "wiki-publish.yml",
         "dast.yml",
         "threat-model.yml",
+        "lory-audit.yml",
     )
 ]
 # The language CI workflows: each ends in the `CI green` gate branch protection requires.
@@ -129,7 +131,7 @@ def all_steps(path: Path):
 
 
 def test_there_is_something_to_check():
-    assert len(REUSABLE) == 17, "expected the seventeen callable workflows"
+    assert len(REUSABLE) == 18, "expected the eighteen callable workflows"
     assert len(DOPPLER) == 5, "expected five of them to fetch CI secrets"
     assert [p.name for p in LANGUAGE_CI] == ["arduino-ci.yml", "bash-ci.yml", "python-ci.yml", "tofu-ci.yml"]
     assert ACTION_FILES, "no composite actions found"
@@ -670,6 +672,9 @@ def test_a_workflow_that_fetches_nothing_holds_no_token_at_all(name):
 
 DOWNLOAD = re.compile(r"\bcurl\b")
 CANARY_STEP = "Egress canary (EX-0001)"  # tests/test_egress_canary.py holds its text identical everywhere
+# The one curl that calls an API instead of downloading a tool: nothing it fetches is saved as code or run.
+# tests/test_lory_audit.py holds that step to its own rules (token on stdin, size cap, fail closed).
+API_CALL_STEPS = {("lory-audit.yml", "Call the Lory pipeline scan API")}
 
 
 @pytest.mark.parametrize("path", REUSABLE, ids=lambda p: p.name)
@@ -681,6 +686,8 @@ def test_every_downloaded_tool_is_checked_against_a_pinned_hash(path):
             continue
         if step.get("name") == CANARY_STEP:
             continue  # its only curl is a diagnostic header request to the Actions hosts; nothing is saved or run
+        if (path.name, step.get("name")) in API_CALL_STEPS:
+            continue
         assert "sha256sum -c" in body, f"{path.name}: job {job_name!r} downloads with curl and never checks a hash"
         env = step.get("env") or {}
         assert any(v.startswith("${{ inputs.") and k.endswith("SHA256") for k, v in env.items()), (
@@ -965,10 +972,19 @@ def test_the_old_release_name_forwards_everything_to_container_release():
     assert job["permissions"] == granted
 
 
+# Workflows that cannot run against this repository's own pull requests, with the reason. lory-audit.yml needs a
+# vendor token this repository does not hold and would call a third-party service on every pull request, which is
+# the opposite of what it is for (a monthly or on-demand deep dive). tests/test_lory_audit.py runs both of its
+# scripts as shipped against stub responses instead.
+NOT_DOGFOODED = {"lory-audit.yml"}
+
+
 def test_every_reusable_workflow_is_run_from_this_repository_at_the_pull_requests_ref():
     """A workflow tested only structurally ships to nine repositories before anything runs it."""
     called = {reusable for _, _, reusable in dogfood_callers()}
-    assert called == {p.name for p in REUSABLE}, f"not dogfooded: {sorted({p.name for p in REUSABLE} - called)}"
+    expected = {p.name for p in REUSABLE} - NOT_DOGFOODED
+    assert called == expected, f"not dogfooded: {sorted(expected - called)}"
+    assert not called & NOT_DOGFOODED, "a workflow on the NOT_DOGFOODED list is now dogfooded; take it off the list"
 
 
 def test_the_fixture_release_never_publishes():
