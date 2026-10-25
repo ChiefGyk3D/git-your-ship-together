@@ -553,7 +553,7 @@ write_release() {
         echo "          disable-sudo: true"
         echo "          disable-telemetry: true"
         echo "      # pypa/gh-action-pypi-publish must stay a direct step: wrapped in a composite action or reusable workflow its image fails to resolve"
-        echo "      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1"
+        echo "      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2"
         echo "        with:"
         echo "          name: dist"
         echo "          path: dist/"

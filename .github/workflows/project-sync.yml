@@ -357,7 +357,7 @@ jobs:
       # `reconcile: false` makes the schedule and manual runs a no-op, as before.
       - name: Sync the project
         if: ${{ inputs.reconcile || (github.event_name != 'schedule' && github.event_name != 'workflow_dispatch') }}
-        uses: ChiefGyk3D/scrum-around-and-find-out@613c021532ed5c6f64960e8e98fbf414a95c7d79 # v0.1.1
+        uses: ChiefGyk3D/scrum-around-and-find-out@dda1e44000f59dfe156f02faccbbddcaf8c9005f # v0.1.2
         with:
           mode: ${{ inputs.dry-run && env.PROJECTS_APP_PRIVATE_KEY == '' && 'validate' || (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'reconcile' || 'sync' }}
           project-url: ${{ inputs.project-url }}

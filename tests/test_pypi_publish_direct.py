@@ -23,7 +23,7 @@ WIKI = (REPO / "docs" / "wiki" / "Workflow-python-package-release.md").read_text
 WORKFLOW = yaml.safe_load(WORKFLOW_PATH.read_text())
 JOBS = WORKFLOW["jobs"]
 CALL = (WORKFLOW.get("on") or WORKFLOW.get(True))["workflow_call"]
-DOWNLOAD = "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"
+DOWNLOAD = "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333"
 PYPA = "pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33"
 
 
