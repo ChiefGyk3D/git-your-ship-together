@@ -226,7 +226,9 @@ jobs:
           case "$LORY_MAX_TIME" in '' | *[!0-9]*) fail "request-timeout-seconds must be a whole number" ;; esac
           case "$LORY_MAX_BYTES" in '' | *[!0-9]*) fail "max-response-bytes must be a whole number" ;; esac
           case "$LORY_PR_NUMBER" in '' | *[!0-9]*) fail "the pull request number is not a whole number" ;; esac
-          [ "$LORY_MAX_TIME" -ge 1 ] && [ "$LORY_MAX_BYTES" -ge 1 ] || fail "request-timeout-seconds and max-response-bytes must be at least 1"
+          if ! { [ "$LORY_MAX_TIME" -ge 1 ] && [ "$LORY_MAX_BYTES" -ge 1 ]; }; then
+            fail "request-timeout-seconds and max-response-bytes must be at least 1"
+          fi
           [ -n "$LORY_PIPELINE_TOKEN" ] || fail "the LORY_PIPELINE_TOKEN secret is empty"
           mkdir -p "$LORY_OUT_DIR"
           out="$LORY_OUT_DIR/response.json"
@@ -263,7 +265,9 @@ jobs:
           case "$status" in [0-9][0-9][0-9]) ;; *) fail "no HTTP status came back with the response" ;; esac
           [ "$status" = 200 ] || fail "the API answered HTTP status $status, not 200; only 200 is accepted"
           size=$((total - ${#status} - 1))
-          [ "$size" -ge 0 ] && [ "$size" -le "$LORY_MAX_BYTES" ] || fail "the response is larger than max-response-bytes ($LORY_MAX_BYTES); not trusting it"
+          if ! { [ "$size" -ge 0 ] && [ "$size" -le "$LORY_MAX_BYTES" ]; }; then
+            fail "the response is larger than max-response-bytes ($LORY_MAX_BYTES); not trusting it"
+          fi
           head -c "$size" "$raw" >"$out" || fail "could not save the response"
           keep=1
           echo "Lory audit: HTTP 200, response received ($size bytes)"
