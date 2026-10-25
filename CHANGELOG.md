@@ -14,7 +14,9 @@ name what a caller sees after that.
   non-integer `exit_code`, always fails the job. `contents: read` only; the `LORY_PIPELINE_TOKEN` secret reaches one
   step and curl reads it from standard input. Findings are not copied into GitHub: the body is never
   logged, never uploaded and deleted as soon as the judging step ends; the summary shows only `exit_code` and a
-  timestamp, and the findings are read in the vendor portal. Only an HTTP status of exactly 200 is accepted
+  timestamp, and the findings are read in the vendor portal. The response lives in a private `mktemp -d` directory
+  (0700, files 0600) handed to the next step through a step output, and the token is removed from the environment
+  before any child process starts. Only an HTTP status of exactly 200 is accepted
   (redirects are not followed), curl runs with `--disable` and without proxy variables, and the egress allow-list
   is fixed in the workflow (no `allowed-endpoints` input). The first real run is a spike: the response schema beyond
   `exit_code`, deep-audit support for a non-pull-request target and the rate limits are unknown.

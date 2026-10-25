@@ -685,11 +685,35 @@ CURL_SAVES = re.compile(
 CURL_COMMAND = re.compile(r"\bcurl\b(?:[^\n]*\\\n)*[^\n]*")
 
 
+def code_lines(body: str) -> str:
+    """The script without its comment lines."""
+    return "\n".join(line for line in body.splitlines() if not line.lstrip().startswith("#"))
+
+
+def curl_invocations(body: str) -> tuple[int, str]:
+    """How many times the code uses the word curl (not counting the `(curl exit N)` of an error message), and the
+    command line of the first use with its backslash continuations."""
+    text = code_lines(body).replace("(curl exit", "(CURL-EXIT")
+    first = CURL_COMMAND.search(text)
+    return len(re.findall(r"\bcurl\b", text)), first.group(0) if first else ""
+
+
 def api_call_problems(body: str) -> list[str]:
-    """What an exempt API-call step must still be: no user curl config, an exact 200 check, nothing run or fetched."""
+    """What an exempt API-call step must still be: ONE curl, with one fixed URL, its header on stdin, no user
+    curl config, an exact 200 check, nothing run or fetched."""
     problems = []
-    if not re.search(r"\bcurl --disable\b", body):
-        problems.append("curl does not start with --disable")
+    count, call = curl_invocations(body)
+    if count != 1:
+        problems.append(f"exactly one curl invocation is allowed, found {count}")
+    else:
+        if not re.search(r"\bcurl --disable\b", call):
+            problems.append("curl does not start with --disable")
+        if "--header @-" not in call:
+            problems.append("the token header must come from stdin (--header @-)")
+        if call.count('"$LORY_API_URL"') != 1 or re.search(r"https?://", call):
+            problems.append('the only URL must be "$LORY_API_URL"')
+    if re.search(r"https?://", code_lines(body)):
+        problems.append("no URL literal belongs in the script; the fixed URL is in the step env")
     if not re.search(r'"\$\w+" !?= 200 \]', body):
         problems.append("no exact HTTP 200 check")
     if EXECUTES.search(body) or any(CURL_SAVES.search(c.group(0)) for c in CURL_COMMAND.finditer(body)):
@@ -736,6 +760,17 @@ def test_the_api_call_exemption_applies_to_that_step_only_and_only_while_it_stay
     body = step["run"]
     for mutation, needle in (
         (body.replace("curl --disable", "curl"), "--disable"),
+        (body + "\ncurl --silent https://example.invalid/x", "exactly one curl"),
+        (body + '\ncurl --disable --header @- "$LORY_API_URL"', "exactly one curl"),
+        (body + '\nprintf "%s" "$token" | curl --header @- https://example.invalid/x', "exactly one curl"),
+        (
+            body + '\ncurl --header "Authorization: Bearer $LORY_PIPELINE_TOKEN" https://example.invalid',
+            "exactly one curl",
+        ),
+        (body + '\necho "$(curl https://example.invalid)"', "exactly one curl"),
+        (body.replace("--header @-", "--header 'X: y'"), "stdin"),
+        (body.replace('"$LORY_API_URL"', '"$LORY_API_URL" https://example.invalid/second'), "only URL"),
+        (body.replace('"$LORY_API_URL"', "https://example.invalid/x"), "only URL"),
         (re.sub(r'"\$status" !?= 200', '"$status" = 2', body), "200"),
         (body + "\nbash ./downloaded.sh", "executes or saves"),
         (body.replace("--output -", "--output tool.tar"), "executes or saves"),

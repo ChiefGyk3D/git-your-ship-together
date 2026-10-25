@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import stat
 import subprocess
 import textwrap
@@ -128,11 +129,13 @@ def test_no_input_can_add_an_endpoint_or_change_where_the_job_may_connect():
 
 def test_the_call_is_bounded_and_does_not_follow_redirects():
     body = CALL_STEP["run"]
+    command = re.search(r"curl --disable.*?\"\$LORY_API_URL\"", body, re.S)[0]
     for flag in ("--fail-with-body", "--max-time", "--max-filesize", "--proto '=https'", "--header @-"):
-        assert flag in body, flag
-    assert not re.search(r"(^|\s)(-L|--location)(\s|$)", body)
-    assert not re.search(r"--(proxy|insecure|cacert|netrc|config)\b|(^|\s)(-k|-K|-x)(\s|$)", body)
+        assert flag in command, flag
+    assert not re.search(r"(^|\s)(-L|--location)(\s|$)", command)
+    assert not re.search(r"--(proxy|insecure|cacert|netrc|config)\b|(^|\s)(-k|-K|-x)(\s|$)", command)
     assert "Authorization: Bearer %s" in body and "set -u -o pipefail" in body
+    assert body.count("curl --disable") == 1
 
 
 # --- the call step, run against a stub curl --------------------------------------------------------------------
@@ -141,6 +144,7 @@ STUB = """#!/usr/bin/env bash
 # a stand-in for curl: records its argument vector and header-from-stdin, then replies as told
 printf '%s\\n' "$@" >"$STUB_DIR/argv"
 env | grep -iE '^(http_proxy|https_proxy|all_proxy|curl_home)=' >"$STUB_DIR/env" || true
+{ echo "== curl"; env; } >>"$STUB_DIR/children-env"
 cat >"$STUB_DIR/stdin"
 if [ -f "$STUB_DIR/body" ]; then cat "$STUB_DIR/body"; fi
 # --write-out '\\n%{http_code}': a real curl appends the status after the body, also on an HTTP error
@@ -153,19 +157,34 @@ def script(step: dict) -> str:
     return textwrap.dedent(step["run"])
 
 
+# Every external command the call step may run is wrapped: it records its environment, then runs the real one.
+WRAPPED = ["python3", "mktemp", "head", "tail", "wc", "tr", "rm", "stat", "mkdir", "cat", "chmod"]
+WRAPPER = """#!/usr/bin/env bash
+{ echo "== NAME"; env; } >>"$STUB_DIR/children-env"
+exec REAL "$@"
+"""
+
+
 def run_call(tmp_path: Path, body: bytes | None, rc: int = 0, status: str | None = "200", **env):
     bindir = tmp_path / "bin"
     bindir.mkdir(exist_ok=True)
     stub = bindir / "curl"
     stub.write_text(STUB)
     stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
+    for name in WRAPPED:
+        wrapper = bindir / name
+        wrapper.write_text(WRAPPER.replace("NAME", name).replace("REAL", shutil.which(name) or name))
+        wrapper.chmod(wrapper.stat().st_mode | stat.S_IXUSR)
     stubdir = tmp_path / "stub"
     stubdir.mkdir(exist_ok=True)
     if body is not None:
         (stubdir / "body").write_bytes(body)
     summary = tmp_path / "summary.md"
     summary.write_text("")
-    out_dir = tmp_path / "out"
+    runner_temp = tmp_path / "rt"
+    runner_temp.mkdir(exist_ok=True)
+    github_output = tmp_path / "github-output"
+    github_output.write_text("")
     full = {
         **os.environ,
         "PATH": f"{bindir}:{os.environ['PATH']}",
@@ -180,13 +199,16 @@ def run_call(tmp_path: Path, body: bytes | None, rc: int = 0, status: str | None
         "LORY_PR_NUMBER": "0",
         "LORY_MAX_TIME": "60",
         "LORY_MAX_BYTES": "1024",
-        "LORY_OUT_DIR": str(out_dir),
+        "LORY_TMP": str(runner_temp),
+        "GITHUB_OUTPUT": str(github_output),
         **{k: str(v) for k, v in env.items()},
     }
     done = subprocess.run(
         ["bash", "-c", script(CALL_STEP)], capture_output=True, text=True, timeout=60, env=full, cwd=tmp_path
     )
-    return done, summary.read_text(), out_dir / "response.json", stubdir
+    handed = re.search(r"^dir=(.*)$", github_output.read_text(), re.M)
+    saved = Path(handed[1]) / "response.json" if handed else tmp_path / "no-output" / "response.json"
+    return done, summary.read_text(), saved, stubdir
 
 
 def test_a_good_call_sends_the_documented_request_and_keeps_the_token_off_the_command_line(tmp_path):
@@ -202,6 +224,61 @@ def test_a_good_call_sends_the_documented_request_and_keeps_the_token_off_the_co
     assert saved.read_bytes() == b'{"exit_code": 0}'
     assert TOKEN not in done.stdout + done.stderr + summary
     assert [p.name for p in saved.parent.iterdir()] == ["response.json"], "no temp files are left behind"
+
+
+def test_the_response_lives_in_a_private_unique_directory_and_is_handed_over_by_step_output(tmp_path):
+    done, _, saved, _ = run_call(tmp_path, b'{"exit_code": 0}')
+    assert done.returncode == 0, done.stdout + done.stderr
+    rt = tmp_path / "rt"
+    (directory,) = list(rt.iterdir())
+    assert re.fullmatch(r"lory\.[A-Za-z0-9]{6}", directory.name), "an unpredictable mktemp name, never a fixed one"
+    assert saved.parent == directory
+    assert stat.S_IMODE(directory.stat().st_mode) == 0o700
+    assert stat.S_IMODE(saved.stat().st_mode) == 0o600
+    assert CALL_STEP["id"] == "call"
+    assert JUDGE_STEP["env"]["LORY_DIR"] == "${{ steps.call.outputs.dir }}"
+    assert JUDGE_STEP["env"]["LORY_TMP"] == "${{ runner.temp }}"
+    assert "mktemp -d" in CALL_STEP["run"] and "umask 077" in CALL_STEP["run"]
+
+
+def test_a_symlink_at_the_old_fixed_path_is_not_followed(tmp_path):
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    rt = tmp_path / "rt"
+    rt.mkdir()
+    (rt / "lory").symlink_to(victim)
+    done, _, saved, _ = run_call(tmp_path, b'{"exit_code": 0}')
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert list(victim.iterdir()) == [], "nothing may be written through the planted link"
+    assert saved.parent != victim and not saved.parent.is_symlink()
+    assert (rt / "lory").is_symlink(), "and the link itself is left alone"
+
+
+def test_a_planted_directory_with_the_same_prefix_is_never_reused(tmp_path):
+    rt = tmp_path / "rt"
+    rt.mkdir()
+    planted = rt / "lory.AAAAAA"
+    planted.mkdir()
+    done, _, saved, _ = run_call(tmp_path, b'{"exit_code": 0}')
+    assert done.returncode == 0
+    assert saved.parent != planted and list(planted.iterdir()) == []
+
+
+def test_the_token_is_in_the_environment_of_no_child_process(tmp_path):
+    """The step copies the token into a shell variable and unsets the exported one before it runs any program."""
+    done, _, _, stubdir = run_call(tmp_path, b'{"exit_code": 0}')
+    assert done.returncode == 0, done.stdout + done.stderr
+    recorded = (stubdir / "children-env").read_text()
+    names = set(re.findall(r"^== (\S+)$", recorded, re.M))
+    assert {"curl", "python3", "mktemp", "head", "wc", "tail"} <= names, names
+    assert "LORY_PIPELINE_TOKEN" not in recorded and TOKEN not in recorded
+    # ... while the request still carries it, on curl's standard input only.
+    assert (stubdir / "stdin").read_text() == f"Authorization: Bearer {TOKEN}\n"
+    assert TOKEN not in (stubdir / "argv").read_text()
+    script_text = CALL_STEP["run"]
+    assert script_text.index("unset LORY_PIPELINE_TOKEN") < script_text.index("python3")
+    assert script_text.index("unset LORY_PIPELINE_TOKEN") < script_text.index("mktemp")
+    assert script_text.index("unset LORY_PIPELINE_TOKEN") < script_text.index("curl --disable")
 
 
 def test_curl_ignores_the_users_config_proxies_and_curl_home(tmp_path):
@@ -267,7 +344,7 @@ def test_every_way_the_call_can_fail_fails_the_step(tmp_path, case, body, rc, en
     assert done.returncode == 1, f"{case}: {done.stdout}{done.stderr}"
     assert fragment in done.stdout and fragment in summary, case
     assert not saved.exists(), f"{case}: a failed call must leave no response file for anything to read"
-    assert not list(saved.parent.glob("*")), f"{case}: temp files left behind"
+    assert list((tmp_path / "rt").iterdir()) == [], f"{case}: the private directory must be gone"
     assert TOKEN not in done.stdout + done.stderr + summary
 
 
@@ -298,9 +375,11 @@ def test_a_body_exactly_at_the_cap_is_accepted(tmp_path):
 # --- the judge step -----------------------------------------------------------------------------------------------
 
 
-def run_judge(tmp_path: Path, content: bytes | None, fail_on: str, cap: int = 1024):
-    out_dir = tmp_path / "judge"
-    out_dir.mkdir(exist_ok=True)
+def run_judge(tmp_path: Path, content: bytes | None, fail_on: str, cap: int = 1024, directory: Path | None = None):
+    runner_temp = tmp_path / "rt"
+    runner_temp.mkdir(exist_ok=True)
+    out_dir = directory or runner_temp / "lory.judge1"
+    out_dir.mkdir(mode=0o700, exist_ok=True)
     if content is not None:
         (out_dir / "response.json").write_bytes(content)
     summary = tmp_path / "judge-summary.md"
@@ -308,7 +387,8 @@ def run_judge(tmp_path: Path, content: bytes | None, fail_on: str, cap: int = 10
     env = {
         **os.environ,
         "GITHUB_STEP_SUMMARY": str(summary),
-        "LORY_OUT_DIR": str(out_dir),
+        "LORY_DIR": str(out_dir),
+        "LORY_TMP": str(runner_temp),
         "LORY_MAX_BYTES": str(cap),
         "FAIL_ON_FINDINGS": fail_on,
     }
@@ -345,9 +425,47 @@ def test_a_malformed_response_fails_even_in_advisory_mode(tmp_path, case, body, 
 
 @pytest.mark.parametrize("body", [b'{"exit_code": 0}', b'{"exit_code": 3}', b"not json"])
 @pytest.mark.parametrize("mode", ["true", "false"])
-def test_the_judge_deletes_the_response_whatever_it_decides(tmp_path, body, mode):
+def test_the_judge_deletes_the_whole_directory_whatever_it_decides(tmp_path, body, mode):
     run_judge(tmp_path, body, mode)
-    assert not (tmp_path / "judge" / "response.json").exists()
+    assert list((tmp_path / "rt").iterdir()) == []
+
+
+def test_the_judge_deletes_the_directory_when_the_response_is_missing_too(tmp_path):
+    run_judge(tmp_path, None, "false")
+    assert list((tmp_path / "rt").iterdir()) == []
+
+
+def test_the_judge_refuses_a_directory_it_was_not_given_by_the_call_step(tmp_path):
+    """A path outside RUNNER_TEMP/lory.XXXXXX, a symlink or an empty value: fail, and delete nothing."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "precious").write_text("keep")
+    runner_temp = tmp_path / "rt"
+    runner_temp.mkdir()
+    link = runner_temp / "lory.link00"
+    link.symlink_to(outside)
+    for case, value in (
+        ("outside", str(outside)),
+        ("symlink", str(link)),
+        ("empty", ""),
+        ("parent", str(runner_temp)),
+        ("dotdot", f"{runner_temp}/lory.xxxxxx/../../outside"),
+        ("nested", f"{runner_temp}/lory.abcdef/sub"),
+    ):
+        env = {
+            **os.environ,
+            "GITHUB_STEP_SUMMARY": str(tmp_path / "s.md"),
+            "LORY_DIR": value,
+            "LORY_TMP": str(runner_temp),
+            "LORY_MAX_BYTES": "1024",
+            "FAIL_ON_FINDINGS": "false",
+        }
+        done = subprocess.run(
+            ["bash", "-c", script(JUDGE_STEP)], capture_output=True, text=True, timeout=60, env=env, cwd=tmp_path
+        )
+        assert done.returncode == 1, f"{case}: {done.stdout}{done.stderr}"
+        assert "::error" in done.stdout, case
+        assert (outside / "precious").read_text() == "keep", f"{case}: the judge deleted something it must not"
 
 
 def test_a_missing_response_file_fails(tmp_path):

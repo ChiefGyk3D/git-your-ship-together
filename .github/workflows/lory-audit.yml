@@ -199,9 +199,10 @@ jobs:
           exit "$rc"
 
       # The only step that holds the token. It saves the body for the next step and its own failure line to the job
-      # summary; it does not judge a finding. The response file exists only if every check below passed, and the
-      # trap removes the temp file always and the response file on any failure.
+      # summary; it does not judge a finding. The response lives in a private, unique directory (mode 0700, files
+      # 0600) that exists only if every check below passed; the trap removes the whole directory on any failure.
       - name: Call the Lory pipeline scan API
+        id: call
         shell: bash
         env:
           LORY_PIPELINE_TOKEN: ${{ secrets.LORY_PIPELINE_TOKEN }}
@@ -211,11 +212,17 @@ jobs:
           LORY_PR_NUMBER: ${{ github.event.pull_request.number || 0 }}
           LORY_MAX_TIME: ${{ inputs.request-timeout-seconds }}
           LORY_MAX_BYTES: ${{ inputs.max-response-bytes }}
-          LORY_OUT_DIR: ${{ runner.temp }}/lory
+          LORY_TMP: ${{ runner.temp }}
         run: |
           set -u -o pipefail
+          # The token moves into a shell variable and out of the environment before any program starts, so no
+          # child process (the JSON builder, curl, head, wc, tail, rm) inherits it. The header reaches curl only
+          # through the printf builtin and a pipe, as its standard input.
+          token=$LORY_PIPELINE_TOKEN
+          unset LORY_PIPELINE_TOKEN
+          umask 077
           # Nothing from the environment may redirect the call: a proxy would see the bearer token, CURL_HOME could
-          # point at a curlrc, a CA override could trust another server. (curl --disable below skips ~/.curlrc.)
+          # point at a curlrc, a CA override could trust another server. (the --disable option below skips ~/.curlrc.)
           unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY CURL_HOME CURL_CA_BUNDLE SSL_CERT_FILE SSL_CERT_DIR
           summary="${GITHUB_STEP_SUMMARY:-/dev/null}"
           fail() {
@@ -229,21 +236,36 @@ jobs:
           if ! { [ "$LORY_MAX_TIME" -ge 1 ] && [ "$LORY_MAX_BYTES" -ge 1 ]; }; then
             fail "request-timeout-seconds and max-response-bytes must be at least 1"
           fi
-          [ -n "$LORY_PIPELINE_TOKEN" ] || fail "the LORY_PIPELINE_TOKEN secret is empty"
-          mkdir -p "$LORY_OUT_DIR"
-          out="$LORY_OUT_DIR/response.json"
-          raw="$LORY_OUT_DIR/raw.out"
+          [ -n "$token" ] || fail "the LORY_PIPELINE_TOKEN secret is empty"
+          # A fresh, unpredictable directory every run, never a fixed name that something else could have planted.
+          dir=$(mktemp -d "$LORY_TMP/lory.XXXXXX") || fail "could not create a private temp directory"
+          case "$dir" in
+            "$LORY_TMP"/lory.[A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9]) ;;
+            *) fail "the temp directory is not where it should be" ;;
+          esac
+          if [ ! -d "$dir" ] || [ -L "$dir" ]; then
+            fail "the temp directory is not a plain directory"
+          fi
           keep=0
           cleanup() {
-            rm -f "$raw"
-            [ "$keep" = 1 ] || rm -f "$out"
+            if [ "$keep" = 1 ]; then
+              rm -f -- "$raw"
+            else
+              rm -rf -- "$dir"
+            fi
           }
+          out="$dir/response.json"
+          raw="$dir/raw.out"
           trap cleanup EXIT
+          mode=$(stat -c %a "$dir") || fail "could not read the temp directory mode"
+          if [ "$mode" != 700 ]; then
+            fail "the temp directory is not private (mode $mode)"
+          fi
           body=$(python3 -I -c 'import json, os; print(json.dumps({"branch": os.environ["LORY_BRANCH"], "commit_sha": os.environ["LORY_COMMIT_SHA"], "pr_number": int(os.environ["LORY_PR_NUMBER"])}))') || fail "could not build the request body"
           # The header comes from standard input so the token is never in a process list. The body is not secret.
           # No -L: a redirect is not followed, and a 3xx is refused below. head -c caps a body that has no
           # Content-Length. The status is appended after the body (`--write-out`) and split off again below.
-          printf 'Authorization: Bearer %s\n' "$LORY_PIPELINE_TOKEN" |
+          printf 'Authorization: Bearer %s\n' "$token" |
             curl --disable --silent --show-error --fail-with-body --proto '=https' --tlsv1.2 \
               --max-time "$LORY_MAX_TIME" --max-filesize "$LORY_MAX_BYTES" --write-out '\n%{http_code}' \
               --request POST --header @- --header 'Content-Type: application/json' \
@@ -269,19 +291,37 @@ jobs:
             fail "the response is larger than max-response-bytes ($LORY_MAX_BYTES); not trusting it"
           fi
           head -c "$size" "$raw" >"$out" || fail "could not save the response"
+          # The next step gets the exact path from this output, never from an expression inside a script.
+          echo "dir=$dir" >>"$GITHUB_OUTPUT" || fail "could not hand the response over to the next step"
           keep=1
           echo "Lory audit: HTTP 200, response received ($size bytes)"
 
-      # No token in this step. The response file is data: it is parsed, never executed or interpolated, and it is
-      # deleted when the step ends, whatever the verdict.
+      # No token in this step. The response file is data: it is parsed, never executed or interpolated, and its whole
+      # directory is deleted when the step ends, whatever the verdict. The path must be exactly what the call step made.
       - name: Judge the Lory response
         shell: bash
         env:
-          LORY_OUT_DIR: ${{ runner.temp }}/lory
+          LORY_TMP: ${{ runner.temp }}
+          LORY_DIR: ${{ steps.call.outputs.dir }}
           LORY_MAX_BYTES: ${{ inputs.max-response-bytes }}
           FAIL_ON_FINDINGS: ${{ inputs.fail-on-findings }}
         run: |
-          trap 'rm -f "$LORY_OUT_DIR/response.json"' EXIT
+          set -u
+          refuse() {
+            echo "::error title=Lory audit::$1"
+            echo "Lory audit: FAILED, $1" >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
+            exit 1
+          }
+          # Delete only a directory shaped like the one the call step makes, directly under the runner temp
+          # directory and not a link; anything else is refused and left alone.
+          case "$LORY_DIR" in
+            "$LORY_TMP"/lory.[A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9]) ;;
+            *) refuse "the response directory is not the one the call step made" ;;
+          esac
+          if [ ! -d "$LORY_DIR" ] || [ -L "$LORY_DIR" ]; then
+            refuse "the response directory is not a plain directory"
+          fi
+          trap 'rm -rf -- "$LORY_DIR"' EXIT
           python3 -I - <<'PY'
           import datetime
           import json
@@ -290,7 +330,7 @@ jobs:
 
           summary = os.environ.get("GITHUB_STEP_SUMMARY") or os.devnull
           stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-          path = os.path.join(os.environ["LORY_OUT_DIR"], "response.json")
+          path = os.path.join(os.environ["LORY_DIR"], "response.json")
           cap = int(os.environ["LORY_MAX_BYTES"])
           blocking = os.environ["FAIL_ON_FINDINGS"].strip().lower() == "true"
 
