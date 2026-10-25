@@ -2288,8 +2288,11 @@ That is the whole rollback.
 `.github/actions/egress-canary/action.yml` is the source; each workflow inlines a byte-identical copy of its
 script (a reusable workflow cannot name the commit it runs from), and `tests/test_egress_canary.py` holds the
 copies identical. The same holds for `.github/actions/egress-policy-check`, the input validation that runs
-just before it. The canary step runs only when the job's effective policy is `block`, uses no secret and
-reads no input.
+just before it. The canary step runs only when the runner is Linux (`runner.os == 'Linux'`) **and** the job's
+effective policy is `block`; it uses no secret and reads no input. It is Linux-only because it needs `timeout`
+and `getent`, which macOS lacks (and Git Bash on Windows lacks `getent`), and because EX-0001 concerns
+harden-runner `block` on Linux runners. On a macOS or Windows matrix leg the step is skipped; it is a diagnostic,
+so skipping it weakens no control (v1.25.1, issue #196).
 
 It detects exactly the dropped-IP symptom. It resolves every A record of `github.com`, `api.github.com` and
 `results-receiver.actions.githubusercontent.com` with `getent ahostsv4` (three lookups each, unioned, so a

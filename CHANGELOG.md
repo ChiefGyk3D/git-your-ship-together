@@ -5,6 +5,14 @@ name what a caller sees after that.
 
 ## Unreleased
 
+### v1.25.1: the egress canary runs only on Linux (issue #196)
+
+- **Fix.** The EX-0001 egress canary used `timeout` and `getent`, which macOS lacks (and `getent` is missing
+  in Git Bash on Windows), so a macOS matrix leg failed with the misleading "known westus2 DNS issue"
+  message. Every inlined copy now has `runner.os == 'Linux' &&` in its `if`, so the step is skipped on macOS
+  and Windows runners. The canary is a diagnostic for harden-runner `block` on Linux, so no control is
+  weakened. Callers re-pin to pick it up. `tests/test_egress_canary.py` fails if a canary lacks the condition.
+
 ### Security exception EX-0001: harden-runner `block` on westus2 runners
 
 GitHub-hosted runners in the Azure region `westus2` break harden-runner in `block` mode (about 6 percent of
