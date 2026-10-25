@@ -1,0 +1,36 @@
+# Refuse an egress policy that is not exactly `audit` or `block`.
+#
+# The policy inputs of the reusable workflows are free strings (workflow_call
+# has no choice type). In the workflows the effective policy of a job is
+# computed fail-closed: anything but exactly `audit` is `block`. This step
+# turns such a typo into a clear failure instead of a silent `block`.
+#
+# The workflows inline a copy of the `run:` script below, with `POLICIES` set
+# to the workflow's policy inputs joined by `|` (see egress-canary for why);
+# tests/test_egress_canary.py holds every copy byte-identical to this file.
+name: Egress policy check
+description: Fail unless every egress policy input is exactly audit or block (EX-0001).
+runs:
+  using: composite
+  steps:
+    - name: Validate the egress policy inputs (EX-0001)
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      env:
+        POLICIES: audit|block
+      run: |
+        set -u
+        bad=0
+        rest="$POLICIES|"
+        while [ -n "$rest" ]; do
+          v=${rest%%|*}
+          rest=${rest#*|}
+          case "$v" in
+            audit | block) ;;
+            *)
+              echo "::error title=egress policy::an egress policy input must be exactly 'audit' or 'block', got '${v:0:40}'"
+              bad=1
+              ;;
+          esac
+        done
+        exit "$bad"

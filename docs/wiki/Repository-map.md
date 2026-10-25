@@ -91,6 +91,7 @@ publish).
 |---|---|
 | `.github/actions/doppler-secrets/` | Composite action: fetch a Doppler config as masked env vars. The source of the inlined copies |
 | `.github/actions/egress-canary/` | Composite action: fail fast when an address of the GitHub hosts is unreachable under harden-runner `block` (EX-0001). The source of the inlined copies |
+| `.github/actions/egress-policy-check/` | Composite action: fail unless every egress policy input is exactly `audit` or `block`. The source of the inlined copies that precede each canary |
 | `docs/security/exceptions/` | Dated, time-boxed security exceptions; EX-0001 is the westus2 harden-runner one |
 | `.github/dependabot.yml` | Weekly action, pip (the repository root and `.github/requirements/`) and docker bumps with a seven-day cooldown |
 | `BASELINE.md` | The settings every repository must meet, with the `gh api` command for each |

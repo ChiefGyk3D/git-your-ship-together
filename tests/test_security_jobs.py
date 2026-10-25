@@ -49,16 +49,18 @@ def test_semgrep_uses_its_own_egress_policy():
     first = steps_of(SEMGREP)[0]
     assert first["uses"].startswith("step-security/harden-runner@")
     assert first["with"]["egress-policy"] == (
-        "${{ inputs.egress-policy-secretless == 'audit' && 'audit' || inputs.semgrep-egress-policy }}"
+        "${{ (inputs.egress-policy-secretless == 'audit' || inputs.semgrep-egress-policy == 'audit') "
+        "&& 'audit' || 'block' }}"
     )
     assert "inputs.semgrep-allowed-endpoints" in first["with"]["allowed-endpoints"]
     assert "inputs.extra-allowed-endpoints" in first["with"]["allowed-endpoints"]
     others = [n for n, j in jobs(DOC).items() if n != "semgrep"]
     for name in others:
         policy = steps_of(jobs(DOC)[name])[0]["with"]["egress-policy"]
-        assert policy in ("${{ inputs.egress-policy }}", "${{ inputs.egress-policy-secretless }}"), (
-            f"{name} must keep a shared egress input"
-        )
+        assert policy in (
+            "${{ inputs.egress-policy == 'audit' && 'audit' || 'block' }}",
+            "${{ inputs.egress-policy-secretless == 'audit' && 'audit' || 'block' }}",
+        ), f"{name} must keep a shared egress input"
 
 
 def test_semgrep_scan_command():

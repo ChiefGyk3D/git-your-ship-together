@@ -128,7 +128,7 @@ on:
         type: string
         default: audit
       egress-policy-secretless:
-        description: harden-runner egress policy for the jobs that hold no secret (read-only contents, no OIDC token, no publish credential; SARIF upload at most) - `audit` or `block`. Defaults to `audit` while security exception EX-0001 is active (GitHub-hosted runners in westus2 break harden-runner `block`; expires 2026-11-07 or when step-security/harden-runner#708 is fixed; see docs/security/exceptions/). Set `block` to opt back in. Jobs that hold a secret, an OIDC token or a write grant ignore this input and follow `egress-policy`.
+        description: harden-runner egress policy for the jobs that hold no stored secret, no OIDC token and no write-scoped or publish-capable token (read-only contents, a SARIF upload at most), and whose output no privileged job consumes - exactly `audit` or `block`. Defaults to `audit` while security exception EX-0001 is active (GitHub-hosted runners in westus2 break harden-runner `block`; expires 2026-11-07 or when step-security/harden-runner#708 is fixed; see docs/security/exceptions/). Every job still has the default read-only job token. Set `block` to opt back in. Any other job follows `egress-policy`. Any other value fails the job.
         type: string
         default: audit
       allowed-endpoints:
@@ -166,14 +166,37 @@ jobs:
     steps:
       - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
         with:
-          egress-policy: ${{ inputs.egress-policy }}
+          egress-policy: ${{ inputs.egress-policy == 'audit' && 'audit' || 'block' }}
           allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
           disable-sudo: true
           # The agent may only stop reporting to StepSecurity in block mode.
-          disable-telemetry: ${{ inputs.egress-policy == 'block' }}
+          disable-telemetry: ${{ (inputs.egress-policy == 'audit' && 'audit' || 'block') == 'block' }}
+
+      - name: Validate the egress policy inputs (EX-0001)
+        timeout-minutes: 1
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        env:
+          POLICIES: ${{ inputs.egress-policy }}|${{ inputs.egress-policy-secretless }}
+        run: |
+          set -u
+          bad=0
+          rest="$POLICIES|"
+          while [ -n "$rest" ]; do
+            v=${rest%%|*}
+            rest=${rest#*|}
+            case "$v" in
+              audit | block) ;;
+              *)
+                echo "::error title=egress policy::an egress policy input must be exactly 'audit' or 'block', got '${v:0:40}'"
+                bad=1
+                ;;
+            esac
+          done
+          exit "$bad"
 
       - name: Egress canary (EX-0001)
-        if: ${{ inputs.egress-policy == 'block' }}
+        if: ${{ (inputs.egress-policy == 'audit' && 'audit' || 'block') == 'block' }}
         timeout-minutes: 2
         shell: bash
         # The workspace root exists before checkout; a job default working-directory may not.
@@ -184,6 +207,14 @@ jobs:
           PORT=443
           canary_resolve() { timeout 5 getent ahostsv4 "$1" 2>/dev/null | awk '$2 == "STREAM" { print $1 }'; }
           canary_probe() { timeout 3 bash -c "exec 3<>\"/dev/tcp/\$0/\$1\"" "$1" "$PORT" 2>/dev/null; }
+          canary_reach() {
+            local i
+            for i in 1 2 3 4; do
+              canary_probe "$1" && return 0
+              [ "$i" -lt 4 ] && sleep 1
+            done
+            return 1
+          }
           canary_show() { local n=$1; shift; echo "+ $*"; { timeout 10 "$@" 2>&1 || true; } | head -n "$n" || true; }
           canary_diag() {
             local name
@@ -194,7 +225,7 @@ jobs:
             canary_show 20 bash -c "ss -lunp | grep ':53 '"
             for name in $NAMES pipelines.actions.githubusercontent.com; do
               canary_show 20 getent ahostsv4 "$name"
-              canary_show 30 curl -Ivs --max-time 8 "https://$name"
+              canary_show 5 curl -sS -o /dev/null -w '%{http_code} %{remote_ip} %{time_connect}\n' --max-time 8 "https://$name"
             done
             echo "::endgroup::"
           }
@@ -211,7 +242,7 @@ jobs:
             done
             while read -r name addr; do
               n=$((n + 1))
-              ( { [ "$addr" != "-" ] && { canary_probe "$addr" || { sleep 1; canary_probe "$addr"; }; }; } || echo "$name $addr" >"$tmp/bad.$n" ) </dev/null &
+              ( { [ "$addr" != "-" ] && canary_reach "$addr"; } || echo "$name $addr" >"$tmp/bad.$n" ) </dev/null &
             done <"$tmp/pairs"
             wait
             bad=$(cat "$tmp"/bad.* 2>/dev/null | sort || true)
@@ -227,7 +258,18 @@ jobs:
             echo "EX-0001 egress canary failed, unreachable: $(printf '%s' "$bad" | tr '\n' ';')" >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
             return 1
           }
-          canary_main
+          canary_main &
+          main=$!
+          (sleep 90; kill "$main") >/dev/null 2>&1 &
+          dog=$!
+          wait "$main" && rc=0 || rc=$?
+          pkill -P "$dog" >/dev/null 2>&1 || true
+          kill "$dog" >/dev/null 2>&1 || true
+          if [ "$rc" -eq 143 ]; then
+            echo "::error title=egress canary::the canary hit its 90 s deadline (EX-0001): rerun the job"
+            rc=124
+          fi
+          exit "$rc"
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -419,14 +461,37 @@ jobs:
     steps:
       - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
         with:
-          egress-policy: ${{ inputs.egress-policy-secretless }}
+          egress-policy: ${{ inputs.egress-policy-secretless == 'audit' && 'audit' || 'block' }}
           allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
           disable-sudo: true
           # The agent may only stop reporting to StepSecurity in block mode.
-          disable-telemetry: ${{ inputs.egress-policy-secretless == 'block' }}
+          disable-telemetry: ${{ (inputs.egress-policy-secretless == 'audit' && 'audit' || 'block') == 'block' }}
+
+      - name: Validate the egress policy inputs (EX-0001)
+        timeout-minutes: 1
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        env:
+          POLICIES: ${{ inputs.egress-policy }}|${{ inputs.egress-policy-secretless }}
+        run: |
+          set -u
+          bad=0
+          rest="$POLICIES|"
+          while [ -n "$rest" ]; do
+            v=${rest%%|*}
+            rest=${rest#*|}
+            case "$v" in
+              audit | block) ;;
+              *)
+                echo "::error title=egress policy::an egress policy input must be exactly 'audit' or 'block', got '${v:0:40}'"
+                bad=1
+                ;;
+            esac
+          done
+          exit "$bad"
 
       - name: Egress canary (EX-0001)
-        if: ${{ inputs.egress-policy-secretless == 'block' }}
+        if: ${{ (inputs.egress-policy-secretless == 'audit' && 'audit' || 'block') == 'block' }}
         timeout-minutes: 2
         shell: bash
         # The workspace root exists before checkout; a job default working-directory may not.
@@ -437,6 +502,14 @@ jobs:
           PORT=443
           canary_resolve() { timeout 5 getent ahostsv4 "$1" 2>/dev/null | awk '$2 == "STREAM" { print $1 }'; }
           canary_probe() { timeout 3 bash -c "exec 3<>\"/dev/tcp/\$0/\$1\"" "$1" "$PORT" 2>/dev/null; }
+          canary_reach() {
+            local i
+            for i in 1 2 3 4; do
+              canary_probe "$1" && return 0
+              [ "$i" -lt 4 ] && sleep 1
+            done
+            return 1
+          }
           canary_show() { local n=$1; shift; echo "+ $*"; { timeout 10 "$@" 2>&1 || true; } | head -n "$n" || true; }
           canary_diag() {
             local name
@@ -447,7 +520,7 @@ jobs:
             canary_show 20 bash -c "ss -lunp | grep ':53 '"
             for name in $NAMES pipelines.actions.githubusercontent.com; do
               canary_show 20 getent ahostsv4 "$name"
-              canary_show 30 curl -Ivs --max-time 8 "https://$name"
+              canary_show 5 curl -sS -o /dev/null -w '%{http_code} %{remote_ip} %{time_connect}\n' --max-time 8 "https://$name"
             done
             echo "::endgroup::"
           }
@@ -464,7 +537,7 @@ jobs:
             done
             while read -r name addr; do
               n=$((n + 1))
-              ( { [ "$addr" != "-" ] && { canary_probe "$addr" || { sleep 1; canary_probe "$addr"; }; }; } || echo "$name $addr" >"$tmp/bad.$n" ) </dev/null &
+              ( { [ "$addr" != "-" ] && canary_reach "$addr"; } || echo "$name $addr" >"$tmp/bad.$n" ) </dev/null &
             done <"$tmp/pairs"
             wait
             bad=$(cat "$tmp"/bad.* 2>/dev/null | sort || true)
@@ -480,7 +553,18 @@ jobs:
             echo "EX-0001 egress canary failed, unreachable: $(printf '%s' "$bad" | tr '\n' ';')" >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
             return 1
           }
-          canary_main
+          canary_main &
+          main=$!
+          (sleep 90; kill "$main") >/dev/null 2>&1 &
+          dog=$!
+          wait "$main" && rc=0 || rc=$?
+          pkill -P "$dog" >/dev/null 2>&1 || true
+          kill "$dog" >/dev/null 2>&1 || true
+          if [ "$rc" -eq 143 ]; then
+            echo "::error title=egress canary::the canary hit its 90 s deadline (EX-0001): rerun the job"
+            rc=124
+          fi
+          exit "$rc"
 
       - name: Explain
         env:
@@ -504,14 +588,37 @@ jobs:
     steps:
       - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
         with:
-          egress-policy: ${{ inputs.egress-policy }}
+          egress-policy: ${{ inputs.egress-policy == 'audit' && 'audit' || 'block' }}
           allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
           disable-sudo: true
           # The agent may only stop reporting to StepSecurity in block mode.
-          disable-telemetry: ${{ inputs.egress-policy == 'block' }}
+          disable-telemetry: ${{ (inputs.egress-policy == 'audit' && 'audit' || 'block') == 'block' }}
+
+      - name: Validate the egress policy inputs (EX-0001)
+        timeout-minutes: 1
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        env:
+          POLICIES: ${{ inputs.egress-policy }}|${{ inputs.egress-policy-secretless }}
+        run: |
+          set -u
+          bad=0
+          rest="$POLICIES|"
+          while [ -n "$rest" ]; do
+            v=${rest%%|*}
+            rest=${rest#*|}
+            case "$v" in
+              audit | block) ;;
+              *)
+                echo "::error title=egress policy::an egress policy input must be exactly 'audit' or 'block', got '${v:0:40}'"
+                bad=1
+                ;;
+            esac
+          done
+          exit "$bad"
 
       - name: Egress canary (EX-0001)
-        if: ${{ inputs.egress-policy == 'block' }}
+        if: ${{ (inputs.egress-policy == 'audit' && 'audit' || 'block') == 'block' }}
         timeout-minutes: 2
         shell: bash
         # The workspace root exists before checkout; a job default working-directory may not.
@@ -522,6 +629,14 @@ jobs:
           PORT=443
           canary_resolve() { timeout 5 getent ahostsv4 "$1" 2>/dev/null | awk '$2 == "STREAM" { print $1 }'; }
           canary_probe() { timeout 3 bash -c "exec 3<>\"/dev/tcp/\$0/\$1\"" "$1" "$PORT" 2>/dev/null; }
+          canary_reach() {
+            local i
+            for i in 1 2 3 4; do
+              canary_probe "$1" && return 0
+              [ "$i" -lt 4 ] && sleep 1
+            done
+            return 1
+          }
           canary_show() { local n=$1; shift; echo "+ $*"; { timeout 10 "$@" 2>&1 || true; } | head -n "$n" || true; }
           canary_diag() {
             local name
@@ -532,7 +647,7 @@ jobs:
             canary_show 20 bash -c "ss -lunp | grep ':53 '"
             for name in $NAMES pipelines.actions.githubusercontent.com; do
               canary_show 20 getent ahostsv4 "$name"
-              canary_show 30 curl -Ivs --max-time 8 "https://$name"
+              canary_show 5 curl -sS -o /dev/null -w '%{http_code} %{remote_ip} %{time_connect}\n' --max-time 8 "https://$name"
             done
             echo "::endgroup::"
           }
@@ -549,7 +664,7 @@ jobs:
             done
             while read -r name addr; do
               n=$((n + 1))
-              ( { [ "$addr" != "-" ] && { canary_probe "$addr" || { sleep 1; canary_probe "$addr"; }; }; } || echo "$name $addr" >"$tmp/bad.$n" ) </dev/null &
+              ( { [ "$addr" != "-" ] && canary_reach "$addr"; } || echo "$name $addr" >"$tmp/bad.$n" ) </dev/null &
             done <"$tmp/pairs"
             wait
             bad=$(cat "$tmp"/bad.* 2>/dev/null | sort || true)
@@ -565,7 +680,18 @@ jobs:
             echo "EX-0001 egress canary failed, unreachable: $(printf '%s' "$bad" | tr '\n' ';')" >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
             return 1
           }
-          canary_main
+          canary_main &
+          main=$!
+          (sleep 90; kill "$main") >/dev/null 2>&1 &
+          dog=$!
+          wait "$main" && rc=0 || rc=$?
+          pkill -P "$dog" >/dev/null 2>&1 || true
+          kill "$dog" >/dev/null 2>&1 || true
+          if [ "$rc" -eq 143 ]; then
+            echo "::error title=egress canary::the canary hit its 90 s deadline (EX-0001): rerun the job"
+            rc=124
+          fi
+          exit "$rc"
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:

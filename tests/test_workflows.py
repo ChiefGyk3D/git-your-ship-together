@@ -333,12 +333,20 @@ def test_every_reusable_job_starts_with_harden_runner(path):
         with_ = steps[0].get("with") or {}
         # The distro and semgrep jobs have their own policy input: their hosts are not measured yet.
         own = {"distro": "distro-egress-policy", "semgrep": "semgrep-egress-policy"}.get(job_name)
-        # A job with no secret follows egress-policy-secretless (EX-0001); one that holds one follows egress-policy.
-        # tests/test_egress_canary.py pins which is which. distro and semgrep keep their own input as well: audit
-        # wins when either says audit.
-        allowed = {"${{ inputs.egress-policy }}", "${{ inputs.egress-policy-secretless }}"}
+        # Fail closed: a job is audit only when the input it answers to says exactly `audit`, otherwise block
+        # (EX-0001). A job with no secret answers to egress-policy-secretless, one that holds one to egress-policy;
+        # tests/test_egress_canary.py pins which is which. distro and semgrep keep their own input as well:
+        # audit when either says audit.
+        allowed = {
+            "${{ inputs.egress-policy == 'audit' && 'audit' || 'block' }}",
+            "${{ inputs.egress-policy-secretless == 'audit' && 'audit' || 'block' }}",
+        }
         if own:
-            allowed = {"${{ inputs.egress-policy-secretless == 'audit' && 'audit' || inputs." + own + " }}"}
+            allowed = {
+                "${{ (inputs.egress-policy-secretless == 'audit' || inputs."
+                + own
+                + " == 'audit') && 'audit' || 'block' }}"
+            }
         assert with_.get("egress-policy") in allowed, (
             f"{path.name}: job {job_name!r} harden-runner ignores the {own or 'egress-policy'} input"
         )
@@ -576,9 +584,9 @@ def test_the_distro_job_is_gated_and_has_its_own_egress_policy(name):
     steps = steps_of(jobs(doc)["distro"])
     assert str(steps[0]["uses"]).startswith(HARDEN_RUNNER)
     with_ = steps[0]["with"]
-    assert (
-        with_["egress-policy"]
-        == "${{ inputs.egress-policy-secretless == 'audit' && 'audit' || inputs.distro-egress-policy }}"
+    assert with_["egress-policy"] == (
+        "${{ (inputs.egress-policy-secretless == 'audit' || inputs.distro-egress-policy == 'audit') "
+        "&& 'audit' || 'block' }}"
     )
     assert "inputs.distro-egress-policy" in with_["disable-telemetry"]
     assert "inputs.egress-policy-secretless" in with_["disable-telemetry"]

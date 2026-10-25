@@ -128,7 +128,7 @@ on:
         type: string
         default: audit
       egress-policy-secretless:
-        description: harden-runner egress policy for the jobs that hold no secret (read-only contents, no OIDC token, no publish credential; SARIF upload at most) - `audit` or `block`. Defaults to `audit` while security exception EX-0001 is active (GitHub-hosted runners in westus2 break harden-runner `block`; expires 2026-11-07 or when step-security/harden-runner#708 is fixed; see docs/security/exceptions/). Set `block` to opt back in. Jobs that hold a secret, an OIDC token or a write grant ignore this input and follow `egress-policy`.
+        description: harden-runner egress policy for the jobs that hold no stored secret, no OIDC token and no write-scoped or publish-capable token (read-only contents, a SARIF upload at most), and whose output no privileged job consumes - exactly `audit` or `block`. Defaults to `audit` while security exception EX-0001 is active (GitHub-hosted runners in westus2 break harden-runner `block`; expires 2026-11-07 or when step-security/harden-runner#708 is fixed; see docs/security/exceptions/). Every job still has the default read-only job token. Set `block` to opt back in. Any other job follows `egress-policy`. Any other value fails the job.
         type: string
         default: audit
       allowed-endpoints:

@@ -88,6 +88,14 @@ jobs:
           PORT=443
           canary_resolve() { timeout 5 getent ahostsv4 "$1" 2>/dev/null | awk '$2 == "STREAM" { print $1 }'; }
           canary_probe() { timeout 3 bash -c "exec 3<>\"/dev/tcp/\$0/\$1\"" "$1" "$PORT" 2>/dev/null; }
+          canary_reach() {
+            local i
+            for i in 1 2 3 4; do
+              canary_probe "$1" && return 0
+              [ "$i" -lt 4 ] && sleep 1
+            done
+            return 1
+          }
           canary_show() { local n=$1; shift; echo "+ $*"; { timeout 10 "$@" 2>&1 || true; } | head -n "$n" || true; }
           canary_diag() {
             local name
@@ -98,7 +106,7 @@ jobs:
             canary_show 20 bash -c "ss -lunp | grep ':53 '"
             for name in $NAMES pipelines.actions.githubusercontent.com; do
               canary_show 20 getent ahostsv4 "$name"
-              canary_show 30 curl -Ivs --max-time 8 "https://$name"
+              canary_show 5 curl -sS -o /dev/null -w '%{http_code} %{remote_ip} %{time_connect}\n' --max-time 8 "https://$name"
             done
             echo "::endgroup::"
           }
@@ -115,7 +123,7 @@ jobs:
             done
             while read -r name addr; do
               n=$((n + 1))
-              ( { [ "$addr" != "-" ] && { canary_probe "$addr" || { sleep 1; canary_probe "$addr"; }; }; } || echo "$name $addr" >"$tmp/bad.$n" ) </dev/null &
+              ( { [ "$addr" != "-" ] && canary_reach "$addr"; } || echo "$name $addr" >"$tmp/bad.$n" ) </dev/null &
             done <"$tmp/pairs"
             wait
             bad=$(cat "$tmp"/bad.* 2>/dev/null | sort || true)
@@ -131,7 +139,18 @@ jobs:
             echo "EX-0001 egress canary failed, unreachable: $(printf '%s' "$bad" | tr '\n' ';')" >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
             return 1
           }
-          canary_main
+          canary_main &
+          main=$!
+          (sleep 90; kill "$main") >/dev/null 2>&1 &
+          dog=$!
+          wait "$main" && rc=0 || rc=$?
+          pkill -P "$dog" >/dev/null 2>&1 || true
+          kill "$dog" >/dev/null 2>&1 || true
+          if [ "$rc" -eq 143 ]; then
+            echo "::error title=egress canary::the canary hit its 90 s deadline (EX-0001): rerun the job"
+            rc=124
+          fi
+          exit "$rc"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -292,6 +311,14 @@ jobs:
           PORT=443
           canary_resolve() { timeout 5 getent ahostsv4 "$1" 2>/dev/null | awk '$2 == "STREAM" { print $1 }'; }
           canary_probe() { timeout 3 bash -c "exec 3<>\"/dev/tcp/\$0/\$1\"" "$1" "$PORT" 2>/dev/null; }
+          canary_reach() {
+            local i
+            for i in 1 2 3 4; do
+              canary_probe "$1" && return 0
+              [ "$i" -lt 4 ] && sleep 1
+            done
+            return 1
+          }
           canary_show() { local n=$1; shift; echo "+ $*"; { timeout 10 "$@" 2>&1 || true; } | head -n "$n" || true; }
           canary_diag() {
             local name
@@ -302,7 +329,7 @@ jobs:
             canary_show 20 bash -c "ss -lunp | grep ':53 '"
             for name in $NAMES pipelines.actions.githubusercontent.com; do
               canary_show 20 getent ahostsv4 "$name"
-              canary_show 30 curl -Ivs --max-time 8 "https://$name"
+              canary_show 5 curl -sS -o /dev/null -w '%{http_code} %{remote_ip} %{time_connect}\n' --max-time 8 "https://$name"
             done
             echo "::endgroup::"
           }
@@ -319,7 +346,7 @@ jobs:
             done
             while read -r name addr; do
               n=$((n + 1))
-              ( { [ "$addr" != "-" ] && { canary_probe "$addr" || { sleep 1; canary_probe "$addr"; }; }; } || echo "$name $addr" >"$tmp/bad.$n" ) </dev/null &
+              ( { [ "$addr" != "-" ] && canary_reach "$addr"; } || echo "$name $addr" >"$tmp/bad.$n" ) </dev/null &
             done <"$tmp/pairs"
             wait
             bad=$(cat "$tmp"/bad.* 2>/dev/null | sort || true)
@@ -335,7 +362,18 @@ jobs:
             echo "EX-0001 egress canary failed, unreachable: $(printf '%s' "$bad" | tr '\n' ';')" >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
             return 1
           }
-          canary_main
+          canary_main &
+          main=$!
+          (sleep 90; kill "$main") >/dev/null 2>&1 &
+          dog=$!
+          wait "$main" && rc=0 || rc=$?
+          pkill -P "$dog" >/dev/null 2>&1 || true
+          kill "$dog" >/dev/null 2>&1 || true
+          if [ "$rc" -eq 143 ]; then
+            echo "::error title=egress canary::the canary hit its 90 s deadline (EX-0001): rerun the job"
+            rc=124
+          fi
+          exit "$rc"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false

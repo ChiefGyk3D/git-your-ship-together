@@ -57,30 +57,39 @@ where `block` runs and how fast a broken runner is detected.
 
 ## Exact scope
 
-Relaxed (policy follows `egress-policy-secretless`, default `audit`): the jobs below. Criteria, all four
-required: no secret (no `secrets.*`, no Doppler), `permissions` of `contents: read` (a `security-events:
-write` grant for a SARIF upload is the only other grant allowed), no `id-token`, no publish credential.
+**"Secretless" means, exactly:** no stored secret (no `secrets.*`, no Doppler), no OIDC `id-token`, no
+publish-capable or write-scoped token, `contents: read` at most (and `security-events: write` only for a SARIF
+upload), no token handed to an action or a `gh` call beyond the default, and no output that a privileged job
+consumes verbatim. It does **not** mean the job has no credential at all: every job has the default job token,
+read-scoped here. The runner mints it, harden-runner v2.22.2 takes it through its `token` input (default
+`github.token`, used "to avoid github rate limiting"), and `actions/checkout` uses it even with
+`persist-credentials: false`. So a read-scoped token exists transiently during checkout and the harden-runner
+step, and it is in the job's environment for the steps that run caller code.
+
+We looked at passing `token: ''` to harden-runner. Its documented purpose is rate limiting (it fetches the
+agent release from the GitHub API), so the unauthenticated form would fail on shared runner addresses
+intermittently, a new flake on top of the one this exception fixes. We did not do it.
+
+Relaxed (policy follows `egress-policy-secretless`, default `audit`): the jobs below, and only these.
 
 | Workflow | Jobs relaxed |
 |---|---|
-| `python-ci.yml` | `lint`, `typecheck`, `workflow-lint`, `test`, `distro`, `smoke`, `docker`, `fragment-check`, `commit-claims`, `ci-green` |
+| `python-ci.yml` | `lint`, `typecheck`, `workflow-lint`, `distro`, `smoke`, `docker`, `fragment-check`, `commit-claims`, `ci-green` |
 | `bash-ci.yml` | `shellcheck`, `shfmt`, `test`, `distro`, `config-lint`, `workflow-lint`, `fragment-check`, `commit-claims`, `ci-green` |
 | `tofu-ci.yml` | `fmt`, `validate`, `test`, `tflint`, `trivy`, `policy`, `workflow-lint`, `ci-green` |
 | `arduino-ci.yml` | `compile`, `test`, `workflow-lint`, `ci-green` |
-| `security.yml` | `codeql`, `gitleaks`, `dependency-audit`, `semgrep` (SARIF upload only) |
-| `dast.yml` | `scan`, `upload` (SARIF upload only; the scan account is a throwaway one) |
+| `security.yml` | `codeql`, `gitleaks`, `dependency-audit`, `semgrep` (SARIF upload with the default token only) |
+| `dast.yml` | `upload` (SARIF upload only) |
 | `python-fuzz.yml` | `fuzz` |
 | `threat-model.yml` | `check` |
-| `docs-pages.yml` | `build` |
-| `wiki-publish.yml` | `generate` |
-| `container-release.yml` | `plan`, `dockerfile-lint` |
+| `container-release.yml` | `dockerfile-lint` |
 | `python-package-release.yml` | `pypi-unsupported` |
-| `verify-published.yml` | `verify-release`, `rescan`, `verified` |
+| `verify-published.yml` | `rescan`, `verified` |
 
 `distro` (python-ci, bash-ci) and `semgrep` (security) keep their own policy inputs as well: the job is
-`audit` when either `egress-policy-secretless` or its own input says `audit`.
+`audit` when either `egress-policy-secretless` or its own input says exactly `audit`.
 
-**Kept in `block`** (follow `egress-policy`, and get the fail-fast canary):
+**Kept in `block`** (follow `egress-policy`, and get the policy check and the fail-fast canary):
 
 | Workflow | Jobs | Why |
 |---|---|---|
@@ -89,31 +98,42 @@ write` grant for a SARIF upload is the only other grant allowed), no `id-token`,
 | `python-package-release.yml` | `github-release` | `contents: write`, `id-token`, attestations |
 | `python-package-release.yml` | `build` | **ambiguous**: builds the distribution that is published |
 | `container-release.yml` | `build`, `merge` | `packages: write`, `id-token`, Doppler |
+| `container-release.yml` | `plan` | **ambiguous**: its outputs choose the runners and the image name of the privileged `build` |
 | `docs-pages.yml` | `deploy` | `pages: write`, `id-token` |
+| `docs-pages.yml` | `build` | runs caller code; its artifact is deployed verbatim by `deploy` |
 | `wiki-publish.yml` | `publish` | `contents: write` |
+| `wiki-publish.yml` | `generate` | runs caller code; its artifact is pushed verbatim by `publish` |
 | `python-ci.yml` | `coverage` | `id-token`, Doppler, the Codecov upload |
+| `python-ci.yml` | `test` | its coverage artifact is uploaded to Codecov by `coverage` |
+| `dast.yml` | `scan` | its SARIF artifact is uploaded verbatim by `upload` (`security-events: write`) |
 | `security.yml` | `snyk`, `scorecard` | `id-token`, Doppler (`SNYK_TOKEN`) |
 | `security.yml` | `dependency-review` | **ambiguous**: `pull-requests: write` |
 | `tofu-ci.yml` | `plan` | `id-token`, Doppler |
-| `verify-published.yml` | `verify` | **ambiguous**: `packages: read` token for the registry |
+| `verify-published.yml` | `verify` | passes the job token to `gh attestation verify`; `packages: read` |
+| `verify-published.yml` | `verify-release` | passes the job token to `gh release download` and `gh attestation verify` |
 | `project-sync.yml`, `dependabot-auto-merge.yml` | all | a GitHub App token, `contents: write` |
 | `audit.yml` (this repository's weekly audit) | all | `id-token`, Doppler, hardcoded `block` |
 
 Ambiguous means the job holds no stored secret but sits in a release or write path; the rule was "if
-unsure, keep it in `block`". `tests/test_egress_canary.py` pins this table against the YAML: a job that
-holds a secret, an OIDC token or a write grant cannot follow the secretless input.
+unsure, keep it in `block`". Every secretless job was re-audited for `github.token`, `GITHUB_TOKEN`,
+`GH_TOKEN`, `secrets.*`, a `token` or `password` in a `with:`, `gh` calls and token-consuming actions; the
+result is in the pull request. `tests/test_egress_canary.py` pins the table against the YAML: a job that
+holds any of those, or whose artifact or outputs feed a job kept in `block`, cannot follow the secretless
+input.
 
 Not in scope: this repository's own `ci.yml` jobs (already `audit` before this exception).
 
 ## Compensating controls
 
 - Every action is pinned to a commit SHA, and zizmor (pedantic persona) enforces it in this repository's CI.
-- Least-privilege `permissions` on every job; the relaxed jobs hold `contents: read` and nothing that can
-  publish, push or deploy.
-- No credential is in scope in the relaxed jobs, so there is nothing of that kind for a compromised step to
-  send out.
+- Least-privilege `permissions` on every job; the relaxed jobs hold `contents: read` (and a SARIF upload
+  grant in four of them) and nothing that can publish, push or deploy.
+- No stored secret, no OIDC token and no publish-capable token is in scope in the relaxed jobs, so there is
+  nothing of that kind for a compromised step to send out.
 - `audit` mode still logs every outbound connection to the job summary and the harden-runner insights, and
   `disable-sudo` stays on where it was.
+- A policy value that is not exactly `audit` or `block` fails closed: the job is `block`, and a first step
+  fails it with a message naming the bad value.
 - The jobs that stay in `block` are covered by the fail-fast egress canary, which turns the westus2 symptom
   into an immediate, named failure instead of a ten-minute hang.
 - Timeouts were cut to about three times the slowest healthy p99 (python-ci 15, bash-ci 10, tofu-ci 16,
@@ -123,10 +143,17 @@ Not in scope: this repository's own `ci.yml` jobs (already `audit` before this e
 
 In the relaxed jobs a compromised dependency or action can now send data to any host and the job will not
 stop it; it is logged, not blocked. What it can reach is the checked-out repository (a private repository's
-source can leave the runner) and a read-only job token. It cannot publish, push, deploy or read a stored
-secret. The relaxation applies to every region, not only westus2, because the input is static. Audit mode
-also has its own open upstream defect (#709, memory growth on process-heavy jobs); none of our jobs is
-shaped like the reported one, and we have not seen it.
+source can leave the runner) and the default job token, read-scoped, which exists transiently during checkout
+and the harden-runner step and stays in the environment of the job's steps. A read-scoped token can read
+what the repository's own read access allows; it cannot publish, push, deploy or read a stored secret. The
+relaxation applies to every region, not only westus2, because the input is static. Audit mode also has its
+own open upstream defect (#709, memory growth on process-heavy jobs); none of our jobs is shaped like the
+reported one, and we have not seen it.
+
+The canary has a known false-positive risk: a load balancer that still lists an address that has stopped
+answering fails a healthy `block` job. Each failing address is retried three more times, a second apart, so
+a transient refusal passes; a persistent one costs a rerun. The logs it prints on failure contain resolver
+and host addresses, so review them before attaching them to a support ticket.
 
 ## Expiry
 
