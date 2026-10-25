@@ -7,7 +7,9 @@ compromised step, dependency or action can send data. Full reference:
 ## harden-runner on every job
 
 [`step-security/harden-runner`](Glossary.md) is the **first step of every job**
-(a test checks), so the policy is in place before anything else runs.
+(a test checks), so the policy is in place before anything else runs. The one exception is the egress policy
+check (EX-0001, below): it runs before harden-runner, touches no network, and fails the job if a policy value is
+not exactly `audit` or `block`.
 
 | Mode | Behaviour | Used for |
 |---|---|---|
@@ -20,6 +22,16 @@ Turning it on in a caller is one line:
 with:
   egress-policy: block
 ```
+
+## Known platform issue: westus2 (EX-0001)
+
+GitHub-hosted runners in `westus2` break `block` (a DNS experiment makes the agent drop allowed IPs). Until
+it is fixed upstream, jobs that hold no secret follow the `egress-policy-secretless` input (default `audit`),
+and every job that can run in `block` starts with the **egress canary** (`.github/actions/egress-canary`),
+which fails in seconds with "rerun the job" instead of hanging. The scope, the evidence, the residual risk,
+the expiry (2026-11-07 at the latest) and the rollback are in
+[EX-0001](../security/exceptions/EX-0001-harden-runner-block-westus2.md).
+Full description: [README](../../README.md#known-ci-platform-issue-westus2-ex-0001).
 
 ## Where the lists come from
 

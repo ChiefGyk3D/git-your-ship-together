@@ -1,0 +1,112 @@
+# Fail fast on a runner whose egress is broken by the westus2 DNS experiment
+# (security exception EX-0001, docs/security/exceptions/).
+#
+# On those runners harden-runner in `block` records one A record per allowed
+# domain and drops connections to the other addresses of the same name, GitHub's
+# own services included. The job then hangs or fails minutes later in a step
+# that has nothing to do with the cause. This step makes the failure immediate
+# and obvious: it resolves every address of github.com, api.github.com and
+# results-receiver.actions.githubusercontent.com (three lookups each, unioned)
+# and opens a TCP connection to port 443 of EACH address. An address that
+# refuses or times out four times, one second apart, fails the step with
+# "rerun the job". On a healthy runner every address was seen by the agent, so
+# every connection succeeds and the step prints one line.
+#
+# Known false-positive risk: a load balancer that still lists an address that
+# has stopped answering would fail this step on a healthy runner. The retries
+# (one try plus three, a second apart) make a transient refusal harmless; a
+# persistent one is rare for these hosts, and the cost is a rerun.
+#
+# Nothing here can hang: each lookup has a 5 s limit, each connection 3 s, the
+# connections run in parallel, the whole of `canary_main` runs in its own
+# process group under a 90 s watchdog that kills the group (TERM, then KILL), and the workflow step carries `timeout-minutes: 2`. Nothing
+# here reads a secret or the environment. IPv6 is deliberately not probed: the
+# defect is about the IPv4 answers the agent records.
+#
+# The workflows inline a copy of the `run:` script below (a reusable workflow
+# cannot name the commit it runs from, see docs/wiki/Design-rules.md);
+# tests/test_egress_canary.py holds every copy byte-identical to this file.
+# Everything from the `canary_main &` line on is the entry point; the test
+# sources the part before it with stubs.
+name: Egress canary
+description: Fail fast when any address of the GitHub hosts is unreachable under harden-runner block (EX-0001).
+runs:
+  using: composite
+  steps:
+    - name: Egress canary (EX-0001)
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      run: |
+        set -u
+        NAMES="github.com api.github.com results-receiver.actions.githubusercontent.com"
+        PORT=443
+        canary_resolve() { timeout 5 getent ahostsv4 "$1" 2>/dev/null | awk '$2 == "STREAM" { print $1 }'; }
+        canary_probe() { timeout 3 bash -c "exec 3<>\"/dev/tcp/\$0/\$1\"" "$1" "$PORT" 2>/dev/null; }
+        canary_reach() {
+          local i
+          for i in 1 2 3 4; do
+            canary_probe "$1" && return 0
+            [ "$i" -lt 4 ] && sleep 1
+          done
+          return 1
+        }
+        canary_show() { local n=$1; shift; echo "+ $*"; { timeout 10 "$@" 2>&1 || true; } | head -n "$n" || true; }
+        canary_diag() {
+          local name
+          echo "::group::egress canary diagnostics (EX-0001, for the GitHub Support ticket)"
+          canary_show 5 uname -srmo
+          canary_show 20 cat /etc/resolv.conf
+          canary_show 20 bash -c "resolvectl status 2>/dev/null | grep -E '^ *(Current DNS Server|DNS Servers?|DNS Domain):'"
+          canary_show 20 bash -c "ss -lun | grep ':53 '"
+          for name in $NAMES pipelines.actions.githubusercontent.com; do
+            canary_show 20 getent ahostsv4 "$name"
+            canary_show 5 curl -sS -o /dev/null -w '%{http_code} %{remote_ip} %{time_connect}\n' --max-time 8 "https://$name"
+          done
+          echo "::endgroup::"
+        }
+        canary_main() {
+          local tmp name addr n=0 bad
+          tmp=$(mktemp -d) || return 1
+          for _ in 1 2 3; do
+            for name in $NAMES; do canary_resolve "$name" >>"$tmp/res.$name" & done
+            wait
+            sleep 1
+          done
+          for name in $NAMES; do
+            if [ -s "$tmp/res.$name" ]; then sort -u "$tmp/res.$name"; else echo "-"; fi | sed "s|^|$name |" >>"$tmp/pairs"
+          done
+          while read -r name addr; do
+            n=$((n + 1))
+            ( { [ "$addr" != "-" ] && canary_reach "$addr"; } || echo "$name $addr" >"$tmp/bad.$n" ) </dev/null &
+          done <"$tmp/pairs"
+          wait
+          bad=$(cat "$tmp"/bad.* 2>/dev/null | sort || true)
+          rm -rf "$tmp"
+          if [ -z "$bad" ]; then
+            echo "egress canary: all $n addresses of $NAMES accept TCP $PORT"
+            return 0
+          fi
+          echo "::error title=egress canary::egress broken on this runner (known westus2 DNS issue, EX-0001): rerun the job"
+          echo "unreachable addresses (name address; '-' means the name did not resolve):"
+          printf '%s\n' "$bad"
+          canary_diag
+          echo "EX-0001 egress canary failed, unreachable: $(printf '%s' "$bad" | tr '\n' ';')" >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
+          return 1
+        }
+        set -m
+        canary_main &
+        main=$!
+        (sleep 90; kill -TERM -- "-$main"; sleep 2; kill -KILL -- "-$main") >/dev/null 2>&1 &
+        dog=$!
+        wait "$main" && rc=0 || rc=$?
+        kill -TERM -- "-$dog" >/dev/null 2>&1 || true
+        if kill -0 -- "-$main" >/dev/null 2>&1; then
+          kill -TERM -- "-$main" >/dev/null 2>&1 || true
+          sleep 1
+          kill -KILL -- "-$main" >/dev/null 2>&1 || true
+        fi
+        if [ "$rc" -eq 143 ] || [ "$rc" -eq 137 ]; then
+          echo "::error title=egress canary::the canary hit its 90 s deadline (EX-0001): rerun the job"
+          rc=124
+        fi
+        exit "$rc"

@@ -1,0 +1,44 @@
+# Refuse an egress policy that is not exactly `audit` or `block`.
+#
+# The policy inputs of the reusable workflows are free strings (workflow_call
+# has no choice type). In the workflows the effective policy of a job is an
+# expression that gives `audit` for a value equal to `audit` and `block` for
+# anything else, but GitHub's `==` is case-insensitive, so the expression alone
+# reads `AUDIT` as `audit`. THIS step is the exact-string control: it is step 0
+# of every job and fails it on any value that is not exactly `audit` or
+# `block`, before anything consumes the value.
+#
+# Each policy arrives as its own environment variable (POLICY_EGRESS_POLICY,
+# POLICY_EGRESS_POLICY_SECRETLESS, POLICY_DISTRO_EGRESS_POLICY,
+# POLICY_SEMGREP_EGRESS_POLICY); a workflow sets only those it declares. Values
+# are compared as exact strings and never echoed: the message names the input
+# and the length of the value, so nothing a caller passes can add a workflow
+# command to the log.
+#
+# The workflows inline a copy of the `run:` script below, with the `env:` of
+# the inputs they declare (see egress-canary for why);
+# tests/test_egress_canary.py holds every copy byte-identical to this file.
+name: Egress policy check
+description: Fail unless every egress policy input is exactly audit or block (EX-0001).
+runs:
+  using: composite
+  steps:
+    - name: Validate the egress policy inputs (EX-0001)
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      env:
+        POLICY_EGRESS_POLICY: audit
+      run: |
+        set -u
+        bad=0
+        check() {
+          if [ "$2" = set ] && [ "$3" != audit ] && [ "$3" != block ]; then
+            echo "::error title=egress policy::the $1 input must be exactly 'audit' or 'block' (its value is ${#3} characters long)"
+            bad=1
+          fi
+        }
+        check egress-policy "${POLICY_EGRESS_POLICY+set}" "${POLICY_EGRESS_POLICY-}"
+        check egress-policy-secretless "${POLICY_EGRESS_POLICY_SECRETLESS+set}" "${POLICY_EGRESS_POLICY_SECRETLESS-}"
+        check distro-egress-policy "${POLICY_DISTRO_EGRESS_POLICY+set}" "${POLICY_DISTRO_EGRESS_POLICY-}"
+        check semgrep-egress-policy "${POLICY_SEMGREP_EGRESS_POLICY+set}" "${POLICY_SEMGREP_EGRESS_POLICY-}"
+        exit "$bad"

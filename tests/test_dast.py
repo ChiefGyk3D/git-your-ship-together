@@ -132,7 +132,13 @@ def test_the_upload_job_holds_the_one_write_and_runs_none_of_the_callers_code():
     assert upload["permissions"] == {"contents": "read", "security-events": "write"}
     names = [str(s.get("uses", "")) for s in steps_of(upload)]
     assert not any(n.startswith("actions/checkout@") for n in names), "the write must not sit beside a checkout"
-    assert not any(s.get("run") for s in steps_of(upload)), "the upload job runs no shell at all"
+    shells = [s for s in steps_of(upload) if s.get("run")]
+    # The one shell is the egress canary: a fixed script that reads no input and no caller file.
+    assert [s["name"] for s in shells] in (
+        [],
+        ["Egress canary (EX-0001)"],
+        ["Validate the egress policy inputs (EX-0001)", "Egress canary (EX-0001)"],
+    ), "the upload job runs no shell but the canary"
     sarif = steps_of(upload)[-1]
     assert sarif["uses"].startswith("github/codeql-action/upload-sarif@")
     assert sarif["with"]["category"] == "${{ inputs.sarif-category }}", (
