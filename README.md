@@ -2257,13 +2257,15 @@ latest or when the upstream defect is fixed:
   The existing `egress-policy` keeps governing every other job and keeps its default. A job that builds or
   generates something a privileged job then publishes or deploys stays under `egress-policy`. The exception
   record lists the jobs on each side and a test pins the list to the YAML.
-- The exception covers GitHub-hosted runners only. Where a caller picks the runner label (`runner`,
-  `runners`, `distro-runners`), the job is `audit` only if the label is exactly a standard hosted label (the
-  list is in the exception record, with the GitHub docs page it comes from); `self-hosted`, an empty label, a
-  list or a larger-runner name gives `block`, because an untrusted job must not run in `audit` on a persistent
-  runner.
+- The exception covers GitHub-hosted runners only, decided at run time: a secretless job is `audit` only when
+  the policy input is exactly `audit` and `runner.environment` is `github-hosted` (GitHub's own context; a
+  self-hosted runner can carry any label, so a label proves nothing). Where a caller also picks the runner
+  label (`runner`, `runners`, `distro-runners`), the label must additionally be exactly a standard hosted
+  label (the list is in the exception record, with the GitHub docs page it comes from). Anything else is
+  `block`, because an untrusted job must not run in `audit` on a persistent runner.
 - A policy value that is not exactly `audit` or `block` fails closed: the job runs in `block` and a first
-  step fails it with a fixed message that names the input and the length of its value, never the value. `distro` and `semgrep` stay `audit` when either their own
+  step fails it with a fixed message that names the input and the length of its value, never the value. That
+  check is the first step of the job, before harden-runner, so nothing consumes a bad value first. `distro` and `semgrep` stay `audit` when either their own
   input or `egress-policy-secretless` says exactly `audit`.
 - A fail-fast canary as a step of every job that can run in `block` (below).
 - Lower default timeouts, so a stuck job costs minutes: `python-ci` 15 (was 30), `bash-ci` 10 (was 15),

@@ -83,14 +83,6 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
-        with:
-          egress-policy: ${{ inputs.egress-policy == 'audit' && 'audit' || 'block' }}
-          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
-          disable-sudo: true
-          # The agent may only stop reporting to StepSecurity in block mode.
-          disable-telemetry: ${{ (inputs.egress-policy == 'audit' && 'audit' || 'block') == 'block' }}
-
       - name: Validate the egress policy inputs (EX-0001)
         timeout-minutes: 1
         shell: bash
@@ -111,6 +103,14 @@ jobs:
           check distro-egress-policy "${POLICY_DISTRO_EGRESS_POLICY+set}" "${POLICY_DISTRO_EGRESS_POLICY-}"
           check semgrep-egress-policy "${POLICY_SEMGREP_EGRESS_POLICY+set}" "${POLICY_SEMGREP_EGRESS_POLICY-}"
           exit "$bad"
+
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: ${{ inputs.egress-policy == 'audit' && 'audit' || 'block' }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
+          disable-sudo: true
+          # The agent may only stop reporting to StepSecurity in block mode.
+          disable-telemetry: ${{ (inputs.egress-policy == 'audit' && 'audit' || 'block') == 'block' }}
 
       - name: Egress canary (EX-0001)
         if: ${{ (inputs.egress-policy == 'audit' && 'audit' || 'block') == 'block' }}
@@ -250,14 +250,6 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
-        with:
-          egress-policy: ${{ inputs.egress-policy == 'audit' && 'audit' || 'block' }}
-          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
-          disable-sudo: true
-          # The agent may only stop reporting to StepSecurity in block mode.
-          disable-telemetry: ${{ (inputs.egress-policy == 'audit' && 'audit' || 'block') == 'block' }}
-
       - name: Validate the egress policy inputs (EX-0001)
         timeout-minutes: 1
         shell: bash
@@ -278,6 +270,14 @@ jobs:
           check distro-egress-policy "${POLICY_DISTRO_EGRESS_POLICY+set}" "${POLICY_DISTRO_EGRESS_POLICY-}"
           check semgrep-egress-policy "${POLICY_SEMGREP_EGRESS_POLICY+set}" "${POLICY_SEMGREP_EGRESS_POLICY-}"
           exit "$bad"
+
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: ${{ inputs.egress-policy == 'audit' && 'audit' || 'block' }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
+          disable-sudo: true
+          # The agent may only stop reporting to StepSecurity in block mode.
+          disable-telemetry: ${{ (inputs.egress-policy == 'audit' && 'audit' || 'block') == 'block' }}
 
       - name: Egress canary (EX-0001)
         if: ${{ (inputs.egress-policy == 'audit' && 'audit' || 'block') == 'block' }}

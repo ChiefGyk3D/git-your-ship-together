@@ -7,7 +7,9 @@ compromised step, dependency or action can send data. Full reference:
 ## harden-runner on every job
 
 [`step-security/harden-runner`](Glossary.md) is the **first step of every job**
-(a test checks), so the policy is in place before anything else runs.
+(a test checks), so the policy is in place before anything else runs. The one exception is the egress policy
+check (EX-0001, below): it runs before harden-runner, touches no network, and fails the job if a policy value is
+not exactly `audit` or `block`.
 
 | Mode | Behaviour | Used for |
 |---|---|---|

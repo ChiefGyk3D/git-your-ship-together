@@ -15,7 +15,7 @@ from urllib.request import Request, urlopen
 
 import pytest
 import yaml
-from test_workflows import README, WORKFLOWS, jobs, load, steps_of, triggers
+from test_workflows import README, WORKFLOWS, jobs, load, steps_of, triggers, without_runner_check
 
 DOC = load(WORKFLOWS / "security.yml")
 INPUTS = triggers(DOC)["workflow_call"]["inputs"]
@@ -48,7 +48,7 @@ def test_semgrep_holds_no_id_token_and_no_doppler():
 def test_semgrep_uses_its_own_egress_policy():
     first = steps_of(SEMGREP)[0]
     assert first["uses"].startswith("step-security/harden-runner@")
-    assert first["with"]["egress-policy"] == (
+    assert without_runner_check(first["with"]["egress-policy"]) == (
         "${{ (inputs.egress-policy-secretless == 'audit' || inputs.semgrep-egress-policy == 'audit') "
         "&& 'audit' || 'block' }}"
     )
@@ -56,7 +56,7 @@ def test_semgrep_uses_its_own_egress_policy():
     assert "inputs.extra-allowed-endpoints" in first["with"]["allowed-endpoints"]
     others = [n for n, j in jobs(DOC).items() if n != "semgrep"]
     for name in others:
-        policy = steps_of(jobs(DOC)[name])[0]["with"]["egress-policy"]
+        policy = without_runner_check(steps_of(jobs(DOC)[name])[0]["with"]["egress-policy"])
         assert policy in (
             "${{ inputs.egress-policy == 'audit' && 'audit' || 'block' }}",
             "${{ inputs.egress-policy-secretless == 'audit' && 'audit' || 'block' }}",

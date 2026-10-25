@@ -70,15 +70,30 @@ We looked at passing `token: ''` to harden-runner. Its documented purpose is rat
 agent release from the GitHub API), so the unauthenticated form would fail on shared runner addresses
 intermittently, a new flake on top of the one this exception fixes. We did not do it.
 
-**Only on GitHub-hosted runners.** The exception covers GitHub-hosted runners, because that is where the
-defect lives and where an `audit` job is thrown away after its run. A job whose runner label a caller can
-choose (`runner`, `runners` and `distro-runners` inputs, which can name a persistent self-hosted runner) must
-not run in `audit` there: an untrusted job on a persistent runner could poison it. So for those four jobs
-(`bash-ci.yml` `test` and `distro`, `python-ci.yml` `distro`, `python-fuzz.yml` `fuzz`) the effective policy is
-`audit` only when the policy input says exactly `audit` **and** the job's actual label (`matrix.runner` or
-`inputs.runner`) is exactly one of the standard hosted labels below, compared case-insensitively. Anything
-else (`self-hosted`, an empty label, a comma list, a JSON list, a runner-group object, a larger-runner name)
-is `block`. Every other relaxed job has a literal `runs-on` that is one of these labels; a test enforces it.
+**Only on GitHub-hosted runners, decided at run time.** The exception covers GitHub-hosted runners, because that
+is where the defect lives and where an `audit` job is thrown away after its run. A label cannot prove a runner
+is hosted: a self-hosted runner can carry the label `ubuntu-latest`, or any other. So the control is GitHub's own
+runtime context. `runner.environment` is `github-hosted` for GitHub-hosted runners and `self-hosted` for
+self-hosted ones (GitHub Docs, "Contexts" reference, the `runner` context table; the page is
+`content/actions/reference/workflows-and-actions/contexts.md` in github/docs, read 2026-10-24). It is available
+in step contexts (`jobs.<job_id>.steps.if` and `steps.with` list `runner`) and not in `runs-on` or a job-level
+`if`, so it is read in the harden-runner step's `with:` and in the canary's step-level `if:`.
+
+For every relaxed job the effective policy is `audit` only when the policy input is exactly `audit` **and**
+`runner.environment == 'github-hosted'`; anything else (`self-hosted`, empty, undefined) is `block`. GitHub's
+string comparison is case-insensitive, so `GitHub-Hosted` counts as hosted; the policy inputs themselves are
+compared exactly by the policy check, which fails the job first.
+
+The label list is a second check, kept for the four jobs whose runner label a caller chooses (`runner`,
+`runners` and `distro-runners` inputs: `bash-ci.yml` `test` and `distro`, `python-ci.yml` `distro`,
+`python-fuzz.yml` `fuzz`). For those, audit needs **both** the runtime context and a label that is exactly one
+of the standard hosted labels below. The label check alone would not be enough; the runtime check alone is the
+control. A runner-group object, a comma list, a JSON list or a larger-runner name does not match a label and
+gives `block`. Every other relaxed job has a literal `runs-on` that is one of these labels; a test enforces it.
+
+The policy check is the **first** step of every job, before harden-runner, so a value that is not exactly
+`audit` or `block` fails the job before anything consumes it. It touches no network and reads only its own
+inputs. (harden-runner is therefore the second step of those jobs.)
 
 The list of hosted labels, in one place. Source: GitHub Docs, "GitHub-hosted runners" reference, section
 "Standard GitHub-hosted runners" (https://docs.github.com/en/actions/reference/runners/github-hosted-runners;

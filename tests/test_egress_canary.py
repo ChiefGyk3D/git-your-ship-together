@@ -406,13 +406,38 @@ def test_the_policy_check_reports_every_bad_input_by_name():
     assert done.stdout.count("::error") == 2
 
 
+CHECK_NAME = "Validate the egress policy inputs (EX-0001)"
+
+
 def workflow_jobs():
+    """Every job that has a harden-runner step, with its steps after the leading policy check (if it has one)."""
     for path in WORKFLOWS:
         doc = yaml.safe_load(path.read_text())
         for name, job in doc["jobs"].items():
-            steps = job.get("steps") or []
+            raw = job.get("steps") or []
+            steps = raw[1:] if raw and raw[0].get("name") == CHECK_NAME else raw
             if steps and str(steps[0].get("uses", "")).startswith("step-security/harden-runner@"):
                 yield path, name, job, steps
+
+
+def test_the_policy_check_is_the_first_step_of_every_job_that_has_it():
+    """It runs before anything consumes a policy, harden-runner included. No step may precede it."""
+    seen = 0
+    for path in WORKFLOWS:
+        for name, job in yaml.safe_load(path.read_text())["jobs"].items():
+            names = [s.get("name") for s in job.get("steps") or []]
+            if CHECK_NAME in names:
+                seen += 1
+                assert names.index(CHECK_NAME) == 0, f"{path.name}:{name}: a step runs before the policy check"
+                assert names.count(CHECK_NAME) == 1
+    assert seen > 60
+
+
+def test_every_job_that_can_block_has_the_policy_check_except_the_hardcoded_audit_workflow():
+    for path, name, job, _steps in workflow_jobs():
+        if path.name in ("ci.yml", "audit.yml"):
+            continue
+        assert job["steps"][0].get("name") == CHECK_NAME, f"{path.name}:{name}"
 
 
 def test_something_was_collected():
@@ -452,7 +477,10 @@ def runner_is_hosted(label) -> bool:
 
 
 POLICY_INPUTS = ("egress-policy", "egress-policy-secretless", "distro-egress-policy", "semgrep-egress-policy")
-VALUES = ["audit", "block", "typo", "", "Block"]
+VALUES = ["audit", "block", "typo", "", "Block", "AUDIT"]
+# `runner.environment` is `github-hosted` or `self-hosted` (GitHub Docs, contexts, runner context). Anything else
+# must never give audit. GitHub's string comparison is case-insensitive, so the capitalizations below are equal.
+ENVIRONMENTS = ["github-hosted", "self-hosted", "", None, "GitHub-Hosted", "GITHUB-HOSTED", "github-hosted ", "hosted"]
 
 
 def declared_policy_inputs(path: Path) -> list[str]:
@@ -473,9 +501,14 @@ def hosted_labels() -> list[str]:
     return labels
 
 
-def evaluate(expression: str, values: dict[str, str], runner=None):
-    """The expression forms used for a policy: inputs.X, runner refs, == 'lit', &&, ||, parentheses, and
-    contains(fromJSON('[...]'), <runner>) against the hosted-label list."""
+def eq(left, right: str) -> bool:
+    """GitHub's `==` on strings is case-insensitive; null (an undefined context value) equals no string."""
+    return isinstance(left, str) and left.lower() == right.lower()
+
+
+def evaluate(expression: str, values: dict[str, str], runner=None, environment="github-hosted"):
+    """The expression forms used for a policy: inputs.X, runner.environment, == 'lit' (case-insensitive like
+    GitHub's), &&, ||, parentheses, and contains(fromJSON('[...]'), <runner>) against the hosted-label list."""
     body = re.fullmatch(r"\$\{\{ (.*) \}\}", expression).group(1)
 
     def hosted(m):
@@ -485,22 +518,35 @@ def evaluate(expression: str, values: dict[str, str], runner=None):
         return "H(R)"
 
     body = re.sub(r"contains\(fromJSON\('(\[[^']*\])'\), (?:matrix|inputs)\.runner\)", hosted, body)
-    py = re.sub(r"inputs\.([\w-]+)", lambda m: f"V[{m.group(1)!r}]", body).replace("&&", " and ").replace("||", " or ")
-    assert re.fullmatch(r"[\sVHR\[\]'a-z\-=()]*", py), f"unexpected syntax in a policy expression: {py}"
+    body = body.replace("runner.environment", "N")
+    body = re.sub(r"inputs\.([\w-]+)", lambda m: f"V[{m.group(1)!r}]", body)
+    body = re.sub(r"(V\['[\w-]+'\]|N) == ('[\w-]*')", r"Q(\1, \2)", body)
+    py = body.replace("&&", " and ").replace("||", " or ")
+    assert re.fullmatch(r"[\sVHRNQ\[\]'a-z\-=(),]*", py), f"unexpected syntax in a policy expression: {py}"
 
-    def is_hosted(label):  # GitHub compares strings case-insensitively; a list or other type never matches a label
+    def is_hosted(label):  # a list or other type never matches a label
         return isinstance(label, str) and label.lower() in {x.lower() for x in hosted_labels()}
 
-    return eval(py, {"__builtins__": {}}, {"V": values, "H": is_hosted, "R": runner})  # noqa: S307 - our own fixed expression
+    env = {"V": values, "H": is_hosted, "R": runner, "N": environment, "Q": eq}
+    return eval(py, {"__builtins__": {}}, env)  # noqa: S307 - our own fixed expression
 
 
 def test_the_runner_check_follows_the_hosted_list():
     lst = json.dumps(hosted_labels(), separators=(",", ":"))
-    expr = "${{ (inputs.a == 'audit' && contains(fromJSON('" + lst + "'), matrix.runner)) && 'audit' || 'block' }}"
+    expr = (
+        "${{ (inputs.a == 'audit' && runner.environment == 'github-hosted' && contains(fromJSON('"
+        + lst
+        + "'), matrix.runner)) && 'audit' || 'block' }}"
+    )
     assert evaluate(expr, {"a": "audit"}, "ubuntu-24.04") == "audit"
     assert evaluate(expr, {"a": "audit"}, "self-hosted") == "block"
     assert evaluate(expr, {"a": "audit"}, ["ubuntu-24.04"]) == "block"
     assert evaluate(expr, {"a": "block"}, "ubuntu-24.04") == "block"
+    # A self-hosted runner can carry a hosted label; the runtime context is what stops it.
+    assert evaluate(expr, {"a": "audit"}, "ubuntu-24.04", environment="self-hosted") == "block"
+    assert evaluate(expr, {"a": "audit"}, "ubuntu-24.04", environment=None) == "block"
+    assert evaluate(expr, {"a": "audit"}, "ubuntu-24.04", environment="") == "block"
+    assert evaluate(expr, {"a": "audit"}, "ubuntu-24.04", environment="GitHub-Hosted") == "audit"  # case-insensitive
 
 
 def test_the_evaluator_follows_github_semantics():
@@ -520,15 +566,14 @@ def test_every_job_gets_the_policy_check_and_the_canary_right_after_harden_runne
     offset = 1
     declared = declared_policy_inputs(path)
     if not hardcoded:
-        check = steps[1]
-        assert check.get("name") == "Validate the egress policy inputs (EX-0001)", f"{path.name}:{name}"
+        check = job["steps"][0]
+        assert check.get("name") == CHECK_NAME, f"{path.name}:{name}: the policy check must be the first step"
         assert check["run"] == check_script(), f"{path.name}:{name} policy check differs from the composite action"
         assert "if" not in check, "the check must run whatever the policy is"
         assert check["env"] == {"POLICY_" + n.upper().replace("-", "_"): f"${{{{ inputs.{n} }}}}" for n in declared}, (
             f"{path.name}:{name}: one environment variable per policy input, never a joined string"
         )
         assert check["working-directory"] == "${{ github.workspace }}" and check["shell"] == "bash"
-        offset = 2
     canary = steps[offset]
     assert canary.get("name") == "Egress canary (EX-0001)", f"{path.name}:{name} has no canary after the checks"
     assert canary["timeout-minutes"] == 2
@@ -557,18 +602,27 @@ def test_every_job_gets_the_policy_check_and_the_canary_right_after_harden_runne
         assert job["runs-on"].lower() in {x.lower() for x in hosted_labels()}, f"{path.name}:{name}: not a hosted label"
     assert ("contains(fromJSON(" in policy) is (secretless and dynamic), f"{path.name}:{name}: runner check misplaced"
     runners = RUNNER_CASES if dynamic else [None]
+    used = sorted(set(re.findall(r"inputs\.([\w-]+)", policy)) - {"runner"})
+    assert ("runner.environment == 'github-hosted'" in policy) is secretless, (
+        f"{path.name}:{name}: runtime check misplaced"
+    )
     for runner in runners:
-        for combo in itertools.product(VALUES, repeat=len(declared)):
-            values = dict(zip(declared, combo, strict=True))
-            result = evaluate(policy, values, runner)
-            assert result in ("audit", "block")
-            assert evaluate(steps[0]["with"]["disable-telemetry"], values, runner) is (result == "block")
-            assert evaluate(canary["if"], values, runner) is (result == "block")
-            used = set(re.findall(r"inputs\.([\w-]+)", policy)) - {"runner"}
-            wants_audit = any(values[n] == "audit" for n in used)
-            on_hosted = (not secretless) or (not dynamic) or runner_is_hosted(runner)
-            expected = "audit" if wants_audit and on_hosted else "block"
-            assert result == expected, f"{path.name}:{name}: audit only on an exact `audit` on a hosted runner label"
+        for environment in ENVIRONMENTS:
+            for combo in itertools.product(VALUES, repeat=len(used)):
+                values = dict(zip(used, combo, strict=True))
+                result = evaluate(policy, values, runner, environment)
+                assert result in ("audit", "block")
+                assert evaluate(steps[0]["with"]["disable-telemetry"], values, runner, environment) is (
+                    result == "block"
+                )
+                assert evaluate(canary["if"], values, runner, environment) is (result == "block")
+                wants_audit = any(v.lower() == "audit" for v in values.values())  # GitHub compares case-insensitively
+                runtime_hosted = (not secretless) or (environment or "").lower() == "github-hosted"
+                label_hosted = (not secretless) or (not dynamic) or runner_is_hosted(runner)
+                expected = "audit" if wants_audit and runtime_hosted and label_hosted else "block"
+                assert result == expected, (
+                    f"{path.name}:{name}: audit needs the input, runner.environment and the label to agree"
+                )
 
 
 def test_the_effective_policy_follows_the_right_inputs():

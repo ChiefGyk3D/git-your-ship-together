@@ -89,6 +89,7 @@ def without_runner_check(expression: str) -> str:
     audit; tests/test_egress_canary.py pins that clause and its list, this reduces the rest to the plain form.
     """
     plain = re.sub(r" && contains\(fromJSON\('[^']*'\), (?:matrix|inputs)\.runner\)", "", expression)
+    plain = plain.replace(" && runner.environment == 'github-hosted'", "")
     plain = plain.replace("((", "(").replace("))", ")")
     return re.sub(r"\((inputs\.[\w-]+ == 'audit')\)", r"\1", plain)
 
@@ -107,7 +108,13 @@ def jobs(doc: dict) -> dict:
 
 
 def steps_of(job: dict) -> list[dict]:
-    return [s for s in (job.get("steps") or []) if isinstance(s, dict)]
+    """A job's steps. The leading egress policy check (EX-0001) runs before harden-runner and touches no network;
+    the guard tests that say "harden-runner is first" look through it. tests/test_egress_canary.py pins that it is
+    the first step, and that it is the only one that precedes harden-runner."""
+    steps = [s for s in (job.get("steps") or []) if isinstance(s, dict)]
+    if steps and steps[0].get("name") == "Validate the egress policy inputs (EX-0001)":
+        return steps[1:]
+    return steps
 
 
 def all_steps(path: Path):
