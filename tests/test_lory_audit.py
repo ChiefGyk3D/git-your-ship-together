@@ -8,12 +8,14 @@ two scripts are extracted from the YAML and run as shipped; `curl` is a stub on 
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
 import stat
 import subprocess
 import textwrap
+import urllib.parse
 from pathlib import Path
 
 import pytest
@@ -29,7 +31,7 @@ JOB = DOC["jobs"]["audit"]
 STEPS = {s.get("name"): s for s in JOB["steps"]}
 CALL_STEP = STEPS["Call the Lory pipeline scan API"]
 JUDGE_STEP = STEPS["Judge the Lory response"]
-TOKEN = "lory-test-token-0123456789"  # a made-up value, not a credential
+TOKEN = 'lory/te+st=tok"en\\ 0123&456789'  # a made-up value with awkward characters, not a credential
 URL = "https://lorikeetsecurity.com/talon/api/v1/pipeline/scan"
 
 
@@ -80,8 +82,21 @@ def test_there_is_no_checkout_and_the_artifact_step_is_pinned():
     assert not [u for u in uses if u.startswith("actions/checkout@")], "nothing here needs the tree"
     upload = STEPS["Keep the response"]
     assert re.fullmatch(r"actions/upload-artifact@[0-9a-f]{40}", upload["uses"])
-    assert upload["if"] == "${{ always() }}"
     assert upload["with"]["path"] == "${{ runner.temp }}/lory/response.json"
+
+
+def test_the_raw_response_is_uploaded_only_on_request_from_a_private_repository_for_three_days():
+    """Findings are sensitive: an artifact is readable by anyone who can read the repository's artifacts."""
+    assert CALL["inputs"]["upload-response"]["default"] is False
+    assert CALL["inputs"]["upload-response"]["type"] == "boolean"
+    upload = STEPS["Keep the response"]
+    condition = upload["if"]
+    assert "inputs.upload-response" in condition and "github.event.repository.private == true" in condition
+    assert int(upload["with"]["retention-days"]) <= 3
+    assert upload["with"]["if-no-files-found"] == "ignore"
+    assert CALL_STEP["env"]["LORY_REPO_PRIVATE"] == "${{ github.event.repository.private }}"
+    assert CALL_STEP["env"]["LORY_UPLOAD"] == "${{ inputs.upload-response }}"
+    assert len([s for s in JOB["steps"] if "upload-artifact" in str(s.get("uses", ""))]) == 1
 
 
 def test_the_call_is_bounded_and_does_not_follow_redirects():
@@ -134,6 +149,8 @@ def run_call(tmp_path: Path, body: bytes | None, rc: int = 0, **env):
         "LORY_MAX_TIME": "60",
         "LORY_MAX_BYTES": "1024",
         "LORY_OUT_DIR": str(out_dir),
+        "LORY_UPLOAD": "false",
+        "LORY_REPO_PRIVATE": "true",
         **{k: str(v) for k, v in env.items()},
     }
     done = subprocess.run(
@@ -156,10 +173,90 @@ def test_a_good_call_sends_the_documented_request_and_keeps_the_token_off_the_co
     assert TOKEN not in done.stdout + done.stderr + summary
 
 
-def test_the_token_is_scrubbed_from_the_saved_response(tmp_path):
-    done, _, saved, _ = run_call(tmp_path, json.dumps({"exit_code": 0, "echo": TOKEN}).encode())
+def token_part(token: str, offset: int) -> bytes:
+    """The base64 characters of `token` that do not depend on its neighbours, when it starts at byte `offset` mod 3."""
+    enc = base64.b64encode(b"\0" * offset + token.encode()).rstrip(b"=")
+    total = offset + len(token.encode())
+    return enc[(offset * 8 + 5) // 6 : len(enc) - (1 if total % 3 else 0)]
+
+
+PLAIN_FORMS = {
+    "raw": lambda t: t,
+    "json-escaped": lambda t: json.dumps(t)[1:-1],
+    "json-slash-escaped": lambda t: json.dumps(t)[1:-1].replace("/", "\\/"),
+    "url-quote": lambda t: urllib.parse.quote(t, safe=""),
+    "url-quote-plus": lambda t: urllib.parse.quote_plus(t),
+    "url-quote-keeping-slash": lambda t: urllib.parse.quote(t),
+    "bearer-header": lambda t: "Bearer " + t,
+}
+
+
+def body_with(text: str) -> bytes:
+    # Inserted verbatim: the forms under test are already what a server would have written inside a JSON string.
+    return ('{"exit_code": 0, "echo": "' + text + '"}').encode()
+
+
+def assert_clean(kept: bytes, form: str):
+    for name, make in PLAIN_FORMS.items():
+        assert make(TOKEN).encode() not in kept, f"{form}: {name} form survived in the saved response"
+    for offset in range(3):
+        assert token_part(TOKEN, offset) not in kept, f"{form}: base64 (offset {offset}) survived"
+        urlsafe = token_part(TOKEN, offset).replace(b"+", b"-").replace(b"/", b"_")
+        assert urlsafe not in kept, f"{form}: urlsafe base64 (offset {offset}) survived"
+
+
+@pytest.mark.parametrize("form", list(PLAIN_FORMS))
+def test_the_token_is_scrubbed_from_the_saved_response_in_every_plain_form(tmp_path, form):
+    body = body_with("before " + PLAIN_FORMS[form](TOKEN) + " after")
+    done, _, saved, _ = run_call(tmp_path, body, LORY_MAX_BYTES=len(body) + 64)
+    assert done.returncode == 0, done.stdout + done.stderr
+    kept = saved.read_bytes()
+    assert b"[redacted]" in kept, form
+    assert_clean(kept, form)
+    assert TOKEN not in done.stdout + done.stderr
+
+
+@pytest.mark.parametrize("urlsafe", [False, True], ids=["base64", "base64url"])
+@pytest.mark.parametrize("offset", [0, 1, 2])
+def test_the_token_is_scrubbed_from_the_saved_response_when_base64_encoded_at_any_alignment(tmp_path, offset, urlsafe):
+    encode = base64.urlsafe_b64encode if urlsafe else base64.b64encode
+    text = encode(b"x" * (30 + offset) + TOKEN.encode() + b"yz").decode()
+    assert token_part(TOKEN, offset).replace(b"+", b"-").replace(b"/", b"_") in text.encode() or (
+        token_part(TOKEN, offset) in text.encode()
+    ), "test setup: this alignment is not in the encoded text"
+    body = body_with(text)
+    done, _, saved, _ = run_call(tmp_path, body, LORY_MAX_BYTES=len(body) + 64)
+    assert done.returncode == 0, done.stdout + done.stderr
+    kept = saved.read_bytes()
+    assert b"[redacted]" in kept
+    assert_clean(kept, f"base64 offset {offset}")
+
+
+def test_the_response_body_is_never_printed(tmp_path):
+    marker = "SENSITIVE-FINDING-TEXT"
+    done, summary, _, _ = run_call(tmp_path, json.dumps({"exit_code": 3, "finding": marker}).encode())
     assert done.returncode == 0
-    assert TOKEN.encode() not in saved.read_bytes() and b"[redacted]" in saved.read_bytes()
+    assert marker not in done.stdout + done.stderr + summary
+    done, summary, _, _ = run_call(tmp_path, json.dumps({"finding": marker}).encode() + b"x" * 5000)
+    assert done.returncode == 1 and marker not in done.stdout + done.stderr + summary
+
+
+@pytest.mark.parametrize("private", ["false", "", "maybe", "True "])
+def test_uploading_is_refused_unless_the_repository_is_exactly_private(tmp_path, private):
+    done, summary, saved, stubdir = run_call(
+        tmp_path, b'{"exit_code": 0}', LORY_UPLOAD="true", LORY_REPO_PRIVATE=private
+    )
+    assert done.returncode == 1, done.stdout + done.stderr
+    assert "upload-response" in done.stdout and "private" in summary
+    assert not (stubdir / "argv").exists(), "the API must not be called when the upload is refused"
+    assert not saved.exists()
+
+
+def test_uploading_is_allowed_in_a_private_repository_and_a_public_one_may_run_without_it(tmp_path):
+    done, *_ = run_call(tmp_path, b'{"exit_code": 0}', LORY_UPLOAD="true", LORY_REPO_PRIVATE="true")
+    assert done.returncode == 0, done.stdout + done.stderr
+    done, *_ = run_call(tmp_path, b'{"exit_code": 0}', LORY_UPLOAD="false", LORY_REPO_PRIVATE="false")
+    assert done.returncode == 0, done.stdout + done.stderr
 
 
 @pytest.mark.parametrize(
@@ -249,6 +346,16 @@ def test_a_clean_result_passes_in_both_modes(tmp_path):
         done, summary = run_judge(tmp_path, b'{"exit_code": 0, "extra": {"anything": [1]}}', mode)
         assert done.returncode == 0, done.stdout + done.stderr
         assert "exit_code 0, pass" in summary
+        assert re.search(r"at \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", summary), "the summary carries a UTC timestamp"
+
+
+def test_the_judge_never_prints_the_body(tmp_path):
+    marker = "SENSITIVE-FINDING-TEXT"
+    for mode in ("true", "false"):
+        done, summary = run_judge(tmp_path, json.dumps({"exit_code": 4, "finding": marker}).encode(), mode)
+        assert marker not in done.stdout + done.stderr + summary
+        done, summary = run_judge(tmp_path, ('{"exit_code": "' + marker + '"}').encode(), mode)
+        assert done.returncode == 1 and marker not in done.stdout + done.stderr + summary
 
 
 def test_findings_are_advisory_by_default_and_blocking_on_request(tmp_path):
@@ -298,6 +405,7 @@ def test_the_caller_template_is_scheduled_and_on_demand_never_per_pull_request()
     ), "the template pins by commit with a version comment, like every GYST caller"
     assert job["permissions"] == {"contents": "read"}
     assert job["secrets"] == {"LORY_PIPELINE_TOKEN": "${{ secrets.LORY_PIPELINE_TOKEN }}"}
+    assert "sensitive" in EXAMPLE.read_text().lower() and "upload-response" in EXAMPLE.read_text()
     assert "with" not in job, "the template is advisory by default; blocking is a commented-out choice"
 
 
@@ -312,5 +420,9 @@ def test_the_page_states_the_limits():
         "never instructions",
         "fails closed",
         ".lory/config.yml",
+        "sensitive",
+        "upload-response",
+        "private",
+        "three days",
     ):
         assert needle in text, f"docs/wiki/Workflow-lory-audit.md does not say {needle!r}"

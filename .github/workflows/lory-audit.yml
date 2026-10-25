@@ -31,7 +31,13 @@
 # to curl on standard input, never on a command line. Every value, including
 # the ref name, reaches the shell through an environment variable and never by
 # template expansion into a script. The saved response is scrubbed of the token
-# before it is uploaded as an artifact.
+# before anything is kept, in its raw, JSON-escaped, URL-encoded and base64 forms.
+#
+# Findings are sensitive: anyone who can read a repository's artifacts can read
+# them, and a public repository's artifacts are public. So the response body is
+# never printed to the log, the job summary carries only the exit_code and a
+# timestamp, and the raw response is uploaded only when `upload-response` is
+# true AND the repository is private (the job refuses otherwise), for three days.
 #
 # Unknown until the first real run (a spike): the response schema beyond
 # `exit_code`, whether a deep audit of a non-pull-request target works through
@@ -46,6 +52,10 @@ on:
     inputs:
       fail-on-findings:
         description: Fail the job when Lory returns a nonzero `exit_code`. The default (false) reports the result in the job summary and as a warning and passes. A failed or malformed call fails the job either way.
+        type: boolean
+        default: false
+      upload-response:
+        description: Upload the raw Lory response as an artifact (kept three days). Off by default because findings are sensitive. It is refused, and the job fails before calling the API, unless the repository is private. With it off, the job summary carries only the `exit_code` and a timestamp.
         type: boolean
         default: false
       request-timeout-seconds:
@@ -209,6 +219,8 @@ jobs:
           LORY_PR_NUMBER: ${{ github.event.pull_request.number || 0 }}
           LORY_MAX_TIME: ${{ inputs.request-timeout-seconds }}
           LORY_MAX_BYTES: ${{ inputs.max-response-bytes }}
+          LORY_UPLOAD: ${{ inputs.upload-response }}
+          LORY_REPO_PRIVATE: ${{ github.event.repository.private }}
           LORY_OUT_DIR: ${{ runner.temp }}/lory
         run: |
           set -u -o pipefail
@@ -222,6 +234,11 @@ jobs:
           case "$LORY_MAX_BYTES" in '' | *[!0-9]*) fail "max-response-bytes must be a whole number" ;; esac
           case "$LORY_PR_NUMBER" in '' | *[!0-9]*) fail "the pull request number is not a whole number" ;; esac
           [ "$LORY_MAX_TIME" -ge 1 ] && [ "$LORY_MAX_BYTES" -ge 1 ] || fail "request-timeout-seconds and max-response-bytes must be at least 1"
+          # Raw findings in an artifact are readable by everyone who can read this repository's artifacts. Only a
+          # repository that says it is private may upload them; anything else, including a missing value, refuses.
+          if [ "$LORY_UPLOAD" = true ] && [ "$LORY_REPO_PRIVATE" != true ]; then
+            fail "upload-response is true but the repository is not known to be private; findings are sensitive and only a private repository may upload them"
+          fi
           [ -n "$LORY_PIPELINE_TOKEN" ] || fail "the LORY_PIPELINE_TOKEN secret is empty"
           mkdir -p "$LORY_OUT_DIR"
           out="$LORY_OUT_DIR/response.json"
@@ -236,17 +253,32 @@ jobs:
               --data "$body" --output - "$LORY_API_URL" |
             head -c "$((LORY_MAX_BYTES + 1))" >"$out"
           statuses=("${PIPESTATUS[@]}")
-          # Scrub the token from whatever was saved, even though a server has no reason to echo it.
+          # Scrub the token from whatever was saved, in every form a server might echo it: raw, JSON-escaped,
+          # URL-encoded, and base64 (both alphabets, at each of the three alignments, keeping only the characters
+          # that do not depend on the neighbouring bytes).
           python3 -I - "$out" <<'PY'
+          import base64
+          import json
           import os
           import sys
+          import urllib.parse
 
-          path, token = sys.argv[1], os.environ["LORY_PIPELINE_TOKEN"].encode()
+          path, token = sys.argv[1], os.environ["LORY_PIPELINE_TOKEN"]
+          raw = token.encode()
+          forms = {raw, json.dumps(token)[1:-1].encode(), json.dumps(token)[1:-1].replace("/", "\\/").encode()}
+          forms |= {urllib.parse.quote(token, safe="").encode(), urllib.parse.quote(token).encode()}
+          forms.add(urllib.parse.quote_plus(token).encode())
+          for offset in range(3):
+              enc = base64.b64encode(b"\0" * offset + raw).rstrip(b"=")
+              part = enc[(offset * 8 + 5) // 6 : len(enc) - (1 if (offset + len(raw)) % 3 else 0)]
+              forms.add(part)
+              forms.add(part.replace(b"+", b"-").replace(b"/", b"_"))
           with open(path, "rb") as handle:
               data = handle.read()
-          if token and token in data:
-              with open(path, "wb") as handle:
-                  handle.write(data.replace(token, b"[redacted]"))
+          for form in sorted((f for f in forms if len(f) >= 4), key=len, reverse=True):
+              data = data.replace(form, b"[redacted]")
+          with open(path, "wb") as handle:
+              handle.write(data)
           PY
           size=$(wc -c <"$out" | tr -d ' ')
           if [ "$size" -gt "$LORY_MAX_BYTES" ]; then
@@ -269,11 +301,13 @@ jobs:
           FAIL_ON_FINDINGS: ${{ inputs.fail-on-findings }}
         run: |
           python3 -I - <<'PY'
+          import datetime
           import json
           import os
           import sys
 
           summary = os.environ.get("GITHUB_STEP_SUMMARY") or os.devnull
+          stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
           path = os.path.join(os.environ["LORY_OUT_DIR"], "response.json")
           cap = int(os.environ["LORY_MAX_BYTES"])
           blocking = os.environ["FAIL_ON_FINDINGS"].strip().lower() == "true"
@@ -318,21 +352,22 @@ jobs:
           if "exit_code" not in doc or isinstance(code, bool) or not isinstance(code, int):
               die("the response has no integer exit_code; a missing or malformed result is never a pass")
           if code == 0:
-              note("Lory audit: exit_code 0, pass")
+              note(f"Lory audit: exit_code 0, pass, at {stamp}")
               print("Lory audit: exit_code 0, pass")
               sys.exit(0)
           if blocking:
               die(f"exit_code {code}: Lory reported findings and fail-on-findings is true")
-          note(f"Lory audit: exit_code {code}, findings reported (advisory: fail-on-findings is false)")
+          note(f"Lory audit: exit_code {code}, findings reported (advisory: fail-on-findings is false), at {stamp}")
           print(f"::warning title=Lory audit::exit_code {code}: Lory reported findings (advisory run)")
           PY
 
-      # The saved response, scrubbed of the token. It is third-party output: read it, do not run it.
+      # Off by default and private repositories only: findings are sensitive and an artifact is readable by anyone who
+      # can read this repository's artifacts. The condition repeats the refusal in the call step. Three days at most.
       - name: Keep the response
-        if: ${{ always() }}
+        if: ${{ always() && inputs.upload-response && github.event.repository.private == true }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: lory-audit-response
           path: ${{ runner.temp }}/lory/response.json
           if-no-files-found: ignore
-          retention-days: 30
+          retention-days: 3
