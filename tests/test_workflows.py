@@ -82,6 +82,17 @@ SELF = "ChiefGyk3D/git-your-ship-together/"
 HARDEN_RUNNER = "step-security/harden-runner@"
 
 
+def without_runner_check(expression: str) -> str:
+    """The effective-policy expression with the hosted-runner clause of EX-0001 removed.
+
+    A job whose runner label a caller chooses also requires `contains(fromJSON([hosted labels]), <runner>)` for
+    audit; tests/test_egress_canary.py pins that clause and its list, this reduces the rest to the plain form.
+    """
+    plain = re.sub(r" && contains\(fromJSON\('[^']*'\), (?:matrix|inputs)\.runner\)", "", expression)
+    plain = plain.replace("((", "(").replace("))", ")")
+    return re.sub(r"\((inputs\.[\w-]+ == 'audit')\)", r"\1", plain)
+
+
 def load(path: Path) -> dict:
     """`on:` parses as the boolean True under YAML 1.1; use triggers()."""
     return yaml.safe_load(path.read_text())
@@ -347,7 +358,7 @@ def test_every_reusable_job_starts_with_harden_runner(path):
                 + own
                 + " == 'audit') && 'audit' || 'block' }}"
             }
-        assert with_.get("egress-policy") in allowed, (
+        assert without_runner_check(with_.get("egress-policy")) in allowed, (
             f"{path.name}: job {job_name!r} harden-runner ignores the {own or 'egress-policy'} input"
         )
 
@@ -584,7 +595,7 @@ def test_the_distro_job_is_gated_and_has_its_own_egress_policy(name):
     steps = steps_of(jobs(doc)["distro"])
     assert str(steps[0]["uses"]).startswith(HARDEN_RUNNER)
     with_ = steps[0]["with"]
-    assert with_["egress-policy"] == (
+    assert without_runner_check(with_["egress-policy"]) == (
         "${{ (inputs.egress-policy-secretless == 'audit' || inputs.distro-egress-policy == 'audit') "
         "&& 'audit' || 'block' }}"
     )

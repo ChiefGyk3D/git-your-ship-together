@@ -63,12 +63,51 @@ upload), no token handed to an action or a `gh` call beyond the default, and no 
 consumes verbatim. It does **not** mean the job has no credential at all: every job has the default job token,
 read-scoped here. The runner mints it, harden-runner v2.22.2 takes it through its `token` input (default
 `github.token`, used "to avoid github rate limiting"), and `actions/checkout` uses it even with
-`persist-credentials: false`. So a read-scoped token exists transiently during checkout and the harden-runner
-step, and it is in the job's environment for the steps that run caller code.
+`persist-credentials: false`. So a read-scoped token is available to the actions that take it as an input (checkout, harden-runner) and to
+any step that references it explicitly. It is not exported to `run` steps automatically.
 
 We looked at passing `token: ''` to harden-runner. Its documented purpose is rate limiting (it fetches the
 agent release from the GitHub API), so the unauthenticated form would fail on shared runner addresses
 intermittently, a new flake on top of the one this exception fixes. We did not do it.
+
+**Only on GitHub-hosted runners.** The exception covers GitHub-hosted runners, because that is where the
+defect lives and where an `audit` job is thrown away after its run. A job whose runner label a caller can
+choose (`runner`, `runners` and `distro-runners` inputs, which can name a persistent self-hosted runner) must
+not run in `audit` there: an untrusted job on a persistent runner could poison it. So for those four jobs
+(`bash-ci.yml` `test` and `distro`, `python-ci.yml` `distro`, `python-fuzz.yml` `fuzz`) the effective policy is
+`audit` only when the policy input says exactly `audit` **and** the job's actual label (`matrix.runner` or
+`inputs.runner`) is exactly one of the standard hosted labels below, compared case-insensitively. Anything
+else (`self-hosted`, an empty label, a comma list, a JSON list, a runner-group object, a larger-runner name)
+is `block`. Every other relaxed job has a literal `runs-on` that is one of these labels; a test enforces it.
+
+The list of hosted labels, in one place. Source: GitHub Docs, "GitHub-hosted runners" reference, section
+"Standard GitHub-hosted runners" (https://docs.github.com/en/actions/reference/runners/github-hosted-runners;
+the table is `data/reusables/actions/supported-github-runners.md` in github/docs, read 2026-10-24).
+Larger runners have custom names and are deliberately not in the list. `tests/test_egress_canary.py` parses
+this block and requires every workflow to embed exactly this list.
+
+<!-- hosted-runner-labels:begin -->
+ubuntu-latest
+ubuntu-22.04
+ubuntu-24.04
+ubuntu-26.04
+ubuntu-22.04-arm
+ubuntu-24.04-arm
+ubuntu-26.04-arm
+ubuntu-slim
+windows-latest
+windows-2022
+windows-2025
+windows-2025-vs2026
+windows-11-arm
+windows-11-vs2026-arm
+macos-latest
+macos-14
+macos-15
+macos-15-intel
+macos-26
+macos-26-intel
+<!-- hosted-runner-labels:end -->
 
 Relaxed (policy follows `egress-policy-secretless`, default `audit`): the jobs below, and only these.
 
@@ -143,8 +182,9 @@ Not in scope: this repository's own `ci.yml` jobs (already `audit` before this e
 
 In the relaxed jobs a compromised dependency or action can now send data to any host and the job will not
 stop it; it is logged, not blocked. What it can reach is the checked-out repository (a private repository's
-source can leave the runner) and the default job token, read-scoped, which exists transiently during checkout
-and the harden-runner step and stays in the environment of the job's steps. A read-scoped token can read
+source can leave the runner) and the default job token, read-scoped, which actions that take it as an input
+(checkout, harden-runner) and steps that reference it explicitly can use; it is not exported to `run` steps
+automatically. A read-scoped token can read
 what the repository's own read access allows; it cannot publish, push, deploy or read a stored secret. The
 relaxation applies to every region, not only westus2, because the input is static. Audit mode also has its
 own open upstream defect (#709, memory growth on process-heavy jobs); none of our jobs is shaped like the
@@ -154,6 +194,17 @@ The canary has a known false-positive risk: a load balancer that still lists an 
 answering fails a healthy `block` job. Each failing address is retried three more times, a second apart, so
 a transient refusal passes; a persistent one costs a rerun. The logs it prints on failure contain resolver
 and host addresses, so review them before attaching them to a support ticket.
+
+## What the canary prints
+
+Only when it fails, to the live job log and nowhere else: `uname -srmo` (kernel name, release, machine and
+operating system; no hostname), `/etc/resolv.conf`, the `Current DNS Server`, `DNS Servers` and `DNS Domain`
+lines of `resolvectl status`, the UDP listeners on port 53 from `ss -lun` (no process names), for each of
+`github.com`, `api.github.com`, `results-receiver.actions.githubusercontent.com` and
+`pipelines.actions.githubusercontent.com` the `getent ahostsv4` answer and one line from `curl`
+(HTTP status, remote address, connect time), and the list of unreachable addresses. Plus a one-line step
+summary naming EX-0001 and those addresses. Nothing from the environment, no headers, no hostname. The
+output contains resolver and host addresses, so read it before attaching it to a support ticket.
 
 ## Expiry
 

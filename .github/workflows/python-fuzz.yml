@@ -99,37 +99,36 @@ jobs:
     steps:
       - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
         with:
-          egress-policy: ${{ inputs.egress-policy-secretless == 'audit' && 'audit' || 'block' }}
+          egress-policy: ${{ (inputs.egress-policy-secretless == 'audit' && contains(fromJSON('["ubuntu-latest","ubuntu-22.04","ubuntu-24.04","ubuntu-26.04","ubuntu-22.04-arm","ubuntu-24.04-arm","ubuntu-26.04-arm","ubuntu-slim","windows-latest","windows-2022","windows-2025","windows-2025-vs2026","windows-11-arm","windows-11-vs2026-arm","macos-latest","macos-14","macos-15","macos-15-intel","macos-26","macos-26-intel"]'), inputs.runner)) && 'audit' || 'block' }}
           allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
           disable-sudo: true
           # The agent may only stop reporting to StepSecurity in block mode.
-          disable-telemetry: ${{ (inputs.egress-policy-secretless == 'audit' && 'audit' || 'block') == 'block' }}
+          disable-telemetry: ${{ ((inputs.egress-policy-secretless == 'audit' && contains(fromJSON('["ubuntu-latest","ubuntu-22.04","ubuntu-24.04","ubuntu-26.04","ubuntu-22.04-arm","ubuntu-24.04-arm","ubuntu-26.04-arm","ubuntu-slim","windows-latest","windows-2022","windows-2025","windows-2025-vs2026","windows-11-arm","windows-11-vs2026-arm","macos-latest","macos-14","macos-15","macos-15-intel","macos-26","macos-26-intel"]'), inputs.runner)) && 'audit' || 'block') == 'block' }}
 
       - name: Validate the egress policy inputs (EX-0001)
         timeout-minutes: 1
         shell: bash
         working-directory: ${{ github.workspace }}
         env:
-          POLICIES: ${{ inputs.egress-policy }}|${{ inputs.egress-policy-secretless }}
+          POLICY_EGRESS_POLICY: ${{ inputs.egress-policy }}
+          POLICY_EGRESS_POLICY_SECRETLESS: ${{ inputs.egress-policy-secretless }}
         run: |
           set -u
           bad=0
-          rest="$POLICIES|"
-          while [ -n "$rest" ]; do
-            v=${rest%%|*}
-            rest=${rest#*|}
-            case "$v" in
-              audit | block) ;;
-              *)
-                echo "::error title=egress policy::an egress policy input must be exactly 'audit' or 'block', got '${v:0:40}'"
-                bad=1
-                ;;
-            esac
-          done
+          check() {
+            if [ "$2" = set ] && [ "$3" != audit ] && [ "$3" != block ]; then
+              echo "::error title=egress policy::the $1 input must be exactly 'audit' or 'block' (its value is ${#3} characters long)"
+              bad=1
+            fi
+          }
+          check egress-policy "${POLICY_EGRESS_POLICY+set}" "${POLICY_EGRESS_POLICY-}"
+          check egress-policy-secretless "${POLICY_EGRESS_POLICY_SECRETLESS+set}" "${POLICY_EGRESS_POLICY_SECRETLESS-}"
+          check distro-egress-policy "${POLICY_DISTRO_EGRESS_POLICY+set}" "${POLICY_DISTRO_EGRESS_POLICY-}"
+          check semgrep-egress-policy "${POLICY_SEMGREP_EGRESS_POLICY+set}" "${POLICY_SEMGREP_EGRESS_POLICY-}"
           exit "$bad"
 
       - name: Egress canary (EX-0001)
-        if: ${{ (inputs.egress-policy-secretless == 'audit' && 'audit' || 'block') == 'block' }}
+        if: ${{ ((inputs.egress-policy-secretless == 'audit' && contains(fromJSON('["ubuntu-latest","ubuntu-22.04","ubuntu-24.04","ubuntu-26.04","ubuntu-22.04-arm","ubuntu-24.04-arm","ubuntu-26.04-arm","ubuntu-slim","windows-latest","windows-2022","windows-2025","windows-2025-vs2026","windows-11-arm","windows-11-vs2026-arm","macos-latest","macos-14","macos-15","macos-15-intel","macos-26","macos-26-intel"]'), inputs.runner)) && 'audit' || 'block') == 'block' }}
         timeout-minutes: 2
         shell: bash
         # The workspace root exists before checkout; a job default working-directory may not.
@@ -152,10 +151,10 @@ jobs:
           canary_diag() {
             local name
             echo "::group::egress canary diagnostics (EX-0001, for the GitHub Support ticket)"
-            canary_show 5 uname -a
+            canary_show 5 uname -srmo
             canary_show 20 cat /etc/resolv.conf
-            canary_show 40 resolvectl status
-            canary_show 20 bash -c "ss -lunp | grep ':53 '"
+            canary_show 20 bash -c "resolvectl status 2>/dev/null | grep -E '^ *(Current DNS Server|DNS Servers?|DNS Domain):'"
+            canary_show 20 bash -c "ss -lun | grep ':53 '"
             for name in $NAMES pipelines.actions.githubusercontent.com; do
               canary_show 20 getent ahostsv4 "$name"
               canary_show 5 curl -sS -o /dev/null -w '%{http_code} %{remote_ip} %{time_connect}\n' --max-time 8 "https://$name"
@@ -191,14 +190,19 @@ jobs:
             echo "EX-0001 egress canary failed, unreachable: $(printf '%s' "$bad" | tr '\n' ';')" >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
             return 1
           }
+          set -m
           canary_main &
           main=$!
-          (sleep 90; kill "$main") >/dev/null 2>&1 &
+          (sleep 90; kill -TERM -- "-$main"; sleep 2; kill -KILL -- "-$main") >/dev/null 2>&1 &
           dog=$!
           wait "$main" && rc=0 || rc=$?
-          pkill -P "$dog" >/dev/null 2>&1 || true
-          kill "$dog" >/dev/null 2>&1 || true
-          if [ "$rc" -eq 143 ]; then
+          kill -TERM -- "-$dog" >/dev/null 2>&1 || true
+          if kill -0 -- "-$main" >/dev/null 2>&1; then
+            kill -TERM -- "-$main" >/dev/null 2>&1 || true
+            sleep 1
+            kill -KILL -- "-$main" >/dev/null 2>&1 || true
+          fi
+          if [ "$rc" -eq 143 ] || [ "$rc" -eq 137 ]; then
             echo "::error title=egress canary::the canary hit its 90 s deadline (EX-0001): rerun the job"
             rc=124
           fi

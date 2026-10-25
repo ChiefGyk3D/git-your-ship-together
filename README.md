@@ -2251,13 +2251,19 @@ latest or when the upstream defect is fixed:
   `id-token`, no publish-capable or write-scoped token, `contents: read` (and `security-events: write` for a
   SARIF upload only), no token handed to an action or `gh` beyond the default, and no artifact or output
   that a privileged job consumes. It does not mean no credential: every job has the default job token, read-
-  scoped here, which exists transiently during checkout and the harden-runner step. (harden-runner's `token`
+  scoped here, available to the actions that take it as an input (checkout, harden-runner) and to steps that
+  reference it explicitly. (harden-runner's `token`
   input only avoids GitHub API rate limiting; emptying it would trade this flake for another, so we do not.)
   The existing `egress-policy` keeps governing every other job and keeps its default. A job that builds or
   generates something a privileged job then publishes or deploys stays under `egress-policy`. The exception
   record lists the jobs on each side and a test pins the list to the YAML.
+- The exception covers GitHub-hosted runners only. Where a caller picks the runner label (`runner`,
+  `runners`, `distro-runners`), the job is `audit` only if the label is exactly a standard hosted label (the
+  list is in the exception record, with the GitHub docs page it comes from); `self-hosted`, an empty label, a
+  list or a larger-runner name gives `block`, because an untrusted job must not run in `audit` on a persistent
+  runner.
 - A policy value that is not exactly `audit` or `block` fails closed: the job runs in `block` and a first
-  step fails it with a message naming the value. `distro` and `semgrep` stay `audit` when either their own
+  step fails it with a fixed message that names the input and the length of its value, never the value. `distro` and `semgrep` stay `audit` when either their own
   input or `egress-policy-secretless` says exactly `audit`.
 - A fail-fast canary as a step of every job that can run in `block` (below).
 - Lower default timeouts, so a stuck job costs minutes: `python-ci` 15 (was 30), `bash-ci` 10 (was 15),
@@ -2295,13 +2301,15 @@ load balancer that keeps listing an address that has stopped answering would fai
 The retries absorb a transient refusal; a persistent one costs a rerun. IPv6 is not probed.
 
 Nothing can hang. Every lookup has a 5 second limit and every connection 3 seconds; the probes run in
-parallel; the whole of the canary runs under an internal `timeout 90`; and the workflow step carries
+parallel; the whole of the canary runs in its own process group under a 90 second watchdog that kills the
+group (TERM, then KILL) and is cancelled when the canary finishes; and the workflow step carries
 `timeout-minutes: 2`, which bounds the inline step as a whole. A healthy step takes about 5 seconds. The
 three hosts are in each such job's allow-list (`results-receiver.actions.githubusercontent.com:443` is added
 explicitly; `github.com:443` and `api.github.com:443` too where a default list lacked them).
 
-When it fails it prints, straight to the live job log (not to a file, which a hung job loses): `uname -a`,
-`/etc/resolv.conf`, `resolvectl status`, the listeners on port 53, and for the three hosts plus
+When it fails it prints, straight to the live job log (not to a file, which a hung job loses): `uname -srmo`
+(no hostname), `/etc/resolv.conf`, the DNS server and domain lines of `resolvectl status`, the UDP listeners on
+port 53 (no process names), and for the three hosts plus
 `pipelines.actions.githubusercontent.com` the `getent ahostsv4` answer and the status, remote address and
 connect time of a `curl` request, each bounded by `timeout 10`; and the list of unreachable addresses. It
 also writes a one-line step summary naming EX-0001 and the addresses. These lines are what to attach to a

@@ -11,6 +11,7 @@ input validation that precedes the canary; its copies are held identical the sam
 """
 
 import itertools
+import json
 import os
 import re
 import socket
@@ -32,13 +33,57 @@ def canary_script() -> str:
     return yaml.safe_load(ACTION.read_text())["runs"]["steps"][0]["run"]
 
 
+WATCHDOG = '(sleep 90; kill -TERM -- "-$main"; sleep 2; kill -KILL -- "-$main") >/dev/null 2>&1 &'
+
+
+def entry_index(lines: list[str]) -> int:
+    entry = lines.index("set -m")
+    assert lines[entry + 1] == "canary_main &", "canary_main must run as a job of its own process group"
+    assert lines[entry + 3] == WATCHDOG, "canary_main must run under a 90 s watchdog that kills the group"
+    return entry
+
+
 def sourceable() -> str:
     lines = canary_script().rstrip("\n").split("\n")
-    entry = next(i for i, line in enumerate(lines) if line == "canary_main &")
-    assert lines[entry + 2] == '(sleep 90; kill "$main") >/dev/null 2>&1 &', (
-        "canary_main must run under a 90 s watchdog"
-    )
-    return "\n".join(lines[:entry]) + "\n"
+    return "\n".join(lines[: entry_index(lines)]) + "\n"
+
+
+def full_script(stubs: str = "", deadline: int | None = None) -> str:
+    """The script as shipped, with stub functions defined just before the entry point."""
+    lines = canary_script().rstrip("\n").split("\n")
+    entry = entry_index(lines)
+    text = "\n".join(lines[:entry]) + "\n" + textwrap.dedent(stubs) + "\n" + "\n".join(lines[entry:]) + "\n"
+    return text if deadline is None else text.replace("sleep 90;", f"sleep {deadline};")
+
+
+def process_alive(marker: str) -> bool:
+    """True when any process has `marker` as an argument (read from /proc, so this test never matches itself)."""
+    for entry in Path("/proc").glob("[0-9]*/cmdline"):
+        try:
+            if marker.encode() in entry.read_bytes().split(b"\0"):
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def kill_leftovers(marker: str) -> None:
+    """Tidy up after a test whose assertion failed: stop any process that still has `marker` as an argument."""
+    for entry in Path("/proc").glob("[0-9]*/cmdline"):
+        try:
+            if marker.encode() in entry.read_bytes().split(b"\0"):
+                os.kill(int(entry.parent.name), 9)
+        except (OSError, ValueError):
+            continue
+
+
+def wait_gone(marker: str, seconds: float = 4.0) -> bool:
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        if not process_alive(marker):
+            return True
+        time.sleep(0.1)
+    return not process_alive(marker)
 
 
 CHECK = REPO / ".github" / "actions" / "egress-policy-check" / "action.yml"
@@ -88,10 +133,10 @@ def test_one_dropped_address_fails_names_it_and_prints_the_diagnostics(tmp_path)
     assert "github.com 140.82.1.2" in out
     assert "140.82.1.1\n" not in out.split("unreachable addresses")[1].split("::group::")[0]
     for expected in [
-        "+ uname -a",
+        "+ uname -srmo",
         "+ cat /etc/resolv.conf",
-        "+ resolvectl status",
-        "ss -lunp",
+        "resolvectl status",
+        "ss -lun",
         "+ getent ahostsv4 pipelines.actions.githubusercontent.com",
         "+ curl -sS -o /dev/null -w %{http_code} %{remote_ip} %{time_connect}\\n --max-time 8 https://pipelines.actions.githubusercontent.com",
         *(f"+ getent ahostsv4 {h}" for h in HOSTS),
@@ -99,6 +144,7 @@ def test_one_dropped_address_fails_names_it_and_prints_the_diagnostics(tmp_path)
     ]:
         assert expected in out, f"diagnostic missing: {expected}"
     assert "-Ivs" not in out and " -v " not in out, "no verbose curl: its output carries request headers"
+    assert "uname -a" not in out and "ss -lunp" not in out, "no hostname and no process names in the diagnostics"
     assert "EX-0001" in summary and "github.com 140.82.1.2" in summary
     assert summary.count("\n") == 1, "the step summary is one line"
 
@@ -224,49 +270,140 @@ def test_the_guard_bites_a_probe_that_always_succeeds_hides_a_dropped_address(tm
 # --- where the workflows put it ------------------------------------------------------------------
 
 
+def run_full(tmp_path, script: str, extra_path: Path | None = None):
+    path = f"{extra_path}:{os.environ['PATH']}" if extra_path else os.environ["PATH"]
+    return subprocess.run(
+        ["bash", "-eo", "pipefail", "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={**os.environ, "PATH": path, "GITHUB_STEP_SUMMARY": str(tmp_path / "s")},
+    )
+
+
 def test_the_whole_canary_runs_under_a_deadline(tmp_path):
     """The script as shipped, with the deadline cut to 1 s and a resolver that takes 3 s: exit 124 and a message."""
     fake = tmp_path / "bin"
     fake.mkdir()
     (fake / "getent").write_text("#!/bin/sh\nsleep 3\n")
     (fake / "getent").chmod(0o755)
-    script = canary_script().replace("sleep 90;", "sleep 1;")
-    assert script != canary_script()
-    done = subprocess.run(
-        ["bash", "-c", script],
-        capture_output=True,
-        text=True,
-        timeout=60,
-        env={**os.environ, "PATH": f"{fake}:{os.environ['PATH']}", "GITHUB_STEP_SUMMARY": str(tmp_path / "s")},
-    )
+    done = run_full(tmp_path, full_script(deadline=1), fake)
     assert done.returncode == 124, done.stdout + done.stderr
     assert "90 s deadline" in done.stdout
 
 
-@pytest.mark.parametrize(
-    "policies,ok",
-    [
-        ("audit|block", True),
-        ("block", True),
-        ("audit|audit|block", True),
-        ("audit|typo", False),
-        ("", False),
-        ("block|", False),
-        ("Block", False),
-        ("audit|block|audit ", False),
-    ],
-)
-def test_the_policy_check_accepts_only_exact_audit_or_block(policies, ok):
-    done = subprocess.run(
+def test_a_deadline_kills_the_whole_process_tree(tmp_path):
+    """A resolver that leaves a grandchild behind: after the deadline no process of the group remains."""
+    try:
+        stubs = "canary_resolve() { sleep 4711 & wait; }"
+        done = run_full(tmp_path, full_script(stubs, deadline=1))
+        assert done.returncode == 124, done.stdout + done.stderr
+        assert wait_gone("4711"), "a grandchild of canary_main survived the deadline"
+    finally:
+        kill_leftovers("4711")
+
+
+def test_a_normal_finish_leaves_no_stray_process(tmp_path):
+    """A probe that backgrounds something and returns: the group is cleaned up when canary_main is done."""
+    try:
+        stubs = RESOLVE + "canary_probe() { sleep 4712 & return 0; }"
+        done = run_full(tmp_path, full_script(stubs))
+        assert done.returncode == 0, done.stdout + done.stderr
+        assert wait_gone("4712"), "a background child survived a normal finish"
+    finally:
+        kill_leftovers("4712")
+
+
+def test_a_normal_finish_does_not_wait_for_the_watchdog(tmp_path):
+    start = time.monotonic()
+    done = run_full(tmp_path, full_script(RESOLVE + "canary_probe() { return 0; }"))
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert time.monotonic() - start < 20, "the watchdog's 90 s sleep must be cancelled when the canary is done"
+    assert wait_gone("90"), "the watchdog's sleep outlived the step"
+
+
+def run_check(env: dict[str, str]):
+    clean = {k: v for k, v in os.environ.items() if not k.startswith("POLICY_")}
+    return subprocess.run(
         ["bash", "-eo", "pipefail", "-c", check_script()],
         capture_output=True,
         text=True,
         timeout=20,
-        env={**os.environ, "POLICIES": policies},
+        env={**clean, **env},
     )
-    assert (done.returncode == 0) is ok, done.stdout + done.stderr
-    if not ok:
-        assert "must be exactly 'audit' or 'block'" in done.stdout
+
+
+@pytest.mark.parametrize(
+    "env",
+    [
+        {"POLICY_EGRESS_POLICY": "audit"},
+        {"POLICY_EGRESS_POLICY": "block"},
+        {"POLICY_EGRESS_POLICY": "audit", "POLICY_EGRESS_POLICY_SECRETLESS": "block"},
+        {
+            "POLICY_EGRESS_POLICY": "block",
+            "POLICY_EGRESS_POLICY_SECRETLESS": "audit",
+            "POLICY_DISTRO_EGRESS_POLICY": "block",
+            "POLICY_SEMGREP_EGRESS_POLICY": "audit",
+        },
+        {},  # a workflow that declares none of them
+    ],
+)
+def test_the_policy_check_accepts_exact_audit_and_block(env):
+    done = run_check(env)
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert done.stdout == ""
+
+
+HOSTILE = [
+    "typo",
+    "",
+    "Block",
+    "AUDIT",
+    "audit ",
+    " block",
+    "audit|audit",
+    "audit|block",
+    "audit,block",
+    "audit\nblock",
+    "audit\n",
+    "block\n::warning::injected",
+    "::error::injected",
+    "::set-output name=x::y",
+    "'; echo pwned #",
+    '"; echo pwned #',
+    "$(echo pwned)",
+    "`echo pwned`",
+    "caf\u00e9 \u202e audit",
+    "a" * 2000,
+]
+
+
+@pytest.mark.parametrize("value", HOSTILE, ids=lambda v: repr(v)[:30])
+@pytest.mark.parametrize(
+    "var,name",
+    [
+        ("POLICY_EGRESS_POLICY", "egress-policy"),
+        ("POLICY_EGRESS_POLICY_SECRETLESS", "egress-policy-secretless"),
+        ("POLICY_DISTRO_EGRESS_POLICY", "distro-egress-policy"),
+        ("POLICY_SEMGREP_EGRESS_POLICY", "semgrep-egress-policy"),
+    ],
+)
+def test_the_policy_check_rejects_anything_else_and_never_echoes_it(var, name, value):
+    done = run_check({var: value})
+    out = done.stdout + done.stderr
+    assert done.returncode == 1, out
+    assert out == (
+        f"::error title=egress policy::the {name} input must be exactly 'audit' or 'block' "
+        f"(its value is {len(value)} characters long)\n"
+    ), "the message is fixed text, the input name and a length; nothing a caller passes appears in it"
+    assert "::warning::" not in out and "injected" not in out and "pwned" not in out
+
+
+def test_the_policy_check_reports_every_bad_input_by_name():
+    done = run_check({"POLICY_EGRESS_POLICY": "typo", "POLICY_EGRESS_POLICY_SECRETLESS": "audit|audit"})
+    assert done.returncode == 1
+    assert "the egress-policy input" in done.stdout and "the egress-policy-secretless input" in done.stdout
+    assert done.stdout.count("::error") == 2
 
 
 def workflow_jobs():
@@ -289,6 +426,31 @@ def effective_allow_list(path: Path, expression: str) -> str:
     return re.sub(r"\$\{\{ inputs\.([\w-]+) \}\}", lambda m: str(inputs[m.group(1)].get("default", "")), expression)
 
 
+RUNNER_CASES = [
+    "ubuntu-latest",
+    "ubuntu-24.04-arm",
+    "Ubuntu-Latest",
+    "windows-latest",
+    "macos-26",
+    "self-hosted",
+    "",
+    "linux",
+    "ubuntu-latest,self-hosted",
+    '["ubuntu-latest"]',
+    '["self-hosted","linux"]',
+    ["self-hosted", "linux"],
+    ["ubuntu-latest"],
+    "ubuntu-latest-4-cores",
+    "ubuntu-24.04-16core",
+    "my-org-large-runner",
+    None,
+]
+
+
+def runner_is_hosted(label) -> bool:
+    return isinstance(label, str) and label.lower() in {x.lower() for x in hosted_labels()}
+
+
 POLICY_INPUTS = ("egress-policy", "egress-policy-secretless", "distro-egress-policy", "semgrep-egress-policy")
 VALUES = ["audit", "block", "typo", "", "Block"]
 
@@ -299,12 +461,46 @@ def declared_policy_inputs(path: Path) -> list[str]:
     return sorted(n for n in inputs if n in POLICY_INPUTS)
 
 
-def evaluate(expression: str, values: dict[str, str]):
-    """The few expression forms used for a policy: inputs.X, == 'lit', &&, ||, parentheses."""
+RECORD = REPO / "docs" / "security" / "exceptions" / "EX-0001-harden-runner-block-westus2.md"
+
+
+def hosted_labels() -> list[str]:
+    """The ONE list of GitHub-hosted runner labels: the exception record (it cites the GitHub docs page)."""
+    text = RECORD.read_text()
+    block = text.split("<!-- hosted-runner-labels:begin -->")[1].split("<!-- hosted-runner-labels:end -->")[0]
+    labels = [line.strip() for line in block.splitlines() if line.strip() and not line.startswith("```")]
+    assert len(labels) >= 15 and len(labels) == len(set(labels))
+    return labels
+
+
+def evaluate(expression: str, values: dict[str, str], runner=None):
+    """The expression forms used for a policy: inputs.X, runner refs, == 'lit', &&, ||, parentheses, and
+    contains(fromJSON('[...]'), <runner>) against the hosted-label list."""
     body = re.fullmatch(r"\$\{\{ (.*) \}\}", expression).group(1)
+
+    def hosted(m):
+        assert json.loads(m.group(1)) == hosted_labels(), (
+            "a workflow embeds a hosted-label list that differs from EX-0001"
+        )
+        return "H(R)"
+
+    body = re.sub(r"contains\(fromJSON\('(\[[^']*\])'\), (?:matrix|inputs)\.runner\)", hosted, body)
     py = re.sub(r"inputs\.([\w-]+)", lambda m: f"V[{m.group(1)!r}]", body).replace("&&", " and ").replace("||", " or ")
-    assert re.fullmatch(r"[\sV\[\]'a-z\-=()]*", py), f"unexpected syntax in a policy expression: {py}"
-    return eval(py, {"__builtins__": {}}, {"V": values})  # noqa: S307 - a fixed expression from our own workflows
+    assert re.fullmatch(r"[\sVHR\[\]'a-z\-=()]*", py), f"unexpected syntax in a policy expression: {py}"
+
+    def is_hosted(label):  # GitHub compares strings case-insensitively; a list or other type never matches a label
+        return isinstance(label, str) and label.lower() in {x.lower() for x in hosted_labels()}
+
+    return eval(py, {"__builtins__": {}}, {"V": values, "H": is_hosted, "R": runner})  # noqa: S307 - our own fixed expression
+
+
+def test_the_runner_check_follows_the_hosted_list():
+    lst = json.dumps(hosted_labels(), separators=(",", ":"))
+    expr = "${{ (inputs.a == 'audit' && contains(fromJSON('" + lst + "'), matrix.runner)) && 'audit' || 'block' }}"
+    assert evaluate(expr, {"a": "audit"}, "ubuntu-24.04") == "audit"
+    assert evaluate(expr, {"a": "audit"}, "self-hosted") == "block"
+    assert evaluate(expr, {"a": "audit"}, ["ubuntu-24.04"]) == "block"
+    assert evaluate(expr, {"a": "block"}, "ubuntu-24.04") == "block"
 
 
 def test_the_evaluator_follows_github_semantics():
@@ -328,7 +524,9 @@ def test_every_job_gets_the_policy_check_and_the_canary_right_after_harden_runne
         assert check.get("name") == "Validate the egress policy inputs (EX-0001)", f"{path.name}:{name}"
         assert check["run"] == check_script(), f"{path.name}:{name} policy check differs from the composite action"
         assert "if" not in check, "the check must run whatever the policy is"
-        assert check["env"]["POLICIES"] == "|".join(f"${{{{ inputs.{n} }}}}" for n in declared), f"{path.name}:{name}"
+        assert check["env"] == {"POLICY_" + n.upper().replace("-", "_"): f"${{{{ inputs.{n} }}}}" for n in declared}, (
+            f"{path.name}:{name}: one environment variable per policy input, never a joined string"
+        )
         assert check["working-directory"] == "${{ github.workspace }}" and check["shell"] == "bash"
         offset = 2
     canary = steps[offset]
@@ -353,15 +551,24 @@ def test_every_job_gets_the_policy_check_and_the_canary_right_after_harden_runne
     inner = policy[len("${{ ") : -len(" }}")]
     assert steps[0]["with"]["disable-telemetry"] == "${{ (" + inner + ") == 'block' }}"
     assert canary["if"] == "${{ (" + inner + ") == 'block' }}"
-    for combo in itertools.product(VALUES, repeat=len(declared)):
-        values = dict(zip(declared, combo, strict=True))
-        result = evaluate(policy, values)
-        assert result in ("audit", "block")
-        assert evaluate(steps[0]["with"]["disable-telemetry"], values) is (result == "block")
-        assert evaluate(canary["if"], values) is (result == "block")
-        used = set(re.findall(r"inputs\.([\w-]+)", policy))
-        expected = "audit" if any(values[n] == "audit" for n in used) else "block"
-        assert result == expected, f"{path.name}:{name}: audit only on an exact `audit`; anything else fails closed"
+    dynamic = str(job.get("runs-on")) in ("${{ matrix.runner }}", "${{ inputs.runner }}")
+    secretless = (path.name, name) not in KEPT_BLOCK
+    if secretless and not dynamic:
+        assert job["runs-on"].lower() in {x.lower() for x in hosted_labels()}, f"{path.name}:{name}: not a hosted label"
+    assert ("contains(fromJSON(" in policy) is (secretless and dynamic), f"{path.name}:{name}: runner check misplaced"
+    runners = RUNNER_CASES if dynamic else [None]
+    for runner in runners:
+        for combo in itertools.product(VALUES, repeat=len(declared)):
+            values = dict(zip(declared, combo, strict=True))
+            result = evaluate(policy, values, runner)
+            assert result in ("audit", "block")
+            assert evaluate(steps[0]["with"]["disable-telemetry"], values, runner) is (result == "block")
+            assert evaluate(canary["if"], values, runner) is (result == "block")
+            used = set(re.findall(r"inputs\.([\w-]+)", policy)) - {"runner"}
+            wants_audit = any(values[n] == "audit" for n in used)
+            on_hosted = (not secretless) or (not dynamic) or runner_is_hosted(runner)
+            expected = "audit" if wants_audit and on_hosted else "block"
+            assert result == expected, f"{path.name}:{name}: audit only on an exact `audit` on a hosted runner label"
 
 
 def test_the_effective_policy_follows_the_right_inputs():
@@ -371,7 +578,7 @@ def test_the_effective_policy_follows_the_right_inputs():
         if path.name in ("ci.yml", "audit.yml"):
             continue
         seen += 1
-        used = set(re.findall(r"inputs\.([\w-]+)", steps[0]["with"]["egress-policy"]))
+        used = set(re.findall(r"inputs\.([\w-]+)", steps[0]["with"]["egress-policy"])) - {"runner"}
         if (path.name, name) in KEPT_BLOCK:
             assert used == {"egress-policy"}, f"{path.name}:{name}"
         elif (path.name, name) in {("python-ci.yml", "distro"), ("bash-ci.yml", "distro")}:

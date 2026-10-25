@@ -21,8 +21,12 @@ jobs hang or fail; see the README section "Known CI platform issue: westus2 (EX-
   `audit` on the secretless jobs until it also passes `egress-policy-secretless: block`. The exception
   expires 2026-11-07 at the latest. `python-ci`'s `test`, `dast`'s `scan`, and `docs-pages` and
   `wiki-publish` jobs in full stay under `egress-policy`, because a privileged job consumes their output.
+- **GitHub-hosted runners only.** Where a caller chooses the runner label (`runner`, `runners`,
+  `distro-runners`: `bash-ci` `test` and `distro`, `python-ci` `distro`, `python-fuzz` `fuzz`), a secretless
+  job is `audit` only if the label is exactly a standard GitHub-hosted label; `self-hosted`, an empty label,
+  a list or a larger-runner name runs in `block`.
 - **Fail-closed policy.** A policy input that is not exactly `audit` or `block` makes the job run in
-  `block` and fails it in a first step with a clear message. Before, harden-runner rejected it or treated it
+  `block` and fails it in a first step with a fixed message that names the input and the length of its value. Before, harden-runner rejected it or treated it
   its own way.
 - **Egress canary.** Every job that can run in `block` now has a step that fails in seconds with "egress
   broken on this runner (known westus2 DNS issue, EX-0001): rerun the job" when any address of `github.com`,
