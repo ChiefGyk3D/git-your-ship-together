@@ -48,13 +48,17 @@ def test_semgrep_holds_no_id_token_and_no_doppler():
 def test_semgrep_uses_its_own_egress_policy():
     first = steps_of(SEMGREP)[0]
     assert first["uses"].startswith("step-security/harden-runner@")
-    assert first["with"]["egress-policy"] == "${{ inputs.semgrep-egress-policy }}"
+    assert first["with"]["egress-policy"] == (
+        "${{ inputs.egress-policy-secretless == 'audit' && 'audit' || inputs.semgrep-egress-policy }}"
+    )
     assert "inputs.semgrep-allowed-endpoints" in first["with"]["allowed-endpoints"]
     assert "inputs.extra-allowed-endpoints" in first["with"]["allowed-endpoints"]
     others = [n for n, j in jobs(DOC).items() if n != "semgrep"]
     for name in others:
         policy = steps_of(jobs(DOC)[name])[0]["with"]["egress-policy"]
-        assert policy == "${{ inputs.egress-policy }}", f"{name} must keep the shared egress input"
+        assert policy in ("${{ inputs.egress-policy }}", "${{ inputs.egress-policy-secretless }}"), (
+            f"{name} must keep a shared egress input"
+        )
 
 
 def test_semgrep_scan_command():

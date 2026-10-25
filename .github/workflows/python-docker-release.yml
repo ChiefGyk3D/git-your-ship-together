@@ -124,7 +124,11 @@ on:
         type: string
         default: ""
       egress-policy:
-        description: harden-runner egress policy - `audit` logs outbound connections, `block` allows only `allowed-endpoints`.
+        description: harden-runner egress policy - `audit` logs outbound connections, `block` allows only `allowed-endpoints`. Jobs that hold no secret follow `egress-policy-secretless` instead (EX-0001).
+        type: string
+        default: audit
+      egress-policy-secretless:
+        description: harden-runner egress policy for the jobs that hold no secret (read-only contents, no OIDC token, no publish credential; SARIF upload at most) - `audit` or `block`. Defaults to `audit` while security exception EX-0001 is active (GitHub-hosted runners in westus2 break harden-runner `block`; expires 2026-11-07 or when step-security/harden-runner#708 is fixed; see docs/security/exceptions/). Set `block` to opt back in. Jobs that hold a secret, an OIDC token or a write grant ignore this input and follow `egress-policy`.
         type: string
         default: audit
       allowed-endpoints:
@@ -209,6 +213,7 @@ jobs:
       trivy-ignore-unfixed: ${{ inputs.trivy-ignore-unfixed }}
       trivyignores: ${{ inputs.trivyignores }}
       egress-policy: ${{ inputs.egress-policy }}
+      egress-policy-secretless: ${{ inputs.egress-policy-secretless }}
       allowed-endpoints: ${{ inputs.allowed-endpoints }}
       extra-allowed-endpoints: ${{ inputs.extra-allowed-endpoints }}
       doppler-project: ${{ inputs.doppler-project }}

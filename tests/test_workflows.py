@@ -332,9 +332,15 @@ def test_every_reusable_job_starts_with_harden_runner(path):
         assert first.startswith(HARDEN_RUNNER), f"{path.name}: job {job_name!r} does not start with harden-runner"
         with_ = steps[0].get("with") or {}
         # The distro and semgrep jobs have their own policy input: their hosts are not measured yet.
-        policy = {"distro": "distro-egress-policy", "semgrep": "semgrep-egress-policy"}.get(job_name, "egress-policy")
-        assert with_.get("egress-policy") == "${{ inputs." + policy + " }}", (
-            f"{path.name}: job {job_name!r} harden-runner ignores the {policy} input"
+        own = {"distro": "distro-egress-policy", "semgrep": "semgrep-egress-policy"}.get(job_name)
+        # A job with no secret follows egress-policy-secretless (EX-0001); one that holds one follows egress-policy.
+        # tests/test_egress_canary.py pins which is which. distro and semgrep keep their own input as well: audit
+        # wins when either says audit.
+        allowed = {"${{ inputs.egress-policy }}", "${{ inputs.egress-policy-secretless }}"}
+        if own:
+            allowed = {"${{ inputs.egress-policy-secretless == 'audit' && 'audit' || inputs." + own + " }}"}
+        assert with_.get("egress-policy") in allowed, (
+            f"{path.name}: job {job_name!r} harden-runner ignores the {own or 'egress-policy'} input"
         )
 
 
@@ -570,9 +576,17 @@ def test_the_distro_job_is_gated_and_has_its_own_egress_policy(name):
     steps = steps_of(jobs(doc)["distro"])
     assert str(steps[0]["uses"]).startswith(HARDEN_RUNNER)
     with_ = steps[0]["with"]
-    assert with_["egress-policy"] == "${{ inputs.distro-egress-policy }}"
+    assert (
+        with_["egress-policy"]
+        == "${{ inputs.egress-policy-secretless == 'audit' && 'audit' || inputs.distro-egress-policy }}"
+    )
     assert "inputs.distro-egress-policy" in with_["disable-telemetry"]
-    assert with_["allowed-endpoints"] == "${{ inputs.distro-allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}"
+    assert "inputs.egress-policy-secretless" in with_["disable-telemetry"]
+    assert with_["allowed-endpoints"] == (
+        "${{ inputs.distro-allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}"
+        # the egress canary's hosts
+        " results-receiver.actions.githubusercontent.com:443 github.com:443 api.github.com:443"
+    )
     spec = triggers(doc)["workflow_call"]["inputs"]["distro-egress-policy"]
     assert spec["default"] == "block"
     assert "inputs.distros != '[]'" in jobs(doc)["distro"]["if"]
@@ -629,6 +643,7 @@ def test_a_workflow_that_fetches_nothing_holds_no_token_at_all(name):
 
 
 DOWNLOAD = re.compile(r"\bcurl\b")
+CANARY_STEP = "Egress canary (EX-0001)"  # tests/test_egress_canary.py holds its text identical everywhere
 
 
 @pytest.mark.parametrize("path", REUSABLE, ids=lambda p: p.name)
@@ -638,6 +653,8 @@ def test_every_downloaded_tool_is_checked_against_a_pinned_hash(path):
         body = step.get("run")
         if not isinstance(body, str) or not DOWNLOAD.search(body):
             continue
+        if step.get("name") == CANARY_STEP:
+            continue  # its only curl is a diagnostic header request to the Actions hosts; nothing is saved or run
         assert "sha256sum -c" in body, f"{path.name}: job {job_name!r} downloads with curl and never checks a hash"
         env = step.get("env") or {}
         assert any(v.startswith("${{ inputs.") and k.endswith("SHA256") for k, v in env.items()), (

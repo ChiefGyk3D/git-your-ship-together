@@ -1,0 +1,80 @@
+# Fail fast on a runner whose egress is broken by the westus2 DNS experiment
+# (security exception EX-0001, docs/security/exceptions/).
+#
+# On those runners harden-runner in `block` records one A record per allowed
+# domain and drops connections to the other addresses of the same name, GitHub's
+# own services included. The job then hangs or fails minutes later in a step
+# that has nothing to do with the cause. This step makes the failure immediate
+# and obvious: it resolves every address of github.com, api.github.com and
+# results-receiver.actions.githubusercontent.com (three lookups each, unioned)
+# and opens a TCP connection to port 443 of EACH address. An address that
+# refuses or times out fails the step with "rerun the job". On a healthy runner
+# every address was seen by the agent, so every connection succeeds and the step
+# prints one line.
+#
+# Nothing here can hang: each lookup has a 5 s limit, each connection 3 s, the
+# connections run in parallel, and the step carries `timeout-minutes: 2` in the
+# workflow. Nothing here reads a secret or the environment.
+#
+# The workflows inline a copy of the `run:` script below (a reusable workflow
+# cannot name the commit it runs from, see docs/wiki/Design-rules.md);
+# tests/test_egress_canary.py holds every copy byte-identical to this file.
+# The last line, `canary_main`, is the only one that does anything, so the test
+# can source the rest with stubs.
+name: Egress canary
+description: Fail fast when any address of the GitHub hosts is unreachable under harden-runner block (EX-0001).
+runs:
+  using: composite
+  steps:
+    - name: Egress canary (EX-0001)
+      shell: bash
+      run: |
+        set -u
+        NAMES="github.com api.github.com results-receiver.actions.githubusercontent.com"
+        PORT=443
+        canary_resolve() { timeout 5 getent ahostsv4 "$1" 2>/dev/null | awk '$2 == "STREAM" { print $1 }'; }
+        canary_probe() { timeout 3 bash -c 'exec 3<>"/dev/tcp/$0/$1"' "$1" "$PORT" 2>/dev/null; }
+        canary_show() { local n=$1; shift; echo "+ $*"; { timeout 10 "$@" 2>&1 || true; } | head -n "$n" || true; }
+        canary_diag() {
+          local name
+          echo "::group::egress canary diagnostics (EX-0001, for the GitHub Support ticket)"
+          canary_show 5 uname -a
+          canary_show 20 cat /etc/resolv.conf
+          canary_show 40 resolvectl status
+          canary_show 20 bash -c "ss -lunp | grep ':53 '"
+          for name in $NAMES pipelines.actions.githubusercontent.com; do
+            canary_show 20 getent ahostsv4 "$name"
+            canary_show 30 curl -Ivs --max-time 8 "https://$name"
+          done
+          echo "::endgroup::"
+        }
+        canary_main() {
+          local tmp name addr pass n=0 bad
+          tmp=$(mktemp -d) || return 1
+          for pass in 1 2 3; do
+            for name in $NAMES; do canary_resolve "$name" >>"$tmp/res.$name" & done
+            wait
+            sleep 1
+          done
+          for name in $NAMES; do
+            if [ -s "$tmp/res.$name" ]; then sort -u "$tmp/res.$name"; else echo "-"; fi | sed "s|^|$name |" >>"$tmp/pairs"
+          done
+          while read -r name addr; do
+            n=$((n + 1))
+            ( { [ "$addr" != "-" ] && { canary_probe "$addr" || { sleep 1; canary_probe "$addr"; }; }; } || echo "$name $addr" >"$tmp/bad.$n" ) </dev/null &
+          done <"$tmp/pairs"
+          wait
+          bad=$(cat "$tmp"/bad.* 2>/dev/null | sort || true)
+          rm -rf "$tmp"
+          if [ -z "$bad" ]; then
+            echo "egress canary: all $n addresses of $NAMES accept TCP $PORT"
+            return 0
+          fi
+          echo "::error title=egress canary::egress broken on this runner (known westus2 DNS issue, EX-0001): rerun the job"
+          echo "unreachable addresses (name address; '-' means the name did not resolve):"
+          printf '%s\n' "$bad"
+          canary_diag
+          echo "EX-0001 egress canary failed, unreachable: $(printf '%s' "$bad" | tr '\n' ';')" >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
+          return 1
+        }
+        canary_main
