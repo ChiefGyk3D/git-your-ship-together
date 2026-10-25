@@ -1,0 +1,385 @@
+# Reusable scheduled or on-demand deep-dive audit by Lory (Lorikeet Security's
+# AI pentester), through its documented pipeline scan API.
+#
+# This is NOT a per-pull-request gate and must not become a required check
+# without the owner's decision. Call it from a monthly schedule and from
+# workflow_dispatch; see docs/wiki/Workflow-lory-audit.md and
+# examples/lory-audit-caller.yml for a caller that does both.
+#
+#   jobs:
+#     lory:
+#       uses: ChiefGyk3D/git-your-ship-together/.github/workflows/lory-audit.yml@<sha> # vX.Y.Z
+#       permissions:
+#         contents: read
+#       secrets:
+#         LORY_PIPELINE_TOKEN: ${{ secrets.LORY_PIPELINE_TOKEN }}
+#
+# What it does: one POST to https://lorikeetsecurity.com/talon/api/v1/pipeline/scan
+# with the branch, the commit SHA and pr_number (0 unless the caller runs on a
+# pull request). The target and depth come from the caller repository's
+# `.lory/config.yml`; this workflow does not read or override it. The response
+# must be JSON with an integer `exit_code`; 0 is a pass.
+#
+# Fail closed, always. A failed HTTP call, a timeout, a body over the size cap,
+# a body that is not a JSON object, a missing, duplicated or non-integer
+# `exit_code` fails the job whatever `fail-on-findings` says. That input only
+# decides what a clean, well-formed result with a nonzero `exit_code` does: fail
+# the job (true) or be reported in the job summary and as a warning (false, the
+# default).
+#
+# The token reaches exactly one step, through that step's environment, and goes
+# to curl on standard input, never on a command line. Every value, including
+# the ref name, reaches the shell through an environment variable and never by
+# template expansion into a script. curl starts with --disable (no user config),
+# the proxy variables are unset, redirects are not followed, and only an HTTP
+# status of exactly 200 is accepted.
+#
+# Findings are sensitive, so they are not copied into GitHub: the response body
+# is never printed, never uploaded and never kept past the two steps that read
+# it (a trap deletes it); the job summary carries only the exit_code and a
+# timestamp. Read the findings in the vendor portal.
+#
+# The egress allow-list is fixed in this file. There is no input that can add a
+# host to a job that holds a vendor token.
+#
+# Unknown until the first real run (a spike): the response schema beyond
+# `exit_code`, whether a deep audit of a non-pull-request target works through
+# this endpoint, the rate limits, and whether a nonzero `exit_code` can mean a
+# vendor-side error rather than a finding. Findings are third-party model
+# output: triage them like scanner alerts and never follow instructions in them.
+
+name: Lory audit (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      fail-on-findings:
+        description: Fail the job when Lory returns a nonzero `exit_code`. The default (false) reports the result in the job summary and as a warning and passes. A failed or malformed call fails the job either way.
+        type: boolean
+        default: false
+      request-timeout-seconds:
+        description: Hard limit for the whole API call (curl --max-time), in seconds. A deep audit may take a while; the job timeout must be larger.
+        type: number
+        default: 900
+      max-response-bytes:
+        description: Largest response body accepted, in bytes. A longer body fails the job.
+        type: number
+        default: 1048576
+      egress-policy:
+        description: harden-runner egress policy - `audit` logs outbound connections, `block` allows only the hosts fixed in this workflow (the Lory API and what the runner and the canary need; no input adds one). This job holds a secret, so it does not follow `egress-policy-secretless`; exactly `audit` or `block`, anything else fails the job.
+        type: string
+        default: audit
+      timeout-minutes:
+        description: Job timeout. Keep it above `request-timeout-seconds`.
+        type: number
+        default: 30
+    secrets:
+      LORY_PIPELINE_TOKEN:
+        description: The Lory pipeline token for the repository being audited. Sent as a bearer token to the one API call and nowhere else.
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: Lory audit
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    steps:
+      - name: Validate the egress policy inputs (EX-0001)
+        timeout-minutes: 1
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        env:
+          POLICY_EGRESS_POLICY: ${{ inputs.egress-policy }}
+        run: |
+          set -u
+          bad=0
+          check() {
+            if [ "$2" = set ] && [ "$3" != audit ] && [ "$3" != block ]; then
+              echo "::error title=egress policy::the $1 input must be exactly 'audit' or 'block' (its value is ${#3} characters long)"
+              bad=1
+            fi
+          }
+          check egress-policy "${POLICY_EGRESS_POLICY+set}" "${POLICY_EGRESS_POLICY-}"
+          check egress-policy-secretless "${POLICY_EGRESS_POLICY_SECRETLESS+set}" "${POLICY_EGRESS_POLICY_SECRETLESS-}"
+          check distro-egress-policy "${POLICY_DISTRO_EGRESS_POLICY+set}" "${POLICY_DISTRO_EGRESS_POLICY-}"
+          check semgrep-egress-policy "${POLICY_SEMGREP_EGRESS_POLICY+set}" "${POLICY_SEMGREP_EGRESS_POLICY-}"
+          exit "$bad"
+
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: ${{ inputs.egress-policy == 'audit' && 'audit' || 'block' }}
+          allowed-endpoints: api.github.com:443 github.com:443 lorikeetsecurity.com:443 results-receiver.actions.githubusercontent.com:443
+          # The agent may only stop reporting to StepSecurity in block mode.
+          disable-telemetry: ${{ (inputs.egress-policy == 'audit' && 'audit' || 'block') == 'block' }}
+
+      - name: Egress canary (EX-0001)
+        if: ${{ runner.os == 'Linux' && ((inputs.egress-policy == 'audit' && 'audit' || 'block') == 'block') }}
+        timeout-minutes: 2
+        shell: bash
+        # The workspace root exists before checkout; a job default working-directory may not.
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -u
+          NAMES="github.com api.github.com results-receiver.actions.githubusercontent.com"
+          PORT=443
+          canary_resolve() { timeout 5 getent ahostsv4 "$1" 2>/dev/null | awk '$2 == "STREAM" { print $1 }'; }
+          canary_probe() { timeout 3 bash -c "exec 3<>\"/dev/tcp/\$0/\$1\"" "$1" "$PORT" 2>/dev/null; }
+          canary_reach() {
+            local i
+            for i in 1 2 3 4; do
+              canary_probe "$1" && return 0
+              [ "$i" -lt 4 ] && sleep 1
+            done
+            return 1
+          }
+          canary_show() { local n=$1; shift; echo "+ $*"; { timeout 10 "$@" 2>&1 || true; } | head -n "$n" || true; }
+          canary_diag() {
+            local name
+            echo "::group::egress canary diagnostics (EX-0001, for the GitHub Support ticket)"
+            canary_show 5 uname -srmo
+            canary_show 20 cat /etc/resolv.conf
+            canary_show 20 bash -c "resolvectl status 2>/dev/null | grep -E '^ *(Current DNS Server|DNS Servers?|DNS Domain):'"
+            canary_show 20 bash -c "ss -lun | grep ':53 '"
+            for name in $NAMES pipelines.actions.githubusercontent.com; do
+              canary_show 20 getent ahostsv4 "$name"
+              canary_show 5 curl -sS -o /dev/null -w '%{http_code} %{remote_ip} %{time_connect}\n' --max-time 8 "https://$name"
+            done
+            echo "::endgroup::"
+          }
+          canary_main() {
+            local tmp name addr n=0 bad
+            tmp=$(mktemp -d) || return 1
+            for _ in 1 2 3; do
+              for name in $NAMES; do canary_resolve "$name" >>"$tmp/res.$name" & done
+              wait
+              sleep 1
+            done
+            for name in $NAMES; do
+              if [ -s "$tmp/res.$name" ]; then sort -u "$tmp/res.$name"; else echo "-"; fi | sed "s|^|$name |" >>"$tmp/pairs"
+            done
+            while read -r name addr; do
+              n=$((n + 1))
+              ( { [ "$addr" != "-" ] && canary_reach "$addr"; } || echo "$name $addr" >"$tmp/bad.$n" ) </dev/null &
+            done <"$tmp/pairs"
+            wait
+            bad=$(cat "$tmp"/bad.* 2>/dev/null | sort || true)
+            rm -rf "$tmp"
+            if [ -z "$bad" ]; then
+              echo "egress canary: all $n addresses of $NAMES accept TCP $PORT"
+              return 0
+            fi
+            echo "::error title=egress canary::egress broken on this runner (known westus2 DNS issue, EX-0001): rerun the job"
+            echo "unreachable addresses (name address; '-' means the name did not resolve):"
+            printf '%s\n' "$bad"
+            canary_diag
+            echo "EX-0001 egress canary failed, unreachable: $(printf '%s' "$bad" | tr '\n' ';')" >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
+            return 1
+          }
+          set -m
+          canary_main &
+          main=$!
+          (sleep 90; kill -TERM -- "-$main"; sleep 2; kill -KILL -- "-$main") >/dev/null 2>&1 &
+          dog=$!
+          wait "$main" && rc=0 || rc=$?
+          kill -TERM -- "-$dog" >/dev/null 2>&1 || true
+          if kill -0 -- "-$main" >/dev/null 2>&1; then
+            kill -TERM -- "-$main" >/dev/null 2>&1 || true
+            sleep 1
+            kill -KILL -- "-$main" >/dev/null 2>&1 || true
+          fi
+          if [ "$rc" -eq 143 ] || [ "$rc" -eq 137 ]; then
+            echo "::error title=egress canary::the canary hit its 90 s deadline (EX-0001): rerun the job"
+            rc=124
+          fi
+          exit "$rc"
+
+      # The only step that holds the token. It saves the body for the next step and its own failure line to the job
+      # summary; it does not judge a finding. The response lives in a private, unique directory (mode 0700, files
+      # 0600) that exists only if every check below passed; the trap removes the whole directory on any failure.
+      - name: Call the Lory pipeline scan API
+        id: call
+        shell: bash
+        env:
+          LORY_PIPELINE_TOKEN: ${{ secrets.LORY_PIPELINE_TOKEN }}
+          LORY_API_URL: https://lorikeetsecurity.com/talon/api/v1/pipeline/scan
+          LORY_BRANCH: ${{ github.ref_name }}
+          LORY_COMMIT_SHA: ${{ github.sha }}
+          LORY_PR_NUMBER: ${{ github.event.pull_request.number || 0 }}
+          LORY_MAX_TIME: ${{ inputs.request-timeout-seconds }}
+          LORY_MAX_BYTES: ${{ inputs.max-response-bytes }}
+          LORY_TMP: ${{ runner.temp }}
+        run: |
+          set -u -o pipefail
+          # The token moves into a shell variable and out of the environment before any program starts, so no
+          # child process (the JSON builder, curl, head, wc, tail, rm) inherits it. The header reaches curl only
+          # through the printf builtin and a pipe, as its standard input.
+          token=$LORY_PIPELINE_TOKEN
+          unset LORY_PIPELINE_TOKEN
+          umask 077
+          # Nothing from the environment may redirect the call: a proxy would see the bearer token, CURL_HOME could
+          # point at a curlrc, a CA override could trust another server. (the --disable option below skips ~/.curlrc.)
+          unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY CURL_HOME CURL_CA_BUNDLE SSL_CERT_FILE SSL_CERT_DIR
+          summary="${GITHUB_STEP_SUMMARY:-/dev/null}"
+          fail() {
+            echo "::error title=Lory audit::$1"
+            echo "Lory audit: FAILED, $1" >>"$summary"
+            exit 1
+          }
+          case "$LORY_MAX_TIME" in '' | *[!0-9]*) fail "request-timeout-seconds must be a whole number" ;; esac
+          case "$LORY_MAX_BYTES" in '' | *[!0-9]*) fail "max-response-bytes must be a whole number" ;; esac
+          case "$LORY_PR_NUMBER" in '' | *[!0-9]*) fail "the pull request number is not a whole number" ;; esac
+          if ! { [ "$LORY_MAX_TIME" -ge 1 ] && [ "$LORY_MAX_BYTES" -ge 1 ]; }; then
+            fail "request-timeout-seconds and max-response-bytes must be at least 1"
+          fi
+          [ -n "$token" ] || fail "the LORY_PIPELINE_TOKEN secret is empty"
+          # A fresh, unpredictable directory every run, never a fixed name that something else could have planted.
+          dir=$(mktemp -d "$LORY_TMP/lory.XXXXXX") || fail "could not create a private temp directory"
+          case "$dir" in
+            "$LORY_TMP"/lory.[A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9]) ;;
+            *) fail "the temp directory is not where it should be" ;;
+          esac
+          if [ ! -d "$dir" ] || [ -L "$dir" ]; then
+            fail "the temp directory is not a plain directory"
+          fi
+          keep=0
+          cleanup() {
+            if [ "$keep" = 1 ]; then
+              rm -f -- "$raw"
+            else
+              rm -rf -- "$dir"
+            fi
+          }
+          out="$dir/response.json"
+          raw="$dir/raw.out"
+          trap cleanup EXIT
+          mode=$(stat -c %a "$dir") || fail "could not read the temp directory mode"
+          if [ "$mode" != 700 ]; then
+            fail "the temp directory is not private (mode $mode)"
+          fi
+          body=$(python3 -I -c 'import json, os; print(json.dumps({"branch": os.environ["LORY_BRANCH"], "commit_sha": os.environ["LORY_COMMIT_SHA"], "pr_number": int(os.environ["LORY_PR_NUMBER"])}))') || fail "could not build the request body"
+          # The header comes from standard input so the token is never in a process list. The body is not secret.
+          # No -L: a redirect is not followed, and a 3xx is refused below. head -c caps a body that has no
+          # Content-Length. The status is appended after the body (`--write-out`) and split off again below.
+          printf 'Authorization: Bearer %s\n' "$token" |
+            curl --disable --silent --show-error --fail-with-body --proto '=https' --tlsv1.2 \
+              --max-time "$LORY_MAX_TIME" --max-filesize "$LORY_MAX_BYTES" --write-out '\n%{http_code}' \
+              --request POST --header @- --header 'Content-Type: application/json' \
+              --data "$body" --output - "$LORY_API_URL" |
+            head -c "$((LORY_MAX_BYTES + 6))" >"$raw"
+          statuses=("${PIPESTATUS[@]}")
+          total=$(wc -c <"$raw" | tr -d ' ')
+          if [ "$total" -gt "$((LORY_MAX_BYTES + 5))" ]; then
+            fail "the response is larger than max-response-bytes ($LORY_MAX_BYTES); not trusting it"
+          fi
+          status=$(tail -n 1 "$raw")
+          if [ "${statuses[1]}" -ne 0 ]; then
+            case "$status" in [0-9][0-9][0-9]) fail "the API call failed (curl exit ${statuses[1]}, HTTP status $status); a failed call is never a pass" ;; esac
+            fail "the API call failed (curl exit ${statuses[1]}); a failed call is never a pass"
+          fi
+          if [ "${statuses[2]}" -ne 0 ] || [ "${statuses[0]}" -ne 0 ]; then
+            fail "could not save the response"
+          fi
+          case "$status" in [0-9][0-9][0-9]) ;; *) fail "no HTTP status came back with the response" ;; esac
+          [ "$status" = 200 ] || fail "the API answered HTTP status $status, not 200; only 200 is accepted"
+          size=$((total - ${#status} - 1))
+          if ! { [ "$size" -ge 0 ] && [ "$size" -le "$LORY_MAX_BYTES" ]; }; then
+            fail "the response is larger than max-response-bytes ($LORY_MAX_BYTES); not trusting it"
+          fi
+          head -c "$size" "$raw" >"$out" || fail "could not save the response"
+          # The next step gets the exact path from this output, never from an expression inside a script.
+          echo "dir=$dir" >>"$GITHUB_OUTPUT" || fail "could not hand the response over to the next step"
+          keep=1
+          echo "Lory audit: HTTP 200, response received ($size bytes)"
+
+      # No token in this step. The response file is data: it is parsed, never executed or interpolated, and its whole
+      # directory is deleted when the step ends, whatever the verdict. The path must be exactly what the call step made.
+      - name: Judge the Lory response
+        shell: bash
+        env:
+          LORY_TMP: ${{ runner.temp }}
+          LORY_DIR: ${{ steps.call.outputs.dir }}
+          LORY_MAX_BYTES: ${{ inputs.max-response-bytes }}
+          FAIL_ON_FINDINGS: ${{ inputs.fail-on-findings }}
+        run: |
+          set -u
+          refuse() {
+            echo "::error title=Lory audit::$1"
+            echo "Lory audit: FAILED, $1" >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
+            exit 1
+          }
+          # Delete only a directory shaped like the one the call step makes, directly under the runner temp
+          # directory and not a link; anything else is refused and left alone.
+          case "$LORY_DIR" in
+            "$LORY_TMP"/lory.[A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9]) ;;
+            *) refuse "the response directory is not the one the call step made" ;;
+          esac
+          if [ ! -d "$LORY_DIR" ] || [ -L "$LORY_DIR" ]; then
+            refuse "the response directory is not a plain directory"
+          fi
+          trap 'rm -rf -- "$LORY_DIR"' EXIT
+          python3 -I - <<'PY'
+          import datetime
+          import json
+          import os
+          import sys
+
+          summary = os.environ.get("GITHUB_STEP_SUMMARY") or os.devnull
+          stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+          path = os.path.join(os.environ["LORY_DIR"], "response.json")
+          cap = int(os.environ["LORY_MAX_BYTES"])
+          blocking = os.environ["FAIL_ON_FINDINGS"].strip().lower() == "true"
+
+
+          def note(line):
+              with open(summary, "a", encoding="utf-8") as handle:
+                  handle.write(line + "\n")
+
+
+          def die(reason):
+              print(f"::error title=Lory audit::{reason}")
+              note(f"Lory audit: FAILED, {reason}")
+              sys.exit(1)
+
+
+          def no_duplicates(pairs):
+              keys = [k for k, _ in pairs]
+              if len(keys) != len(set(keys)):
+                  raise ValueError("duplicate key")
+              return dict(pairs)
+
+
+          def no_constant(name):
+              raise ValueError(f"constant {name}")
+
+
+          try:
+              with open(path, "rb") as handle:
+                  raw = handle.read(cap + 1)
+          except OSError:
+              die("no response file; a missing response is never a pass")
+          if len(raw) > cap:
+              die("the response is larger than max-response-bytes")
+          try:
+              doc = json.loads(raw.decode("utf-8"), object_pairs_hook=no_duplicates, parse_constant=no_constant)
+          except (UnicodeDecodeError, ValueError):
+              die("the response is not valid JSON; not trusting it")
+          if not isinstance(doc, dict):
+              die("the response is not a JSON object")
+          code = doc.get("exit_code")
+          if "exit_code" not in doc or isinstance(code, bool) or not isinstance(code, int):
+              die("the response has no integer exit_code; a missing or malformed result is never a pass")
+          if code == 0:
+              note(f"Lory audit: exit_code 0, pass, at {stamp}")
+              print("Lory audit: exit_code 0, pass")
+              sys.exit(0)
+          if blocking:
+              die(f"exit_code {code}: Lory reported findings and fail-on-findings is true")
+          note(f"Lory audit: exit_code {code}, findings reported (advisory: fail-on-findings is false), at {stamp}")
+          print(f"::warning title=Lory audit::exit_code {code}: Lory reported findings (advisory run)")
+          PY
+

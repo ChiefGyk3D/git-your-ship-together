@@ -5,6 +5,25 @@ name what a caller sees after that.
 
 ## Unreleased
 
+### New workflow: `lory-audit.yml` (issue #202)
+
+- **Added.** An optional reusable workflow that asks Lory (Lorikeet Security's AI pentester) for a deep-dive audit
+  through its documented pipeline scan API. For scheduled and on-demand use (a monthly cron and
+  `workflow_dispatch`), not a per-pull-request gate; the caller template is `examples/lory-audit-caller.yml`.
+  Advisory by default (`fail-on-findings: false`); a failed, timed-out, oversize or malformed call, or a missing or
+  non-integer `exit_code`, always fails the job. `contents: read` only; the `LORY_PIPELINE_TOKEN` secret reaches one
+  step and curl reads it from standard input. Findings are not copied into GitHub: the body is never
+  logged, never uploaded and deleted as soon as the judging step ends; the summary shows only `exit_code` and a
+  timestamp, and the findings are read in the vendor portal. The response lives in a private `mktemp -d` directory
+  (0700, files 0600) handed to the next step through a step output, and the token is removed from the environment
+  before any child process starts. Only an HTTP status of exactly 200 is accepted
+  (redirects are not followed), curl runs with `--disable` and without proxy variables, and the egress allow-list
+  is fixed in the workflow (no `allowed-endpoints` input). The first real run is a spike: the response schema beyond
+  `exit_code`, deep-audit support for a non-pull-request target and the rate limits are unknown.
+- **Tests.** `tests/test_lory_audit.py` runs both shell scripts as shipped against a stub `curl`. This workflow is not
+  dogfooded by `ci.yml` (it needs a vendor token and calls a third party); `test_workflows.py` records that in
+  `NOT_DOGFOODED`.
+
 ### v1.25.1: the egress canary runs only on Linux (issue #196)
 
 - **Fix.** The EX-0001 egress canary used `timeout` and `getent`, which macOS lacks (and `getent` is missing

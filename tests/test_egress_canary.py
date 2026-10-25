@@ -671,6 +671,7 @@ KEPT_BLOCK = {
     ("dependabot-auto-merge.yml", "auto-merge"),  # contents and pull-requests: write
     ("docs-pages.yml", "build"),  # runs caller code; its artifact is deployed verbatim by `deploy`
     ("docs-pages.yml", "deploy"),  # pages: write, id-token
+    ("lory-audit.yml", "audit"),  # LORY_PIPELINE_TOKEN, a third-party bearer token
     ("project-sync.yml", "sync"),  # id-token, Doppler, a GitHub App token
     ("python-ci.yml", "coverage"),  # id-token, Doppler, the Codecov upload
     ("python-ci.yml", "test"),  # its coverage artifact is uploaded to Codecov by `coverage`

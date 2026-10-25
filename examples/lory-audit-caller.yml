@@ -1,0 +1,41 @@
+# Caller template for lory-audit.yml: a monthly deep dive plus an on-demand run.
+# Copy it to .github/workflows/lory-audit.yml in the repository to be audited.
+#
+# This is not a per-pull-request gate. Do not add a pull_request trigger, and do
+# not make this job a required check unless the repository owner decides to.
+#
+# Before the first run:
+#   1. Put the repository's Lory pipeline token in the repository secret
+#      LORY_PIPELINE_TOKEN (never in the repository, never in a variable).
+#   2. Commit .lory/config.yml (version 1.0; pipeline.target, pipeline.depth,
+#      gate.fail_on, audit.*, reporting.*). The workflow does not read it.
+#   3. Replace <sha> and the version comment with the lory-audit.yml release you
+#      pin (every GYST caller pins by commit).
+#
+# Findings are not copied into GitHub: read them in the vendor portal. The job
+# summary shows only the exit_code and a timestamp.
+#
+# The first real run is a spike: the response schema beyond exit_code, deep
+# audits of a non-pull-request target and the rate limits are not documented.
+
+name: Lory audit
+
+on:
+  schedule:
+    - cron: "23 5 1 * *" # the 1st of each month, 05:23 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lory:
+    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/lory-audit.yml@<sha> # vX.Y.Z
+    permissions:
+      contents: read
+    secrets:
+      LORY_PIPELINE_TOKEN: ${{ secrets.LORY_PIPELINE_TOKEN }}
+    # Advisory by default: findings go to the job summary and a warning, and the
+    # job passes. A failed or malformed call fails the job either way.
+    # with:
+    #   fail-on-findings: true    # make a nonzero exit_code fail the job

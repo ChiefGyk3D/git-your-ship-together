@@ -54,3 +54,4 @@
 - [wiki-publish](Workflow-wiki-publish.md)
 - [project-sync](Workflow-project-sync.md)
 - [threat-model](Workflow-threat-model.md)
+- [lory-audit](Workflow-lory-audit.md)

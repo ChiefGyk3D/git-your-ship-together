@@ -49,6 +49,7 @@ REUSABLE = [
         "project-sync.yml",
         "dast.yml",
         "threat-model.yml",
+        "lory-audit.yml",
     )
 ]
 # The subset that fetches CI secrets. The Doppler rules are about those steps,
@@ -72,6 +73,7 @@ DOPPLER = [
         "wiki-publish.yml",
         "dast.yml",
         "threat-model.yml",
+        "lory-audit.yml",
     )
 ]
 # The language CI workflows: each ends in the `CI green` gate branch protection requires.
@@ -129,7 +131,7 @@ def all_steps(path: Path):
 
 
 def test_there_is_something_to_check():
-    assert len(REUSABLE) == 17, "expected the seventeen callable workflows"
+    assert len(REUSABLE) == 18, "expected the eighteen callable workflows"
     assert len(DOPPLER) == 5, "expected five of them to fetch CI secrets"
     assert [p.name for p in LANGUAGE_CI] == ["arduino-ci.yml", "bash-ci.yml", "python-ci.yml", "tofu-ci.yml"]
     assert ACTION_FILES, "no composite actions found"
@@ -670,22 +672,113 @@ def test_a_workflow_that_fetches_nothing_holds_no_token_at_all(name):
 
 DOWNLOAD = re.compile(r"\bcurl\b")
 CANARY_STEP = "Egress canary (EX-0001)"  # tests/test_egress_canary.py holds its text identical everywhere
+# The one curl that calls an API instead of downloading a tool. The exemption is a name AND a shape: the step must
+# still look like a bounded API call, and a step of that name that stops looking like one loses it.
+API_CALL_STEPS = {("lory-audit.yml", "Call the Lory pipeline scan API")}
+EXECUTES = re.compile(
+    r"\b(?:bash|sh|zsh|dash)\b\s+\S|\beval\b|\bsource\b|\bchmod\b|\btar\b|\bunzip\b|\binstall\b|\bxargs\b|\bexec\b"
+)
+# Only inside the curl command itself: `set -o pipefail` has a lone -o too.
+CURL_SAVES = re.compile(
+    r"--remote-name\b|--output-dir\b|(?:^|\s)-[oO](?:\s|$)|--output\s+(?!-(?:\s|$))|--create-dirs\b|--remote-header-name\b"
+)
+CURL_COMMAND = re.compile(r"\bcurl\b(?:[^\n]*\\\n)*[^\n]*")
+
+
+def code_lines(body: str) -> str:
+    """The script without its comment lines."""
+    return "\n".join(line for line in body.splitlines() if not line.lstrip().startswith("#"))
+
+
+def curl_invocations(body: str) -> tuple[int, str]:
+    """How many times the code uses the word curl (not counting the `(curl exit N)` of an error message), and the
+    command line of the first use with its backslash continuations."""
+    text = code_lines(body).replace("(curl exit", "(CURL-EXIT")
+    first = CURL_COMMAND.search(text)
+    return len(re.findall(r"\bcurl\b", text)), first.group(0) if first else ""
+
+
+def api_call_problems(body: str) -> list[str]:
+    """What an exempt API-call step must still be: ONE curl, with one fixed URL, its header on stdin, no user
+    curl config, an exact 200 check, nothing run or fetched."""
+    problems = []
+    count, call = curl_invocations(body)
+    if count != 1:
+        problems.append(f"exactly one curl invocation is allowed, found {count}")
+    else:
+        if not re.search(r"\bcurl --disable\b", call):
+            problems.append("curl does not start with --disable")
+        if "--header @-" not in call:
+            problems.append("the token header must come from stdin (--header @-)")
+        if call.count('"$LORY_API_URL"') != 1 or re.search(r"https?://", call):
+            problems.append('the only URL must be "$LORY_API_URL"')
+    if re.search(r"https?://", code_lines(body)):
+        problems.append("no URL literal belongs in the script; the fixed URL is in the step env")
+    if not re.search(r'"\$\w+" !?= 200 \]', body):
+        problems.append("no exact HTTP 200 check")
+    if EXECUTES.search(body) or any(CURL_SAVES.search(c.group(0)) for c in CURL_COMMAND.finditer(body)):
+        problems.append("the step executes or saves what it fetches")
+    return problems
+
+
+def download_problem(workflow: str, step: dict) -> str | None:
+    """Why this curl step breaks the pinned-hash rule, or None when it is allowed."""
+    body = step.get("run")
+    if not isinstance(body, str) or not DOWNLOAD.search(body):
+        return None
+    if step.get("name") == CANARY_STEP:
+        return None  # its only curl is a diagnostic header request to the Actions hosts; nothing is saved or run
+    if (workflow, step.get("name")) in API_CALL_STEPS:
+        problems = api_call_problems(body)
+        return "; ".join(problems) if problems else None
+    if "sha256sum -c" not in body:
+        return "downloads with curl and never checks a hash"
+    env = step.get("env") or {}
+    if not any(v.startswith("${{ inputs.") and k.endswith("SHA256") for k, v in env.items()):
+        return "checks a hash that is not a workflow input"
+    return None
 
 
 @pytest.mark.parametrize("path", REUSABLE, ids=lambda p: p.name)
 def test_every_downloaded_tool_is_checked_against_a_pinned_hash(path):
     """A tool fetched by URL is only as fixed as the URL. A pinned SHA-256 is what makes it a pin."""
     for job_name, step in all_steps(path):
-        body = step.get("run")
-        if not isinstance(body, str) or not DOWNLOAD.search(body):
-            continue
-        if step.get("name") == CANARY_STEP:
-            continue  # its only curl is a diagnostic header request to the Actions hosts; nothing is saved or run
-        assert "sha256sum -c" in body, f"{path.name}: job {job_name!r} downloads with curl and never checks a hash"
-        env = step.get("env") or {}
-        assert any(v.startswith("${{ inputs.") and k.endswith("SHA256") for k, v in env.items()), (
-            f"{path.name}: job {job_name!r} checks a hash that is not a workflow input"
-        )
+        problem = download_problem(path.name, step)
+        assert problem is None, f"{path.name}: job {job_name!r}: {problem}"
+
+
+def test_the_api_call_exemption_applies_to_that_step_only_and_only_while_it_stays_an_api_call():
+    name = next(iter(API_CALL_STEPS))
+    step = next(st for _, st in all_steps(WORKFLOWS / name[0]) if st.get("name") == name[1])
+    assert download_problem(name[0], step) is None
+    # Another step name with the very same script gets no exemption.
+    other = {**step, "name": "Fetch something else"}
+    assert "never checks a hash" in str(download_problem(name[0], other))
+    # The same name in another workflow gets none either.
+    assert "never checks a hash" in str(download_problem("python-ci.yml", step))
+    # The named step loses it when it stops being a bounded API call.
+    body = step["run"]
+    for mutation, needle in (
+        (body.replace("curl --disable", "curl"), "--disable"),
+        (body + "\ncurl --silent https://example.invalid/x", "exactly one curl"),
+        (body + '\ncurl --disable --header @- "$LORY_API_URL"', "exactly one curl"),
+        (body + '\nprintf "%s" "$token" | curl --header @- https://example.invalid/x', "exactly one curl"),
+        (
+            body + '\ncurl --header "Authorization: Bearer $LORY_PIPELINE_TOKEN" https://example.invalid',
+            "exactly one curl",
+        ),
+        (body + '\necho "$(curl https://example.invalid)"', "exactly one curl"),
+        (body.replace("--header @-", "--header 'X: y'"), "stdin"),
+        (body.replace('"$LORY_API_URL"', '"$LORY_API_URL" https://example.invalid/second'), "only URL"),
+        (body.replace('"$LORY_API_URL"', "https://example.invalid/x"), "only URL"),
+        (re.sub(r'"\$status" !?= 200', '"$status" = 2', body), "200"),
+        (body + "\nbash ./downloaded.sh", "executes or saves"),
+        (body.replace("--output -", "--output tool.tar"), "executes or saves"),
+        (body + "\ncurl -o /tmp/x https://example.invalid/x", "executes or saves"),
+        (body + "\nchmod +x tool", "executes or saves"),
+    ):
+        assert mutation != body, needle
+        assert needle in str(download_problem(name[0], {**step, "run": mutation})), needle
 
 
 def test_security_defaults_are_neutral_where_they_can_be():
@@ -895,6 +988,22 @@ def test_readme_caller_grants_every_permission_used_by_workflow_jobs(workflow_na
         )
 
 
+# A job that holds a vendor token must not let a caller widen where it can connect, so these workflows have no
+# allowed-endpoints input and a literal list on harden-runner instead.
+LITERAL_ALLOW_LIST = {
+    "lory-audit.yml": "holds a third-party bearer token; the caller cannot add hosts",
+}
+
+
+def host_port_entries(text: str, where: str) -> list[str]:
+    assert "\n" not in text, f"{where}: contains a newline"
+    entries = text.split(" ")
+    assert entries == sorted(entries), f"{where}: not sorted"
+    for entry in entries:
+        assert re.fullmatch(r"[a-z0-9.-]+:\d+", entry), f"{where}: {entry!r} is not host:port"
+    return entries
+
+
 @pytest.mark.parametrize("path", REUSABLE, ids=lambda p: p.name)
 def test_the_default_allow_list_is_one_line_of_sorted_host_ports(path):
     """harden-runner reads allowed-endpoints as space-separated host:port entries.
@@ -903,16 +1012,31 @@ def test_the_default_allow_list_is_one_line_of_sorted_host_ports(path):
     invalidates the list. Sorted so a diff shows one added host, not a reorder.
     """
     inputs = triggers(load(path))["workflow_call"]["inputs"]
+    if path.name in LITERAL_ALLOW_LIST:
+        assert not [n for n in inputs if "endpoint" in n], f"{path.name}: a caller input can add endpoints"
+        for job_name, job in jobs(load(path)).items():
+            harden = steps_of(job)[0]["with"]["allowed-endpoints"]
+            assert "${{" not in harden, f"{path.name}:{job_name}: the allow-list must be a literal"
+            host_port_entries(harden, f"{path.name}:{job_name}")
+        return
     lists = [name for name in inputs if name.endswith("allowed-endpoints") and name != "extra-allowed-endpoints"]
     assert "allowed-endpoints" in lists
     for name in lists:
-        default = inputs[name]["default"]
-        assert "\n" not in default, f"{path.name}: {name} default contains a newline"
-        entries = default.split(" ")
-        assert entries == sorted(entries), f"{path.name}: {name} default is not sorted"
-        for entry in entries:
-            assert re.fullmatch(r"[a-z0-9.-]+:\d+", entry), f"{path.name}: {name}: {entry!r} is not host:port"
+        host_port_entries(inputs[name]["default"], f"{path.name}: {name} default")
     assert inputs["extra-allowed-endpoints"]["default"] == ""
+
+
+def test_the_literal_allow_list_exemption_is_narrow():
+    names = {p.name for p in REUSABLE}
+    assert set(LITERAL_ALLOW_LIST) <= names
+    for name in LITERAL_ALLOW_LIST:
+        inputs = triggers(load(WORKFLOWS / name))["workflow_call"]["inputs"]
+        assert not [n for n in inputs if "endpoint" in n]
+    # Every other workflow still declares both inputs: the exemption is by name, not by absence.
+    for path in REUSABLE:
+        if path.name not in LITERAL_ALLOW_LIST:
+            inputs = triggers(load(path))["workflow_call"]["inputs"]
+            assert "allowed-endpoints" in inputs and "extra-allowed-endpoints" in inputs, path.name
 
 
 # --- dogfooding ------------------------------------------------------------
@@ -965,10 +1089,42 @@ def test_the_old_release_name_forwards_everything_to_container_release():
     assert job["permissions"] == granted
 
 
+# Workflows that cannot run against this repository's own pull requests, each with the reason. The reason must be
+# true of the workflow (see may_skip_dogfooding), and a test keeps this mapping in step with the workflow list.
+NOT_DOGFOODED = {
+    "lory-audit.yml": "needs a required vendor secret this repository does not hold and calls a third-party service; "
+    "tests/test_lory_audit.py runs its scripts as shipped against stub responses",
+}
+
+
+def may_skip_dogfooding(path: Path) -> bool:
+    """Only a workflow with a required caller secret can be exempt: nothing else is excused by 'needs a secret'."""
+    secrets = (triggers(load(path))["workflow_call"].get("secrets") or {}).values()
+    return any(spec.get("required") is True for spec in secrets)
+
+
 def test_every_reusable_workflow_is_run_from_this_repository_at_the_pull_requests_ref():
     """A workflow tested only structurally ships to nine repositories before anything runs it."""
     called = {reusable for _, _, reusable in dogfood_callers()}
-    assert called == {p.name for p in REUSABLE}, f"not dogfooded: {sorted({p.name for p in REUSABLE} - called)}"
+    expected = {p.name for p in REUSABLE} - set(NOT_DOGFOODED)
+    assert called == expected, f"not dogfooded: {sorted(expected - called)}"
+    assert not called & set(NOT_DOGFOODED), "a workflow in NOT_DOGFOODED is now dogfooded; take it off the list"
+
+
+def test_the_not_dogfooded_mapping_is_in_step_with_the_workflow_list():
+    names = {p.name for p in REUSABLE}
+    assert set(NOT_DOGFOODED) <= names, (
+        f"NOT_DOGFOODED names workflows that are not reusable: {sorted(set(NOT_DOGFOODED) - names)}"
+    )
+    for name, reason in NOT_DOGFOODED.items():
+        assert len(reason) > 40, f"{name}: say why it cannot be dogfooded"
+        assert may_skip_dogfooding(WORKFLOWS / name), f"{name}: no required secret, so it has no excuse to skip ci.yml"
+
+
+def test_the_dogfood_exemption_does_not_apply_to_a_workflow_without_a_required_secret():
+    assert not may_skip_dogfooding(WORKFLOWS / "threat-model.yml")
+    assert not may_skip_dogfooding(WORKFLOWS / "python-ci.yml")  # its DOPPLER_TOKEN is optional
+    assert may_skip_dogfooding(WORKFLOWS / "lory-audit.yml")
 
 
 def test_the_fixture_release_never_publishes():
