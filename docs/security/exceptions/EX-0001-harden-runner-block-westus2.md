@@ -195,6 +195,12 @@ Not in scope: this repository's own `ci.yml` jobs (already `audit` before this e
   GitHub's design, and any other value gives `block`.
 - The jobs that stay in `block` are covered by the fail-fast egress canary, which turns the westus2 symptom
   into an immediate, named failure instead of a ten-minute hang.
+- The canary is **Linux-only**: every copy carries `runner.os == 'Linux' &&` in its step-level `if`. It needs
+  `timeout` and `getent`, which macOS lacks (`getent` is also missing in Git Bash on Windows); without the
+  condition a macOS matrix leg failed with the misleading "known westus2 DNS issue" message (issue #196,
+  v1.25.1). This exception concerns harden-runner `block` on Linux runners, and the canary is a diagnostic, so
+  skipping it on macOS and Windows weakens no control. `tests/test_egress_canary.py` fails if a canary step
+  lacks the condition.
 - Timeouts were cut to about three times the slowest healthy p99 (python-ci 15, bash-ci 10, tofu-ci 16,
   security 15, docs-pages 10, wiki-publish 10 minutes), so a stuck job costs minutes, not half an hour.
 

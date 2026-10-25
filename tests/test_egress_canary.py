@@ -508,7 +508,7 @@ def eq(left, right: str) -> bool:
     return isinstance(left, str) and left.lower() == right.lower()
 
 
-def evaluate(expression: str, values: dict[str, str], runner=None, environment="github-hosted"):
+def evaluate(expression: str, values: dict[str, str], runner=None, environment="github-hosted", runner_os="Linux"):
     """The expression forms used for a policy: inputs.X, runner.environment, == 'lit' (case-insensitive like
     GitHub's), &&, ||, parentheses, and contains(fromJSON('[...]'), <runner>) against the hosted-label list."""
     body = re.fullmatch(r"\$\{\{ (.*) \}\}", expression).group(1)
@@ -522,15 +522,16 @@ def evaluate(expression: str, values: dict[str, str], runner=None, environment="
     body = re.sub(r"contains\(fromJSON\('(\[[^']*\])'\), (?:matrix|inputs)\.runner\)", hosted, body)
     body = re.sub(r"hashFiles\([^)]*\) != ''", "T", body)  # a manifest exists: the cache is wanted
     body = body.replace("runner.environment", "N")
+    body = re.sub(r"runner\.os == ('[\w-]*')", r"Q(O, \1)", body)
     body = re.sub(r"inputs\.([\w-]+)", lambda m: f"V[{m.group(1)!r}]", body)
     body = re.sub(r"(V\['[\w-]+'\]|N) == ('[\w-]*')", r"Q(\1, \2)", body)
     py = body.replace("&&", " and ").replace("||", " or ")
-    assert re.fullmatch(r"[\sVHRNQT\[\]'a-z\-=(),]*", py), f"unexpected syntax in a policy expression: {py}"
+    assert re.fullmatch(r"[\sVHRNOQT\[\]'a-zA-Z\-=(),]*", py), f"unexpected syntax in a policy expression: {py}"
 
     def is_hosted(label):  # a list or other type never matches a label
         return isinstance(label, str) and label.lower() in {x.lower() for x in hosted_labels()}
 
-    env = {"V": values, "H": is_hosted, "R": runner, "N": environment, "Q": eq, "T": True}
+    env = {"V": values, "H": is_hosted, "R": runner, "N": environment, "O": runner_os, "Q": eq, "T": True}
     return eval(py, {"__builtins__": {}}, env)  # noqa: S307 - our own fixed expression
 
 
@@ -598,7 +599,7 @@ def test_every_job_gets_the_policy_check_and_the_canary_right_after_harden_runne
     # One effective policy, written three times: harden-runner, its telemetry switch and the canary's `if`.
     inner = policy[len("${{ ") : -len(" }}")]
     assert steps[0]["with"]["disable-telemetry"] == "${{ (" + inner + ") == 'block' }}"
-    assert canary["if"] == "${{ (" + inner + ") == 'block' }}"
+    assert canary["if"] == "${{ runner.os == 'Linux' && ((" + inner + ") == 'block') }}"
     dynamic = str(job.get("runs-on")) in ("${{ matrix.runner }}", "${{ inputs.runner }}")
     secretless = (path.name, name) not in KEPT_BLOCK
     if secretless and not dynamic:
@@ -619,6 +620,8 @@ def test_every_job_gets_the_policy_check_and_the_canary_right_after_harden_runne
                     result == "block"
                 )
                 assert evaluate(canary["if"], values, runner, environment) is (result == "block")
+                for other_os in ("macOS", "Windows"):  # `timeout` and `getent` are Linux tools (issue #196)
+                    assert evaluate(canary["if"], values, runner, environment, other_os) is False
                 wants_audit = any(v.lower() == "audit" for v in values.values())  # GitHub compares case-insensitively
                 runtime_hosted = (not secretless) or (environment or "").lower() == "github-hosted"
                 label_hosted = (not secretless) or (not dynamic) or runner_is_hosted(runner)
@@ -925,3 +928,47 @@ def test_the_expressions_depend_on_the_policy_check_for_exactness():
     expression = "${{ inputs.a == 'audit' && 'audit' || 'block' }}"
     assert evaluate(expression, {"a": "AUDIT"}) == "audit"
     assert run_check({"POLICY_EGRESS_POLICY": "AUDIT"}).returncode == 1
+
+
+# --- the canary is Linux-only (issue #196) -----------------------------------------------------------
+
+CANARY_NAME = "Egress canary (EX-0001)"
+
+
+def canary_steps():
+    """Every canary step in every workflow, hardcoded-audit.yml ones included."""
+    for path in WORKFLOWS:
+        for name, job in yaml.safe_load(path.read_text())["jobs"].items():
+            for step in job.get("steps") or []:
+                if step.get("name") == CANARY_NAME:
+                    yield path, name, job, step
+
+
+def linux_gate_problem(job: dict, step: dict) -> str | None:
+    """None when the canary cannot run on macOS or Windows (`timeout` and `getent` are missing there): its `if`
+    requires `runner.os == 'Linux'`, or the job runs on a fixed ubuntu label."""
+    if "runner.os == 'Linux' &&" in str(step.get("if", "")):
+        return None
+    if re.fullmatch(r"ubuntu-[\w.]+", str(job.get("runs-on"))) and "if" not in step:
+        return None  # audit.yml: hardcoded block on a fixed Linux runner
+    return "canary can run on a non-Linux runner"
+
+
+def test_every_canary_runs_only_on_linux():
+    seen = 0
+    for path, name, job, step in canary_steps():
+        seen += 1
+        assert linux_gate_problem(job, step) is None, f"{path.name}:{name}: {linux_gate_problem(job, step)}"
+    assert seen > 60
+
+
+def test_the_linux_guard_bites():
+    """Mutation: drop the Linux condition from a real canary and the guard must object."""
+    dynamic = [(j, s) for _p, _n, j, s in canary_steps() if str(j.get("runs-on")).startswith("${{ ")]
+    assert len(dynamic) >= 6, "the matrix-runner jobs (python-ci, bash-ci, container-release, python-fuzz) must be seen"
+    for job, step in dynamic:
+        assert linux_gate_problem(job, step) is None
+        mutated = {**step, "if": step["if"].replace("runner.os == 'Linux' && ", "")}
+        assert mutated["if"] != step["if"]
+        assert linux_gate_problem(job, mutated) is not None
+        assert linux_gate_problem(job, {k: v for k, v in step.items() if k != "if"}) is not None
