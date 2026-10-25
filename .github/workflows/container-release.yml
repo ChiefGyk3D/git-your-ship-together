@@ -722,8 +722,8 @@ jobs:
           # The Actions cache is writable by anyone who can open a pull
           # request; a publishing build must not read it. One scope per
           # platform so the architectures do not overwrite each other.
-          cache-from: ${{ !inputs.push && format('type=gha,scope={0}', matrix.arch) || '' }}
-          cache-to: ${{ !inputs.push && format('type=gha,mode=max,scope={0}', matrix.arch) || '' }}
+          cache-from: ${{ !inputs.push && (inputs.egress-policy == 'audit' && 'audit' || 'block') == 'block' && format('type=gha,scope={0}', matrix.arch) || '' }}
+          cache-to: ${{ !inputs.push && (inputs.egress-policy == 'audit' && 'audit' || 'block') == 'block' && format('type=gha,mode=max,scope={0}', matrix.arch) || '' }}
 
       - name: Require a non-root user
         if: inputs.require-non-root

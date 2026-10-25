@@ -2267,6 +2267,9 @@ latest or when the upstream defect is fixed:
   step fails it with a fixed message that names the input and the length of its value, never the value. That
   check is the first step of the job, before harden-runner, so nothing consumes a bad value first. `distro` and `semgrep` stay `audit` when either their own
   input or `egress-policy-secretless` says exactly `audit`.
+- No cache in an audit job: the pip, buildx and Arduino-package caches are on only when the job's own effective
+  policy is `block`, so code running in audit cannot poison a cache a block-mode job restores. Audit-mode jobs
+  install without the cache. Hash-verified tool caches are unchanged.
 - A fail-fast canary as a step of every job that can run in `block` (below).
 - Lower default timeouts, so a stuck job costs minutes: `python-ci` 15 (was 30), `bash-ci` 10 (was 15),
   `tofu-ci` 16 (was 20), `security` 15 (was 30), `docs-pages` 10 (was 30), `wiki-publish` 10 (was 30).

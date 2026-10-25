@@ -355,7 +355,7 @@ jobs:
           python-version: ${{ inputs.lint-python-version }}
           # pip's cache keys on a manifest; a repository without one (stdlib only)
           # would fail the step, so caching is skipped there.
-          cache: ${{ hashFiles('**/requirements*.txt', '**/pyproject.toml', '**/setup.py') != '' && 'pip' || '' }}
+          cache: ${{ ((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block') == 'block' && hashFiles('**/requirements*.txt', '**/pyproject.toml', '**/setup.py') != '' && 'pip' || '' }}
 
       - name: Install linters
         env:
@@ -497,7 +497,7 @@ jobs:
           python-version: ${{ inputs.lint-python-version }}
           # pip's cache keys on a manifest; a repository without one (stdlib only)
           # would fail the step, so caching is skipped there.
-          cache: ${{ hashFiles('**/requirements*.txt', '**/pyproject.toml', '**/setup.py') != '' && 'pip' || '' }}
+          cache: ${{ ((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block') == 'block' && hashFiles('**/requirements*.txt', '**/pyproject.toml', '**/setup.py') != '' && 'pip' || '' }}
 
       - name: Install the type checker
         if: inputs.typecheck-install-command != ''
@@ -780,7 +780,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
           # pip's cache keys on a manifest; a repository without one (stdlib only)
           # would fail the step, so caching is skipped there.
-          cache: ${{ hashFiles('**/requirements*.txt', '**/pyproject.toml', '**/setup.py') != '' && 'pip' || '' }}
+          cache: ${{ (inputs.egress-policy == 'audit' && 'audit' || 'block') == 'block' && hashFiles('**/requirements*.txt', '**/pyproject.toml', '**/setup.py') != '' && 'pip' || '' }}
 
       - name: Install dependencies
         env:
@@ -1336,7 +1336,7 @@ jobs:
           python-version: ${{ inputs.coverage-python-version }}
           # pip's cache keys on a manifest; a repository without one (stdlib only)
           # would fail the step, so caching is skipped there.
-          cache: ${{ hashFiles('**/requirements*.txt', '**/pyproject.toml', '**/setup.py') != '' && 'pip' || '' }}
+          cache: ${{ ((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block') == 'block' && hashFiles('**/requirements*.txt', '**/pyproject.toml', '**/setup.py') != '' && 'pip' || '' }}
 
       - name: Install the project
         env:
@@ -1482,8 +1482,8 @@ jobs:
           push: false
           load: true
           tags: ci-image:local
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: ${{ ((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block') == 'block' && 'type=gha' || '' }}
+          cache-to: ${{ ((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block') == 'block' && 'type=gha,mode=max' || '' }}
 
       - name: Check the image
         if: inputs.docker-test-command != ''

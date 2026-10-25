@@ -518,16 +518,17 @@ def evaluate(expression: str, values: dict[str, str], runner=None, environment="
         return "H(R)"
 
     body = re.sub(r"contains\(fromJSON\('(\[[^']*\])'\), (?:matrix|inputs)\.runner\)", hosted, body)
+    body = re.sub(r"hashFiles\([^)]*\) != ''", "T", body)  # a manifest exists: the cache is wanted
     body = body.replace("runner.environment", "N")
     body = re.sub(r"inputs\.([\w-]+)", lambda m: f"V[{m.group(1)!r}]", body)
     body = re.sub(r"(V\['[\w-]+'\]|N) == ('[\w-]*')", r"Q(\1, \2)", body)
     py = body.replace("&&", " and ").replace("||", " or ")
-    assert re.fullmatch(r"[\sVHRNQ\[\]'a-z\-=(),]*", py), f"unexpected syntax in a policy expression: {py}"
+    assert re.fullmatch(r"[\sVHRNQT\[\]'a-z\-=(),]*", py), f"unexpected syntax in a policy expression: {py}"
 
     def is_hosted(label):  # a list or other type never matches a label
         return isinstance(label, str) and label.lower() in {x.lower() for x in hosted_labels()}
 
-    env = {"V": values, "H": is_hosted, "R": runner, "N": environment, "Q": eq}
+    env = {"V": values, "H": is_hosted, "R": runner, "N": environment, "Q": eq, "T": True}
     return eval(py, {"__builtins__": {}}, env)  # noqa: S307 - our own fixed expression
 
 
@@ -792,3 +793,107 @@ def test_the_canary_overrides_every_job_default_working_directory_and_shell():
 def test_the_action_sets_the_working_directory_too():
     step = yaml.safe_load(ACTION.read_text())["runs"]["steps"][0]
     assert step["working-directory"] == "${{ github.workspace }}" and step["shell"] == "bash"
+
+
+# --- caches: an audit-mode job neither restores nor saves one --------------------------------------
+#
+# Code that runs in an audit job can write a poisoned cache that a later block-mode job (possibly one holding
+# an OIDC token) restores, in the same run or a later one. setup-python's pip cache key is OS, architecture,
+# Python version and a hash of the manifests, with no suffix or namespace option (read at the pinned SHA), so
+# the only way to keep audit and block apart is to turn the cache off in a job whose effective policy is audit.
+# Tool-download caches (key `tool-*`) stay: every restore is followed by `sha256sum -c`, so a poisoned entry
+# cannot pass (tests/test_hygiene.py holds that).
+
+
+def cache_sites(job: dict):
+    """(step name, kind, expression) for every cache a job can restore or save."""
+    run_text = "\n".join(str(s.get("run", "")) for s in job.get("steps") or [])
+    for step in job.get("steps") or []:
+        uses = str(step.get("uses", ""))
+        with_ = step.get("with") or {}
+        label = step.get("name") or uses
+        if uses.startswith("actions/cache"):
+            if str(with_.get("key", "")).startswith("tool-") and "sha256sum -c" in run_text:
+                yield label, "hash-verified tool cache", None
+            else:
+                yield label, "actions/cache", step.get("if")
+        for key in ("cache", "cache-from", "cache-to"):
+            if with_.get(key) not in (None, ""):
+                yield label, key, str(with_[key])
+
+
+def gated_on_block(job: dict, policy: str, expression) -> bool:
+    inner = policy[len("${{ ") : -len(" }}")]
+    return expression is not None and f"({inner}) == 'block'" in str(expression)
+
+
+def uncached_problems(path_name: str, job: dict, policy: str) -> list[str]:
+    return [
+        f"{path_name}: {label} ({kind}) is not off in audit"
+        for label, kind, expr in cache_sites(job)
+        if kind != "hash-verified tool cache" and not gated_on_block(job, policy, expr)
+    ]
+
+
+@pytest.mark.parametrize("path,name,job,steps", list(workflow_jobs()), ids=lambda v: v if isinstance(v, str) else "")
+def test_no_cache_is_used_when_the_job_is_audit(path, name, job, steps):
+    policy = steps[0]["with"]["egress-policy"]
+    if path.name in ("ci.yml", "audit.yml"):
+        pytest.skip("hardcoded policy")
+    assert uncached_problems(f"{path.name}:{name}", job, policy) == []
+    used = sorted(set(re.findall(r"inputs\.([\w-]+)", policy)) - {"runner"})
+    dynamic = str(job.get("runs-on")) in ("${{ matrix.runner }}", "${{ inputs.runner }}")
+    for label, kind, expr in cache_sites(job):
+        if kind == "hash-verified tool cache":
+            continue
+        for runner in RUNNER_CASES if dynamic else [None]:
+            for environment in ENVIRONMENTS:
+                for combo in itertools.product(VALUES, repeat=len(used)):
+                    values = dict(zip(used, combo, strict=True))
+                    effective = evaluate(policy, values, runner, environment)
+                    if kind == "actions/cache":
+                        on = evaluate(expr, values, runner, environment)
+                        assert on is (effective == "block"), f"{path.name}:{name}: {label}"
+                    elif kind == "cache":
+                        got = evaluate(expr, values, runner, environment)
+                        assert got == ("pip" if effective == "block" else ""), f"{path.name}:{name}: {label}"
+                    else:  # a buildx cache spec: empty unless block
+                        assert gated_on_block(job, policy, expr), f"{path.name}:{name}: {label}"
+
+
+def test_the_cache_guard_bites():
+    job = {
+        "steps": [
+            {"name": "py", "uses": "actions/setup-python@x", "with": {"cache": "pip"}},
+            {"name": "buildx", "uses": "docker/build-push-action@x", "with": {"cache-to": "type=gha"}},
+            {"name": "dl", "uses": "actions/cache@x", "with": {"key": "arduino-packages-1"}},
+            {"name": "tool", "uses": "actions/cache@x", "with": {"key": "tool-x-1"}},
+            {"name": "verify", "run": "echo x | sha256sum -c -"},
+        ]
+    }
+    policy = "${{ inputs.a == 'audit' && 'audit' || 'block' }}"
+    assert len(uncached_problems("w.yml", job, policy)) == 3
+    job["steps"][0]["with"]["cache"] = "${{ (inputs.a == 'audit' && 'audit' || 'block') == 'block' && 'pip' || '' }}"
+    assert len(uncached_problems("w.yml", job, policy)) == 2
+
+
+def test_every_cache_site_in_the_workflows_was_seen():
+    kinds = {}
+    for path, name, job, _steps in workflow_jobs():
+        for _label, kind, _expr in cache_sites(job):
+            kinds.setdefault(kind, []).append(f"{path.name}:{name}")
+    assert len(kinds.get("cache", [])) >= 5 and kinds.get("actions/cache") and kinds.get("cache-from")
+    assert kinds.get("hash-verified tool cache"), "the tool caches are the hash-verified exception"
+
+
+def test_this_repositorys_audit_jobs_use_no_cache_that_the_blocking_audit_workflow_restores():
+    """ci.yml jobs are audit by construction and share setup-python's key with audit.yml (block, Doppler)."""
+    doc = yaml.safe_load((REPO / ".github" / "workflows" / "ci.yml").read_text())
+    seen = 0
+    for name, job in doc["jobs"].items():
+        steps = job.get("steps") or []
+        if steps and str(steps[0].get("uses", "")).startswith("step-security/harden-runner@"):
+            assert steps[0]["with"]["egress-policy"] == "audit"
+            seen += 1
+            assert [label for label, kind, _ in cache_sites(job) if kind != "hash-verified tool cache"] == [], name
+    assert seen >= 6

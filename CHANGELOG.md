@@ -26,6 +26,11 @@ jobs hang or fail; see the README section "Known CI platform issue: westus2 (EX-
   label it carries) runs in `block`. Where a caller chooses the runner label (`runner`, `runners`,
   `distro-runners`: `bash-ci` `test` and `distro`, `python-ci` `distro`, `python-fuzz` `fuzz`), the label
   must also be exactly a standard GitHub-hosted label.
+- **No cache in an audit job.** The pip cache (`python-ci`, `python-fuzz`, `docs-pages`), the buildx `gha`
+  cache (`python-ci` `docker`, `container-release` non-publishing build) and the Arduino package cache are on
+  only when the job's own effective policy is `block`, so code running in an audit job cannot poison a cache a
+  block-mode job restores. Audit-mode jobs install without the cache and run a little slower. Hash-verified
+  tool caches are unchanged.
 - **Fail-closed policy.** A policy input that is not exactly `audit` or `block` makes the job run in
   `block` and fails it in the first step of the job, before harden-runner, with a fixed message that names the input and
   the length of its value. Before, harden-runner rejected it or treated it

@@ -210,6 +210,47 @@ answering fails a healthy `block` job. Each failing address is retried three mor
 a transient refusal passes; a persistent one costs a rerun. The logs it prints on failure contain resolver
 and host addresses, so review them before attaching them to a support ticket.
 
+## Caches and artifacts
+
+**The cache rule.** A job whose effective policy is `audit` neither restores nor saves a cache that is not
+hash-verified. Code that runs in an audit job could otherwise write a poisoned cache entry that a later
+block-mode job, one holding an OIDC token or a Doppler secret included, restores in the same run or in a later
+one. setup-python's pip cache key is the operating system, architecture, Python version and a hash of the
+manifests; v7 (read at the pinned SHA) has no suffix or namespace option, only `cache-dependency-path`, so audit
+and block cannot be kept apart by naming. Every cache input in an audit-capable job is therefore computed from
+the job's own effective policy and is off unless that policy is `block`; the expression is the same one that
+drives harden-runner, so the two cannot disagree. A tool-download cache (`tool-*` keys) is kept: every restore
+is followed by `sha256sum -c` against a pinned hash, so a poisoned entry cannot pass.
+
+**Performance consequence.** Audit-mode jobs install their dependencies without the pip cache and build images
+without the Actions cache: a few tens of seconds per job on the short jobs measured, more on a large
+dependency tree. Callers that run `block` get the caches back.
+
+**Residual.** In block mode the secretless jobs and the jobs that stay in `block` share the pip cache namespace
+(for example `python-ci` `lint`, `typecheck`, `smoke` and `test`). They run the same caller code under the same
+egress filter, which is the trust level the project already extends to its own `test` job; the exception does not
+widen it. This is the part a separate namespace would fix, and the action offers none.
+
+Every cache and artifact that can cross a trust class, with the decision:
+
+| Where | What | Decision |
+|---|---|---|
+| `python-ci` `lint`, `typecheck`, `smoke`, `test` | setup-python `cache: pip` | off when the job's effective policy is audit |
+| `python-fuzz` `fuzz` | setup-python `cache: pip` | off when audit |
+| `docs-pages` `build` | setup-python `cache: pip` | off when audit |
+| `python-ci` `docker` | buildx `cache-from` and `cache-to` `type=gha` | off when audit |
+| `container-release` `build` | buildx `type=gha` cache, only on a non-publishing build, scope per architecture | off when audit (it was already off for a publishing build) |
+| `arduino-ci` `compile` | Actions cache of the core and library downloads (`arduino-packages-*`) | step skipped when audit |
+| `arduino-ci`, `bash-ci`, `container-release`, `tofu-ci` | tool-download caches (`tool-*`) | kept: every restore is verified against a pinned SHA-256 |
+| `ci.yml` (this repository's own CI, always audit) | setup-python `cache: pip` in four jobs | removed: `audit.yml` (block, Doppler) restores the same key |
+| `audit.yml` | setup-python `cache: pip` | kept: both jobs are hardcoded `block` |
+| `python-package-release` `build`, `artifact-release` `build` | none (a publishing build never reads a cache; a test holds this) | no change |
+| artifacts: `python-ci` `test` to `coverage`, `dast` `scan` to `upload`, `docs-pages` `build` to `deploy`, `wiki-publish` `generate` to `publish`, `verify-published` `verify-release` to `rescan` | job to job within one run | the producer of each that feeds a privileged consumer is kept under `egress-policy` (see the table above); `rescan` is secretless and only reads what block-class jobs wrote |
+
+`tests/test_egress_canary.py` collects every cache site in every workflow and requires each one to be either a
+hash-verified tool cache or gated on its own job's effective policy, then evaluates the gate for audit, block,
+invalid policies, every runtime environment and runner label. A cache that is left on in audit fails the test.
+
 ## What the canary prints
 
 Only when it fails, to the live job log and nowhere else: `uname -srmo` (kernel name, release, machine and
