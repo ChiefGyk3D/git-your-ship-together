@@ -12,10 +12,11 @@ name what a caller sees after that.
   `workflow_dispatch`), not a per-pull-request gate; the caller template is `examples/lory-audit-caller.yml`.
   Advisory by default (`fail-on-findings: false`); a failed, timed-out, oversize or malformed call, or a missing or
   non-integer `exit_code`, always fails the job. `contents: read` only; the `LORY_PIPELINE_TOKEN` secret reaches one
-  step and curl reads it from standard input. Findings are sensitive: the body is never logged, the summary shows only
-  `exit_code` and a timestamp, and the raw response is uploaded only with `upload-response: true` when the visibility is exactly `private`
-  (public and internal are refused, checked against the live API right before the upload), for three days. The token is scrubbed from the kept response in raw,
-  JSON-escaped, URL-encoded and base64 forms. The first real run is a spike: the response schema beyond
+  step and curl reads it from standard input. Findings are not copied into GitHub: the body is never
+  logged, never uploaded and deleted as soon as the judging step ends; the summary shows only `exit_code` and a
+  timestamp, and the findings are read in the vendor portal. Only an HTTP status of exactly 200 is accepted
+  (redirects are not followed), curl runs with `--disable` and without proxy variables, and the egress allow-list
+  is fixed in the workflow (no `allowed-endpoints` input). The first real run is a spike: the response schema beyond
   `exit_code`, deep-audit support for a non-pull-request target and the rate limits are unknown.
 - **Tests.** `tests/test_lory_audit.py` runs both shell scripts as shipped against a stub `curl`. This workflow is not
   dogfooded by `ci.yml` (it needs a vendor token and calls a third party); `test_workflows.py` records that in

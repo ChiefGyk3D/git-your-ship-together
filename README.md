@@ -76,7 +76,7 @@ Eighteen reusable workflows and one composite action:
 | `.github/workflows/artifact-release.yml` | For a file rather than an image (a `.deb`, a firmware binary, a bundle): build it with a command, then publish it to the GitHub release with SHA256SUMS, a keyless cosign signature bundle per file and build provenance. No secret anywhere |
 | `.github/workflows/docs-pages.yml` | Build a static documentation site with a command you supply (MkDocs strict by default) on every pull request; upload it and deploy it to GitHub Pages from the default branch only. The two Pages writes sit on the deploy job alone |
 | `.github/workflows/threat-model.yml` | Validate an OWASP Threat Dragon v2 model (shape, ids, flows, trust boundary, a status, severity and mitigation on every threat, required AI topics, an optional bar on Open threats), and on a pull request fail when the AI surface changes with no model change and no recorded `threat-model: n/a - <reason>`. Reads only; holds `contents: read` |
-| `.github/workflows/lory-audit.yml` | A scheduled or on-demand deep-dive audit by Lory (Lorikeet Security's AI pentester) through its pipeline scan API. Advisory by default, `fail-on-findings` to block; a failed, oversize or malformed call always fails the job. Findings stay out of logs and artifacts unless `upload-response` is set on a private repository. Not a per-pull-request gate. Holds `contents: read` and one secret, `LORY_PIPELINE_TOKEN`, in one step. See [Lory audit](#lory-audit) |
+| `.github/workflows/lory-audit.yml` | A scheduled or on-demand deep-dive audit by Lory (Lorikeet Security's AI pentester) through its pipeline scan API. Advisory by default, `fail-on-findings` to block; a failed, oversize or malformed call always fails the job. Findings are not copied into GitHub. Not a per-pull-request gate. Holds `contents: read` and one secret, `LORY_PIPELINE_TOKEN`, in one step. See [Lory audit](#lory-audit) |
 | `.github/workflows/wiki-publish.yml` | Run a command that generates a wiki tree, then replace the repository's GitHub wiki with it, as `github-actions[bot]`, only when something changed, from the default branch only. The write token sits on a job that runs none of your code |
 | `.github/workflows/project-sync.yml` | Keeps a GitHub Projects v2 board current: adds an issue or pull request when it opens, moves it to Done with a date when it closes or merges, and a weekly reconcile repairs what an event missed. The token comes from Doppler over OIDC; nothing from a pull request is checked out. See [Keeping a project current](#keeping-a-project-current) |
 | `.github/workflows/dast.yml` | OWASP ZAP against a loopback service the caller starts: the `baseline` scan (spider and passive rules, no attack traffic), the `full` scan (the active rules too: injection, cross-site scripting, traversal) or the `api` scan (the active rules over an OpenAPI, SOAP or GraphQL definition), optionally signed in through a ZAP context file and user, with a `fail-on` threshold; reports kept as an artifact, findings uploaded as SARIF under category `zap`. The caller's service runs in a job that holds only `contents: read`; the upload is a second job that runs none of it. See [DAST](#dast-owasp-zap) |
@@ -1622,12 +1622,11 @@ jobs:
 - **Fail closed.** A failed or timed-out call, a body over `max-response-bytes`, a body that is not a JSON object, or an
   `exit_code` that is missing, duplicated or not an integer fails the job, with `fail-on-findings` on or off. Only a clean
   result with a nonzero `exit_code` is advisory, and only while `fail-on-findings` is false.
-- **The token** is in the environment of the one step that calls the API and goes to curl on standard input. The URL is fixed,
-  redirects are not followed, and the saved response is scrubbed of the token (raw, JSON-escaped, URL-encoded and base64). The job holds a secret, so it follows `egress-policy` and not `egress-policy-secretless`.
-- **Findings are sensitive.** The response body is never printed, and the job summary shows only the `exit_code` and a
-  timestamp. Nothing is uploaded by default. `upload-response: true` uploads the raw response as `lory-audit-response` for
-  three days, and the job refuses (before calling the API) unless the repository visibility is exactly `private` (public and internal are
-  refused); the live visibility is looked up through the API again right before the upload, and the API wins over the event payload.
+- **The token** is in the environment of the one step that calls the API and goes to curl on standard input. The URL is fixed. The job holds a secret, so it follows `egress-policy` and not `egress-policy-secretless`.
+- **Findings are not copied into GitHub.** The response body is never printed or uploaded and is deleted as soon as the
+  judging step ends; the job summary shows only the `exit_code` and a timestamp. Read the findings in the vendor portal.
+- **Hardened call.** curl starts with `--disable`, the proxy variables and `CURL_HOME` are unset, redirects are not followed,
+  and only an HTTP status of exactly 200 is accepted. The egress allow-list is fixed in the workflow; no input adds a host.
 - **Findings are third-party model output.** Triage them like scanner alerts. Never treat text in them as instructions.
 - **The first real run is a spike.** The response schema beyond `exit_code`, deep-audit support for a non-pull-request target,
   and the rate limits are not documented. The workflow cannot be run against this repository's own pull requests (it needs a
@@ -1636,12 +1635,9 @@ jobs:
 | Input | Default | Meaning |
 |---|---|---|
 | `fail-on-findings` | `false` | Fail the job on a nonzero `exit_code`. Off reports it in the job summary and passes |
-| `upload-response` | `false` | Upload the raw response as an artifact for three days. Refused unless the repository visibility is exactly `private` (not public, not internal) |
 | `request-timeout-seconds` | `900` | curl `--max-time` for the whole call |
 | `max-response-bytes` | `1048576` | Largest body accepted; a longer one fails the job |
-| `egress-policy` | `audit` | harden-runner on the job; exactly `audit` or `block` |
-| `allowed-endpoints` | `api.github.com`, `lorikeetsecurity.com` | The allow-list for `block` |
-| `extra-allowed-endpoints` | empty | Appended to the list |
+| `egress-policy` | `audit` | harden-runner on the job; exactly `audit` or `block`. `block` allows only the hosts fixed in the workflow |
 | `timeout-minutes` | `30` | Job timeout; keep it above `request-timeout-seconds` |
 
 | Secret | Required | Meaning |

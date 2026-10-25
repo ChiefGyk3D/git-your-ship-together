@@ -30,15 +30,17 @@
 # The token reaches exactly one step, through that step's environment, and goes
 # to curl on standard input, never on a command line. Every value, including
 # the ref name, reaches the shell through an environment variable and never by
-# template expansion into a script. The saved response is scrubbed of the token
-# before anything is kept, in its raw, JSON-escaped, URL-encoded and base64 forms.
+# template expansion into a script. curl starts with --disable (no user config),
+# the proxy variables are unset, redirects are not followed, and only an HTTP
+# status of exactly 200 is accepted.
 #
-# Findings are sensitive: anyone who can read a repository's artifacts can read
-# them, and a public repository's artifacts are public. So the response body is
-# never printed to the log, the job summary carries only the exit_code and a
-# timestamp, and the raw response is uploaded only when `upload-response` is
-# true AND the repository visibility is exactly `private` (public and internal are refused, checked against
-# the live API right before the upload), for three days.
+# Findings are sensitive, so they are not copied into GitHub: the response body
+# is never printed, never uploaded and never kept past the two steps that read
+# it (a trap deletes it); the job summary carries only the exit_code and a
+# timestamp. Read the findings in the vendor portal.
+#
+# The egress allow-list is fixed in this file. There is no input that can add a
+# host to a job that holds a vendor token.
 #
 # Unknown until the first real run (a spike): the response schema beyond
 # `exit_code`, whether a deep audit of a non-pull-request target works through
@@ -55,10 +57,6 @@ on:
         description: Fail the job when Lory returns a nonzero `exit_code`. The default (false) reports the result in the job summary and as a warning and passes. A failed or malformed call fails the job either way.
         type: boolean
         default: false
-      upload-response:
-        description: Upload the raw Lory response as an artifact (kept three days). Off by default because findings are sensitive. It is refused, and the job fails before calling the API, unless the repository is private. With it off, the job summary carries only the `exit_code` and a timestamp.
-        type: boolean
-        default: false
       request-timeout-seconds:
         description: Hard limit for the whole API call (curl --max-time), in seconds. A deep audit may take a while; the job timeout must be larger.
         type: number
@@ -68,17 +66,9 @@ on:
         type: number
         default: 1048576
       egress-policy:
-        description: harden-runner egress policy - `audit` logs outbound connections, `block` allows only `allowed-endpoints`. This job holds a secret, so it does not follow `egress-policy-secretless`; exactly `audit` or `block`, anything else fails the job.
+        description: harden-runner egress policy - `audit` logs outbound connections, `block` allows only the hosts fixed in this workflow (the Lory API and what the runner and the canary need; no input adds one). This job holds a secret, so it does not follow `egress-policy-secretless`; exactly `audit` or `block`, anything else fails the job.
         type: string
         default: audit
-      allowed-endpoints:
-        description: harden-runner allow-list for `block`, space-separated host:port entries. The Lory API and the GitHub API are all this job reaches.
-        type: string
-        default: "api.github.com:443 lorikeetsecurity.com:443"
-      extra-allowed-endpoints:
-        description: Appended to `allowed-endpoints`. Same format.
-        type: string
-        default: ""
       timeout-minutes:
         description: Job timeout. Keep it above `request-timeout-seconds`.
         type: number
@@ -123,7 +113,7 @@ jobs:
       - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
         with:
           egress-policy: ${{ inputs.egress-policy == 'audit' && 'audit' || 'block' }}
-          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443 github.com:443
+          allowed-endpoints: api.github.com:443 github.com:443 lorikeetsecurity.com:443 results-receiver.actions.githubusercontent.com:443
           # The agent may only stop reporting to StepSecurity in block mode.
           disable-telemetry: ${{ (inputs.egress-policy == 'audit' && 'audit' || 'block') == 'block' }}
 
@@ -208,8 +198,9 @@ jobs:
           fi
           exit "$rc"
 
-      # The only step that holds the token. It writes the response (token scrubbed) and its own failure line to
-      # the job summary; it does not judge a finding.
+      # The only step that holds the token. It saves the body for the next step and its own failure line to the job
+      # summary; it does not judge a finding. The response file exists only if every check below passed, and the
+      # trap removes the temp file always and the response file on any failure.
       - name: Call the Lory pipeline scan API
         shell: bash
         env:
@@ -220,11 +211,12 @@ jobs:
           LORY_PR_NUMBER: ${{ github.event.pull_request.number || 0 }}
           LORY_MAX_TIME: ${{ inputs.request-timeout-seconds }}
           LORY_MAX_BYTES: ${{ inputs.max-response-bytes }}
-          LORY_UPLOAD: ${{ inputs.upload-response }}
-          LORY_REPO_VISIBILITY: ${{ github.event.repository.visibility }}
           LORY_OUT_DIR: ${{ runner.temp }}/lory
         run: |
           set -u -o pipefail
+          # Nothing from the environment may redirect the call: a proxy would see the bearer token, CURL_HOME could
+          # point at a curlrc, a CA override could trust another server. (curl --disable below skips ~/.curlrc.)
+          unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY CURL_HOME CURL_CA_BUNDLE SSL_CERT_FILE SSL_CERT_DIR
           summary="${GITHUB_STEP_SUMMARY:-/dev/null}"
           fail() {
             echo "::error title=Lory audit::$1"
@@ -235,67 +227,49 @@ jobs:
           case "$LORY_MAX_BYTES" in '' | *[!0-9]*) fail "max-response-bytes must be a whole number" ;; esac
           case "$LORY_PR_NUMBER" in '' | *[!0-9]*) fail "the pull request number is not a whole number" ;; esac
           [ "$LORY_MAX_TIME" -ge 1 ] && [ "$LORY_MAX_BYTES" -ge 1 ] || fail "request-timeout-seconds and max-response-bytes must be at least 1"
-          # Raw findings in an artifact are readable by everyone who can read this repository's artifacts, and an
-          # internal repository is readable by a whole organization or enterprise. Only a visibility of exactly
-          # `private` may upload them; public, internal, anything else and a missing value refuse. The upload step
-          # asks the API again, right before uploading, because this payload value can be stale.
-          if [ "$LORY_UPLOAD" = true ] && [ "$LORY_REPO_VISIBILITY" != private ]; then
-            fail "upload-response is true but the repository visibility is not exactly private; findings are sensitive and only a private repository may upload them"
-          fi
           [ -n "$LORY_PIPELINE_TOKEN" ] || fail "the LORY_PIPELINE_TOKEN secret is empty"
           mkdir -p "$LORY_OUT_DIR"
           out="$LORY_OUT_DIR/response.json"
+          raw="$LORY_OUT_DIR/raw.out"
+          keep=0
+          cleanup() {
+            rm -f "$raw"
+            [ "$keep" = 1 ] || rm -f "$out"
+          }
+          trap cleanup EXIT
           body=$(python3 -I -c 'import json, os; print(json.dumps({"branch": os.environ["LORY_BRANCH"], "commit_sha": os.environ["LORY_COMMIT_SHA"], "pr_number": int(os.environ["LORY_PR_NUMBER"])}))') || fail "could not build the request body"
           # The header comes from standard input so the token is never in a process list. The body is not secret.
-          # No -L: a redirect is an error, so the bearer token cannot be carried to another host. head -c caps a
-          # body that has no Content-Length; one byte more than the cap is read to tell "exactly the cap" from "over".
+          # No -L: a redirect is not followed, and a 3xx is refused below. head -c caps a body that has no
+          # Content-Length. The status is appended after the body (`--write-out`) and split off again below.
           printf 'Authorization: Bearer %s\n' "$LORY_PIPELINE_TOKEN" |
-            curl --silent --show-error --fail-with-body --proto '=https' --tlsv1.2 \
-              --max-time "$LORY_MAX_TIME" --max-filesize "$LORY_MAX_BYTES" \
+            curl --disable --silent --show-error --fail-with-body --proto '=https' --tlsv1.2 \
+              --max-time "$LORY_MAX_TIME" --max-filesize "$LORY_MAX_BYTES" --write-out '\n%{http_code}' \
               --request POST --header @- --header 'Content-Type: application/json' \
               --data "$body" --output - "$LORY_API_URL" |
-            head -c "$((LORY_MAX_BYTES + 1))" >"$out"
+            head -c "$((LORY_MAX_BYTES + 6))" >"$raw"
           statuses=("${PIPESTATUS[@]}")
-          # Scrub the token from whatever was saved, in every form a server might echo it: raw, JSON-escaped,
-          # URL-encoded, and base64 (both alphabets, at each of the three alignments, keeping only the characters
-          # that do not depend on the neighbouring bytes).
-          python3 -I - "$out" <<'PY'
-          import base64
-          import json
-          import os
-          import sys
-          import urllib.parse
-
-          path, token = sys.argv[1], os.environ["LORY_PIPELINE_TOKEN"]
-          raw = token.encode()
-          forms = {raw, json.dumps(token)[1:-1].encode(), json.dumps(token)[1:-1].replace("/", "\\/").encode()}
-          forms |= {urllib.parse.quote(token, safe="").encode(), urllib.parse.quote(token).encode()}
-          forms.add(urllib.parse.quote_plus(token).encode())
-          for offset in range(3):
-              enc = base64.b64encode(b"\0" * offset + raw).rstrip(b"=")
-              part = enc[(offset * 8 + 5) // 6 : len(enc) - (1 if (offset + len(raw)) % 3 else 0)]
-              forms.add(part)
-              forms.add(part.replace(b"+", b"-").replace(b"/", b"_"))
-          with open(path, "rb") as handle:
-              data = handle.read()
-          for form in sorted((f for f in forms if len(f) >= 4), key=len, reverse=True):
-              data = data.replace(form, b"[redacted]")
-          with open(path, "wb") as handle:
-              handle.write(data)
-          PY
-          size=$(wc -c <"$out" | tr -d ' ')
-          if [ "$size" -gt "$LORY_MAX_BYTES" ]; then
+          total=$(wc -c <"$raw" | tr -d ' ')
+          if [ "$total" -gt "$((LORY_MAX_BYTES + 5))" ]; then
             fail "the response is larger than max-response-bytes ($LORY_MAX_BYTES); not trusting it"
           fi
+          status=$(tail -n 1 "$raw")
           if [ "${statuses[1]}" -ne 0 ]; then
+            case "$status" in [0-9][0-9][0-9]) fail "the API call failed (curl exit ${statuses[1]}, HTTP status $status); a failed call is never a pass" ;; esac
             fail "the API call failed (curl exit ${statuses[1]}); a failed call is never a pass"
           fi
           if [ "${statuses[2]}" -ne 0 ] || [ "${statuses[0]}" -ne 0 ]; then
             fail "could not save the response"
           fi
-          echo "Lory audit: response received ($size bytes)"
+          case "$status" in [0-9][0-9][0-9]) ;; *) fail "no HTTP status came back with the response" ;; esac
+          [ "$status" = 200 ] || fail "the API answered HTTP status $status, not 200; only 200 is accepted"
+          size=$((total - ${#status} - 1))
+          [ "$size" -ge 0 ] && [ "$size" -le "$LORY_MAX_BYTES" ] || fail "the response is larger than max-response-bytes ($LORY_MAX_BYTES); not trusting it"
+          head -c "$size" "$raw" >"$out" || fail "could not save the response"
+          keep=1
+          echo "Lory audit: HTTP 200, response received ($size bytes)"
 
-      # No token in this step. The response file is data: it is parsed, never executed or interpolated.
+      # No token in this step. The response file is data: it is parsed, never executed or interpolated, and it is
+      # deleted when the step ends, whatever the verdict.
       - name: Judge the Lory response
         shell: bash
         env:
@@ -303,6 +277,7 @@ jobs:
           LORY_MAX_BYTES: ${{ inputs.max-response-bytes }}
           FAIL_ON_FINDINGS: ${{ inputs.fail-on-findings }}
         run: |
+          trap 'rm -f "$LORY_OUT_DIR/response.json"' EXIT
           python3 -I - <<'PY'
           import datetime
           import json
@@ -364,35 +339,3 @@ jobs:
           print(f"::warning title=Lory audit::exit_code {code}: Lory reported findings (advisory run)")
           PY
 
-      # The current visibility, from the API, immediately before the upload. The event payload can be stale (a
-      # repository made public after the run was queued), so the API wins. Any error, an empty answer or anything
-      # but exactly `private` fails the job and the upload never runs.
-      - name: Look up the repository visibility now
-        id: visibility
-        if: ${{ always() && inputs.upload-response && github.event.repository.visibility == 'private' }}
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          LORY_REPOSITORY: ${{ github.repository }}
-        run: |
-          set -u -o pipefail
-          fail() {
-            echo "::error title=Lory audit::$1"
-            echo "Lory audit: FAILED, $1" >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
-            exit 1
-          }
-          visibility=$(gh api "repos/$LORY_REPOSITORY" --jq .visibility) || fail "could not look up the repository visibility; not uploading"
-          [ "$visibility" = private ] || fail "the repository visibility is not exactly private right now; not uploading findings"
-          echo "private=true" >>"$GITHUB_OUTPUT"
-
-      # Off by default, and only when both the event payload and the live API say the repository is private:
-      # findings are sensitive and an artifact is readable by anyone who can read this repository's artifacts.
-      # Three days at most.
-      - name: Keep the response
-        if: ${{ always() && inputs.upload-response && github.event.repository.visibility == 'private' && steps.visibility.outputs.private == 'true' }}
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: lory-audit-response
-          path: ${{ runner.temp }}/lory/response.json
-          if-no-files-found: ignore
-          retention-days: 3

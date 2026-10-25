@@ -2,20 +2,19 @@
 
 The general rules (pinning, permissions, harden-runner, injection, documented inputs, the egress canary) are held
 for every reusable workflow in test_workflows.py and test_egress_canary.py. This file holds what only this workflow
-owes: the token reaches one step and never a command line, and every way the call can go wrong fails the job. The
+owes: the token reaches one step and never a command line, the response is never copied anywhere, and every way
+the call can go wrong fails the job. The
 two scripts are extracted from the YAML and run as shipped; `curl` is a stub on PATH, so nothing reaches the network.
 """
 
 from __future__ import annotations
 
-import base64
 import json
 import os
 import re
 import stat
 import subprocess
 import textwrap
-import urllib.parse
 from pathlib import Path
 
 import pytest
@@ -77,33 +76,54 @@ def test_no_run_script_contains_a_template_expression_at_all():
         assert "${{" not in body
 
 
-def test_there_is_no_checkout_and_the_artifact_step_is_pinned():
+def test_findings_are_never_copied_into_github():
+    """Findings stay in the vendor portal: no artifact, upload, scrubber, visibility lookup or GitHub token."""
+    text = WORKFLOW.read_text()
+    code = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
+    assert "upload-artifact" not in code and "actions/cache" not in code
+    assert "upload-response" not in code and "retention-days" not in code
+    assert "gh api" not in code and "GH_TOKEN" not in code and "github.token" not in code
+    assert [n for n in STEPS if "Keep" in str(n) or "Look up" in str(n)] == []
+    assert "upload-response" not in CALL["inputs"]
+    assert [s for s in JOB["steps"] if "upload" in str(s.get("uses", ""))] == []
+
+
+def test_there_is_no_checkout_and_the_steps_are_the_expected_ones():
     uses = [str(s.get("uses", "")) for s in JOB["steps"] if "uses" in s]
     assert not [u for u in uses if u.startswith("actions/checkout@")], "nothing here needs the tree"
-    upload = STEPS["Keep the response"]
-    assert re.fullmatch(r"actions/upload-artifact@[0-9a-f]{40}", upload["uses"])
-    assert upload["with"]["path"] == "${{ runner.temp }}/lory/response.json"
+    assert [s.get("name") for s in JOB["steps"] if "name" in s] == [
+        "Validate the egress policy inputs (EX-0001)",
+        "Egress canary (EX-0001)",
+        "Call the Lory pipeline scan API",
+        "Judge the Lory response",
+    ]
+    assert uses == ["step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2"]
 
 
-def test_the_raw_response_is_uploaded_only_on_request_from_a_private_repository_for_three_days():
-    """Findings are sensitive: an artifact is readable by anyone who can read the repository's artifacts."""
-    assert CALL["inputs"]["upload-response"]["default"] is False
-    assert CALL["inputs"]["upload-response"]["type"] == "boolean"
-    upload = STEPS["Keep the response"]
-    condition = upload["if"]
-    assert "inputs.upload-response" in condition
-    assert "github.event.repository.visibility == 'private'" in condition
-    assert "steps.visibility.outputs.private == 'true'" in condition, "the live API lookup must gate the upload"
-    assert int(upload["with"]["retention-days"]) <= 3
-    assert upload["with"]["if-no-files-found"] == "ignore"
-    assert CALL_STEP["env"]["LORY_REPO_VISIBILITY"] == "${{ github.event.repository.visibility }}"
-    assert "github.event.repository.private" not in WORKFLOW.read_text(), "the boolean is not what we trust"
-    names = [s.get("name") for s in JOB["steps"]]
-    assert names.index("Look up the repository visibility now") == names.index("Keep the response") - 1, (
-        "the lookup must come immediately before the upload"
-    )
-    assert CALL_STEP["env"]["LORY_UPLOAD"] == "${{ inputs.upload-response }}"
-    assert len([s for s in JOB["steps"] if "upload-artifact" in str(s.get("uses", ""))]) == 1
+def test_no_input_can_add_an_endpoint_or_change_where_the_job_may_connect():
+    """A caller must not be able to widen the egress allow-list of a job that holds a vendor token."""
+    assert sorted(CALL["inputs"]) == [
+        "egress-policy",
+        "fail-on-findings",
+        "max-response-bytes",
+        "request-timeout-seconds",
+        "timeout-minutes",
+    ]
+    harden = next(s for s in JOB["steps"] if str(s.get("uses", "")).startswith("step-security/harden-runner@"))
+    allowed = harden["with"]["allowed-endpoints"]
+    assert "${{" not in allowed, "the allow-list is a literal"
+    entries = allowed.split(" ")
+    assert entries == sorted(entries) and "lorikeetsecurity.com:443" in entries
+    assert all(re.fullmatch(r"[a-z0-9.-]+:\d+", e) for e in entries)
+    assert set(entries) == {
+        "api.github.com:443",
+        "github.com:443",
+        "lorikeetsecurity.com:443",
+        "results-receiver.actions.githubusercontent.com:443",
+    }
+    assert JOB["steps"][2]["name"] == "Egress canary (EX-0001)"
+    egress = CALL["inputs"]["egress-policy"]
+    assert egress["type"] == "string" and egress["default"] == "audit"
 
 
 def test_the_call_is_bounded_and_does_not_follow_redirects():
@@ -111,6 +131,7 @@ def test_the_call_is_bounded_and_does_not_follow_redirects():
     for flag in ("--fail-with-body", "--max-time", "--max-filesize", "--proto '=https'", "--header @-"):
         assert flag in body, flag
     assert not re.search(r"(^|\s)(-L|--location)(\s|$)", body)
+    assert not re.search(r"--(proxy|insecure|cacert|netrc|config)\b|(^|\s)(-k|-K|-x)(\s|$)", body)
     assert "Authorization: Bearer %s" in body and "set -u -o pipefail" in body
 
 
@@ -119,8 +140,11 @@ def test_the_call_is_bounded_and_does_not_follow_redirects():
 STUB = """#!/usr/bin/env bash
 # a stand-in for curl: records its argument vector and header-from-stdin, then replies as told
 printf '%s\\n' "$@" >"$STUB_DIR/argv"
+env | grep -iE '^(http_proxy|https_proxy|all_proxy|curl_home)=' >"$STUB_DIR/env" || true
 cat >"$STUB_DIR/stdin"
 if [ -f "$STUB_DIR/body" ]; then cat "$STUB_DIR/body"; fi
+# --write-out '\\n%{http_code}': a real curl appends the status after the body, also on an HTTP error
+if [ -n "${STUB_STATUS+set}" ]; then printf '\\n%s' "$STUB_STATUS"; fi
 exit "${STUB_RC:-0}"
 """
 
@@ -129,7 +153,7 @@ def script(step: dict) -> str:
     return textwrap.dedent(step["run"])
 
 
-def run_call(tmp_path: Path, body: bytes | None, rc: int = 0, **env):
+def run_call(tmp_path: Path, body: bytes | None, rc: int = 0, status: str | None = "200", **env):
     bindir = tmp_path / "bin"
     bindir.mkdir(exist_ok=True)
     stub = bindir / "curl"
@@ -147,6 +171,7 @@ def run_call(tmp_path: Path, body: bytes | None, rc: int = 0, **env):
         "PATH": f"{bindir}:{os.environ['PATH']}",
         "STUB_DIR": str(stubdir),
         "STUB_RC": str(rc),
+        **({"STUB_STATUS": status} if status is not None else {}),
         "GITHUB_STEP_SUMMARY": str(summary),
         "LORY_PIPELINE_TOKEN": TOKEN,
         "LORY_API_URL": URL,
@@ -156,8 +181,6 @@ def run_call(tmp_path: Path, body: bytes | None, rc: int = 0, **env):
         "LORY_MAX_TIME": "60",
         "LORY_MAX_BYTES": "1024",
         "LORY_OUT_DIR": str(out_dir),
-        "LORY_UPLOAD": "false",
-        "LORY_REPO_VISIBILITY": "private",
         **{k: str(v) for k, v in env.items()},
     }
     done = subprocess.run(
@@ -178,65 +201,34 @@ def test_a_good_call_sends_the_documented_request_and_keeps_the_token_off_the_co
     assert not (tmp_path / "pwned").exists(), "a hostile ref name must stay data"
     assert saved.read_bytes() == b'{"exit_code": 0}'
     assert TOKEN not in done.stdout + done.stderr + summary
+    assert [p.name for p in saved.parent.iterdir()] == ["response.json"], "no temp files are left behind"
 
 
-def token_part(token: str, offset: int) -> bytes:
-    """The base64 characters of `token` that do not depend on its neighbours, when it starts at byte `offset` mod 3."""
-    enc = base64.b64encode(b"\0" * offset + token.encode()).rstrip(b"=")
-    total = offset + len(token.encode())
-    return enc[(offset * 8 + 5) // 6 : len(enc) - (1 if total % 3 else 0)]
-
-
-PLAIN_FORMS = {
-    "raw": lambda t: t,
-    "json-escaped": lambda t: json.dumps(t)[1:-1],
-    "json-slash-escaped": lambda t: json.dumps(t)[1:-1].replace("/", "\\/"),
-    "url-quote": lambda t: urllib.parse.quote(t, safe=""),
-    "url-quote-plus": lambda t: urllib.parse.quote_plus(t),
-    "url-quote-keeping-slash": lambda t: urllib.parse.quote(t),
-    "bearer-header": lambda t: "Bearer " + t,
-}
-
-
-def body_with(text: str) -> bytes:
-    # Inserted verbatim: the forms under test are already what a server would have written inside a JSON string.
-    return ('{"exit_code": 0, "echo": "' + text + '"}').encode()
-
-
-def assert_clean(kept: bytes, form: str):
-    for name, make in PLAIN_FORMS.items():
-        assert make(TOKEN).encode() not in kept, f"{form}: {name} form survived in the saved response"
-    for offset in range(3):
-        assert token_part(TOKEN, offset) not in kept, f"{form}: base64 (offset {offset}) survived"
-        urlsafe = token_part(TOKEN, offset).replace(b"+", b"-").replace(b"/", b"_")
-        assert urlsafe not in kept, f"{form}: urlsafe base64 (offset {offset}) survived"
-
-
-@pytest.mark.parametrize("form", list(PLAIN_FORMS))
-def test_the_token_is_scrubbed_from_the_saved_response_in_every_plain_form(tmp_path, form):
-    body = body_with("before " + PLAIN_FORMS[form](TOKEN) + " after")
-    done, _, saved, _ = run_call(tmp_path, body, LORY_MAX_BYTES=len(body) + 64)
+def test_curl_ignores_the_users_config_proxies_and_curl_home(tmp_path):
+    done, _, _, stubdir = run_call(
+        tmp_path,
+        b'{"exit_code": 0}',
+        http_proxy="http://evil.invalid:3128",
+        HTTPS_PROXY="http://evil.invalid:3128",
+        all_proxy="socks5://evil.invalid",
+        ALL_PROXY="socks5://evil.invalid",
+        HTTP_PROXY="http://evil.invalid:3128",
+        https_proxy="http://evil.invalid:3128",
+        CURL_HOME=str(tmp_path),
+    )
     assert done.returncode == 0, done.stdout + done.stderr
-    kept = saved.read_bytes()
-    assert b"[redacted]" in kept, form
-    assert_clean(kept, form)
-    assert TOKEN not in done.stdout + done.stderr
+    assert (stubdir / "env").read_text() == "", "no proxy variable and no CURL_HOME may reach curl"
 
 
-@pytest.mark.parametrize("urlsafe", [False, True], ids=["base64", "base64url"])
-@pytest.mark.parametrize("offset", [0, 1, 2])
-def test_the_token_is_scrubbed_from_the_saved_response_when_base64_encoded_at_any_alignment(tmp_path, offset, urlsafe):
-    encode = base64.urlsafe_b64encode if urlsafe else base64.b64encode
-    text = encode(b"x" * (30 + offset) + TOKEN.encode() + b"yz").decode()
-    assert token_part(TOKEN, offset).replace(b"+", b"-").replace(b"/", b"_") in text.encode() or (
-        token_part(TOKEN, offset) in text.encode()
-    ), "test setup: this alignment is not in the encoded text"
-    body = body_with(text)
-    done, _, saved, _ = run_call(tmp_path, body, LORY_MAX_BYTES=len(body) + 64)
-    assert done.returncode == 0, done.stdout + done.stderr
-    kept = saved.read_bytes()
-    assert b"[redacted]" in kept
-    assert_clean(kept, f"base64 offset {offset}")
+def test_disable_is_the_first_curl_option(tmp_path):
+    """`--disable` must be first or a curlrc could still re-enable redirects, tracing or a proxy."""
+    done, _, _, stubdir = run_call(tmp_path, b'{"exit_code": 0}')
+    assert done.returncode == 0
+    argv = (stubdir / "argv").read_text().splitlines()
+    assert argv[0] == "--disable"
+    assert argv.count("--disable") == 1
+    for flag in ("--write-out", "--fail-with-body", "--max-time"):
+        assert flag in argv
 
 
 def test_the_response_body_is_never_printed(tmp_path):
@@ -248,29 +240,19 @@ def test_the_response_body_is_never_printed(tmp_path):
     assert done.returncode == 1 and marker not in done.stdout + done.stderr + summary
 
 
-@pytest.mark.parametrize("visibility", ["public", "internal", "", "maybe", "PRIVATE", "private "])
-def test_uploading_is_refused_unless_the_visibility_is_exactly_private(tmp_path, visibility):
-    done, summary, saved, stubdir = run_call(
-        tmp_path, b'{"exit_code": 0}', LORY_UPLOAD="true", LORY_REPO_VISIBILITY=visibility
-    )
-    assert done.returncode == 1, done.stdout + done.stderr
-    assert "upload-response" in done.stdout and "private" in summary
-    assert not (stubdir / "argv").exists(), "the API must not be called when the upload is refused"
-    assert not saved.exists()
-
-
-def test_uploading_is_allowed_in_a_private_repository_and_a_public_one_may_run_without_it(tmp_path):
-    done, *_ = run_call(tmp_path, b'{"exit_code": 0}', LORY_UPLOAD="true", LORY_REPO_VISIBILITY="private")
-    assert done.returncode == 0, done.stdout + done.stderr
-    done, *_ = run_call(tmp_path, b'{"exit_code": 0}', LORY_UPLOAD="false", LORY_REPO_VISIBILITY="public")
-    assert done.returncode == 0, done.stdout + done.stderr
-
-
 @pytest.mark.parametrize(
     "case,body,rc,env,fragment",
     [
-        ("http error", b'{"error": "nope"}', 22, {}, "curl exit 22"),
-        ("timeout", None, 28, {}, "curl exit 28"),
+        ("http 500", b'{"error": "nope"}', 22, {"status": "500"}, "HTTP status 500"),
+        ("http 401", b'{"error": "nope"}', 22, {"status": "401"}, "HTTP status 401"),
+        ("timeout", None, 28, {"status": "000"}, "curl exit 28"),
+        ("redirect with a valid body", b'{"exit_code": 0}', 0, {"status": "302"}, "HTTP status 302"),
+        ("permanent redirect", b'{"exit_code": 0}', 0, {"status": "308"}, "HTTP status 308"),
+        ("no content", b"", 0, {"status": "204"}, "HTTP status 204"),
+        ("created", b'{"exit_code": 0}', 0, {"status": "201"}, "HTTP status 201"),
+        ("missing status", b'{"exit_code": 0}', 0, {"status": None}, "no HTTP status"),
+        ("garbage status", b'{"exit_code": 0}', 0, {"status": "2OO"}, "no HTTP status"),
+        ("status with a suffix", b'{"exit_code": 0}', 0, {"status": "2000"}, "no HTTP status"),
         ("oversize", b"x" * 5000, 0, {}, "larger than max-response-bytes"),
         ("oversize with a curl error", b"x" * 5000, 63, {}, "larger than max-response-bytes"),
         ("bad timeout input", b"{}", 0, {"LORY_MAX_TIME": "9; reboot"}, "whole number"),
@@ -281,10 +263,28 @@ def test_uploading_is_allowed_in_a_private_repository_and_a_public_one_may_run_w
     ],
 )
 def test_every_way_the_call_can_fail_fails_the_step(tmp_path, case, body, rc, env, fragment):
-    done, summary, _, _ = run_call(tmp_path, body, rc, **env)
+    done, summary, saved, _ = run_call(tmp_path, body, rc, **env)
     assert done.returncode == 1, f"{case}: {done.stdout}{done.stderr}"
     assert fragment in done.stdout and fragment in summary, case
+    assert not saved.exists(), f"{case}: a failed call must leave no response file for anything to read"
+    assert not list(saved.parent.glob("*")), f"{case}: temp files left behind"
     assert TOKEN not in done.stdout + done.stderr + summary
+
+
+def test_only_exactly_200_passes(tmp_path):
+    for status in ("200",):
+        done, *_ = run_call(tmp_path, b'{"exit_code": 0}', status=status)
+        assert done.returncode == 0, done.stdout + done.stderr
+    for status in ("100", "199", "201", "204", "206", "301", "302", "303", "307", "400", "404", "429", "500", "503"):
+        done, *_ = run_call(tmp_path, b'{"exit_code": 0}', status=status)
+        assert done.returncode == 1, status
+
+
+def test_a_body_that_ends_in_a_digit_line_is_not_mistaken_for_the_status(tmp_path):
+    done, _, saved, _ = run_call(tmp_path, b'{"exit_code": 0}\n404', status="200")
+    assert done.returncode == 0 and saved.read_bytes() == b'{"exit_code": 0}\n404'
+    done, *_ = run_call(tmp_path, b'{"exit_code": 0}\n200', status="500")
+    assert done.returncode == 1
 
 
 def test_a_body_exactly_at_the_cap_is_accepted(tmp_path):
@@ -293,81 +293,6 @@ def test_a_body_exactly_at_the_cap_is_accepted(tmp_path):
     assert done.returncode == 0, done.stdout + done.stderr
     done, *_ = run_call(tmp_path, body, LORY_MAX_BYTES=len(body) - 1)
     assert done.returncode == 1
-
-
-# --- the visibility lookup, run against a stub gh -------------------------------------------------------------
-
-LOOKUP_STEP = STEPS["Look up the repository visibility now"]
-GH_STUB = """#!/usr/bin/env bash
-printf '%s\\n' "$@" >"$STUB_DIR/gh-argv"
-printf '%s' "${GH_TOKEN-}" >"$STUB_DIR/gh-token"
-if [ "${STUB_RC:-0}" -ne 0 ]; then echo "gh: HTTP 500" >&2; exit "$STUB_RC"; fi
-printf '%s\\n' "${STUB_VISIBILITY-}"
-"""
-
-
-def run_lookup(tmp_path: Path, visibility: str | None, rc: int = 0):
-    bindir = tmp_path / "ghbin"
-    bindir.mkdir(exist_ok=True)
-    stub = bindir / "gh"
-    stub.write_text(GH_STUB)
-    stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
-    stubdir = tmp_path / "ghstub"
-    stubdir.mkdir(exist_ok=True)
-    out = tmp_path / "github-output"
-    out.write_text("")
-    summary = tmp_path / "lookup-summary.md"
-    summary.write_text("")
-    env = {
-        **os.environ,
-        "PATH": f"{bindir}:{os.environ['PATH']}",
-        "STUB_DIR": str(stubdir),
-        "STUB_RC": str(rc),
-        "STUB_VISIBILITY": visibility or "",
-        "GITHUB_OUTPUT": str(out),
-        "GITHUB_STEP_SUMMARY": str(summary),
-        "GH_TOKEN": "gh-test-token",
-        "LORY_REPOSITORY": "octo/widget",
-    }
-    done = subprocess.run(
-        ["bash", "-c", script(LOOKUP_STEP)], capture_output=True, text=True, timeout=60, env=env, cwd=tmp_path
-    )
-    return done, out.read_text(), stubdir
-
-
-def test_the_lookup_asks_the_api_with_the_job_token_and_the_repository_from_env(tmp_path):
-    env = LOOKUP_STEP["env"]
-    assert env == {"GH_TOKEN": "${{ github.token }}", "LORY_REPOSITORY": "${{ github.repository }}"}
-    done, out, stubdir = run_lookup(tmp_path, "private")
-    assert done.returncode == 0, done.stdout + done.stderr
-    assert (stubdir / "gh-argv").read_text().split() == ["api", "repos/octo/widget", "--jq", ".visibility"]
-    assert (stubdir / "gh-token").read_text() == "gh-test-token"
-    assert out == "private=true\n"
-
-
-@pytest.mark.parametrize("visibility", ["public", "internal", "", "Private", "private-ish", "null"])
-def test_anything_but_exactly_private_from_the_api_fails_closed(tmp_path, visibility):
-    done, out, _ = run_lookup(tmp_path, visibility)
-    assert done.returncode == 1, f"{visibility!r}: {done.stdout}{done.stderr}"
-    assert "private=true" not in out
-    assert "::error" in done.stdout
-
-
-def test_a_lookup_failure_fails_closed(tmp_path):
-    done, out, _ = run_lookup(tmp_path, "private", rc=1)
-    assert done.returncode == 1
-    assert "private=true" not in out and "::error" in done.stdout
-
-
-def test_the_api_wins_over_an_event_payload_that_says_private(tmp_path):
-    """The payload may be stale (a repository made public after the event was queued); the live answer decides."""
-    condition = STEPS["Keep the response"]["if"]
-    assert "github.event.repository.visibility == 'private'" in condition  # the payload says private ...
-    done, out, _ = run_lookup(tmp_path, "public")  # ... the API says public
-    assert done.returncode == 1 and "private=true" not in out
-    # With no output from the lookup, the upload condition's second clause cannot hold.
-    assert "steps.visibility.outputs.private == 'true'" in condition
-    assert STEPS["Look up the repository visibility now"]["id"] == "visibility"
 
 
 # --- the judge step -----------------------------------------------------------------------------------------------
@@ -416,6 +341,13 @@ def test_a_malformed_response_fails_even_in_advisory_mode(tmp_path, case, body, 
     done, summary = run_judge(tmp_path, body, mode)
     assert done.returncode == 1, f"{case}: {done.stdout}{done.stderr}"
     assert "FAILED" in summary and "::error" in done.stdout
+
+
+@pytest.mark.parametrize("body", [b'{"exit_code": 0}', b'{"exit_code": 3}', b"not json"])
+@pytest.mark.parametrize("mode", ["true", "false"])
+def test_the_judge_deletes_the_response_whatever_it_decides(tmp_path, body, mode):
+    run_judge(tmp_path, body, mode)
+    assert not (tmp_path / "judge" / "response.json").exists()
 
 
 def test_a_missing_response_file_fails(tmp_path):
@@ -487,7 +419,8 @@ def test_the_caller_template_is_scheduled_and_on_demand_never_per_pull_request()
     ), "the template pins by commit with a version comment, like every GYST caller"
     assert job["permissions"] == {"contents": "read"}
     assert job["secrets"] == {"LORY_PIPELINE_TOKEN": "${{ secrets.LORY_PIPELINE_TOKEN }}"}
-    assert "sensitive" in EXAMPLE.read_text().lower() and "upload-response" in EXAMPLE.read_text()
+    assert "vendor portal" in EXAMPLE.read_text().lower()
+    assert "upload" not in EXAMPLE.read_text().lower()
     assert "with" not in job, "the template is advisory by default; blocking is a commented-out choice"
 
 
@@ -502,9 +435,9 @@ def test_the_page_states_the_limits():
         "never instructions",
         "fails closed",
         ".lory/config.yml",
-        "sensitive",
-        "upload-response",
-        "private",
-        "three days",
+        "vendor portal",
+        "not copied into github",
     ):
         assert needle in text, f"docs/wiki/Workflow-lory-audit.md does not say {needle!r}"
+    for gone in ("upload-response", "artifact", "retention"):
+        assert gone not in text.replace("no artifact", "").replace("never uploads", ""), f"stale mention of {gone!r}"

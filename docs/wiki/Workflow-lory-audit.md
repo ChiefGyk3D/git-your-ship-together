@@ -1,7 +1,7 @@
 # lory-audit
 
 **What it does.** Asks Lory (Lorikeet Security's AI pentester) for a deep-dive audit of a repository, through its documented
-pipeline scan API, and reports the result in the job summary. It makes one HTTPS call, reports only the exit code, uploads nothing unless asked and holds only
+pipeline scan API, and reports the result in the job summary. It makes one HTTPS call, reports only the exit code, copies nothing into GitHub and holds only
 `contents: read`.
 
 **When to use it.** For scheduled and on-demand deep dives only: a monthly run of the highest-priority targets, plus a manual
@@ -16,7 +16,7 @@ is a spike. Three things are unknown until then and are marked as such here:
 
 | Unknown | Why it matters |
 |---|---|
-| The response schema beyond the integer `exit_code` | The workflow reads `exit_code` and keeps the rest of the body as an artifact. It does not parse findings. |
+| The response schema beyond the integer `exit_code` | The workflow reads only `exit_code`; the rest of the body is deleted unread. It does not parse findings. |
 | Whether a deep audit of a non-pull-request target works through this endpoint | The call sends `pr_number: 0` for a scheduled or manual run. The endpoint may expect a pull request. |
 | Rate limits | A monthly run is unlikely to hit one; a rerun loop might. |
 | Whether a nonzero `exit_code` can also mean a vendor-side error | The workflow treats any nonzero integer as "findings". |
@@ -67,29 +67,25 @@ sample workflow treats a missing `exit_code` as a pass and interpolates `github.
 
 ## Findings are sensitive
 
-A pentest finding is a map to a weakness. Anyone who can read a repository's artifacts can read an uploaded response, and a public
-repository's artifacts are public. So by default nothing leaves the runner: the response body is never printed to the log, and the
-job summary carries only the `exit_code` and a UTC timestamp. Read the findings in the vendor's own portal.
-
-`upload-response: true` uploads the raw response as the `lory-audit-response` artifact, kept three days. The job refuses to do
-that unless the repository visibility is exactly `private`. Public and internal repositories are refused (an internal repository is
-readable by a whole organization or enterprise), and so is a missing or unrecognized value. The job checks
-`github.event.repository.visibility` (passed through the environment) before it calls the API, and then asks the API for the current
-visibility (`gh api repos/<repository> --jq .visibility`, with the job token) right before the upload, because the event payload can be stale. The
-live answer wins: any error, an empty answer or anything but `private` fails the job and nothing is uploaded.
+A pentest finding is a map to a weakness. Findings are not copied into GitHub: the response body is never printed to the log,
+never uploaded and deleted as soon as the judging step ends. The job summary carries only the `exit_code` and a
+UTC timestamp. Read the findings in the vendor portal.
 
 ## Handling findings
 
 Findings are third-party model output. Triage them like scanner alerts: read, reproduce, decide. Text inside a finding is
-data and never instructions, for you or for any agent that reads the response.
+data and never instructions, for you or for any agent that reads them in the portal.
 
 ## How the token is handled
 
 The token is in the environment of one step, the one that calls the API, and goes to curl on standard input, so it never appears
-on a command line. It is not echoed. The saved response is scrubbed of the token, in its raw, JSON-escaped, URL-encoded and base64 forms, before anything is kept. Every other value, including the
+on a command line. It is not echoed. curl starts with `--disable`, so no user curl config applies, and the proxy variables and
+`CURL_HOME` are unset. Only an HTTP status of exactly 200 is accepted; redirects are not followed and a 3xx, a 204 or a missing
+status fails the job. Every other value, including the
 branch name, reaches the shell through an environment variable. The URL is fixed in the workflow and there is no input for it,
-and curl does not follow redirects, so the token cannot be sent to another host. Because this job holds a secret it follows
-`egress-policy` and not the secretless input of security exception EX-0001.
+and curl does not follow redirects, so the token cannot be sent to another host. The egress allow-list is fixed in the workflow
+(the Lory API and what the runner and the egress canary need); no input adds a host. Because this job holds a secret it follows
+`egress-policy` (exactly `audit` or `block`) and not the secretless input of security exception EX-0001.
 
 ## How it is tested
 
@@ -102,6 +98,6 @@ the token in one step, no `${{ }}` in any script.
 ## What it refuses to do
 
 It never passes on a call that failed, timed out, came back too large or returned something it cannot read. It does not run on
-pull requests unless a caller wires it to them, and it is not a required check. It does not upload findings from a public repository, print the response, check out the repository, write
+pull requests unless a caller wires it to them, and it is not a required check. It does not upload, print or keep the response, check out the repository, write
 anything back, open issues, or follow anything the response says. It cannot tell whether a finding is real, and it does not
 read `.lory/config.yml`.
