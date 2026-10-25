@@ -91,10 +91,17 @@ def test_the_raw_response_is_uploaded_only_on_request_from_a_private_repository_
     assert CALL["inputs"]["upload-response"]["type"] == "boolean"
     upload = STEPS["Keep the response"]
     condition = upload["if"]
-    assert "inputs.upload-response" in condition and "github.event.repository.private == true" in condition
+    assert "inputs.upload-response" in condition
+    assert "github.event.repository.visibility == 'private'" in condition
+    assert "steps.visibility.outputs.private == 'true'" in condition, "the live API lookup must gate the upload"
     assert int(upload["with"]["retention-days"]) <= 3
     assert upload["with"]["if-no-files-found"] == "ignore"
-    assert CALL_STEP["env"]["LORY_REPO_PRIVATE"] == "${{ github.event.repository.private }}"
+    assert CALL_STEP["env"]["LORY_REPO_VISIBILITY"] == "${{ github.event.repository.visibility }}"
+    assert "github.event.repository.private" not in WORKFLOW.read_text(), "the boolean is not what we trust"
+    names = [s.get("name") for s in JOB["steps"]]
+    assert names.index("Look up the repository visibility now") == names.index("Keep the response") - 1, (
+        "the lookup must come immediately before the upload"
+    )
     assert CALL_STEP["env"]["LORY_UPLOAD"] == "${{ inputs.upload-response }}"
     assert len([s for s in JOB["steps"] if "upload-artifact" in str(s.get("uses", ""))]) == 1
 
@@ -150,7 +157,7 @@ def run_call(tmp_path: Path, body: bytes | None, rc: int = 0, **env):
         "LORY_MAX_BYTES": "1024",
         "LORY_OUT_DIR": str(out_dir),
         "LORY_UPLOAD": "false",
-        "LORY_REPO_PRIVATE": "true",
+        "LORY_REPO_VISIBILITY": "private",
         **{k: str(v) for k, v in env.items()},
     }
     done = subprocess.run(
@@ -241,10 +248,10 @@ def test_the_response_body_is_never_printed(tmp_path):
     assert done.returncode == 1 and marker not in done.stdout + done.stderr + summary
 
 
-@pytest.mark.parametrize("private", ["false", "", "maybe", "True "])
-def test_uploading_is_refused_unless_the_repository_is_exactly_private(tmp_path, private):
+@pytest.mark.parametrize("visibility", ["public", "internal", "", "maybe", "PRIVATE", "private "])
+def test_uploading_is_refused_unless_the_visibility_is_exactly_private(tmp_path, visibility):
     done, summary, saved, stubdir = run_call(
-        tmp_path, b'{"exit_code": 0}', LORY_UPLOAD="true", LORY_REPO_PRIVATE=private
+        tmp_path, b'{"exit_code": 0}', LORY_UPLOAD="true", LORY_REPO_VISIBILITY=visibility
     )
     assert done.returncode == 1, done.stdout + done.stderr
     assert "upload-response" in done.stdout and "private" in summary
@@ -253,9 +260,9 @@ def test_uploading_is_refused_unless_the_repository_is_exactly_private(tmp_path,
 
 
 def test_uploading_is_allowed_in_a_private_repository_and_a_public_one_may_run_without_it(tmp_path):
-    done, *_ = run_call(tmp_path, b'{"exit_code": 0}', LORY_UPLOAD="true", LORY_REPO_PRIVATE="true")
+    done, *_ = run_call(tmp_path, b'{"exit_code": 0}', LORY_UPLOAD="true", LORY_REPO_VISIBILITY="private")
     assert done.returncode == 0, done.stdout + done.stderr
-    done, *_ = run_call(tmp_path, b'{"exit_code": 0}', LORY_UPLOAD="false", LORY_REPO_PRIVATE="false")
+    done, *_ = run_call(tmp_path, b'{"exit_code": 0}', LORY_UPLOAD="false", LORY_REPO_VISIBILITY="public")
     assert done.returncode == 0, done.stdout + done.stderr
 
 
@@ -286,6 +293,81 @@ def test_a_body_exactly_at_the_cap_is_accepted(tmp_path):
     assert done.returncode == 0, done.stdout + done.stderr
     done, *_ = run_call(tmp_path, body, LORY_MAX_BYTES=len(body) - 1)
     assert done.returncode == 1
+
+
+# --- the visibility lookup, run against a stub gh -------------------------------------------------------------
+
+LOOKUP_STEP = STEPS["Look up the repository visibility now"]
+GH_STUB = """#!/usr/bin/env bash
+printf '%s\\n' "$@" >"$STUB_DIR/gh-argv"
+printf '%s' "${GH_TOKEN-}" >"$STUB_DIR/gh-token"
+if [ "${STUB_RC:-0}" -ne 0 ]; then echo "gh: HTTP 500" >&2; exit "$STUB_RC"; fi
+printf '%s\\n' "${STUB_VISIBILITY-}"
+"""
+
+
+def run_lookup(tmp_path: Path, visibility: str | None, rc: int = 0):
+    bindir = tmp_path / "ghbin"
+    bindir.mkdir(exist_ok=True)
+    stub = bindir / "gh"
+    stub.write_text(GH_STUB)
+    stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
+    stubdir = tmp_path / "ghstub"
+    stubdir.mkdir(exist_ok=True)
+    out = tmp_path / "github-output"
+    out.write_text("")
+    summary = tmp_path / "lookup-summary.md"
+    summary.write_text("")
+    env = {
+        **os.environ,
+        "PATH": f"{bindir}:{os.environ['PATH']}",
+        "STUB_DIR": str(stubdir),
+        "STUB_RC": str(rc),
+        "STUB_VISIBILITY": visibility or "",
+        "GITHUB_OUTPUT": str(out),
+        "GITHUB_STEP_SUMMARY": str(summary),
+        "GH_TOKEN": "gh-test-token",
+        "LORY_REPOSITORY": "octo/widget",
+    }
+    done = subprocess.run(
+        ["bash", "-c", script(LOOKUP_STEP)], capture_output=True, text=True, timeout=60, env=env, cwd=tmp_path
+    )
+    return done, out.read_text(), stubdir
+
+
+def test_the_lookup_asks_the_api_with_the_job_token_and_the_repository_from_env(tmp_path):
+    env = LOOKUP_STEP["env"]
+    assert env == {"GH_TOKEN": "${{ github.token }}", "LORY_REPOSITORY": "${{ github.repository }}"}
+    done, out, stubdir = run_lookup(tmp_path, "private")
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert (stubdir / "gh-argv").read_text().split() == ["api", "repos/octo/widget", "--jq", ".visibility"]
+    assert (stubdir / "gh-token").read_text() == "gh-test-token"
+    assert out == "private=true\n"
+
+
+@pytest.mark.parametrize("visibility", ["public", "internal", "", "Private", "private-ish", "null"])
+def test_anything_but_exactly_private_from_the_api_fails_closed(tmp_path, visibility):
+    done, out, _ = run_lookup(tmp_path, visibility)
+    assert done.returncode == 1, f"{visibility!r}: {done.stdout}{done.stderr}"
+    assert "private=true" not in out
+    assert "::error" in done.stdout
+
+
+def test_a_lookup_failure_fails_closed(tmp_path):
+    done, out, _ = run_lookup(tmp_path, "private", rc=1)
+    assert done.returncode == 1
+    assert "private=true" not in out and "::error" in done.stdout
+
+
+def test_the_api_wins_over_an_event_payload_that_says_private(tmp_path):
+    """The payload may be stale (a repository made public after the event was queued); the live answer decides."""
+    condition = STEPS["Keep the response"]["if"]
+    assert "github.event.repository.visibility == 'private'" in condition  # the payload says private ...
+    done, out, _ = run_lookup(tmp_path, "public")  # ... the API says public
+    assert done.returncode == 1 and "private=true" not in out
+    # With no output from the lookup, the upload condition's second clause cannot hold.
+    assert "steps.visibility.outputs.private == 'true'" in condition
+    assert STEPS["Look up the repository visibility now"]["id"] == "visibility"
 
 
 # --- the judge step -----------------------------------------------------------------------------------------------

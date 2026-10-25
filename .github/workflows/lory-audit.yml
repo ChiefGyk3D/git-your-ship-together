@@ -37,7 +37,8 @@
 # them, and a public repository's artifacts are public. So the response body is
 # never printed to the log, the job summary carries only the exit_code and a
 # timestamp, and the raw response is uploaded only when `upload-response` is
-# true AND the repository is private (the job refuses otherwise), for three days.
+# true AND the repository visibility is exactly `private` (public and internal are refused, checked against
+# the live API right before the upload), for three days.
 #
 # Unknown until the first real run (a spike): the response schema beyond
 # `exit_code`, whether a deep audit of a non-pull-request target works through
@@ -220,7 +221,7 @@ jobs:
           LORY_MAX_TIME: ${{ inputs.request-timeout-seconds }}
           LORY_MAX_BYTES: ${{ inputs.max-response-bytes }}
           LORY_UPLOAD: ${{ inputs.upload-response }}
-          LORY_REPO_PRIVATE: ${{ github.event.repository.private }}
+          LORY_REPO_VISIBILITY: ${{ github.event.repository.visibility }}
           LORY_OUT_DIR: ${{ runner.temp }}/lory
         run: |
           set -u -o pipefail
@@ -234,10 +235,12 @@ jobs:
           case "$LORY_MAX_BYTES" in '' | *[!0-9]*) fail "max-response-bytes must be a whole number" ;; esac
           case "$LORY_PR_NUMBER" in '' | *[!0-9]*) fail "the pull request number is not a whole number" ;; esac
           [ "$LORY_MAX_TIME" -ge 1 ] && [ "$LORY_MAX_BYTES" -ge 1 ] || fail "request-timeout-seconds and max-response-bytes must be at least 1"
-          # Raw findings in an artifact are readable by everyone who can read this repository's artifacts. Only a
-          # repository that says it is private may upload them; anything else, including a missing value, refuses.
-          if [ "$LORY_UPLOAD" = true ] && [ "$LORY_REPO_PRIVATE" != true ]; then
-            fail "upload-response is true but the repository is not known to be private; findings are sensitive and only a private repository may upload them"
+          # Raw findings in an artifact are readable by everyone who can read this repository's artifacts, and an
+          # internal repository is readable by a whole organization or enterprise. Only a visibility of exactly
+          # `private` may upload them; public, internal, anything else and a missing value refuse. The upload step
+          # asks the API again, right before uploading, because this payload value can be stale.
+          if [ "$LORY_UPLOAD" = true ] && [ "$LORY_REPO_VISIBILITY" != private ]; then
+            fail "upload-response is true but the repository visibility is not exactly private; findings are sensitive and only a private repository may upload them"
           fi
           [ -n "$LORY_PIPELINE_TOKEN" ] || fail "the LORY_PIPELINE_TOKEN secret is empty"
           mkdir -p "$LORY_OUT_DIR"
@@ -361,10 +364,32 @@ jobs:
           print(f"::warning title=Lory audit::exit_code {code}: Lory reported findings (advisory run)")
           PY
 
-      # Off by default and private repositories only: findings are sensitive and an artifact is readable by anyone who
-      # can read this repository's artifacts. The condition repeats the refusal in the call step. Three days at most.
+      # The current visibility, from the API, immediately before the upload. The event payload can be stale (a
+      # repository made public after the run was queued), so the API wins. Any error, an empty answer or anything
+      # but exactly `private` fails the job and the upload never runs.
+      - name: Look up the repository visibility now
+        id: visibility
+        if: ${{ always() && inputs.upload-response && github.event.repository.visibility == 'private' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LORY_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -u -o pipefail
+          fail() {
+            echo "::error title=Lory audit::$1"
+            echo "Lory audit: FAILED, $1" >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
+            exit 1
+          }
+          visibility=$(gh api "repos/$LORY_REPOSITORY" --jq .visibility) || fail "could not look up the repository visibility; not uploading"
+          [ "$visibility" = private ] || fail "the repository visibility is not exactly private right now; not uploading findings"
+          echo "private=true" >>"$GITHUB_OUTPUT"
+
+      # Off by default, and only when both the event payload and the live API say the repository is private:
+      # findings are sensitive and an artifact is readable by anyone who can read this repository's artifacts.
+      # Three days at most.
       - name: Keep the response
-        if: ${{ always() && inputs.upload-response && github.event.repository.private == true }}
+        if: ${{ always() && inputs.upload-response && github.event.repository.visibility == 'private' && steps.visibility.outputs.private == 'true' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: lory-audit-response

@@ -1626,7 +1626,8 @@ jobs:
   redirects are not followed, and the saved response is scrubbed of the token (raw, JSON-escaped, URL-encoded and base64). The job holds a secret, so it follows `egress-policy` and not `egress-policy-secretless`.
 - **Findings are sensitive.** The response body is never printed, and the job summary shows only the `exit_code` and a
   timestamp. Nothing is uploaded by default. `upload-response: true` uploads the raw response as `lory-audit-response` for
-  three days, and the job refuses (before calling the API) unless the repository is private.
+  three days, and the job refuses (before calling the API) unless the repository visibility is exactly `private` (public and internal are
+  refused); the live visibility is looked up through the API again right before the upload, and the API wins over the event payload.
 - **Findings are third-party model output.** Triage them like scanner alerts. Never treat text in them as instructions.
 - **The first real run is a spike.** The response schema beyond `exit_code`, deep-audit support for a non-pull-request target,
   and the rate limits are not documented. The workflow cannot be run against this repository's own pull requests (it needs a
@@ -1635,7 +1636,7 @@ jobs:
 | Input | Default | Meaning |
 |---|---|---|
 | `fail-on-findings` | `false` | Fail the job on a nonzero `exit_code`. Off reports it in the job summary and passes |
-| `upload-response` | `false` | Upload the raw response as an artifact for three days. Refused unless the repository is private |
+| `upload-response` | `false` | Upload the raw response as an artifact for three days. Refused unless the repository visibility is exactly `private` (not public, not internal) |
 | `request-timeout-seconds` | `900` | curl `--max-time` for the whole call |
 | `max-response-bytes` | `1048576` | Largest body accepted; a longer one fails the job |
 | `egress-policy` | `audit` | harden-runner on the job; exactly `audit` or `block` |

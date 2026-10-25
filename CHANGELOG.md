@@ -13,8 +13,8 @@ name what a caller sees after that.
   Advisory by default (`fail-on-findings: false`); a failed, timed-out, oversize or malformed call, or a missing or
   non-integer `exit_code`, always fails the job. `contents: read` only; the `LORY_PIPELINE_TOKEN` secret reaches one
   step and curl reads it from standard input. Findings are sensitive: the body is never logged, the summary shows only
-  `exit_code` and a timestamp, and the raw response is uploaded only with `upload-response: true` in a private
-  repository (the job refuses otherwise), for three days. The token is scrubbed from the kept response in raw,
+  `exit_code` and a timestamp, and the raw response is uploaded only with `upload-response: true` when the visibility is exactly `private`
+  (public and internal are refused, checked against the live API right before the upload), for three days. The token is scrubbed from the kept response in raw,
   JSON-escaped, URL-encoded and base64 forms. The first real run is a spike: the response schema beyond
   `exit_code`, deep-audit support for a non-pull-request target and the rate limits are unknown.
 - **Tests.** `tests/test_lory_audit.py` runs both shell scripts as shipped against a stub `curl`. This workflow is not

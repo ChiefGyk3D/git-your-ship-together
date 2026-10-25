@@ -72,8 +72,11 @@ repository's artifacts are public. So by default nothing leaves the runner: the 
 job summary carries only the `exit_code` and a UTC timestamp. Read the findings in the vendor's own portal.
 
 `upload-response: true` uploads the raw response as the `lory-audit-response` artifact, kept three days. The job refuses to do
-that unless the repository is private: it checks `github.event.repository.private` (passed through the environment) before it calls
-the API, and a missing or unclear value counts as not private.
+that unless the repository visibility is exactly `private`. Public and internal repositories are refused (an internal repository is
+readable by a whole organization or enterprise), and so is a missing or unrecognized value. The job checks
+`github.event.repository.visibility` (passed through the environment) before it calls the API, and then asks the API for the current
+visibility (`gh api repos/<repository> --jq .visibility`, with the job token) right before the upload, because the event payload can be stale. The
+live answer wins: any error, an empty answer or anything but `private` fails the job and nothing is uploaded.
 
 ## Handling findings
 

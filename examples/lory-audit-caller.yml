@@ -15,7 +15,7 @@
 # Findings are sensitive. They stay out of the log and out of artifacts by
 # default: the job summary shows only the exit_code and a timestamp. Setting
 # upload-response: true uploads the raw response for three days, and the job
-# refuses to do it in a public repository.
+# refuses to do it unless the repository is private (not public, not internal).
 #
 # The first real run is a spike: the response schema beyond exit_code, deep
 # audits of a non-pull-request target and the rate limits are not documented.
@@ -41,4 +41,4 @@ jobs:
     # job passes. A failed or malformed call fails the job either way.
     # with:
     #   fail-on-findings: true    # make a nonzero exit_code fail the job
-    #   upload-response: true     # private repositories only; raw findings, kept three days
+    #   upload-response: true     # visibility exactly private only; raw findings, kept 3 days
