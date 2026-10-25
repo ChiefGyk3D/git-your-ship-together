@@ -28,6 +28,7 @@ runs:
   steps:
     - name: Egress canary (EX-0001)
       shell: bash
+      working-directory: ${{ github.workspace }}
       run: |
         set -u
         NAMES="github.com api.github.com results-receiver.actions.githubusercontent.com"

@@ -219,6 +219,10 @@ def test_every_job_that_can_block_gets_the_canary_right_after_harden_runner(path
     assert canary.get("name") == "Egress canary (EX-0001)", f"{path.name}:{name} has no canary as its second step"
     assert canary["timeout-minutes"] == 2
     assert canary["shell"] == "bash"
+    # A job's defaults.run.working-directory may not exist before checkout (python-package-release `build`).
+    assert canary["working-directory"] == "${{ github.workspace }}", (
+        f"{path.name}:{name}: canary lacks working-directory"
+    )
     assert canary["run"] == canary_script(), f"{path.name}:{name} canary differs from the composite action"
     if policy != "block":  # audit.yml hardcodes block, so its canary runs unconditionally
         assert "== 'block'" in canary["if"], f"{path.name}:{name}: the canary must run only when the job is in block"
@@ -312,3 +316,25 @@ def test_the_guard_bites_a_job_that_holds_something(job, expected):
 def test_the_guard_accepts_a_sarif_upload_and_a_read_only_job():
     assert what_a_job_holds({"permissions": {"contents": "read", "security-events": "write"}}) == []
     assert what_a_job_holds({"permissions": {"contents": "read"}, "steps": [{"run": "true"}]}) == []
+
+
+def test_the_canary_overrides_every_job_default_working_directory_and_shell():
+    seen_default = 0
+    for path, name, job, steps in workflow_jobs():
+        canary = next((s for s in steps if s.get("name") == "Egress canary (EX-0001)"), None)
+        if canary is None:
+            continue
+        run_defaults = (job.get("defaults") or {}).get("run") or {}
+        if "working-directory" in run_defaults:
+            seen_default += 1
+            assert canary.get("working-directory") == "${{ github.workspace }}", f"{path.name}:{name}"
+        if "shell" in run_defaults:
+            assert canary.get("shell") == "bash", f"{path.name}:{name}"
+        top = (yaml.safe_load(path.read_text()).get("defaults") or {}).get("run") or {}
+        assert not top, f"{path.name} has workflow-level run defaults; extend this test"
+    assert seen_default >= 1, "python-package-release build sets a default working-directory; the guard must see it"
+
+
+def test_the_action_sets_the_working_directory_too():
+    step = yaml.safe_load(ACTION.read_text())["runs"]["steps"][0]
+    assert step["working-directory"] == "${{ github.workspace }}" and step["shell"] == "bash"

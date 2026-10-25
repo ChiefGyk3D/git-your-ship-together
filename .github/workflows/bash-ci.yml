@@ -210,6 +210,8 @@ jobs:
         if: ${{ inputs.egress-policy-secretless == 'block' }}
         timeout-minutes: 2
         shell: bash
+        # The workspace root exists before checkout; a job default working-directory may not.
+        working-directory: ${{ github.workspace }}
         run: |
           set -u
           NAMES="github.com api.github.com results-receiver.actions.githubusercontent.com"
@@ -343,6 +345,8 @@ jobs:
         if: ${{ inputs.egress-policy-secretless == 'block' }}
         timeout-minutes: 2
         shell: bash
+        # The workspace root exists before checkout; a job default working-directory may not.
+        working-directory: ${{ github.workspace }}
         run: |
           set -u
           NAMES="github.com api.github.com results-receiver.actions.githubusercontent.com"
@@ -477,6 +481,8 @@ jobs:
         if: ${{ inputs.egress-policy-secretless == 'block' }}
         timeout-minutes: 2
         shell: bash
+        # The workspace root exists before checkout; a job default working-directory may not.
+        working-directory: ${{ github.workspace }}
         run: |
           set -u
           NAMES="github.com api.github.com results-receiver.actions.githubusercontent.com"
@@ -572,6 +578,8 @@ jobs:
         if: ${{ inputs.distro-egress-policy == 'block' && inputs.egress-policy-secretless == 'block' }}
         timeout-minutes: 2
         shell: bash
+        # The workspace root exists before checkout; a job default working-directory may not.
+        working-directory: ${{ github.workspace }}
         run: |
           set -u
           NAMES="github.com api.github.com results-receiver.actions.githubusercontent.com"
@@ -661,6 +669,8 @@ jobs:
         if: ${{ inputs.egress-policy-secretless == 'block' }}
         timeout-minutes: 2
         shell: bash
+        # The workspace root exists before checkout; a job default working-directory may not.
+        working-directory: ${{ github.workspace }}
         run: |
           set -u
           NAMES="github.com api.github.com results-receiver.actions.githubusercontent.com"
@@ -750,6 +760,8 @@ jobs:
         if: ${{ inputs.egress-policy-secretless == 'block' }}
         timeout-minutes: 2
         shell: bash
+        # The workspace root exists before checkout; a job default working-directory may not.
+        working-directory: ${{ github.workspace }}
         run: |
           set -u
           NAMES="github.com api.github.com results-receiver.actions.githubusercontent.com"
@@ -841,6 +853,8 @@ jobs:
         if: ${{ inputs.egress-policy-secretless == 'block' }}
         timeout-minutes: 2
         shell: bash
+        # The workspace root exists before checkout; a job default working-directory may not.
+        working-directory: ${{ github.workspace }}
         run: |
           set -u
           NAMES="github.com api.github.com results-receiver.actions.githubusercontent.com"
@@ -923,6 +937,8 @@ jobs:
         if: ${{ inputs.egress-policy-secretless == 'block' }}
         timeout-minutes: 2
         shell: bash
+        # The workspace root exists before checkout; a job default working-directory may not.
+        working-directory: ${{ github.workspace }}
         run: |
           set -u
           NAMES="github.com api.github.com results-receiver.actions.githubusercontent.com"
@@ -1008,6 +1024,8 @@ jobs:
         if: ${{ inputs.egress-policy-secretless == 'block' }}
         timeout-minutes: 2
         shell: bash
+        # The workspace root exists before checkout; a job default working-directory may not.
+        working-directory: ${{ github.workspace }}
         run: |
           set -u
           NAMES="github.com api.github.com results-receiver.actions.githubusercontent.com"
