@@ -79,15 +79,17 @@ self-hosted ones (GitHub Docs, "Contexts" reference, the `runner` context table;
 in step contexts (`jobs.<job_id>.steps.if` and `steps.with` list `runner`) and not in `runs-on` or a job-level
 `if`, so it is read in the harden-runner step's `with:` and in the canary's step-level `if:`.
 
-For every relaxed job the effective policy is `audit` only when the policy input is exactly `audit` **and**
-`runner.environment == 'github-hosted'`; anything else (`self-hosted`, empty, undefined) is `block`. GitHub's
-string comparison is case-insensitive, so `GitHub-Hosted` counts as hosted; the policy inputs themselves are
-compared exactly by the policy check, which fails the job first.
+For every relaxed job the effective policy is `audit` only when the policy input equals `audit` **and**
+`runner.environment == 'github-hosted'`; anything else (`self-hosted`, empty, undefined) is `block`.
+GitHub's `==` and `contains()` compare strings case-insensitively, so inside the expressions `AUDIT` equals `audit` and `Block` equals `block`; the expressions alone are not exact. `GitHub-Hosted` counts as hosted for
+the same reason. The **exact-string control is the policy check**, not the expression: it is step 0 of every job
+and fails the job on any policy value that is not exactly `audit` or `block` (so `AUDIT` and `Block` fail it),
+before anything consumes the value. A test pins that dependency.
 
 The label list is a second check, kept for the four jobs whose runner label a caller chooses (`runner`,
 `runners` and `distro-runners` inputs: `bash-ci.yml` `test` and `distro`, `python-ci.yml` `distro`,
-`python-fuzz.yml` `fuzz`). For those, audit needs **both** the runtime context and a label that is exactly one
-of the standard hosted labels below. The label check alone would not be enough; the runtime check alone is the
+`python-fuzz.yml` `fuzz`). For those, audit needs **both** the runtime context and a label that matches one
+of the standard hosted labels below, case-insensitively (`contains()` ignores case). The label check alone would not be enough; the runtime check alone is the
 control. A runner-group object, a comma list, a JSON list or a larger-runner name does not match a label and
 gives `block`. Every other relaxed job has a literal `runs-on` that is one of these labels; a test enforces it.
 
@@ -141,7 +143,8 @@ Relaxed (policy follows `egress-policy-secretless`, default `audit`): the jobs b
 | `verify-published.yml` | `rescan`, `verified` |
 
 `distro` (python-ci, bash-ci) and `semgrep` (security) keep their own policy inputs as well: the job is
-`audit` when either `egress-policy-secretless` or its own input says exactly `audit`.
+`audit` when either `egress-policy-secretless` or its own input says `audit` (case-insensitively in the
+expression; exactly, by the policy check that runs first).
 
 **Kept in `block`** (follow `egress-policy`, and get the policy check and the fail-fast canary):
 
@@ -186,8 +189,10 @@ Not in scope: this repository's own `ci.yml` jobs (already `audit` before this e
   nothing of that kind for a compromised step to send out.
 - `audit` mode still logs every outbound connection to the job summary and the harden-runner insights, and
   `disable-sudo` stays on where it was.
-- A policy value that is not exactly `audit` or `block` fails closed: the job is `block`, and a first step
-  fails it with a message naming the bad value.
+- The policy check (step 0 of every job) fails the job on any policy value that is not exactly `audit` or
+  `block`, with a message naming the input and the length of the value, before anything uses it. The effective
+  expressions then only matter for valid values; for a value that reaches them they are case-insensitive by
+  GitHub's design, and any other value gives `block`.
 - The jobs that stay in `block` are covered by the fail-fast egress canary, which turns the westus2 symptom
   into an immediate, named failure instead of a ten-minute hang.
 - Timeouts were cut to about three times the slowest healthy p99 (python-ci 15, bash-ci 10, tofu-ci 16,

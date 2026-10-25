@@ -473,6 +473,8 @@ RUNNER_CASES = [
 
 
 def runner_is_hosted(label) -> bool:
+    """The oracle for the label check. `contains(fromJSON(list), label)` compares strings case-insensitively, so
+    this lowercases both sides on purpose; a non-string (a list or object) never matches."""
     return isinstance(label, str) and label.lower() in {x.lower() for x in hosted_labels()}
 
 
@@ -627,7 +629,8 @@ def test_every_job_gets_the_policy_check_and_the_canary_right_after_harden_runne
 
 
 def test_the_effective_policy_follows_the_right_inputs():
-    """audit only when the input the job answers to says exactly audit; distro and semgrep need either to say audit."""
+    """audit only when the input the job answers to equals `audit` (GitHub's `==` ignores case); distro and
+    semgrep need either to say so. The exact-string control is the policy check, see the test that pins it."""
     seen = 0
     for path, name, _job, steps in workflow_jobs():
         if path.name in ("ci.yml", "audit.yml"):
@@ -897,3 +900,28 @@ def test_this_repositorys_audit_jobs_use_no_cache_that_the_blocking_audit_workfl
             seen += 1
             assert [label for label, kind, _ in cache_sites(job) if kind != "hash-verified tool cache"] == [], name
     assert seen >= 6
+
+
+def test_the_expressions_depend_on_the_policy_check_for_exactness():
+    """GitHub's `==` and `contains()` compare strings case-insensitively, so an effective-policy expression reads
+    `AUDIT` as `audit` and `Block` as `block`. The expressions are therefore NOT the exact-string control. The
+    control is the policy check: step 0 of every job that has such an expression, running before anything
+    consumes the value, and failing on every value that is not exactly `audit` or `block`.
+    """
+    jobs_with_expressions = 0
+    for path in WORKFLOWS:
+        if path.name in ("ci.yml", "audit.yml"):
+            continue  # hardcoded policies: no input reaches an expression
+        for name, job in yaml.safe_load(path.read_text())["jobs"].items():
+            steps = job.get("steps") or []
+            harden = next((s for s in steps if str(s.get("uses", "")).startswith("step-security/harden-runner@")), None)
+            if harden is None or "inputs." not in str(harden["with"]["egress-policy"]):
+                continue
+            jobs_with_expressions += 1
+            assert steps[0].get("name") == CHECK_NAME, f"{path.name}:{name}: an expression without the exact check"
+            assert steps.index(harden) > 0
+    assert jobs_with_expressions > 60
+    # The expression alone is case-insensitive (the reason the check exists); the check is exact.
+    expression = "${{ inputs.a == 'audit' && 'audit' || 'block' }}"
+    assert evaluate(expression, {"a": "AUDIT"}) == "audit"
+    assert run_check({"POLICY_EGRESS_POLICY": "AUDIT"}).returncode == 1

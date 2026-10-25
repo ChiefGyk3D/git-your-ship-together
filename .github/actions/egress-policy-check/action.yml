@@ -1,9 +1,12 @@
 # Refuse an egress policy that is not exactly `audit` or `block`.
 #
 # The policy inputs of the reusable workflows are free strings (workflow_call
-# has no choice type). In the workflows the effective policy of a job is
-# computed fail-closed: anything but exactly `audit` is `block`. This step
-# turns such a typo into a clear failure instead of a silent `block`.
+# has no choice type). In the workflows the effective policy of a job is an
+# expression that gives `audit` for a value equal to `audit` and `block` for
+# anything else, but GitHub's `==` is case-insensitive, so the expression alone
+# reads `AUDIT` as `audit`. THIS step is the exact-string control: it is step 0
+# of every job and fails it on any value that is not exactly `audit` or
+# `block`, before anything consumes the value.
 #
 # Each policy arrives as its own environment variable (POLICY_EGRESS_POLICY,
 # POLICY_EGRESS_POLICY_SECRETLESS, POLICY_DISTRO_EGRESS_POLICY,

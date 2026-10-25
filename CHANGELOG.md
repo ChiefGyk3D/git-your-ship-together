@@ -22,19 +22,19 @@ jobs hang or fail; see the README section "Known CI platform issue: westus2 (EX-
   expires 2026-11-07 at the latest. `python-ci`'s `test`, `dast`'s `scan`, and `docs-pages` and
   `wiki-publish` jobs in full stay under `egress-policy`, because a privileged job consumes their output.
 - **GitHub-hosted runners only, decided at run time.** A secretless job is `audit` only when the policy input
-  is exactly `audit` and GitHub's `runner.environment` is `github-hosted`; a self-hosted runner (whatever
+  equals `audit` and GitHub's `runner.environment` is `github-hosted`; a self-hosted runner (whatever
   label it carries) runs in `block`. Where a caller chooses the runner label (`runner`, `runners`,
   `distro-runners`: `bash-ci` `test` and `distro`, `python-ci` `distro`, `python-fuzz` `fuzz`), the label
-  must also be exactly a standard GitHub-hosted label.
+  must also match a standard GitHub-hosted label (case-insensitively, like all GitHub string comparison).
 - **No cache in an audit job.** The pip cache (`python-ci`, `python-fuzz`, `docs-pages`), the buildx `gha`
   cache (`python-ci` `docker`, `container-release` non-publishing build) and the Arduino package cache are on
   only when the job's own effective policy is `block`, so code running in an audit job cannot poison a cache a
   block-mode job restores. Audit-mode jobs install without the cache and run a little slower. Hash-verified
   tool caches are unchanged.
-- **Fail-closed policy.** A policy input that is not exactly `audit` or `block` makes the job run in
-  `block` and fails it in the first step of the job, before harden-runner, with a fixed message that names the input and
-  the length of its value. Before, harden-runner rejected it or treated it
-  its own way.
+- **Exact policy check.** A policy input that is not exactly `audit` or `block` fails the job in its first
+  step, before harden-runner, with a fixed message that names the input and the length of its value. The
+  effective-policy expressions use GitHub's case-insensitive `==`, so the check, not the expression, is the exact
+  control. Before, harden-runner rejected such a value or treated it its own way.
 - **Egress canary.** Every job that can run in `block` now has a step that fails in seconds with "egress
   broken on this runner (known westus2 DNS issue, EX-0001): rerun the job" when any address of `github.com`,
   `api.github.com` or the Actions results receiver is unreachable (four tries, a second apart), under an

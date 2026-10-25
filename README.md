@@ -2258,15 +2258,17 @@ latest or when the upstream defect is fixed:
   generates something a privileged job then publishes or deploys stays under `egress-policy`. The exception
   record lists the jobs on each side and a test pins the list to the YAML.
 - The exception covers GitHub-hosted runners only, decided at run time: a secretless job is `audit` only when
-  the policy input is exactly `audit` and `runner.environment` is `github-hosted` (GitHub's own context; a
+  the policy input equals `audit` and `runner.environment` is `github-hosted` (GitHub's own context; a
   self-hosted runner can carry any label, so a label proves nothing). Where a caller also picks the runner
-  label (`runner`, `runners`, `distro-runners`), the label must additionally be exactly a standard hosted
-  label (the list is in the exception record, with the GitHub docs page it comes from). Anything else is
+  label (`runner`, `runners`, `distro-runners`), the label must additionally match a standard hosted
+  label, case-insensitively (the list is in the exception record, with the GitHub docs page it comes from). Anything else is
   `block`, because an untrusted job must not run in `audit` on a persistent runner.
-- A policy value that is not exactly `audit` or `block` fails closed: the job runs in `block` and a first
-  step fails it with a fixed message that names the input and the length of its value, never the value. That
-  check is the first step of the job, before harden-runner, so nothing consumes a bad value first. `distro` and `semgrep` stay `audit` when either their own
-  input or `egress-policy-secretless` says exactly `audit`.
+- A policy value that is not exactly `audit` or `block` fails the job. The exact-string control is the policy
+  check, step 0 of every job, before harden-runner: it prints a fixed message that names the input and the length
+  of its value, never the value, and nothing consumes a bad value first. GitHub's `==` and `contains()` are
+  case-insensitive, so the effective-policy expressions alone would read `AUDIT` as `audit`; they are not the
+  exact control, the check is. `distro` and `semgrep` stay `audit` when either their own
+  input or `egress-policy-secretless` says `audit` (case-insensitively in the expression; the check above is exact).
 - No cache in an audit job: the pip, buildx and Arduino-package caches are on only when the job's own effective
   policy is `block`, so code running in audit cannot poison a cache a block-mode job restores. Audit-mode jobs
   install without the cache. Hash-verified tool caches are unchanged.
