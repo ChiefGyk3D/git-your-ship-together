@@ -1,5 +1,6 @@
-# Fetch CI secrets from Doppler and expose them as (masked) environment
-# variables for the rest of the job.
+# Fetch CI secrets from Doppler and expose them as masked values: by default as
+# environment variables for the rest of the job, or (export: outputs) as one
+# masked JSON output that only the steps you hand it to can read.
 #
 # Doppler is the single source of truth for secrets in these repositories: the
 # daemons already read from it at runtime, and this action extends that to CI so
@@ -26,11 +27,41 @@
 # proposal can read; `trusted-refs-only: "false"` restores the old behaviour
 # for a caller that has decided otherwise.
 #
-# Every value is exported with `inject-env-vars`, so the Doppler config named
-# here must hold ONLY what CI needs (a `ci` config), never the runtime set.
+# What `export` and `names` do (issue #207):
+#
+#   export: env (default, the behavior every existing caller has). Every secret
+#     in the config goes into GITHUB_ENV, so EVERY later step in the job - and
+#     every action's post-run hook - inherits all of them. A compromised
+#     dependency or post-run hook can read them. The config named here must
+#     hold ONLY what CI needs (a `ci` config), never the runtime set.
+#   export: outputs. Nothing is written to GITHUB_ENV and nothing is exported
+#     into the environment. Every value is masked, then the result is returned
+#     as ONE masked JSON output, `secrets`. The caller reads one value with
+#     fromJSON(steps.<id>.outputs.secrets).NAME and passes it to the single step
+#     that needs it through that step's `env:`. With nothing fetched the output
+#     is `{}`. This is the form for a job that holds a production credential.
+#   names: an optional comma or whitespace separated allow-list of secret names
+#     (each ^[A-Z_][A-Z0-9_]*$). In both modes only those are exported. A name
+#     that is not in the config fails the job (the message names the secret,
+#     never a value). Empty means every secret. `export: outputs` with `names`
+#     is the safest combination: the job gets exactly what it asked for, once.
+#
+# Why `outputs` does not use dopplerhq/secrets-fetch-action: that action can only
+# export everything it reads, and its per-secret outputs cannot be declared in a
+# composite action. So the allow-list and outputs paths call the Doppler API
+# (the same two endpoints) with curl and jq. Credentials go to curl on standard
+# input, never on a command line, and are masked before use. The default path
+# (export: env, no names) is unchanged and still runs the pinned action.
+#
+# The decide step below is inlined byte-identical in five workflows and is not
+# touched by this feature; the validate and select steps exist only here.
+#
+# Callers waiting on this: the ChiefGyk3D/no-php-no-cry and
+# ChiefGyk3D/Reach-Around deploy workflows. They re-pin to the release that
+# carries it. See docs/wiki/Secrets-Doppler-and-OIDC.md.
 
 name: Doppler CI secrets
-description: Fetch a Doppler config as masked environment variables via OIDC or a Service Token.
+description: Fetch a Doppler config as masked environment variables, or as one masked JSON output, via OIDC or a Service Token.
 
 inputs:
   project:
@@ -57,6 +88,19 @@ inputs:
     description: Fetch only on the default branch, a version tag (vN.N.N) or a schedule; never on a pull request or another branch.
     required: false
     default: "true"
+  export:
+    description: >-
+      `env` (default) exports every secret to the rest of the job through GITHUB_ENV, so each later step and post-run hook
+      can read it. `outputs` writes nothing to the environment and returns the masked values as one JSON output,
+      `secrets`. Anything else fails the job.
+    required: false
+    default: env
+  names:
+    description: >-
+      Comma or whitespace separated allow-list of secret names (each ^[A-Z_][A-Z0-9_]*$). When set, only these are
+      exported in either mode and a name missing from the config fails the job. Empty means every secret.
+    required: false
+    default: ""
 
 outputs:
   mode:
@@ -65,6 +109,11 @@ outputs:
   untrusted-tag:
     description: "`true` when the ref is a tag that is not a vMAJOR.MINOR.PATCH release tag and so was refused secrets; a caller that asked for a secret-backed feature should fail on it."
     value: ${{ steps.mode.outputs.untrusted-tag }}
+  secrets:
+    description: >-
+      With `export: outputs`, one masked JSON object of NAME to value (`{}` when nothing was fetched). Read one value
+      with fromJSON(steps.<id>.outputs.secrets).NAME and pass it to a step through `env:`. Always `{}` with `export: env`.
+    value: ${{ steps.select.outputs.secrets || '{}' }}
 
 runs:
   using: composite
@@ -137,8 +186,43 @@ runs:
         echo "untrusted-tag=$untrusted_tag" >> "$GITHUB_OUTPUT"
         echo "Doppler auth mode: $mode"
 
+    - name: Check the export and names inputs
+      id: validate
+      shell: bash
+      env:
+        EXPORT: ${{ inputs.export }}
+        NAMES: ${{ inputs.names }}
+      run: |
+        set -euo pipefail
+        export LC_ALL=C
+        # Runs on every ref, so a typo fails on a pull request too. Neither value is echoed back.
+        case "$EXPORT" in
+          env | outputs) ;;
+          *)
+            echo "::error title=Doppler::export must be env or outputs"
+            exit 1 ;;
+        esac
+        names=""
+        if [ -n "$NAMES" ]; then
+          read -r -a parts <<<"$(printf '%s' "$NAMES" | tr ',\r\n\t' '    ')"
+          if [ "${#parts[@]}" -eq 0 ]; then
+            # An allow-list that parses to nothing must not quietly mean "every secret".
+            echo "::error title=Doppler::names is set but holds no names"
+            exit 1
+          fi
+          for n in "${parts[@]}"; do
+            if ! [[ $n =~ ^[A-Z_][A-Z0-9_]*$ ]]; then
+              echo "::error title=Doppler::names holds an entry that is not a valid secret name (^[A-Z_][A-Z0-9_]*\$)"
+              exit 1
+            fi
+            case ",$names," in *",$n,"*) continue ;; esac
+            names="${names:+$names,}$n"
+          done
+        fi
+        echo "names=$names" >> "$GITHUB_OUTPUT"
+
     - name: Fetch secrets via OIDC (Service Account Identity)
-      if: steps.mode.outputs.mode == 'oidc'
+      if: steps.mode.outputs.mode == 'oidc' && inputs.export == 'env' && steps.validate.outputs.names == ''
       uses: dopplerhq/secrets-fetch-action@451892f16195f9ac360e1a5bcbf0b5fd0e957534 # v2.0.0
       with:
         auth-method: oidc
@@ -148,10 +232,126 @@ runs:
         inject-env-vars: true
 
     - name: Fetch secrets via Service Token
-      if: steps.mode.outputs.mode == 'token'
+      if: steps.mode.outputs.mode == 'token' && inputs.export == 'env' && steps.validate.outputs.names == ''
       uses: dopplerhq/secrets-fetch-action@451892f16195f9ac360e1a5bcbf0b5fd0e957534 # v2.0.0
       with:
         doppler-token: ${{ inputs.token }}
         doppler-project: ${{ inputs.project }}
         doppler-config: ${{ inputs.config }}
         inject-env-vars: true
+
+    # The allow-list and outputs paths. Reached when something is fetched and the two steps above did not cover it:
+    # export: outputs, or export: env with names.
+    - name: Fetch the selected secrets
+      id: select
+      if: steps.mode.outputs.mode != 'none' && (inputs.export == 'outputs' || steps.validate.outputs.names != '')
+      shell: bash
+      env:
+        MODE: ${{ steps.mode.outputs.mode }}
+        EXPORT: ${{ inputs.export }}
+        WANT: ${{ steps.validate.outputs.names }}
+        PROJECT: ${{ inputs.project }}
+        CONFIG: ${{ inputs.config }}
+        IDENTITY_ID: ${{ inputs.identity-id }}
+        TOKEN: ${{ inputs.token }}
+      run: | # zizmor: ignore[github-env] export: env with names is this feature; names are checked against ^[A-Z_][A-Z0-9_]*$, the delimiter is random
+        set -euo pipefail
+        umask 077
+        export LC_ALL=C
+        # Nothing from the environment may redirect a call that carries a credential.
+        unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY CURL_HOME CURL_CA_BUNDLE SSL_CERT_FILE SSL_CERT_DIR
+        api=https://api.doppler.com
+        limit=1000000 # GitHub caps one step output at 1 MB
+        fail() {
+          echo "::error title=Doppler::$1"
+          exit 1
+        }
+        # --fail keeps an error body (which can echo a request) out of the log; credentials arrive on stdin.
+        call() { curl --disable --silent --show-error --fail --proto '=https' --tlsv1.2 --max-time 60 --retry 2 "$@"; }
+        # A credential is masked before it is used, and only if it cannot carry a newline or a workflow command.
+        mask_token() {
+          [[ $1 =~ ^[A-Za-z0-9._~+/=-]+$ ]] || fail "a credential has an unexpected shape"
+          echo "::add-mask::$1"
+        }
+
+        if [ "$MODE" = oidc ]; then
+          if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ] || [ -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ]; then
+            fail "no OIDC token is available; the calling job needs id-token: write"
+          fi
+          reply=$(printf 'Authorization: Bearer %s\n' "$ACTIONS_ID_TOKEN_REQUEST_TOKEN" |
+            call --header @- "$ACTIONS_ID_TOKEN_REQUEST_URL") || fail "could not get the job's OIDC token"
+          jwt=$(jq -r '.value // empty' <<<"$reply") || fail "the OIDC token reply was not JSON"
+          [ -n "$jwt" ] || fail "the OIDC token reply held no token"
+          mask_token "$jwt"
+          # The token goes into curl's config on stdin as a JSON string; a JSON string is also a valid curl config string.
+          reply=$(JWT="$jwt" jq -n -r '"data = " + ({identity: env.IDENTITY_ID, token: env.JWT} | tojson | tojson)' |
+            call --config - --header 'Content-Type: application/json' "$api/v3/auth/oidc") || fail "Doppler refused the OIDC exchange"
+          dtoken=$(jq -r '.token // empty' <<<"$reply") || fail "the Doppler OIDC reply was not JSON"
+          [ -n "$dtoken" ] || fail "the Doppler OIDC reply held no token"
+        else
+          dtoken=$TOKEN
+        fi
+        unset TOKEN
+        mask_token "$dtoken"
+        auth=$(printf '%s:' "$dtoken" | base64 | tr -d '\n')
+        mask_token "$auth"
+
+        query=""
+        case "$dtoken" in
+          dp.pt.* | dp.sa.* | dp.said.*)
+            query="?$(jq -rn '"project=" + (env.PROJECT | @uri) + "&config=" + (env.CONFIG | @uri)')" ;;
+        esac
+        response=$(printf 'Authorization: Basic %s\n' "$auth" |
+          call --header @- --header 'Accept: application/json' "$api/v3/configs/config/secrets$query") || fail "could not read the Doppler config"
+        jq -e '.secrets | type == "object"' <<<"$response" >/dev/null 2>&1 || fail "the Doppler reply held no secrets"
+
+        want='[]'
+        if [ -n "$WANT" ]; then
+          want=$(jq -cn --arg w "$WANT" '$w | split(",")')
+        fi
+        missing=$(jq -r --argjson want "$want" '$want - (.secrets | keys_unsorted) | join(",")' <<<"$response")
+        if [ -n "$missing" ]; then
+          fail "requested secret(s) not in the Doppler config: $missing"
+        fi
+        selected=$(jq -c --argjson want "$want" '
+          .secrets | if ($want | length) == 0 then . else with_entries(select(.key as $k | $want | index($k) != null)) end' <<<"$response")
+        result=$(jq -c 'map_values((.computed // "") | tostring)' <<<"$selected")
+
+        if [ "$EXPORT" = outputs ]; then
+          bytes=$(printf '%s' "$result" | wc -c | tr -d ' ')
+          if [ "$bytes" -gt "$limit" ]; then
+            fail "the secrets JSON is $bytes bytes, over GitHub's output size limit of $limit; list fewer secrets in names"
+          fi
+        fi
+
+        # Mask every value BEFORE it is written anywhere: each line, the whole (multi-line) value, and its JSON-escaped
+        # form. % and CR are escaped because the runner unescapes them in a command, so the literal text is masked.
+        # Values Doppler marks unmasked, and its own project/config/environment labels, are left readable.
+        jq -r '
+          def esc: gsub("%"; "%25") | gsub("\r"; "%0D") | gsub("\n"; "%0A");
+          def mask: select(. != "") | "::add-mask::" + esc;
+          ["DOPPLER_PROJECT", "DOPPLER_CONFIG", "DOPPLER_ENVIRONMENT"] as $meta
+          | [ to_entries[]
+              | select((.key | IN($meta[])) | not)
+              | select(.value.computedVisibility != "unmasked")
+              | (.value.computed // "" | tostring) as $v
+              | ($v | mask), ($v | splits("[\r\n]+") | mask), ($v | tojson | .[1:-1] | select(. != $v) | mask) ]
+          | unique[]' <<<"$selected"
+
+        if [ "$EXPORT" = outputs ]; then
+          if [ "$result" != "{}" ]; then
+            printf '%s' "$result" | jq -Rr '"::add-mask::" + (gsub("%"; "%25") | gsub("\r"; "%0D"))'
+          fi
+          delim="GYST_$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+          case "$result" in *"$delim"*) fail "could not pick a safe output delimiter" ;; esac
+          printf 'secrets<<%s\n%s\n%s\n' "$delim" "$result" "$delim" >> "$GITHUB_OUTPUT"
+        else
+          IFS=, read -r -a list <<<"$WANT"
+          for name in "${list[@]}"; do
+            value=$(jq -j --arg n "$name" '.[$n]' <<<"$result"; printf x)
+            value=${value%x}
+            delim="GYST_$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+            case "$value" in *"$delim"*) fail "could not pick a safe delimiter" ;; esac
+            printf '%s<<%s\n%s\n%s\n' "$name" "$delim" "$value" "$delim" >> "$GITHUB_ENV"
+          done
+        fi

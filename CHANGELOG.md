@@ -101,6 +101,23 @@ name what a caller sees after that.
 - **Docs.** The fork claim is now exact: a `pull_request` from a fork never fetches; `pull_request_target` with
   `doppler-trusted-refs-only: false` does, and the test now pins that.
 
+### doppler-secrets: `export: outputs` and a `names` allow-list (issue #207)
+
+- **Added.** The composite action `.github/actions/doppler-secrets` takes `export` (`env`, the default, or `outputs`) and
+  `names` (a comma or whitespace separated allow-list). `env` is unchanged: every secret goes to `GITHUB_ENV`, so each
+  later step and every action post-run hook inherits it. `outputs` writes nothing to `GITHUB_ENV`; every value is masked
+  (each line, the whole value, its JSON-escaped form) before it is written, and one masked JSON output, `secrets`, is
+  returned (`{}` when nothing was fetched) for the caller to read with `fromJSON(steps.<id>.outputs.secrets).NAME` and
+  hand to single steps through `env:`. `names` narrows either mode; a missing name, an invalid `export`, a malformed or
+  empty-after-parsing `names`, and a result over GitHub's 1 MB output limit each fail the job without echoing a value.
+  Both authentication paths and the trusted-refs-only guard are kept; the `mode` output is unchanged.
+- **Caller impact.** None unless a caller sets the new inputs. The default path still runs the pinned
+  `dopplerhq/secrets-fetch-action`. The new paths call the Doppler API with curl and jq (that action can only export
+  everything it reads), with credentials on standard input. The inlined decide step is untouched, so the five workflow
+  copies stay byte-identical. Callers that want `outputs` (the `no-php-no-cry` and `Reach-Around` deploy workflows) re-pin
+  to the release that carries this.
+- **Tests.** `tests/test_doppler_outputs.py` runs the new steps as shipped against a stub `curl`.
+
 ### New workflow: `lory-audit.yml` (issue #202)
 
 - **Added.** An optional reusable workflow that asks Lory (Lorikeet Security's AI pentester) for a deep-dive audit

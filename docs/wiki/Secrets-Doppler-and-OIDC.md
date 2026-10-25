@@ -127,6 +127,25 @@ from; a test holds the copies byte-identical to
 [`.github/actions/doppler-secrets`](../../.github/actions/doppler-secrets/action.yml),
 which is the source.
 
+## Keeping a production credential away from the rest of the job
+
+The composite action [`.github/actions/doppler-secrets`](../../.github/actions/doppler-secrets/action.yml)
+has two inputs the inlined workflow copies do not need:
+
+- **`export`**: `env` (the default, today's behavior) or `outputs`. Any other value fails the job.
+- **`names`**: an optional comma or whitespace separated allow-list of secret names. It narrows both modes; a name
+  missing from the config fails the job, naming the secret and never a value. Empty means every secret.
+
+**The trade-off.** `env` writes the whole config into the job's environment, so every later step and every action's
+post-run hook can read all of it. A compromised dependency or hook in a deploy job is then a way to a production
+credential. `outputs` writes nothing to the environment: the values are masked, returned as one JSON output
+(`{}` when nothing was fetched), and the caller passes each one to the step that needs it through `env:`, reading it
+with `fromJSON(steps.<id>.outputs.secrets).NAME`. **`export: outputs` with `names` is the safe form for a job that
+holds a production credential.** The README shows a worked step ("Handing a secret to one step"). The first callers
+are the `no-php-no-cry` and `Reach-Around` deploy workflows.
+
+One limit: GitHub caps a step output at 1 MB, so a large result fails the job; list fewer names.
+
 ## What lives in the `ci` config
 
 One Doppler project `ci` with environment `ci` and config `ci`, separate from every
