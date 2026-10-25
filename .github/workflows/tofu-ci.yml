@@ -175,7 +175,7 @@ jobs:
           NAMES="github.com api.github.com results-receiver.actions.githubusercontent.com"
           PORT=443
           canary_resolve() { timeout 5 getent ahostsv4 "$1" 2>/dev/null | awk '$2 == "STREAM" { print $1 }'; }
-          canary_probe() { timeout 3 bash -c 'exec 3<>"/dev/tcp/$0/$1"' "$1" "$PORT" 2>/dev/null; }
+          canary_probe() { timeout 3 bash -c "exec 3<>\"/dev/tcp/\$0/\$1\"" "$1" "$PORT" 2>/dev/null; }
           canary_show() { local n=$1; shift; echo "+ $*"; { timeout 10 "$@" 2>&1 || true; } | head -n "$n" || true; }
           canary_diag() {
             local name
@@ -191,9 +191,9 @@ jobs:
             echo "::endgroup::"
           }
           canary_main() {
-            local tmp name addr pass n=0 bad
+            local tmp name addr n=0 bad
             tmp=$(mktemp -d) || return 1
-            for pass in 1 2 3; do
+            for _ in 1 2 3; do
               for name in $NAMES; do canary_resolve "$name" >>"$tmp/res.$name" & done
               wait
               sleep 1
@@ -298,7 +298,7 @@ jobs:
           NAMES="github.com api.github.com results-receiver.actions.githubusercontent.com"
           PORT=443
           canary_resolve() { timeout 5 getent ahostsv4 "$1" 2>/dev/null | awk '$2 == "STREAM" { print $1 }'; }
-          canary_probe() { timeout 3 bash -c 'exec 3<>"/dev/tcp/$0/$1"' "$1" "$PORT" 2>/dev/null; }
+          canary_probe() { timeout 3 bash -c "exec 3<>\"/dev/tcp/\$0/\$1\"" "$1" "$PORT" 2>/dev/null; }
           canary_show() { local n=$1; shift; echo "+ $*"; { timeout 10 "$@" 2>&1 || true; } | head -n "$n" || true; }
           canary_diag() {
             local name
@@ -314,9 +314,9 @@ jobs:
             echo "::endgroup::"
           }
           canary_main() {
-            local tmp name addr pass n=0 bad
+            local tmp name addr n=0 bad
             tmp=$(mktemp -d) || return 1
-            for pass in 1 2 3; do
+            for _ in 1 2 3; do
               for name in $NAMES; do canary_resolve "$name" >>"$tmp/res.$name" & done
               wait
               sleep 1
@@ -428,7 +428,7 @@ jobs:
           NAMES="github.com api.github.com results-receiver.actions.githubusercontent.com"
           PORT=443
           canary_resolve() { timeout 5 getent ahostsv4 "$1" 2>/dev/null | awk '$2 == "STREAM" { print $1 }'; }
-          canary_probe() { timeout 3 bash -c 'exec 3<>"/dev/tcp/$0/$1"' "$1" "$PORT" 2>/dev/null; }
+          canary_probe() { timeout 3 bash -c "exec 3<>\"/dev/tcp/\$0/\$1\"" "$1" "$PORT" 2>/dev/null; }
           canary_show() { local n=$1; shift; echo "+ $*"; { timeout 10 "$@" 2>&1 || true; } | head -n "$n" || true; }
           canary_diag() {
             local name
@@ -444,9 +444,9 @@ jobs:
             echo "::endgroup::"
           }
           canary_main() {
-            local tmp name addr pass n=0 bad
+            local tmp name addr n=0 bad
             tmp=$(mktemp -d) || return 1
-            for pass in 1 2 3; do
+            for _ in 1 2 3; do
               for name in $NAMES; do canary_resolve "$name" >>"$tmp/res.$name" & done
               wait
               sleep 1
@@ -552,7 +552,7 @@ jobs:
           NAMES="github.com api.github.com results-receiver.actions.githubusercontent.com"
           PORT=443
           canary_resolve() { timeout 5 getent ahostsv4 "$1" 2>/dev/null | awk '$2 == "STREAM" { print $1 }'; }
-          canary_probe() { timeout 3 bash -c 'exec 3<>"/dev/tcp/$0/$1"' "$1" "$PORT" 2>/dev/null; }
+          canary_probe() { timeout 3 bash -c "exec 3<>\"/dev/tcp/\$0/\$1\"" "$1" "$PORT" 2>/dev/null; }
           canary_show() { local n=$1; shift; echo "+ $*"; { timeout 10 "$@" 2>&1 || true; } | head -n "$n" || true; }
           canary_diag() {
             local name
@@ -568,9 +568,9 @@ jobs:
             echo "::endgroup::"
           }
           canary_main() {
-            local tmp name addr pass n=0 bad
+            local tmp name addr n=0 bad
             tmp=$(mktemp -d) || return 1
-            for pass in 1 2 3; do
+            for _ in 1 2 3; do
               for name in $NAMES; do canary_resolve "$name" >>"$tmp/res.$name" & done
               wait
               sleep 1
@@ -667,7 +667,7 @@ jobs:
           NAMES="github.com api.github.com results-receiver.actions.githubusercontent.com"
           PORT=443
           canary_resolve() { timeout 5 getent ahostsv4 "$1" 2>/dev/null | awk '$2 == "STREAM" { print $1 }'; }
-          canary_probe() { timeout 3 bash -c 'exec 3<>"/dev/tcp/$0/$1"' "$1" "$PORT" 2>/dev/null; }
+          canary_probe() { timeout 3 bash -c "exec 3<>\"/dev/tcp/\$0/\$1\"" "$1" "$PORT" 2>/dev/null; }
           canary_show() { local n=$1; shift; echo "+ $*"; { timeout 10 "$@" 2>&1 || true; } | head -n "$n" || true; }
           canary_diag() {
             local name
@@ -683,9 +683,9 @@ jobs:
             echo "::endgroup::"
           }
           canary_main() {
-            local tmp name addr pass n=0 bad
+            local tmp name addr n=0 bad
             tmp=$(mktemp -d) || return 1
-            for pass in 1 2 3; do
+            for _ in 1 2 3; do
               for name in $NAMES; do canary_resolve "$name" >>"$tmp/res.$name" & done
               wait
               sleep 1
@@ -755,7 +755,7 @@ jobs:
           NAMES="github.com api.github.com results-receiver.actions.githubusercontent.com"
           PORT=443
           canary_resolve() { timeout 5 getent ahostsv4 "$1" 2>/dev/null | awk '$2 == "STREAM" { print $1 }'; }
-          canary_probe() { timeout 3 bash -c 'exec 3<>"/dev/tcp/$0/$1"' "$1" "$PORT" 2>/dev/null; }
+          canary_probe() { timeout 3 bash -c "exec 3<>\"/dev/tcp/\$0/\$1\"" "$1" "$PORT" 2>/dev/null; }
           canary_show() { local n=$1; shift; echo "+ $*"; { timeout 10 "$@" 2>&1 || true; } | head -n "$n" || true; }
           canary_diag() {
             local name
@@ -771,9 +771,9 @@ jobs:
             echo "::endgroup::"
           }
           canary_main() {
-            local tmp name addr pass n=0 bad
+            local tmp name addr n=0 bad
             tmp=$(mktemp -d) || return 1
-            for pass in 1 2 3; do
+            for _ in 1 2 3; do
               for name in $NAMES; do canary_resolve "$name" >>"$tmp/res.$name" & done
               wait
               sleep 1
@@ -878,7 +878,7 @@ jobs:
           NAMES="github.com api.github.com results-receiver.actions.githubusercontent.com"
           PORT=443
           canary_resolve() { timeout 5 getent ahostsv4 "$1" 2>/dev/null | awk '$2 == "STREAM" { print $1 }'; }
-          canary_probe() { timeout 3 bash -c 'exec 3<>"/dev/tcp/$0/$1"' "$1" "$PORT" 2>/dev/null; }
+          canary_probe() { timeout 3 bash -c "exec 3<>\"/dev/tcp/\$0/\$1\"" "$1" "$PORT" 2>/dev/null; }
           canary_show() { local n=$1; shift; echo "+ $*"; { timeout 10 "$@" 2>&1 || true; } | head -n "$n" || true; }
           canary_diag() {
             local name
@@ -894,9 +894,9 @@ jobs:
             echo "::endgroup::"
           }
           canary_main() {
-            local tmp name addr pass n=0 bad
+            local tmp name addr n=0 bad
             tmp=$(mktemp -d) || return 1
-            for pass in 1 2 3; do
+            for _ in 1 2 3; do
               for name in $NAMES; do canary_resolve "$name" >>"$tmp/res.$name" & done
               wait
               sleep 1
@@ -1074,7 +1074,7 @@ jobs:
           NAMES="github.com api.github.com results-receiver.actions.githubusercontent.com"
           PORT=443
           canary_resolve() { timeout 5 getent ahostsv4 "$1" 2>/dev/null | awk '$2 == "STREAM" { print $1 }'; }
-          canary_probe() { timeout 3 bash -c 'exec 3<>"/dev/tcp/$0/$1"' "$1" "$PORT" 2>/dev/null; }
+          canary_probe() { timeout 3 bash -c "exec 3<>\"/dev/tcp/\$0/\$1\"" "$1" "$PORT" 2>/dev/null; }
           canary_show() { local n=$1; shift; echo "+ $*"; { timeout 10 "$@" 2>&1 || true; } | head -n "$n" || true; }
           canary_diag() {
             local name
@@ -1090,9 +1090,9 @@ jobs:
             echo "::endgroup::"
           }
           canary_main() {
-            local tmp name addr pass n=0 bad
+            local tmp name addr n=0 bad
             tmp=$(mktemp -d) || return 1
-            for pass in 1 2 3; do
+            for _ in 1 2 3; do
               for name in $NAMES; do canary_resolve "$name" >>"$tmp/res.$name" & done
               wait
               sleep 1
@@ -1164,7 +1164,7 @@ jobs:
           NAMES="github.com api.github.com results-receiver.actions.githubusercontent.com"
           PORT=443
           canary_resolve() { timeout 5 getent ahostsv4 "$1" 2>/dev/null | awk '$2 == "STREAM" { print $1 }'; }
-          canary_probe() { timeout 3 bash -c 'exec 3<>"/dev/tcp/$0/$1"' "$1" "$PORT" 2>/dev/null; }
+          canary_probe() { timeout 3 bash -c "exec 3<>\"/dev/tcp/\$0/\$1\"" "$1" "$PORT" 2>/dev/null; }
           canary_show() { local n=$1; shift; echo "+ $*"; { timeout 10 "$@" 2>&1 || true; } | head -n "$n" || true; }
           canary_diag() {
             local name
@@ -1180,9 +1180,9 @@ jobs:
             echo "::endgroup::"
           }
           canary_main() {
-            local tmp name addr pass n=0 bad
+            local tmp name addr n=0 bad
             tmp=$(mktemp -d) || return 1
-            for pass in 1 2 3; do
+            for _ in 1 2 3; do
               for name in $NAMES; do canary_resolve "$name" >>"$tmp/res.$name" & done
               wait
               sleep 1
