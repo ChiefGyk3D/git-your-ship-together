@@ -18,12 +18,22 @@ race seen on GYST #218), and a push that moved the head under the loop. This scr
   at least `--min-checks` check runs completed; and no check run failed, was cancelled, timed out, needed action or failed to start.
 - **No check runs is not green.** `--min-checks` cannot be below 1, so an empty list never passes, even with no named context.
 - **A context that has not reported is not green.** Twenty passing jobs and no `CI green` yet means keep waiting.
+- **The reporting app matters.** A check run counts toward a required context only when it came from the expected GitHub
+  App (`--app-id`, default 15368, GitHub Actions). Anything that can post a check run could otherwise copy the name `CI green`.
+  A same-named run from another app is ignored in both directions: it cannot satisfy the gate, and a failed one cannot turn a
+  green gate red (the output says `ignored N run(s)`). If it is the only run with that name, the result is not green. A failed
+  run with any other name is red whatever its app. `--any-app` switches this off and prints a warning. This is a second lock:
+  merge safety also relies on branch protection or a ruleset that pins the required check to an app, because the merge itself
+  is decided by GitHub, not by this script.
 - **Names match exactly.** The comparison is a literal string compare: `CI green (old)`, `ci green`, `CI green ` with a trailing
   space, `xCI green` and a glob such as `CI *` do not satisfy `CI green`. Skipped and neutral are not `success`.
 - **Red is immediate.** A failed or cancelled check run ends the wait with exit 1 even while the gate is still running.
 - **A push aborts or resets.** `--on-push abort` (the default) exits 4 when the pull request head moves. `--on-push reset`
   pins the new head and starts over; the total `--timeout` keeps running, so a stream of pushes cannot extend the wait forever.
   Once the pinned commit has verified green, a push is always exit 4: the watcher never merges what it did not verify.
+  When you give `--sha`, any head move is exit 4 whichever mode is set: an explicit SHA is never replaced, and the SHA given to
+  `--match-head-commit` is the one whose checks were verified, never a re-read value. A second check just before the merge
+  enforces the same rule.
 - **Hung is not slow.** `--hung-after` counts seconds with no check run changing state. A slow run that keeps completing checks
   does not trip it; a run frozen on one job does, with exit 3. A failing GitHub API counts as no progress.
 - **The merge is pinned.** `--merge` runs `gh pr merge N --squash --match-head-commit <verified sha>`. If it fails, the head is
@@ -57,7 +67,7 @@ echo "exit=$?"
 Run it from a checkout of this repository at a pinned commit, or fetch the file at that commit. It needs `bash`, `gh` and `cksum`.
 `GH_BIN` names a different `gh` (the tests use a fake). When `GITHUB_OUTPUT` is set it appends `result`, `sha` and `merged`.
 
-Options: `--repo`, `--pr`, `--sha`, `--context` (repeatable; `--context ''` means no named gate), `--min-checks`, `--timeout`,
+Options: `--repo`, `--pr`, `--sha`, `--context` (repeatable; `--context ''` means no named gate), `--app-id`, `--any-app`, `--min-checks`, `--timeout`,
 `--hung-after`, `--interval`, `--on-push`, `--merge`, `--delete-branch`, `--merge-retries`, `--merge-retry-delay`. The header of
 the script lists the defaults.
 
@@ -93,6 +103,8 @@ branch is supposed to trigger a deploy; pass a different `token` when it does.
 | `pr` | Pull request number; needed for `merge`. Give this or `sha`. |
 | `sha` | Full 40-character SHA to verify; with `pr` it must equal the head. |
 | `context` | Required check run names, one per line, exact. Default `CI green`; empty means no named gate. |
+| `app-id` | GitHub App id whose check runs may satisfy a context; default 15368 (GitHub Actions). |
+| `any-app` | `true` accepts a same-named run from any app, with a warning. |
 | `min-checks` | Check runs that must be complete, at least 1. |
 | `timeout` | Total seconds before exit 2. |
 | `hung-after` | Seconds without change before exit 3. |

@@ -12,7 +12,7 @@ name what a caller sees after that.
   the named required check (`CI green` by default, matched exactly) to have reported and succeeded on that SHA, at least N check
   runs complete, and none failed or cancelled. No check runs, or a required context that has not reported yet, is not green.
   A moved head exits 4 (or, with `--on-push reset`, re-pins; the total timeout keeps running). `--merge` squash-merges with
-  `--match-head-commit` and retries a policy block a bounded number of times. It prints the verified SHA and never a token.
+  `--match-head-commit` and retries a policy block a bounded number of times. A required name counts only from the expected GitHub App (`--app-id`, default Actions; `--any-app` opts out), and an explicit `--sha` is never replaced by a head move. It prints the verified SHA and never a token.
   Exit codes: 0 green (and merged if asked), 1 red, 2 timeout, 3 hung, 4 head moved, 64 bad input.
 - **No change to any existing workflow.** Nothing calls the new action yet; a caller opts in by pinning a commit that has it.
   Docs: [wait-ci](docs/wiki/Action-wait-ci.md). Tests: `tests/test_wait_ci.py`.

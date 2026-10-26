@@ -85,8 +85,13 @@ if argv[:1] == ["api"]:
             sys.exit(1)
         snaps = st["checks"].get(sha, [[]])
         idx = min(st["check_polls"] - 1 - fails, len(snaps) - 1)
-        for status, conclusion, name in snaps[idx]:
-            print("\\x1f".join([status, conclusion or "", name]))
+        for run in snaps[idx]:
+            status, conclusion, name = run[:3]
+            app = str(run[3]) if len(run) > 3 else "15368"
+            fields = [status, conclusion or "", name]
+            if "app" in jq:
+                fields.insert(2, app)
+            print("\\x1f".join(fields))
         save()
         sys.exit(0)
     sys.stderr.write("fake gh: unexpected api path " + path + "\\n")
@@ -123,16 +128,16 @@ cat "$FAKE_DIR/clock"
 """
 
 
-def ok(name: str) -> tuple[str, str, str]:
-    return ("completed", "success", name)
+def ok(name: str, app: int = 15368) -> tuple:
+    return ("completed", "success", name, app)
 
 
-def done(name: str, conclusion: str) -> tuple[str, str, str]:
-    return ("completed", conclusion, name)
+def done(name: str, conclusion: str, app: int = 15368) -> tuple:
+    return ("completed", conclusion, name, app)
 
 
-def running(name: str) -> tuple[str, str, str]:
-    return ("in_progress", "", name)
+def running(name: str, app: int = 15368) -> tuple:
+    return ("in_progress", "", name, app)
 
 
 class World:
@@ -398,6 +403,90 @@ def test_a_pending_non_gate_check_does_not_block_a_green_gate(world):
     w = world(checks={A: [[ok("CI green"), running("nightly")]]})
     p = w.run("--repo", SLUG, "--pr", "7", *FAST)
     assert p.returncode == 0, shown(p)
+
+
+# --- who reported the check run ------------------------------------------------------
+
+FOREIGN = 99999
+
+
+def test_a_same_named_run_from_another_app_is_not_green(world):
+    w = world(checks={A: [[ok("lint"), ok("CI green", FOREIGN)]]})
+    p = w.run("--repo", SLUG, "--pr", "7", "--interval", "10", "--timeout", "60")
+    assert p.returncode == 2, shown(p)
+    assert "verified" not in p.stdout
+    assert "ignored 1 run(s)" in p.stdout
+
+
+def test_a_same_named_run_from_the_right_app_is_green(world):
+    w = world(checks={A: [[ok("CI green", FOREIGN), ok("CI green"), ok("lint")]]})
+    p = w.run("--repo", SLUG, "--pr", "7", *FAST)
+    assert p.returncode == 0, shown(p)
+
+
+def test_a_foreign_app_cannot_satisfy_the_gate_while_the_real_one_is_still_running(world):
+    w = world(checks={A: [[ok("CI green", FOREIGN), running("CI green")]]})
+    p = w.run("--repo", SLUG, "--pr", "7", "--interval", "10", "--timeout", "60")
+    assert p.returncode == 2, shown(p)
+
+
+def test_a_failed_same_named_run_from_another_app_is_ignored_not_red(world):
+    # Documented choice: a foreign run that borrows a required name is ignored in both directions,
+    # so it can neither satisfy the gate nor block a gate the right app reported green.
+    w = world(checks={A: [[done("CI green", "failure", FOREIGN), ok("CI green")]]})
+    p = w.run("--repo", SLUG, "--pr", "7", *FAST)
+    assert p.returncode == 0, shown(p)
+
+
+def test_a_failed_run_with_another_name_is_red_whatever_its_app(world):
+    w = world(checks={A: [[ok("CI green"), done("other", "failure", FOREIGN)]]})
+    assert w.run("--repo", SLUG, "--pr", "7", *FAST).returncode == 1
+
+
+def test_app_id_selects_the_expected_app(world):
+    w = world(checks={A: [[ok("CI green", FOREIGN)]]})
+    p = w.run("--repo", SLUG, "--pr", "7", "--app-id", str(FOREIGN), *FAST)
+    assert p.returncode == 0, shown(p)
+
+
+def test_any_app_counts_a_foreign_run_with_a_warning(world):
+    w = world(checks={A: [[ok("CI green", FOREIGN)]]})
+    p = w.run("--repo", SLUG, "--pr", "7", "--any-app", *FAST)
+    assert p.returncode == 0, shown(p)
+    assert "warning: --any-app" in p.stdout
+
+
+# --- an explicit --sha is never replaced -------------------------------------------------
+
+
+@pytest.mark.parametrize("mode", ["abort", "reset"])
+def test_a_head_move_with_an_explicit_sha_is_exit_4_in_every_on_push_mode(world, mode):
+    w = world(
+        checks={A: [[running("CI green")], [running("CI green")], GATE], B: [GATE]},
+        moves=[{"after_check_polls": 1, "head": B}],
+    )
+    p = w.run("--repo", SLUG, "--pr", "7", "--sha", A, "--on-push", mode, "--merge", *FAST)
+    assert p.returncode == 4, shown(p)
+    assert w.merges() == []
+    assert B not in set(w.load()["check_shas"]), "the new head is never even looked at"
+
+
+@pytest.mark.parametrize("mode", ["abort", "reset"])
+def test_a_head_move_between_verify_and_merge_with_an_explicit_sha_is_exit_4(world, mode):
+    w = world(checks={A: [GATE], B: [GATE]}, moves=[{"after_check_polls": 1, "head": B}])
+    p = w.run("--repo", SLUG, "--pr", "7", "--sha", A, "--on-push", mode, "--merge", *FAST)
+    assert p.returncode == 4, shown(p)
+    assert w.merges() == []
+
+
+def test_without_an_explicit_sha_reset_still_follows_the_head(world):
+    w = world(
+        checks={A: [[running("CI green")], [running("CI green")]], B: [GATE]},
+        moves=[{"after_check_polls": 1, "head": B}],
+    )
+    p = w.run("--repo", SLUG, "--pr", "7", "--on-push", "reset", "--merge", *FAST)
+    assert p.returncode == 0, shown(p)
+    assert w.merges() == [f"pr merge 7 -R {SLUG} --squash --match-head-commit {B}"]
 
 
 # --- red -----------------------------------------------------------------------

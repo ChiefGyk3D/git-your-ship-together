@@ -10,8 +10,14 @@
 #     pinned SHA and concluded success; at least --min-checks check runs completed; and no run
 #     failed, was cancelled, timed out or needs action. No check runs at all is NOT green, and a
 #     context that has not reported yet is NOT green (the aggregate-gate race seen on GYST #218).
+#   * A required context counts only when the check run was reported by the expected GitHub App
+#     (--app-id, default 15368, GitHub Actions). A same-named run from any other app is ignored:
+#     it is neither green nor red, so another app cannot satisfy or block the gate by copying the name.
+#     --any-app turns that off (with a warning). Merge safety still also needs branch protection or a
+#     ruleset that pins the required check to an app; this script is a second lock, not the first.
 #   * A push (the head moves) aborts with exit 4, or with --on-push reset re-pins to the new head
-#     and starts over (the total timeout is NOT reset, so the wait stays bounded).
+#     and starts over (the total timeout is NOT reset, so the wait stays bounded). When the caller
+#     gave --sha, ANY head move is exit 4 whatever --on-push says: an explicit SHA is never replaced.
 #   * --merge squash-merges with --match-head-commit <verified sha>, retrying a policy block a
 #     bounded number of times. The head is re-read after the last check and again when a merge
 #     fails, so a push between the check and the merge is exit 4, never a merge of unverified code.
@@ -37,7 +43,9 @@
 #   --timeout S             total seconds to wait [1800]
 #   --hung-after S          seconds without any check changing before exit 3 [600]
 #   --interval S            seconds between polls [20]
-#   --on-push abort|reset   what a moved head does [abort]
+#   --app-id N              GitHub App id whose check runs may satisfy a context [15368]
+#   --any-app               accept a same-named run from any app (prints a warning)
+#   --on-push abort|reset   what a moved head does [abort]; reset is ignored when --sha is given
 #   --merge                 squash-merge the verified SHA once green (needs --pr)
 #   --delete-branch         with --merge, delete the head branch
 #   --merge-retries N       retries after a failed merge attempt [5]
@@ -63,6 +71,8 @@ merge=0
 delete_branch=0
 merge_retries=5
 merge_retry_delay=30
+app_id=15368
+any_app=0
 
 result="usage"
 verified=""
@@ -111,6 +121,11 @@ while [[ $# -gt 0 ]]; do
       shift
       continue
       ;;
+    --any-app)
+      any_app=1
+      shift
+      continue
+      ;;
   esac
   need_value "$@"
   case "$1" in
@@ -126,6 +141,7 @@ while [[ $# -gt 0 ]]; do
     --hung-after) hung_after="$2" ;;
     --interval) interval="$2" ;;
     --on-push) on_push="$2" ;;
+    --app-id) app_id="$2" ;;
     --merge-retries) merge_retries="$2" ;;
     --merge-retry-delay) merge_retry_delay="$2" ;;
     *) die_usage "unknown option '$1'" ;;
@@ -147,6 +163,7 @@ need_int --min-checks "$min_checks"
 need_int --timeout "$timeout_s"
 need_int --hung-after "$hung_after"
 need_int --interval "$interval"
+need_int --app-id "$app_id"
 need_int --merge-retries "$merge_retries"
 need_int --merge-retry-delay "$merge_retry_delay"
 [[ "$min_checks" -ge 1 ]] || die_usage "--min-checks must be at least 1: no check runs is never green"
@@ -175,11 +192,11 @@ gh_try() {
 pr_head() { gh_try api "repos/${repo}/pulls/${pr}" --jq '.head.sha'; }
 pr_merged() { gh_try api "repos/${repo}/pulls/${pr}" --jq '.merged'; }
 
-# One line per check run on a commit: status, conclusion, name, split by \x1f (not whitespace,
-# so an empty conclusion stays an empty field; the name is last, so it is kept verbatim).
+# One line per check run on a commit: status, conclusion, app id, name, split by \x1f (not
+# whitespace, so an empty conclusion stays an empty field; the name is last, so it is kept verbatim).
 check_lines() {
   gh_try api --paginate "repos/${repo}/commits/${1}/check-runs?per_page=100&filter=latest" \
-    --jq '.check_runs[] | [.status, (.conclusion // ""), .name] | join("\u001f")'
+    --jq '.check_runs[] | [.status, (.conclusion // ""), ((.app.id // 0) | tostring), .name] | join("\u001f")'
 }
 
 pin=""
@@ -197,6 +214,9 @@ if [[ -n "$pr" ]]; then
 else
   pin="$want_sha"
 fi
+if [[ $any_app -eq 1 ]]; then
+  say "warning: --any-app: a check run of any app with a required name counts; rely on branch protection pinning the app"
+fi
 say "pinned ${pin} (${repo}${pr:+#$pr}); gate: ${contexts[*]:-any checks}; min checks ${min_checks}"
 
 start="$(now)"
@@ -204,13 +224,27 @@ last_change="$start"
 last_sig=""
 polls=0
 
+is_context() {
+  local c
+  for c in "${contexts[@]}"; do
+    [[ "$1" == "$c" ]] && return 0
+  done
+  return 1
+}
+
 # Sets verdict (green|red|pending) and detail for the lines passed in.
 evaluate() {
-  local lines="$1" status conclusion name c
+  local lines="$1" status conclusion app name c
+  foreign=0
   local total=0 complete=0 bad=0 badname="" seen_ok seen_any
   local -A ctx_seen=() ctx_ok=() ctx_open=()
-  while IFS=$'\x1f' read -r status conclusion name; do
+  while IFS=$'\x1f' read -r status conclusion app name; do
     [[ -n "$status" ]] || continue
+    # A run that carries a required name but comes from another app is ignored altogether.
+    if [[ $any_app -eq 0 && "$app" != "$app_id" ]] && is_context "$name"; then
+      foreign=$((foreign + 1))
+      continue
+    fi
     total=$((total + 1))
     if [[ "$status" == completed ]]; then
       complete=$((complete + 1))
@@ -235,6 +269,9 @@ evaluate() {
   done <<<"$lines"
 
   verdict=pending
+  if [[ $foreign -gt 0 ]]; then
+    say "ignored ${foreign} run(s) named like a required check from an app other than ${app_id}"
+  fi
   if [[ $bad -gt 0 ]]; then
     verdict=red
     detail="${badname} on ${pin}"
@@ -276,7 +313,7 @@ while :; do
   # The head first: a push makes everything below about a stale commit.
   if [[ -n "$pr" ]]; then
     if cur="$(pr_head)" && [[ "$cur" != "$pin" ]]; then
-      if [[ "$on_push" == abort ]]; then
+      if [[ "$on_push" == abort || -n "$want_sha" ]]; then
         say "head moved: ${repo}#${pr} was ${pin}, now ${cur}"
         result="head-moved"
         exit 4
@@ -340,6 +377,13 @@ if [[ -n "$pr" ]]; then
 fi
 
 verified="$pin"
+# Backstop for the loop's rule: an explicit --sha is the only commit that may be reported or merged.
+if [[ -n "$want_sha" && "$verified" != "$want_sha" ]]; then
+  verified=""
+  say "verified commit is not the requested ${want_sha}; nothing merged"
+  result="head-moved"
+  exit 4
+fi
 say "verified ${verified}: green"
 
 if [[ $merge -eq 0 ]]; then

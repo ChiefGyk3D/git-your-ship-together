@@ -29,6 +29,14 @@ inputs:
     description: Required check run names, one per line, matched exactly (no globs, no case folding, no trimming). Empty means no named gate; at least `min-checks` completed runs and none failed are still needed.
     required: false
     default: CI green
+  app-id:
+    description: GitHub App id whose check runs may satisfy a context. The default is GitHub Actions. A same-named run from any other app is ignored, neither green nor red.
+    required: false
+    default: "15368"
+  any-app:
+    description: Set `true` to accept a same-named run from any app (prints a warning). Then only branch protection pinning the app stands between a copycat check and the merge.
+    required: false
+    default: "false"
   min-checks:
     description: How many check runs must be complete. At least 1, because no check runs is never green.
     required: false
@@ -46,7 +54,7 @@ inputs:
     required: false
     default: "20"
   on-push:
-    description: What a moved pull request head does while waiting, `abort` (exit 4) or `reset` (pin the new head and start over; the total timeout keeps running). After the pinned commit has verified green a push is always exit 4.
+    description: What a moved pull request head does while waiting, `abort` (exit 4) or `reset` (pin the new head and start over; the total timeout keeps running). With an explicit `sha`, any head move is exit 4 whichever is set. After the pinned commit has verified green a push is always exit 4.
     required: false
     default: abort
   merge:
@@ -91,6 +99,8 @@ runs:
         WAIT_CI_PR: ${{ inputs.pr }}
         WAIT_CI_SHA: ${{ inputs.sha }}
         WAIT_CI_CONTEXT: ${{ inputs.context }}
+        WAIT_CI_APP_ID: ${{ inputs.app-id }}
+        WAIT_CI_ANY_APP: ${{ inputs.any-app }}
         WAIT_CI_MIN_CHECKS: ${{ inputs.min-checks }}
         WAIT_CI_TIMEOUT: ${{ inputs.timeout }}
         WAIT_CI_HUNG_AFTER: ${{ inputs.hung-after }}
@@ -120,6 +130,8 @@ runs:
         if [ -n "$WAIT_CI_SHA" ]; then args+=(--sha "$WAIT_CI_SHA"); fi
         flag --merge "$WAIT_CI_MERGE" merge
         flag --delete-branch "$WAIT_CI_DELETE_BRANCH" delete-branch
+        flag --any-app "$WAIT_CI_ANY_APP" any-app
+        args+=(--app-id "$WAIT_CI_APP_ID")
         if [ -z "${WAIT_CI_CONTEXT//[[:space:]]/}" ]; then
           args+=(--context "")
         else
