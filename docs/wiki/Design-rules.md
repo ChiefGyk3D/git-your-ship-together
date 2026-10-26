@@ -96,7 +96,7 @@ runs on a pull request. **Held by.**
 ## Secrets are fetched only on a trusted ref
 
 **Why.** A pull request's proposed code would otherwise run in a job that holds a
-secret. Only a push to the default branch, a version tag (vN.N.N) or a schedule fetches. A pull
+secret. Only the default branch, a version tag (vN.N.N) or a schedule fetches, on any non-pull-request event (#219 tracks narrowing the events). A pull
 request from a fork never fetches whatever the input says, because GitHub mints
 no OIDC token for it and the step refuses it. `pull_request_target` is not covered
 by that: with the input `false` it fetches, so only a workflow that never checks

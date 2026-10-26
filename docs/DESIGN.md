@@ -118,8 +118,9 @@ is a token that code can mint. So `test` has `contents: read` and nothing
 else, and the Codecov upload happens in a separate `coverage` job that
 downloads the report artifact and never sees a pull request.
 
-**Secrets are fetched only on a trusted ref.** A push to the default branch, a
-version tag (vN.N.N), or a schedule. A pull request from anywhere, and a push to any other
+**Secrets are fetched only on a trusted ref.** The default branch, a
+version tag (vN.N.N), or a schedule, on any event that is not a pull request event
+(the event boundary is #219). A pull request from anywhere, and a push to any other
 branch, gets a notice and nothing. A `pull_request` from a fork never fetches
 anything whichever way the input is set, because GitHub mints no OIDC token
 for it and the Doppler step refuses it. `pull_request_target` is different: it
@@ -247,8 +248,8 @@ input is declared, defaulted, used and documented in the README; `CI green`
 needs every other job; the release signs and attests only after a push; and a
 publishing build never reads the Actions cache.
 
-`tests/test_doppler_gate.py` runs the decide script under bash for every event
-and ref shape and checks the mode it returns. `tests/test_audit_baseline.py`
+`tests/test_doppler_gate.py` runs the decide script under bash for the event kinds
+and ref shapes it lists and checks the mode it returns. `tests/test_audit_baseline.py`
 feeds `scripts/audit_baseline.py` a passing repository and a broken one per
 criterion, so the audit that checks the nine repositories is itself checked.
 

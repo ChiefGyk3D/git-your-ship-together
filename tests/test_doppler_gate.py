@@ -1,8 +1,9 @@
 """Run the Doppler decide script under bash, the way a runner would.
 
 The YAML tests prove the script is the same in seven places and is fed the
-right inputs. This one proves the script itself does what the README says:
-a secret is fetched on a trusted ref and on nothing else. Every case here was
+right inputs. This one runs the script for push, schedule, dispatch, pull request
+and other non-PR events across the ref shapes below, and pins what it does:
+a secret is fetched on a trusted ref, with the event residual documented below. Every case here was
 run against the old script first, where the untrusted ones came back `oidc`.
 """
 
@@ -337,4 +338,26 @@ def test_pull_request_target_with_the_gate_off_still_fetches(tmp_path):
 
 def test_pull_request_target_with_the_gate_on_fetches_nothing(tmp_path):
     code, mode, out = decide(tmp_path, TRUSTED_ONLY="true", EVENT="pull_request_target", REF="refs/heads/main")
+    assert code == 0 and mode == "none", out
+
+
+# --- events other than push/schedule/dispatch: a documented residual, not an endorsement -----------
+
+NON_PR_EVENTS = ["issues", "issue_comment", "repository_dispatch", "workflow_run", "workflow_call"]
+
+
+@pytest.mark.parametrize("event", NON_PR_EVENTS)
+@pytest.mark.parametrize("ref", ["refs/heads/main", "refs/tags/v1.2.3"])
+def test_residual_any_non_pull_request_event_fetches_on_a_trusted_ref(tmp_path, event, ref):
+    """PINS CURRENT BEHAVIOR (a documented residual, #219), NOT an endorsement. The rule is a ref rule, not an
+    event allow-list, so these events fetch on the default branch or a release tag even though they can carry
+    attacker-controlled data. The docs (Secrets-Doppler-and-OIDC.md, "Which events") say so; the narrower
+    contract "push, schedule, dispatch only" is NOT enforced."""
+    code, mode, out = decide(tmp_path, EVENT=event, REF=ref)
+    assert code == 0 and mode == "oidc", out
+
+
+@pytest.mark.parametrize("event", NON_PR_EVENTS)
+def test_those_events_still_get_nothing_off_a_trusted_ref(tmp_path, event):
+    code, mode, out = decide(tmp_path, EVENT=event, REF="refs/heads/feature")
     assert code == 0 and mode == "none", out

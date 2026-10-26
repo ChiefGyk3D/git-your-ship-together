@@ -21,6 +21,12 @@ name what a caller sees after that.
   tag pattern (`v*`) and cuts a pre-release such as `v1.2.3-rc.1` now sees a red job; to opt out, do not trigger the
   Doppler-backed jobs on such tags. The decide step also resets `nocasematch` and `nocaseglob`, so an inherited
   `BASHOPTS` cannot make `V1.2.3` look like a release tag.
+- **Docs (round 3).** The docs now say what the decide step does about events: any event other than a pull request
+  event fetches on the default branch or a release-shaped tag (issues, issue_comment, workflow_run and
+  repository_dispatch included), and a caller that holds fetched secrets on such events must not process their data
+  unsafely. Narrowing the events is #219; the tests pin the current behavior. In `container-release.yml` the
+  refused-tag guard sits in the `merge` job, so the run fails after per-architecture images were pushed to GHCR; no
+  index and no Docker Hub image is published.
 - **Docs.** The fork claim is now exact: a `pull_request` from a fork never fetches; `pull_request_target` with
   `doppler-trusted-refs-only: false` does, and the test now pins that.
 

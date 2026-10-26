@@ -121,7 +121,8 @@ in the repository variable `DOPPLER_IDENTITY_ID`; it is an identifier, not a
 secret.
 
 **Secrets are fetched only on a trusted ref.** The shared Doppler step (every
-copy of it) fetches only on a push to the default branch, a version tag (vN.N.N), or a schedule.
+copy of it) fetches only on the default branch, a version tag (vN.N.N), or a schedule.
+What the step does, exactly: a `schedule` run fetches; any other event that is not a pull request event (`pull_request`, `pull_request_target`) fetches when the ref is the default branch or a release-shaped tag, which includes a `push` and a `workflow_dispatch` on those refs and also `issues`, `issue_comment`, `workflow_run` and `repository_dispatch`. So the rule is a ref rule, not an event allow-list. A caller whose workflow runs on events that carry attacker-controlled data and holds fetched secrets must not process that data unsafely (no shell expansion, no checkout or execution of it). Narrowing the events is tracked in #219; `tests/test_doppler_gate.py` pins the current behavior as a documented residual.
 A tag counts only as `vMAJOR.MINOR.PATCH`. This narrows which refs receive
 secrets and does not remove the exposure: the tag ruleset above blocks deleting,
 moving and force-pushing a version tag, not creating one, and the identity's

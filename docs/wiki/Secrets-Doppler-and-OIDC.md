@@ -58,11 +58,19 @@ The workflows try, in order:
    that need a secret then skip (Docker Hub publish) or fail naming the missing
    secret (Snyk).
 
-The fetch is gated on a **trusted ref**: a push to the default branch, a version tag (`vN.N.N`) or a
+The fetch is gated on a **trusted ref**: the default branch, a version tag (`vN.N.N`) or a
 schedule. A pull request from anywhere and a push to any other branch get a notice
 and nothing else. That is `doppler-trusted-refs-only`, on by default in every
 workflow. A `pull_request` from a fork never fetches whichever way the input is set,
 because GitHub mints no OIDC token for it and the step refuses it.
+
+**Which events.** a `schedule` run fetches; any other event that is not a pull request event
+(`pull_request`, `pull_request_target`) fetches when the ref is the default branch or a release-shaped tag,
+which includes a `push` and a `workflow_dispatch` on those refs and also `issues`, `issue_comment`,
+`workflow_run` and `repository_dispatch`. So the rule is a ref rule, not an event allow-list. A caller whose
+workflow runs on events that carry attacker-controlled data and holds fetched secrets must not process that
+data unsafely (no shell expansion, no checkout or execution of it). Narrowing the events is tracked in #219;
+`tests/test_doppler_gate.py` pins the current behavior as a documented residual.
 
 **`pull_request_target` is different.** It runs the workflow file from the base
 branch with access to secrets, and the step computes its fork check for
@@ -87,7 +95,10 @@ or on a release tag.
 with an error naming the ref (`ref is not a vMAJOR.MINOR.PATCH release tag:
 Doppler secrets are not fetched`) instead of skipping it and staying green:
 `security.yml` with `snyk: true`, and `container-release.yml` with `push: true`
-and `dockerhub: true`. A GHCR-only release (`dockerhub: false`) is unaffected, and
+and `dockerhub: true`. In `container-release.yml` the guard sits in the `merge` job, after the `build` job has already pushed the
+per-architecture images to GHCR: the run fails after per-architecture images were pushed to GHCR, and no
+index and no Docker Hub image is published. The orphaned per-architecture manifests remain until deleted.
+A GHCR-only release (`dockerhub: false`) is unaffected, and
 so are the default branch, schedules and pull requests, which still skip with a
 notice. A caller that triggers on a loose tag pattern such as `v*` and tags a
 pre-release (`v1.2.3-rc.1`) will see these jobs fail; to opt out, do not trigger
@@ -108,7 +119,7 @@ pull request, and keep the Viewer role on the one config the repository needs.
 
 Why: a pull request runs the code it proposes. A secret in that job is a secret
 the proposal can read. `tests/test_doppler_gate.py` runs the decision under bash
-for every event and ref shape.
+for the event kinds and ref shapes it lists.
 
 The Doppler steps are copied into each workflow that needs them rather than called
 as a shared action, because a reusable workflow cannot name the commit it runs
