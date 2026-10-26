@@ -2230,7 +2230,7 @@ the workflows above, which keep the environment behavior) has two more inputs:
 | Input | Values | Effect |
 |---|---|---|
 | `export` | `env` (default), `outputs` | `env` writes every secret to `GITHUB_ENV`. `outputs` writes nothing to the environment and returns the masked values as one JSON output, `secrets`. Any other value fails the job |
-| `names` | comma or whitespace separated secret names, each `^[A-Z_][A-Z0-9_]*$` | In both modes only these are exported. A name missing from the config fails the job (the message names the secret, never a value). Empty means every secret |
+| `names` | comma or whitespace separated secret names, each `^[A-Z_][A-Z0-9_]*$` | In both modes only these are exported. A name missing from the config fails the job (the message names the secret, never a value). **Required with `export: outputs`** (an empty list would return the whole config, so it fails); with `export: env`, empty means every secret |
 
 The trade-off. With `export: env`, **every later step in the job and every
 action's post-run hook inherits the whole config**: a compromised dependency or
@@ -2254,12 +2254,26 @@ caller passes it to the one step that needs it:
   run: ./deploy.sh
 ```
 
-Every value is masked (each line, the whole multi-line value, and its JSON-escaped
-form) before it is written, and the JSON goes through a random-delimiter
-`GITHUB_OUTPUT` write. GitHub caps one step output at 1 MB; a larger result fails
-the job and asks for a shorter `names`. With nothing fetched (an untrusted ref, or
+In `outputs` mode every non-empty value is masked (each line, the whole multi-line
+value, and its JSON-escaped form) before it is written, whatever Doppler's
+visibility says, and the JSON goes through a random-delimiter `GITHUB_OUTPUT`
+write. Doppler's own `DOPPLER_PROJECT`, `DOPPLER_CONFIG` and `DOPPLER_ENVIRONMENT`
+labels are never returned (naming one fails). A value shorter than 4 characters
+fails the job, because masking it would redact that text from every later log line.
+GitHub caps one step output at about 1 MB, counted in UTF-16; the action refuses a
+result over 500,000 UTF-16 code units (1,000,000 bytes in UTF-16) and asks for a
+shorter `names`. With nothing fetched (an untrusted ref, or
 Doppler not configured) the output is `{}`. The callers waiting on this are the
 deploy workflows of `ChiefGyk3D/no-php-no-cry` and `ChiefGyk3D/Reach-Around`.
+
+Rules for the caller. Pass one extracted value to the one step that needs it,
+through that step's `env:`. **Never** pass `steps.<id>.outputs.secrets` whole as an
+env value, and never put it, or a value from it, in `GITHUB_ENV`,
+`GITHUB_STEP_SUMMARY`, an artifact, a cache, debug output or a job output.
+`add-mask` protects logs only; it is not an authorization boundary. Any step that
+receives an extracted value, including a compromised dependency inside that
+step, can steal it.
+
 The default (`export: env`, no `names`) is unchanged and still runs the pinned
 `dopplerhq/secrets-fetch-action`; the other paths call the Doppler API with curl
 and jq because that action can only export everything it reads.

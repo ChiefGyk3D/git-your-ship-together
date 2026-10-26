@@ -108,8 +108,14 @@ name what a caller sees after that.
   later step and every action post-run hook inherits it. `outputs` writes nothing to `GITHUB_ENV`; every value is masked
   (each line, the whole value, its JSON-escaped form) before it is written, and one masked JSON output, `secrets`, is
   returned (`{}` when nothing was fetched) for the caller to read with `fromJSON(steps.<id>.outputs.secrets).NAME` and
-  hand to single steps through `env:`. `names` narrows either mode; a missing name, an invalid `export`, a malformed or
-  empty-after-parsing `names`, and a result over GitHub's 1 MB output limit each fail the job without echoing a value.
+  hand to single steps through `env:`. `names` narrows either mode and is **required** with `export: outputs` (an empty
+  list would return the whole config). In `outputs` mode every non-empty value is masked whatever Doppler's visibility
+  says, Doppler's own `DOPPLER_PROJECT`/`CONFIG`/`ENVIRONMENT` labels are never returned, and a value under 4 characters
+  fails the job (masking it would redact that text from later logs). A missing name, an invalid `export`, a malformed
+  or empty-after-parsing `names`, and a result over 500,000 UTF-16 code units (GitHub's 1 MB output limit is counted in
+  UTF-16) each fail the job without echoing a value. Caller rules: never pass the whole `secrets` output as an env value
+  or put it in `GITHUB_ENV`, `GITHUB_STEP_SUMMARY`, artifacts, caches, debug output or job outputs; `add-mask` protects
+  logs only and is not an authorization boundary; any step that receives an extracted value can steal it.
   Both authentication paths and the trusted-refs-only guard are kept; the `mode` output is unchanged.
 - **Caller impact.** None unless a caller sets the new inputs. The default path still runs the pinned
   `dopplerhq/secrets-fetch-action`. The new paths call the Doppler API with curl and jq (that action can only export

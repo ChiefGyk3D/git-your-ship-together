@@ -40,6 +40,8 @@ SECRETS = {
     "OTHER_NAME": "other-synthetic-value-222",
     "DOPPLER_PROJECT": "demo",
 }
+ALL = "PROD_TOKEN,DEPLOY_KEY,AWKWARD,OTHER_NAME"  # every secret in SECRETS except Doppler's own labels
+ALL_VALUES = {k: v for k, v in SECRETS.items() if not k.startswith("DOPPLER_")}
 SENTINELS = ["prod-synthetic-value-111", "other-synthetic-value-222", "AAAA", "boom", "injected"]
 
 STUB = r"""#!/usr/bin/env bash
@@ -64,7 +66,11 @@ def shipped(step_id: str) -> str:
 
 def doppler_response(values: dict[str, str]) -> str:
     secrets = {
-        k: {"raw": v, "computed": v, "computedVisibility": "unmasked" if k.startswith("DOPPLER_") else "masked"}
+        k: {
+            "raw": v,
+            "computed": v,
+            "computedVisibility": "unmasked" if k.startswith(("DOPPLER_", "UNMASKED_")) else "masked",
+        }
         for k, v in values.items()
     }
     return json.dumps({"success": True, "secrets": secrets})
@@ -232,7 +238,7 @@ def test_untrusted_input_reaches_the_new_steps_only_through_env():
 
 @pytest.mark.parametrize("value", ["env", "outputs"])
 def test_the_two_known_export_values_pass(h, value):
-    assert h.validate(value)[0] == 0
+    assert h.validate(value, "PROD_TOKEN")[0] == 0
 
 
 @pytest.mark.parametrize("value", ["", "ENV", "Outputs", "output", "env,outputs", "file", "env\n::error::x", " env"])
@@ -251,7 +257,6 @@ def test_any_other_export_value_fails(h, value):
         ("A\nB\n", "A,B"),
         ("  _X1 \t Y_2 ", "_X1,Y_2"),
         ("A,A,B,A", "A,B"),
-        ("", ""),
     ],
 )
 def test_names_are_split_on_commas_and_whitespace(h, raw, expected):
@@ -275,19 +280,36 @@ def test_names_that_hold_only_separators_fail_instead_of_meaning_everything(h, r
     assert code == 1 and "no names" in out
 
 
+def test_names_may_be_empty_with_export_env_only(h):
+    code, got, out = h.validate("env", "")
+    assert code == 0 and got == "", out
+
+
+def test_outputs_mode_requires_names(h):
+    """Omitting the list would return the whole config: the exposure this mode exists to avoid."""
+    code, got, out = h.validate("outputs", "")
+    assert code == 1 and got == "" and "export: outputs requires names" in out
+
+
+@pytest.mark.parametrize("raw", ["   ", "\n"])
+def test_outputs_mode_with_blank_names_also_fails(h, raw):
+    code, got, out = h.validate("outputs", raw)
+    assert code == 1 and got == "" and "names" in out
+
+
 # --- outputs mode: nothing reaches the environment ---------------------------------------------------------------
 
 
 def test_outputs_mode_writes_nothing_to_github_env(h):
-    proc = h.fetch("outputs")
+    proc = h.fetch("outputs", ALL)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert h.env_file.read_text() == "", "outputs mode wrote to GITHUB_ENV"
     data = json.loads(h.outputs()["secrets"])
-    assert data == SECRETS
+    assert data == ALL_VALUES
 
 
-def test_outputs_mode_with_no_names_returns_every_secret_and_a_single_output(h):
-    proc = h.fetch("outputs")
+def test_outputs_mode_returns_a_single_output(h):
+    proc = h.fetch("outputs", ALL)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert list(h.outputs()) == ["secrets"]
 
@@ -375,19 +397,70 @@ def test_the_json_escaped_form_and_the_whole_output_are_masked_too(h):
     assert "::add-mask::" + blob in proc.stdout.splitlines()
 
 
-def test_meta_values_that_doppler_marks_unmasked_are_not_masked(h):
-    """Masking the word 'demo' would blank it from every later log line."""
-    proc = h.fetch("outputs")
-    assert "::add-mask::demo" not in proc.stdout.splitlines()
-    assert json.loads(h.outputs()["secrets"])["DOPPLER_PROJECT"] == "demo"
+def test_outputs_mode_masks_a_value_even_when_doppler_marks_it_unmasked(tmp_path):
+    """The caller extracts the value and passes it on, so a log line from that step must not show it."""
+    h2 = Harness(tmp_path, {"UNMASKED_THING": "visible-per-doppler-1", "PROD_TOKEN": "prod-synthetic-value-111"})
+    proc = h2.fetch("outputs", "UNMASKED_THING,PROD_TOKEN")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    masks = proc.stdout.splitlines()
+    assert "::add-mask::visible-per-doppler-1" in masks
+    assert "::add-mask::prod-synthetic-value-111" in masks
 
 
-def test_empty_values_are_not_masked(tmp_path):
-    h2 = Harness(tmp_path, {"EMPTY": "", "FULL": "synthetic-full-value"})
-    proc = h2.fetch("outputs")
+def test_env_mode_still_leaves_a_value_doppler_marks_unmasked_readable(tmp_path):
+    """Unchanged from the pinned action's behavior: only outputs mode masks everything."""
+    h2 = Harness(tmp_path, {"UNMASKED_THING": "visible-per-doppler-1"})
+    proc = h2.fetch("env", "UNMASKED_THING")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "::add-mask::visible-per-doppler-1" not in proc.stdout.splitlines()
+    assert h2.exported() == {"UNMASKED_THING": "visible-per-doppler-1"}
+
+
+def test_the_doppler_labels_are_never_returned_or_masked_in_outputs_mode(h):
+    proc = h.fetch("outputs", ALL)
     assert proc.returncode == 0
+    assert "DOPPLER_PROJECT" not in h.outputs()["secrets"]
+    assert "::add-mask::demo" not in proc.stdout.splitlines()
+
+
+@pytest.mark.parametrize("label", ["DOPPLER_PROJECT", "DOPPLER_CONFIG", "DOPPLER_ENVIRONMENT"])
+def test_asking_for_a_doppler_label_in_outputs_mode_fails(h, label):
+    h.secrets_file.write_text(doppler_response({**SECRETS, label: "label-value-xyz"}))
+    proc = h.fetch("outputs", f"PROD_TOKEN,{label}")
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 1 and label in out and "label-value-xyz" not in out
+    assert h.out.read_text() == ""
+
+
+def test_empty_values_are_returned_but_not_masked(tmp_path):
+    h2 = Harness(tmp_path, {"EMPTY": "", "FULL": "synthetic-full-value"})
+    proc = h2.fetch("outputs", "EMPTY,FULL")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert json.loads(h2.outputs()["secrets"]) == {"EMPTY": "", "FULL": "synthetic-full-value"}
     assert "::add-mask::" not in proc.stdout.splitlines()
     assert "::add-mask::synthetic-full-value" in proc.stdout.splitlines()
+
+
+@pytest.mark.parametrize("value, ok", [("~", False), ("~~~", False), ("~~~~", True)])
+def test_a_short_value_fails_closed_in_outputs_mode(tmp_path, value, ok):
+    """add-mask on a 1 to 3 character value would redact that text from every later log line."""
+    h2 = Harness(tmp_path, {"SHORT_ONE": value, "PROD_TOKEN": "prod-synthetic-value-111"})
+    proc = h2.fetch("outputs", "SHORT_ONE,PROD_TOKEN")
+    out = proc.stdout + proc.stderr
+    if ok:
+        assert proc.returncode == 0, out
+        assert json.loads(h2.outputs()["secrets"])["SHORT_ONE"] == value
+    else:
+        assert proc.returncode == 1 and "SHORT_ONE" in out and "shorter than 4" in out
+        assert "~" not in out and "prod-synthetic-value-111" not in out
+        assert h2.out.read_text() == "" and h2.env_file.read_text() == ""
+
+
+def test_a_short_value_is_still_allowed_in_env_mode(tmp_path):
+    h2 = Harness(tmp_path, {"SHORT_ONE": "~~"})
+    proc = h2.fetch("env", "SHORT_ONE")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert h2.exported() == {"SHORT_ONE": "~~"}
 
 
 def test_masks_are_printed_before_the_value_is_written_anywhere(tmp_path):
@@ -454,7 +527,7 @@ def test_the_output_is_one_compact_line_between_random_delimiters(h):
 
 def test_a_value_that_looks_like_a_heredoc_terminator_cannot_end_the_output_early(tmp_path):
     h2 = Harness(tmp_path, {"TRICKY": "EOF\nghadelimiter\nsecrets<<EOF\nEOF"})
-    proc = h2.fetch("outputs")
+    proc = h2.fetch("outputs", "TRICKY")
     assert proc.returncode == 0
     assert json.loads(h2.outputs()["secrets"]) == {"TRICKY": "EOF\nghadelimiter\nsecrets<<EOF\nEOF"}
 
@@ -471,21 +544,48 @@ def test_env_mode_preserves_a_trailing_newline(h):
     assert h.exported()["DEPLOY_KEY"].endswith("-----END FAKE KEY-----\n")
 
 
-def test_an_oversize_result_fails_clearly_and_writes_nothing(tmp_path):
-    h2 = Harness(tmp_path, {"BIG": "x" * 1_100_000})
-    proc = h2.fetch("outputs")
+def _size_case(tmp_path, value):
+    h2 = Harness(tmp_path, {"BIG": value})
+    return h2, h2.fetch("outputs", "BIG")
+
+
+def test_the_old_byte_limit_is_gone_a_600000_character_ascii_value_fails(tmp_path):
+    """600,000 ASCII characters are 1.2 MB in UTF-16, over GitHub's 1 MB. The old 1,000,000 byte check passed it."""
+    h2, proc = _size_case(tmp_path, "x" * 600_000)
     out = proc.stdout + proc.stderr
-    assert proc.returncode == 1 and "output size limit" in out and "names" in out
+    assert proc.returncode == 1 and "UTF-16 code units" in out and "names" in out
     assert h2.out.read_text() == "" and h2.env_file.read_text() == ""
-    assert "xxxxxxxx" not in out
+    assert "xxxxxxxx" not in out, "an oversize value was masked or printed before the size check"
 
 
-def test_an_empty_config_returns_an_empty_object(tmp_path):
-    h2 = Harness(tmp_path, {})
-    proc = h2.fetch("outputs")
-    assert proc.returncode == 0
-    assert h2.outputs()["secrets"] == "{}"
-    assert "::add-mask::{}" not in proc.stdout.splitlines()
+def test_a_value_just_under_the_limit_passes(tmp_path):
+    h2, proc = _size_case(tmp_path, "x" * 499_000)
+    assert proc.returncode == 0, (proc.stdout + proc.stderr)[-300:]
+    assert json.loads(h2.outputs()["secrets"]) == {"BIG": "x" * 499_000}
+
+
+def test_the_limit_is_exact_on_the_utf16_unit_count(tmp_path):
+    overhead = len('{"BIG":""}')
+    _, ok = _size_case(tmp_path, "x" * (500_000 - overhead))
+    assert ok.returncode == 0
+    (tmp_path / "b").mkdir()
+    _, bad = _size_case(tmp_path / "b", "x" * (500_000 - overhead + 1))
+    assert bad.returncode == 1
+
+
+def test_a_bmp_multibyte_value_is_counted_in_utf16_units_not_utf8_bytes(tmp_path):
+    """300,000 euro signs are 900,000 UTF-8 bytes but 300,000 UTF-16 units, well under the limit."""
+    h2, proc = _size_case(tmp_path, "\u20ac" * 300_000)
+    assert proc.returncode == 0, (proc.stdout + proc.stderr)[-300:]
+    assert json.loads(h2.outputs()["secrets"])["BIG"] == "\u20ac" * 300_000
+
+
+def test_characters_outside_the_bmp_count_as_two_units(tmp_path):
+    h2, ok = _size_case(tmp_path, "\U0001f600" * 249_000)  # 498,000 units
+    assert ok.returncode == 0, (ok.stdout + ok.stderr)[-300:]
+    (tmp_path / "b").mkdir()
+    _, bad = _size_case(tmp_path / "b", "\U0001f600" * 251_000)  # 502,000 units
+    assert bad.returncode == 1 and "UTF-16" in bad.stdout + bad.stderr
 
 
 # --- both ways in, and what goes on a command line ---------------------------------------------------------------
@@ -548,7 +648,7 @@ def test_curl_is_locked_to_https_and_does_not_follow_redirects(h):
 
 
 def test_a_secret_value_is_never_printed_unmasked(h):
-    proc = h.fetch("outputs")
+    proc = h.fetch("outputs", ALL)
     assert proc.returncode == 0
     for line in (proc.stdout + proc.stderr).splitlines():
         assert line.startswith("::add-mask::")
@@ -558,4 +658,6 @@ def test_the_action_text_names_the_trade_off_and_the_waiting_callers():
     text = ACTION.read_text()
     head = text.split("\nname:", 1)[0]
     assert "export: outputs" in head and "names" in head and "post-run" in head
+    assert "requires `names`" in head and "authorization boundary" in head and "GITHUB_STEP_SUMMARY" in head
+    assert "whole as an env" in head and "job outputs" in head and "steal" in head
     assert "fromJSON" in head and "no-php-no-cry" in head and "Reach-Around" in head

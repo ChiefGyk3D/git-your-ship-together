@@ -34,17 +34,29 @@
 #     every action's post-run hook - inherits all of them. A compromised
 #     dependency or post-run hook can read them. The config named here must
 #     hold ONLY what CI needs (a `ci` config), never the runtime set.
-#   export: outputs. Nothing is written to GITHUB_ENV and nothing is exported
+#   export: outputs (requires `names`). Nothing is written to GITHUB_ENV and nothing is exported
 #     into the environment. Every value is masked, then the result is returned
 #     as ONE masked JSON output, `secrets`. The caller reads one value with
 #     fromJSON(steps.<id>.outputs.secrets).NAME and passes it to the single step
 #     that needs it through that step's `env:`. With nothing fetched the output
 #     is `{}`. This is the form for a job that holds a production credential.
+#     EVERY returned value is masked, whatever Doppler's visibility says; a value
+#     shorter than 4 characters fails the job (masking it would redact that text
+#     from later logs); Doppler's own DOPPLER_PROJECT/CONFIG/ENVIRONMENT labels
+#     are never returned; the JSON is refused above 500,000 UTF-16 code units.
+#   Caller rules for the `secrets` output. Pass ONE extracted value to ONE step
+#     through its `env:`. Never pass `steps.<id>.outputs.secrets` whole as an env
+#     value; never put it (or a value) in GITHUB_ENV, GITHUB_STEP_SUMMARY,
+#     artifacts, caches, debug output or job outputs. add-mask protects logs
+#     only; it is not an authorization boundary. Any step that receives an
+#     extracted value - including a compromised dependency inside that step -
+#     can steal it.
 #   names: an optional comma or whitespace separated allow-list of secret names
 #     (each ^[A-Z_][A-Z0-9_]*$). In both modes only those are exported. A name
 #     that is not in the config fails the job (the message names the secret,
-#     never a value). Empty means every secret. `export: outputs` with `names`
-#     is the safest combination: the job gets exactly what it asked for, once.
+#     never a value). Required with `export: outputs`; with `export: env`,
+#     empty means every secret. `outputs` with `names` is the safest
+#     combination: the job gets exactly what it asked for, once.
 #
 # Why `outputs` does not use dopplerhq/secrets-fetch-action: that action can only
 # export everything it reads, and its per-secret outputs cannot be declared in a
@@ -97,8 +109,9 @@ inputs:
     default: env
   names:
     description: >-
-      Comma or whitespace separated allow-list of secret names (each ^[A-Z_][A-Z0-9_]*$). When set, only these are
-      exported in either mode and a name missing from the config fails the job. Empty means every secret.
+      Comma or whitespace separated allow-list of secret names (each ^[A-Z_][A-Z0-9_]*$). Required (non-empty) with
+      `export: outputs`. With `export: env`, empty means every secret. When set, only these are exported and a name
+      missing from the config fails the job.
     required: false
     default: ""
 
@@ -219,6 +232,11 @@ runs:
             names="${names:+$names,}$n"
           done
         fi
+        if [ "$EXPORT" = outputs ] && [ -z "$names" ]; then
+          # Omitting the list would return the whole config, the exposure this mode exists to avoid.
+          echo "::error title=Doppler::export: outputs requires names (the secrets this job needs)"
+          exit 1
+        fi
         echo "names=$names" >> "$GITHUB_OUTPUT"
 
     - name: Fetch secrets via OIDC (Service Account Identity)
@@ -254,14 +272,17 @@ runs:
         CONFIG: ${{ inputs.config }}
         IDENTITY_ID: ${{ inputs.identity-id }}
         TOKEN: ${{ inputs.token }}
-      run: | # zizmor: ignore[github-env] export: env with names is this feature; names are checked against ^[A-Z_][A-Z0-9_]*$, the delimiter is random
+      run: | # zizmor: ignore[github-env] the GITHUB_ENV sink is reachable only when export is env; names are checked against ^[A-Z_][A-Z0-9_]*$ and the delimiter is random
         set -euo pipefail
         umask 077
         export LC_ALL=C
         # Nothing from the environment may redirect a call that carries a credential.
         unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY CURL_HOME CURL_CA_BUNDLE SSL_CERT_FILE SSL_CERT_DIR
         api=https://api.doppler.com
-        limit=1000000 # GitHub caps one step output at 1 MB
+        # GitHub caps one step output at about 1 MB and measures it in UTF-16, not UTF-8. The JSON is counted in UTF-16
+        # code units and refused above 500,000 of them (1,000,000 bytes in UTF-16): conservative, and correct for
+        # multibyte text, where counting UTF-8 bytes would under-count an ASCII-heavy value by half.
+        limit=500000
         fail() {
           echo "::error title=Doppler::$1"
           exit 1
@@ -318,22 +339,34 @@ runs:
         result=$(jq -c 'map_values((.computed // "") | tostring)' <<<"$selected")
 
         if [ "$EXPORT" = outputs ]; then
-          bytes=$(printf '%s' "$result" | wc -c | tr -d ' ')
-          if [ "$bytes" -gt "$limit" ]; then
-            fail "the secrets JSON is $bytes bytes, over GitHub's output size limit of $limit; list fewer secrets in names"
+          # The Doppler labels are not secrets and are never returned (or masked) in outputs mode.
+          labels=$(jq -r --argjson want "$want" '[$want[] | select(IN("DOPPLER_PROJECT", "DOPPLER_CONFIG", "DOPPLER_ENVIRONMENT"))] | join(",")' <<<"$response")
+          if [ -n "$labels" ]; then
+            fail "export: outputs does not return Doppler's own labels ($labels); remove them from names"
+          fi
+          # add-mask on a short value redacts that text from every later log line, so refuse rather than mask it.
+          short=$(jq -r '[to_entries[] | select((.value.computed // "" | tostring | length) as $n | $n > 0 and $n < 4) | .key] | join(",")' <<<"$selected")
+          if [ -n "$short" ]; then
+            fail "secret(s) $short hold a value shorter than 4 characters; masking it would redact that text from later logs. Not returned"
+          fi
+          units=$(printf '%s' "$result" | jq -Rs 'explode | map(if . > 65535 then 2 else 1 end) | add // 0')
+          if [ "$units" -gt "$limit" ]; then
+            fail "the secrets JSON is $units UTF-16 code units, over this action's limit of $limit (GitHub's output size limit is 1 MB); list fewer secrets in names"
           fi
         fi
 
         # Mask every value BEFORE it is written anywhere: each line, the whole (multi-line) value, and its JSON-escaped
         # form. % and CR are escaped because the runner unescapes them in a command, so the literal text is masked.
-        # Values Doppler marks unmasked, and its own project/config/environment labels, are left readable.
-        jq -r '
+        # In outputs mode EVERY non-empty value is masked, whatever Doppler's computedVisibility says, because the
+        # caller extracts it and passes it on. In env mode (names) Doppler's unmasked values and its own
+        # project/config/environment labels are left readable, as the pinned action does.
+        jq -r --argjson all "$([ "$EXPORT" = outputs ] && echo true || echo false)" '
           def esc: gsub("%"; "%25") | gsub("\r"; "%0D") | gsub("\n"; "%0A");
           def mask: select(. != "") | "::add-mask::" + esc;
           ["DOPPLER_PROJECT", "DOPPLER_CONFIG", "DOPPLER_ENVIRONMENT"] as $meta
           | [ to_entries[]
               | select((.key | IN($meta[])) | not)
-              | select(.value.computedVisibility != "unmasked")
+              | select($all or (.value.computedVisibility != "unmasked"))
               | (.value.computed // "" | tostring) as $v
               | ($v | mask), ($v | splits("[\r\n]+") | mask), ($v | tojson | .[1:-1] | select(. != $v) | mask) ]
           | unique[]' <<<"$selected"

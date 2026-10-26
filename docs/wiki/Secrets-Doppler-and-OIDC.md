@@ -134,7 +134,7 @@ has two inputs the inlined workflow copies do not need:
 
 - **`export`**: `env` (the default, today's behavior) or `outputs`. Any other value fails the job.
 - **`names`**: an optional comma or whitespace separated allow-list of secret names. It narrows both modes; a name
-  missing from the config fails the job, naming the secret and never a value. Empty means every secret.
+  missing from the config fails the job, naming the secret and never a value. **Required with `export: outputs`** (an empty list would return the whole config); with `export: env`, empty means every secret.
 
 **The trade-off.** `env` writes the whole config into the job's environment, so every later step and every action's
 post-run hook can read all of it. A compromised dependency or hook in a deploy job is then a way to a production
@@ -144,7 +144,15 @@ with `fromJSON(steps.<id>.outputs.secrets).NAME`. **`export: outputs` with `name
 holds a production credential.** The README shows a worked step ("Handing a secret to one step"). The first callers
 are the `no-php-no-cry` and `Reach-Around` deploy workflows.
 
-One limit: GitHub caps a step output at 1 MB, so a large result fails the job; list fewer names.
+In `outputs` mode every non-empty value is masked whatever Doppler's visibility says, Doppler's own
+`DOPPLER_PROJECT`/`CONFIG`/`ENVIRONMENT` labels are never returned, and a value shorter than 4 characters fails the job
+(masking it would redact that text from every later log line). GitHub caps a step output at about 1 MB, counted in
+UTF-16; the action refuses more than 500,000 UTF-16 code units, so list fewer names.
+
+**Caller rules.** Pass one extracted value to one step through its `env:`. Never pass `steps.<id>.outputs.secrets` whole
+as an env value. Never put it, or a value from it, in `GITHUB_ENV`, `GITHUB_STEP_SUMMARY`, artifacts, caches, debug
+output or job outputs. `add-mask` protects logs only; it is not an authorization boundary. Any step that receives an
+extracted value, including a compromised dependency inside that step, can steal it.
 
 ## What lives in the `ci` config
 
