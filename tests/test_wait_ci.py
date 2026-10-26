@@ -13,14 +13,19 @@ broken on purpose in the script to confirm these tests go red; the mutations are
 
 from __future__ import annotations
 
+import http.server
+import inspect
 import json
 import os
 import re
 import shutil
+import ssl
 import subprocess
 import sys
 import tempfile
+import threading
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 import yaml
@@ -31,11 +36,85 @@ ACTION = REPO / ".github" / "actions" / "wait-ci" / "action.yml"
 PAGE = REPO / "docs" / "wiki" / "Action-wait-ci.md"
 
 SLUG = "N0TST/widgets"
+REAL_GH = shutil.which("gh")
 A = "a" * 40
 B = "b" * 40
 C = "c" * 40
 TOKEN = "ghs_FAKE0TOKEN0VALUE0DO0NOT0PRINT"
 US = "\x1f"
+
+
+def current_head(st):
+    head = st["head"]
+    for move in st.get("moves", []):
+        if st["check_polls"] >= move["after_check_polls"]:
+            head = move["head"]
+    return head
+
+
+def github_runs(snapshot, sha):
+    # GitHub-shaped check runs; list order is chronological (later is newer). A run is
+    # (status, conclusion, name[, app id[, head_sha]]); head_sha defaults to the commit asked about.
+    runs = []
+    for n, run in enumerate(snapshot):
+        status, conclusion, name = run[:3]
+        app = run[3] if len(run) > 3 else 15368
+        head_sha = run[4] if len(run) > 4 else sha
+        runs.append(
+            {
+                "id": 1000 + n,
+                "name": name,
+                "head_sha": head_sha,
+                "status": status,
+                "conclusion": conclusion or None,
+                "started_at": f"2026-10-26T00:{n % 60:02d}:00Z",
+                "completed_at": None if status != "completed" else f"2026-10-26T01:{n % 60:02d}:00Z",
+                "app": {"id": app, "slug": f"app-{app}"},
+            }
+        )
+    return runs
+
+
+def latest_only(runs):
+    # filter=latest: "returns the most recent check runs" (the docs key this on completed_at; an
+    # unfinished run has none and is the newest). Grouped here by (name, app), the newest of each.
+    # Probed live on 2026-10-26: with filter=latest total_count equals the runs returned (95/95 where
+    # filter=all gave 180).
+    newest = {}
+    for run in runs:
+        newest[(run["name"], run["app"]["id"])] = run
+    return list(newest.values())
+
+
+def snapshot_runs(st, sha):
+    # One poll of the check-runs endpoint: advance the counters; None while the scenario has the API failing.
+    st["check_polls"] += 1
+    st["check_shas"].append(sha)
+    fails = st.get("check_failures", 0)
+    if st["check_polls"] <= fails:
+        return None
+    snaps = st["checks"].get(sha, [[]])
+    idx = min(st["check_polls"] - 1 - fails, len(snaps) - 1)
+    return github_runs(snaps[idx], sha)
+
+
+def shape_runs(st, runs, query):
+    # Apply filter=latest, then the scenario's lies: a total_count that is not the runs shown, or a
+    # response cut short (the endpoint only shows the 1000 most recent check suites).
+    if query.get("filter", ["latest"])[0] == "latest":
+        runs = latest_only(runs)
+    total = st.get("total_count_override")
+    if total is None:
+        total = len(runs)
+    if st.get("serve_only") is not None:
+        runs = runs[: st["serve_only"]]
+    return total, runs
+
+
+def split_pages(runs, query):
+    per_page = max(1, min(int(query.get("per_page", ["30"])[0]), 100))
+    return [runs[i : i + per_page] for i in range(0, len(runs), per_page)] or [[]]
+
 
 FAKE_GH = r"""#!@PYTHON@
 import json
@@ -58,43 +137,7 @@ def save():
     sf.write_text(json.dumps(st))
 
 
-def current_head():
-    head = st["head"]
-    for move in st.get("moves", []):
-        if st["check_polls"] >= move["after_check_polls"]:
-            head = move["head"]
-    return head
-
-
-def github_runs(snapshot, sha):
-    # GitHub-shaped check runs; list order is chronological (later is newer).
-    runs = []
-    for n, run in enumerate(snapshot):
-        status, conclusion, name = run[:3]
-        app = run[3] if len(run) > 3 else 15368
-        runs.append(
-            {
-                "id": 1000 + n,
-                "name": name,
-                "head_sha": sha,
-                "status": status,
-                "conclusion": conclusion or None,
-                "started_at": "2026-10-26T00:%02d:00Z" % (n % 60),
-                "completed_at": None if status != "completed" else "2026-10-26T01:%02d:00Z" % (n % 60),
-                "app": {"id": app, "slug": "app-%s" % app},
-            }
-        )
-    return runs
-
-
-def latest_only(runs):
-    # filter=latest: "returns the most recent check runs" (the docs key this on completed_at; an
-    # unfinished run has none and is the newest). Grouped here by (name, app), the newest of each.
-    newest = {}
-    for run in runs:
-        newest[(run["name"], run["app"]["id"])] = run
-    return list(newest.values())
-
+# @HELPERS@
 
 if argv[:1] == ["api"]:
     path = next(a for a in argv[1:] if "/" in a and not a.startswith("-"))
@@ -110,38 +153,34 @@ if argv[:1] == ["api"]:
         if st.get("head_garbage"):
             print(st["head_garbage"])
             sys.exit(0)
-        print(current_head() if jq == ".head.sha" else str(st["merged"]).lower())
+        print(current_head(st) if jq == ".head.sha" else str(st["merged"]).lower())
         sys.exit(0)
     if "/check-runs" in path:
         url = urlsplit(path)
         sha = url.path.split("/commits/")[1].split("/")[0]
         query = parse_qs(url.query)
-        st["check_polls"] += 1
-        st["check_shas"].append(sha)
-        fails = st.get("check_failures", 0)
-        if st["check_polls"] <= fails:
+        runs = snapshot_runs(st, sha)
+        if runs is None:
             save()
             sys.stderr.write("HTTP 500 using " + tok + "\n")
             sys.exit(1)
-        snaps = st["checks"].get(sha, [[]])
-        idx = min(st["check_polls"] - 1 - fails, len(snaps) - 1)
-        runs = github_runs(snaps[idx], sha)
-        if query.get("filter", ["latest"])[0] == "latest":
-            runs = latest_only(runs)
-        per_page = max(1, min(int(query.get("per_page", ["30"])[0]), 100))
-        pages = [runs[i : i + per_page] for i in range(0, len(runs), per_page)] or [[]]
+        total, runs = shape_runs(st, runs, query)
+        pages = split_pages(runs, query)
         if "--paginate" not in argv:
             wanted = int(query.get("page", ["1"])[0])
             pages = pages[wanted - 1 : wanted]
         st["pages_served"] = st.get("pages_served", 0) + len(pages)
         save()
         for page in pages:
-            body = json.dumps({"total_count": len(runs), "check_runs": page})
+            body = json.dumps({"total_count": total, "check_runs": page})
             proc = subprocess.run(["jq", "-r", jq], input=body, capture_output=True, text=True)
             if proc.returncode != 0:
                 sys.stderr.write("jq: " + proc.stderr)
                 sys.exit(1)
-            sys.stdout.write(proc.stdout)
+            out = proc.stdout
+            for old, new in st.get("mangle", []):
+                out = out.replace(old, new)
+            sys.stdout.write(out)
         sys.exit(0)
     sys.stderr.write("fake gh: unexpected api path " + path + "\n")
     sys.exit(97)
@@ -189,16 +228,29 @@ def running(name: str, app: int = 15368) -> tuple:
     return ("in_progress", "", name, app)
 
 
+HELPER_SOURCE = "\n\n".join(
+    inspect.getsource(f) for f in (current_head, github_runs, latest_only, snapshot_runs, shape_runs, split_pages)
+)
+
+
 class World:
-    def __init__(self, tmp: Path, *, head: str = A, checks=None, **extra):
+    def __init__(self, tmp: Path, *, head: str = A, checks=None, engine: str = "jq", cert: Path | None = None, **extra):
         tmp = Path(tempfile.mkdtemp(dir=tmp))
+        self.tmp = tmp
+        self.engine = engine
+        self.cert = cert
+        self.server = None
         self.dir = tmp / "fake"
         self.bin = tmp / "bin"
         self.dir.mkdir()
         self.bin.mkdir()
         self.out = tmp / "github_output"
         python = sys.executable
-        for name, text in (("gh", FAKE_GH.replace("@PYTHON@", python)), ("sleep", FAKE_SLEEP), ("date", FAKE_DATE)):
+        for name, text in (
+            ("gh", FAKE_GH.replace("@PYTHON@", python).replace("# @HELPERS@", HELPER_SOURCE)),
+            ("sleep", FAKE_SLEEP),
+            ("date", FAKE_DATE),
+        ):
             path = self.bin / name
             path.write_text(text)
             path.chmod(0o755)
@@ -216,6 +268,74 @@ class World:
             **extra,
         }
         self.save()
+        if engine == "gh":
+            self.start_server()
+
+    def start_server(self) -> None:
+        """Serve the scenario over TLS on loopback to the REAL gh, whose embedded gojq then runs the script's --jq."""
+        world = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def reply(self, code, obj, headers=()):
+                body = json.dumps(obj).encode()
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                for key, value in headers:
+                    self.send_header(key, value)
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_GET(self):
+                with open(world.dir / "calls.log", "a") as log:
+                    log.write("GET " + self.path + "\n")
+                st = world.load()
+                url = urlsplit(self.path)
+                query = parse_qs(url.query)
+                if re.fullmatch(r"/api/v3/repos/[^/]+/[^/]+/pulls/\d+", url.path):
+                    st["head_reads"] += 1
+                    world.state = st
+                    world.save()
+                    return self.reply(200, {"head": {"sha": current_head(st)}, "merged": st["merged"]})
+                m = re.fullmatch(r"/api/v3/repos/[^/]+/[^/]+/commits/([0-9a-f]+)/check-runs", url.path)
+                if not m:
+                    return self.reply(404, {"message": "Not Found"})
+                page = int(query.get("page", ["1"])[0])
+                if page == 1:
+                    runs = snapshot_runs(st, m.group(1))
+                    if runs is None:
+                        world.state = st
+                        world.save()
+                        return self.reply(500, {"message": "boom"})
+                    total, runs = shape_runs(st, runs, query)
+                    st["cached"] = [total, runs]
+                else:
+                    total, runs = st["cached"]
+                pages = split_pages(runs, query)
+                st["pages_served"] = st.get("pages_served", 0) + 1
+                world.state = st
+                world.save()
+                headers = []
+                if page < len(pages):
+                    q = "&".join(f"{k}={v[0]}" for k, v in query.items() if k != "page")
+                    nxt = f"https://localhost:{world.port}{url.path}?{q}&page={page + 1}"
+                    headers.append(("Link", f'<{nxt}>; rel="next"'))
+                self.reply(200, {"total_count": total, "check_runs": pages[page - 1]}, headers)
+
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(self.cert / "cert.pem", self.cert / "key.pem")
+        self.server.socket = context.wrap_socket(self.server.socket, server_side=True)
+        self.port = self.server.server_address[1]
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def close(self) -> None:
+        if self.server is not None:
+            self.server.shutdown()
+            self.server.server_close()
 
     def save(self) -> None:
         (self.dir / "state.json").write_text(json.dumps(self.state))
@@ -232,7 +352,7 @@ class World:
         return [int(x) for x in path.read_text().split()] if path.exists() else []
 
     def merges(self) -> list[str]:
-        return [c for c in self.calls() if c.startswith("pr merge")]
+        return [c for c in self.calls() if c.startswith("pr merge") or "graphql" in c]
 
     def outputs(self) -> dict[str, str]:
         if not self.out.exists():
@@ -248,6 +368,18 @@ class World:
             GH_TOKEN=TOKEN,
             GITHUB_OUTPUT=str(self.out),
         )
+        if self.engine == "gh":
+            env.pop("GH_TOKEN")
+            env.update(
+                GH_BIN=REAL_GH,
+                GH_HOST=f"localhost:{self.port}",
+                GH_ENTERPRISE_TOKEN=TOKEN,
+                GH_CONFIG_DIR=str(self.tmp / "ghcfg"),
+                SSL_CERT_FILE=str(self.cert / "cert.pem"),
+                GH_PROMPT_DISABLED="1",
+                GH_NO_UPDATE_NOTIFIER="1",
+                NO_PROXY="localhost,127.0.0.1",
+            )
         return env
 
     def run(self, *args: str) -> subprocess.CompletedProcess[str]:
@@ -268,19 +400,62 @@ def shown(p: subprocess.CompletedProcess[str]) -> str:
     return f"exit={p.returncode}\n--stdout--\n{p.stdout}\n--stderr--\n{p.stderr}"
 
 
+def need(tool: str, found: object) -> None:
+    if found:
+        return
+    message = f"{tool} is required by tests/test_wait_ci.py (see docs/wiki/Action-wait-ci.md, How it is tested)"
+    if os.environ.get("CI"):
+        pytest.fail(message)
+    pytest.skip(message)
+
+
+@pytest.fixture(scope="session")
+def tls_cert(tmp_path_factory):
+    need("openssl", shutil.which("openssl"))
+    d = tmp_path_factory.mktemp("tls")
+    subprocess.run(
+        [
+            "openssl",
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-keyout",
+            str(d / "key.pem"),
+            "-out",
+            str(d / "cert.pem"),
+        ]
+        + ["-days", "2", "-subj", "/CN=localhost", "-addext", "subjectAltName=DNS:localhost,IP:127.0.0.1"],
+        check=True,
+        capture_output=True,
+    )
+    return d
+
+
+# Tests that take `engine` run twice: with the system jq under a fake gh, and with the REAL gh (whose
+# embedded gojq evaluates the script's --jq) against a loopback TLS server serving the same scenario.
+ENGINES = pytest.mark.parametrize("engine", ["jq", "gh"])
+
+
 @pytest.fixture
-def world(tmp_path):
+def world(tmp_path, request):
     # The fake gh applies the real --jq expression with the real jq, so the script's parsing is under test.
-    if shutil.which("jq") is None:
-        message = "jq is required: the fake gh runs the script's --jq expression with it (apt-get install jq)"
-        if os.environ.get("CI"):
-            pytest.fail(message)
-        pytest.skip(message)
+    need("jq", shutil.which("jq"))
+    engine = request.node.callspec.params.get("engine", "jq") if hasattr(request.node, "callspec") else "jq"
+    made = []
 
     def make(**kw):
-        return World(tmp_path, **kw)
+        if engine == "gh":
+            need("gh", REAL_GH)
+            kw["cert"] = request.getfixturevalue("tls_cert")
+        w = World(tmp_path, engine=engine, **kw)
+        made.append(w)
+        return w
 
-    return make
+    yield make
+    for w in made:
+        w.close()
 
 
 GATE = [ok("lint"), ok("test"), ok("CI green")]
@@ -289,7 +464,8 @@ GATE = [ok("lint"), ok("test"), ok("CI green")]
 # --- green and the verified SHA ---------------------------------------------
 
 
-def test_green_prints_the_verified_sha_and_exits_zero(world):
+@ENGINES
+def test_green_prints_the_verified_sha_and_exits_zero(world, engine):
     w = world(checks={A: [GATE]})
     p = w.run("--repo", SLUG, "--pr", "7", *FAST)
     assert p.returncode == 0, shown(p)
@@ -564,13 +740,25 @@ HOSTILE_NAMES = {
 }
 
 
+# `gh api` rewrites these in the response before --jq runs (observed with gh 2.100.0: ESC becomes "^[", US "^_",
+# NUL "^@", NEL "^E"), so through the real gh they arrive as printable text that cannot equal a real name; the
+# jq flag still catches them for any other client, and for the characters gh leaves alone.
+SANITIZED_BY_GH = {"NUL", "US 0x1f", "escape", "NEL U+0085"}
+
+
 @pytest.mark.parametrize("label", sorted(HOSTILE_NAMES))
-def test_a_check_run_name_with_a_control_character_is_red_never_green(world, label):
+@ENGINES
+def test_a_check_run_name_with_a_control_character_is_red_never_green(world, label, engine):
     # Another app (or a job name) can post a check run whose name carries a newline and a forged
     # "completed / success / trusted app / CI green" line. No real CI green run exists here.
     name = HOSTILE_NAMES[label]
     w = world(checks={A: [[ok("lint"), ok(name, 57789)]]})
     p = w.run("--repo", SLUG, "--pr", "7", "--merge", *FAST)
+    if engine == "gh" and label in SANITIZED_BY_GH:
+        assert p.returncode in (1, 2), f"{label!r}\n" + shown(p)  # never green: the gate did not report
+        assert "verified" not in p.stdout
+        assert w.merges() == []
+        return
     assert p.returncode == 1, f"{label!r}\n" + shown(p)
     assert "verified" not in p.stdout
     assert "control character" in p.stdout
@@ -579,14 +767,20 @@ def test_a_check_run_name_with_a_control_character_is_red_never_green(world, lab
 
 
 @pytest.mark.parametrize("label", sorted(HOSTILE_NAMES))
-def test_a_hostile_name_is_red_even_when_the_real_gate_is_green(world, label):
+@ENGINES
+def test_a_hostile_name_is_red_even_when_the_real_gate_is_green(world, label, engine):
     w = world(checks={A: [[ok("CI green"), ok(HOSTILE_NAMES[label], 57789)]]})
+    if engine == "gh" and label in SANITIZED_BY_GH:
+        # gh already turned the name into harmless printable text; the gate really is green.
+        assert w.run("--repo", SLUG, "--pr", "7", *FAST).returncode == 0
+        return
     p = w.run("--repo", SLUG, "--pr", "7", "--merge", *FAST)
     assert p.returncode == 1, f"{label!r}\n" + shown(p)
     assert w.merges() == []
 
 
-def test_the_forged_line_cannot_satisfy_a_gate_that_has_not_reported(world):
+@ENGINES
+def test_the_forged_line_cannot_satisfy_a_gate_that_has_not_reported(world, engine):
     # Same forgery, but from a run of the trusted app itself (a job name in this repository).
     w = world(checks={A: [[ok("lint"), ok(FORGED)]]})
     p = w.run("--repo", SLUG, "--pr", "7", *FAST)
@@ -594,7 +788,8 @@ def test_the_forged_line_cannot_satisfy_a_gate_that_has_not_reported(world):
 
 
 @pytest.mark.parametrize("name", ["CI green ✓", 'say "CI green"', "café \U0001f600 build", "a'b $(touch x) `id`"])
-def test_odd_but_printable_names_are_not_hostile_and_still_match_exactly(world, name):
+@ENGINES
+def test_odd_but_printable_names_are_not_hostile_and_still_match_exactly(world, name, engine):
     w = world(checks={A: [[ok("CI green"), ok(name)]]})
     assert w.run("--repo", SLUG, "--pr", "7", *FAST).returncode == 0
     w2 = world(checks={A: [[ok(name)]]})
@@ -612,7 +807,8 @@ def test_the_check_runs_request_asks_for_latest_runs_at_the_maximum_page_size(wo
     assert all("filter=latest" in c and "per_page=100" in c for c in request)
 
 
-def test_the_gate_on_the_second_page_is_found(world):
+@ENGINES
+def test_the_gate_on_the_second_page_is_found(world, engine):
     many = [ok(f"job {n}") for n in range(130)] + [ok("CI green")]
     w = world(checks={A: [many]})
     p = w.run("--repo", SLUG, "--pr", "7", *FAST)
@@ -620,18 +816,21 @@ def test_the_gate_on_the_second_page_is_found(world):
     assert w.load()["pages_served"] == 2
 
 
-def test_a_failure_on_the_second_page_is_red(world):
+@ENGINES
+def test_a_failure_on_the_second_page_is_red(world, engine):
     many = [ok(f"job {n}") for n in range(130)] + [done("late", "failure"), ok("CI green")]
     w = world(checks={A: [many]})
     assert w.run("--repo", SLUG, "--pr", "7", *FAST).returncode == 1
 
 
-def test_a_green_rerun_of_a_failed_run_is_green(world):
+@ENGINES
+def test_a_green_rerun_of_a_failed_run_is_green(world, engine):
     w = world(checks={A: [[done("CI green", "failure"), ok("CI green")]]})
     assert w.run("--repo", SLUG, "--pr", "7", *FAST).returncode == 0
 
 
-def test_a_failed_rerun_of_a_green_run_is_red(world):
+@ENGINES
+def test_a_failed_rerun_of_a_green_run_is_red(world, engine):
     w = world(checks={A: [[ok("CI green"), done("CI green", "failure")]]})
     assert w.run("--repo", SLUG, "--pr", "7", *FAST).returncode == 1
 
@@ -641,13 +840,15 @@ def test_a_rerun_in_progress_after_a_green_run_is_not_green(world):
     assert w.run("--repo", SLUG, "--pr", "7", "--interval", "10", "--timeout", "60").returncode == 2
 
 
-def test_a_completed_run_with_a_null_conclusion_is_not_green(world):
+@ENGINES
+def test_a_completed_run_with_a_null_conclusion_is_not_green(world, engine):
     w = world(checks={A: [[("completed", None, "CI green")]]})
     p = w.run("--repo", SLUG, "--pr", "7", "--interval", "10", "--timeout", "60")
     assert p.returncode == 2, shown(p)
 
 
-def test_a_null_conclusion_while_running_is_pending_then_green(world):
+@ENGINES
+def test_a_null_conclusion_while_running_is_pending_then_green(world, engine):
     w = world(checks={A: [[("in_progress", None, "CI green")], GATE]})
     assert w.run("--repo", SLUG, "--pr", "7", *FAST).returncode == 0
 
@@ -738,6 +939,155 @@ def test_gh_stderr_is_not_mixed_into_the_data_stream(world):
     w = world(checks={A: [GATE]}, head_warns=True)
     p = w.run("--repo", SLUG, "--pr", "7", *FAST)
     assert p.returncode == 0, shown(p)
+
+
+# --- numbers: only plain, bounded, base-10 integers ---------------------------------------------
+
+LIMITS = {
+    "--min-checks": (1, 100000),
+    "--timeout": (1, 604800),
+    "--hung-after": (1, 604800),
+    "--interval": (1, 3600),
+    "--merge-retries": (0, 100),
+    "--merge-retry-delay": (0, 3600),
+    "--pr": (1, 999999999),
+    "--app-id": (1, 999999999),
+}
+BAD_NUMBERS = [
+    "18446744073709551616",  # 2**64: wraps to 0 in a 64-bit comparison
+    "9223372036854775808",  # 2**63
+    "9223372036854775807",
+    "08",  # invalid octal in arithmetic
+    "007",
+    "+5",
+    "-5",
+    " 5",
+    "5 ",
+    "",
+    "0x10",
+    "1e3",
+    "3.0",
+    "٣",  # Arabic-Indic digit three
+    "５",  # fullwidth digit five
+    "1_0",
+]
+
+
+def with_option(option: str, value: str) -> list[str]:
+    if option == "--pr":
+        return ["--repo", SLUG, "--pr", value]
+    return ["--repo", SLUG, "--pr", "7", option, value]
+
+
+@pytest.mark.parametrize("option", sorted(LIMITS))
+@pytest.mark.parametrize("value", BAD_NUMBERS, ids=lambda v: repr(v))
+def test_a_number_that_is_not_a_plain_bounded_integer_is_exit_64_naming_the_option(world, option, value):
+    w = world(checks={A: [GATE]})
+    p = w.run(*with_option(option, value))
+    assert p.returncode == 64, shown(p)
+    assert option in p.stderr
+    assert w.calls() == []
+
+
+@pytest.mark.parametrize("option", sorted(LIMITS))
+def test_each_number_has_a_documented_maximum_and_zero_only_where_it_is_legal(world, option):
+    low, high = LIMITS[option]
+    w = world(checks={A: [GATE]})
+    assert w.run(*with_option(option, str(high + 1))).returncode == 64
+    if low > 0:
+        assert w.run(*with_option(option, "0")).returncode == 64
+    else:
+        assert w.run(*with_option(option, "0"), *FAST).returncode == 0
+    at_max = w.run(*with_option(option, str(high)), "--timeout", "60", "--interval", "10")
+    assert at_max.returncode != 64, shown(at_max)
+
+
+# --- a response that may not be the whole list ------------------------------------------------------
+
+
+@ENGINES
+def test_a_total_count_larger_than_the_runs_seen_is_not_green(world, engine):
+    w = world(checks={A: [GATE]}, total_count_override=5)
+    p = w.run("--repo", SLUG, "--pr", "7", "--interval", "10", "--timeout", "60")
+    assert p.returncode == 2, shown(p)
+    assert "check-run list may be truncated" in p.stdout
+    assert "verified" not in p.stdout
+
+
+@ENGINES
+def test_a_list_at_the_one_thousand_cap_is_not_green_even_when_it_is_consistent(world, engine):
+    runs = [ok(f"job {n}") for n in range(999)] + [ok("CI green")]
+    w = world(checks={A: [runs]})
+    p = w.run("--repo", SLUG, "--pr", "7", "--interval", "10", "--timeout", "60")
+    assert p.returncode == 2, shown(p)
+    assert "check-run list may be truncated" in p.stdout
+
+
+@ENGINES
+def test_a_consistent_list_just_under_the_cap_is_green(world, engine):
+    runs = [ok(f"job {n}") for n in range(998)] + [ok("CI green")]
+    w = world(checks={A: [runs]})
+    p = w.run("--repo", SLUG, "--pr", "7", *FAST)
+    assert p.returncode == 0, shown(p)
+    assert w.load()["pages_served"] == 10
+
+
+@ENGINES
+def test_a_failure_that_is_visible_is_still_red_when_the_list_may_be_truncated(world, engine):
+    w = world(checks={A: [[ok("CI green"), done("lint", "failure")]]}, total_count_override=50)
+    assert w.run("--repo", SLUG, "--pr", "7", *FAST).returncode == 1
+
+
+@ENGINES
+def test_a_run_for_a_different_commit_is_not_green(world, engine):
+    w = world(checks={A: [[ok("lint"), ("completed", "success", "CI green", 15368, B)]]})
+    p = w.run("--repo", SLUG, "--pr", "7", "--merge", *FAST)
+    assert p.returncode == 1, shown(p)
+    assert "head_sha" in p.stdout
+    assert w.merges() == []
+
+
+@ENGINES
+def test_runs_for_the_pinned_commit_are_green(world, engine):
+    w = world(checks={A: [[("completed", "success", "CI green", 15368, A)]]})
+    assert w.run("--repo", SLUG, "--pr", "7", *FAST).returncode == 0
+
+
+# --- base64 must be canonical ---------------------------------------------------------------------------
+
+SPELLINGS = {
+    "bad padding": ("Y29tcGxldGVk", "Y29tcGxldGVk===="),
+    "whitespace inside": ("Y29tcGxldGVk", "Y29t cGxldGVk"),
+    "newline inside": ("Y29tcGxldGVk", "Y29t\ncGxldGVk"),
+    "missing padding": ("Q0kgZ3JlZW4=", "Q0kgZ3JlZW4"),
+    "non-zero trailing bits": ("Q0kgZ3JlZW4=", "Q0kgZ3JlZW5="),
+    "stray character": ("Y29tcGxldGVk", "Y29tcGxldGVk!"),
+}
+
+
+@pytest.mark.parametrize("label", sorted(SPELLINGS))
+def test_a_non_canonical_base64_spelling_is_hostile_not_decoded(world, label):
+    w = world(checks={A: [GATE]}, mangle=[list(SPELLINGS[label])])
+    p = w.run("--repo", SLUG, "--pr", "7", "--merge", *FAST)
+    assert p.returncode == 1, f"{label}\n" + shown(p)
+    assert "verified" not in p.stdout
+    assert w.merges() == []
+
+
+def test_the_mangling_harness_is_neutral_when_the_spelling_is_unchanged(world):
+    w = world(checks={A: [GATE]}, mangle=[["Y29tcGxldGVk", "Y29tcGxldGVk"]])
+    assert w.run("--repo", SLUG, "--pr", "7", *FAST).returncode == 0
+
+
+# --- docs hold the limits ------------------------------------------------------------------------------------
+
+
+def test_the_page_documents_the_numeric_limits_and_the_truncation_rule():
+    text = PAGE.read_text()
+    for option, (_low, high) in LIMITS.items():
+        assert re.search(rf"`{option}`[^\n]*\b{high}\b", text), f"the maximum of {option} is not in the page"
+    assert "may be truncated" in text
+    assert "1000" in text
 
 
 # --- red -----------------------------------------------------------------------

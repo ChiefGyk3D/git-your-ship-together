@@ -10,6 +10,11 @@
 #     pinned SHA and concluded success; at least --min-checks check runs completed; and no run
 #     failed, was cancelled, timed out or needs action. No check runs at all is NOT green, and a
 #     context that has not reported yet is NOT green (the aggregate-gate race seen on GYST #218).
+#   * The list of check runs must be whole. The endpoint shows at most the 1000 most recent check
+#     suites of a ref; the script keeps the response's total_count and is NOT green when it exceeds
+#     the runs actually seen, or reaches 1000 ("check-run list may be truncated": it waits, so the
+#     end is exit 2 or 3). A failure that is visible is still red. Every run must also carry the
+#     pinned commit as its head_sha, else red.
 #   * A required context counts only when the check run was reported by the expected GitHub App
 #     (--app-id, default 15368, GitHub Actions). A same-named run from any other app is ignored:
 #     it is neither green nor red, so another app cannot satisfy or block the gate by copying the name.
@@ -40,6 +45,11 @@
 #   5   queued: the merge was accepted but the pull request is not merged yet (merge queue or auto-merge)
 #   64  usage error (bad flag or value); nothing was waited on
 #
+# Numbers are plain base-10 integers, no sign, space or leading zero (0 only where it is legal), and
+# bounded; anything else is exit 64 naming the option:
+#   --pr 1..999999999  --app-id 1..999999999  --min-checks 1..100000  --timeout 1..604800
+#   --hung-after 1..604800  --interval 1..3600  --merge-retries 0..100  --merge-retry-delay 0..3600
+#
 # Usage:
 #   wait-ci.sh --repo OWNER/REPO (--pr N | --sha SHA) [options]
 #
@@ -64,6 +74,8 @@
 # pull-requests: write for --merge), GH_BIN (the gh command, default gh; tests point it at a fake),
 # GITHUB_OUTPUT (when set, result, sha and merged are appended for a composite action).
 set -euo pipefail
+# Byte-wise matching: [0-9] means the ASCII digits, never another script's.
+export LC_ALL=C
 
 gh_bin="${GH_BIN:-gh}"
 repo="${GITHUB_REPOSITORY:-}"
@@ -121,7 +133,13 @@ now() { date +%s; }
 nap() { sleep "$1"; }
 
 need_value() { [[ $# -ge 2 ]] || die_usage "$1 needs a value"; }
-need_int() { [[ "$2" =~ ^[0-9]+$ ]] || die_usage "$1 must be a whole number (got '$2')"; }
+# need_num OPTION VALUE MIN MAX: a plain base-10 integer in range, else exit 64. The pattern admits at most
+# nine digits and no leading zero, so no later arithmetic can wrap, read an octal or see a sign.
+need_num() {
+  [[ "$2" =~ ^(0|[1-9][0-9]{0,8})$ ]] ||
+    die_usage "$1 must be a plain whole number: digits only, no sign or spaces, no leading zero, at most 999999999 (got '$2')"
+  (($((10#$2)) >= $3 && $((10#$2)) <= $4)) || die_usage "$1 must be between $3 and $4 (got '$2')"
+}
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -170,20 +188,28 @@ fi
 [[ "$repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || die_usage "--repo must be OWNER/REPO (got '${repo}')"
 case "${repo%%/*}" in . | ..) die_usage "--repo owner must not be . or .." ;; esac
 case "${repo##*/}" in . | ..) die_usage "--repo name must not be . or .." ;; esac
-if [[ -n "$pr" ]]; then need_int --pr "$pr"; fi
+if [[ -n "$pr" ]]; then
+  need_num --pr "$pr" 1 999999999
+  pr=$((10#$pr))
+fi
 [[ -n "$pr" || -n "$want_sha" ]] || die_usage "give --pr N or --sha SHA"
 if [[ -n "$want_sha" ]]; then
   [[ "$want_sha" =~ ^[0-9a-f]{40}$ ]] || die_usage "--sha must be a full 40-character lowercase commit SHA (got '${want_sha}')"
 fi
-need_int --min-checks "$min_checks"
-need_int --timeout "$timeout_s"
-need_int --hung-after "$hung_after"
-need_int --interval "$interval"
-[[ "$interval" -ge 1 ]] || die_usage "--interval must be at least 1 second"
-need_int --app-id "$app_id"
-need_int --merge-retries "$merge_retries"
-need_int --merge-retry-delay "$merge_retry_delay"
-[[ "$min_checks" -ge 1 ]] || die_usage "--min-checks must be at least 1: no check runs is never green"
+need_num --min-checks "$min_checks" 1 100000
+need_num --timeout "$timeout_s" 1 604800
+need_num --hung-after "$hung_after" 1 604800
+need_num --interval "$interval" 1 3600
+need_num --app-id "$app_id" 1 999999999
+need_num --merge-retries "$merge_retries" 0 100
+need_num --merge-retry-delay "$merge_retry_delay" 0 3600
+min_checks=$((10#$min_checks))
+timeout_s=$((10#$timeout_s))
+hung_after=$((10#$hung_after))
+interval=$((10#$interval))
+app_id=$((10#$app_id))
+merge_retries=$((10#$merge_retries))
+merge_retry_delay=$((10#$merge_retry_delay))
 case "$on_push" in
   abort | reset) ;;
   *) die_usage "--on-push must be abort or reset (got '${on_push}')" ;;
@@ -222,16 +248,39 @@ pr_head() {
 }
 pr_merged() { gh_try api "repos/${repo}/pulls/${pr}" --jq '.merged'; }
 
-# One line per check run on a commit. Every field crosses as base64, so a hostile value (a name with
-# a newline or the field separator in it) cannot add a line or a field: the line is five fields split
-# by \x1f: status, conclusion, app id, hostile flag (1 when the name holds a control character, a
-# DEL, NEL or a Unicode line or paragraph separator, NUL included), and the name.
+# The check runs of a commit as lines, every value crossing as base64 so a hostile value (a name with a
+# newline or the field separator in it) cannot add a line or a field. Fields are split by \x1f.
+#   T <total_count>                                  once per page
+#   R <status> <conclusion> <app id> <hostile> <head_sha> <name>   once per run
+# hostile is 1 when the name holds a control character, DEL, NEL or a Unicode line or paragraph
+# separator (NUL included).
 check_lines() {
   gh_try api --paginate "repos/${repo}/commits/${1}/check-runs?per_page=100&filter=latest" \
-    --jq '.check_runs[] | [(.status // "" | tostring | @base64), (.conclusion // "" | tostring | @base64), ((.app.id // 0) | tostring | @base64), (.name // "" | tostring | if explode | any(. < 32 or . == 127 or . == 133 or . == 8232 or . == 8233) then "1" else "0" end), (.name // "" | tostring | @base64)] | join("\u001f")'
+    --jq '(["T", ((.total_count // -1) | tostring | @base64)] | join("\u001f")), (.check_runs[] | ["R", (.status // "" | tostring | @base64), (.conclusion // "" | tostring | @base64), ((.app.id // 0) | tostring | @base64), (.name // "" | tostring | if explode | any(. < 32 or . == 127 or . == 133 or . == 8232 or . == 8233) then "1" else "0" end), (.head_sha // "" | tostring | @base64), (.name // "" | tostring | @base64)] | join("\u001f"))'
 }
 
-b64d() { printf '%s' "$1" | base64 -d 2>/dev/null || true; }
+# Canonical base64 only. The pattern is the exact shape including the rule that the unused trailing bits
+# are zero (the last character before "==" is one of A Q g w, before "=" one of A E I M Q U Y c g k o s w
+# 0 4 8), so a value has exactly one spelling and equality of encodings is equality of values.
+B64_RE='^([A-Za-z0-9+/]{4})*([A-Za-z0-9+/][AQgw]==|[A-Za-z0-9+/]{2}[AEIMQUYcgkosw048]=)?$'
+enc() { printf '%s' "$1" | base64 | tr -d '\n'; }
+
+# Strict decode, for the few values read as data (a count): the shape, a decode that succeeds, and a
+# re-encode equal to the input. The decoded value is left in B64_VALUE.
+b64_strict() {
+  local dec
+  [[ "$1" =~ $B64_RE ]] || return 1
+  dec="$(printf '%s' "$1" | base64 -d 2>/dev/null)" || return 1
+  [[ "$(enc "$dec")" == "$1" ]] || return 1
+  B64_VALUE="$dec"
+}
+
+# A name for a message, only ever for a run that is already known to be safe to print.
+dec_display() {
+  local d
+  d="$(printf '%s' "$1" | base64 -d 2>/dev/null | tr -d '\000-\037\177')" || d=""
+  printf '%s' "${d:-unnamed}"
+}
 
 pin=""
 if [[ -n "$pr" ]]; then
@@ -259,65 +308,88 @@ last_sig=""
 polls=0
 fails=0
 
-is_context() {
-  local c
-  for c in "${contexts[@]}"; do
-    [[ "$1" == "$c" ]] && return 0
+# Values are compared in their encoded form, which is canonical and so unique: no per-run decoding.
+B_COMPLETED="$(enc completed)"
+B_SUCCESS="$(enc success)"
+B_APP="$(enc "$app_id")"
+declare -A BAD_CONCLUSION=()
+for c in failure cancelled timed_out action_required startup_failure stale; do
+  BAD_CONCLUSION["$(enc "$c")"]="$c"
+done
+context_enc=()
+for c in "${contexts[@]}"; do
+  context_enc+=("$(enc "$c")")
+done
+
+is_context_enc() {
+  local e
+  for e in "${context_enc[@]}"; do
+    [[ "$1" == "$e" ]] && return 0
   done
   return 1
 }
 
+# Truncation: the endpoint lists at most the 1000 most recent check suites of a ref.
+RUN_LIST_CAP=1000
+
 # Sets verdict (green|red|pending) and detail for the lines passed in.
 evaluate() {
-  local lines="$1" status conclusion app name c b_status b_conclusion b_app hostile_flag b_name
+  local lines="$1" kind f1 f2 f3 f4 f5 f6 i b_pin
   foreign=0
   hostile=0
+  local runs_seen=0 count_lines=0 count_missing=0 total_count=0
   local total=0 complete=0 bad=0 badname="" seen_ok seen_any
   local -A ctx_seen=() ctx_ok=() ctx_open=()
-  while IFS=$'\x1f' read -r b_status b_conclusion b_app hostile_flag b_name; do
-    [[ -n "$b_status$b_conclusion$b_app$hostile_flag$b_name" ]] || continue
-    # Anything that is not exactly the shape jq emits is treated like a hostile name.
-    if [[ ! "$hostile_flag" =~ ^[01]$ || ! "$b_status" =~ ^[A-Za-z0-9+/]*=*$ || ! "$b_conclusion" =~ ^[A-Za-z0-9+/]*=*$ ||
-      ! "$b_app" =~ ^[A-Za-z0-9+/]*=*$ || ! "$b_name" =~ ^[A-Za-z0-9+/]*=*$ ]]; then
+  b_pin="$(enc "$pin")"
+  while IFS=$'\x1f' read -r kind f1 f2 f3 f4 f5 f6; do
+    [[ -n "$kind$f1$f2$f3$f4$f5$f6" ]] || continue
+    if [[ "$kind" == T ]]; then
+      if [[ -n "$f2$f3$f4$f5$f6" ]] || ! b64_strict "$f1" || [[ ! "$B64_VALUE" =~ ^(-1|0|[1-9][0-9]{0,8})$ ]]; then
+        hostile=$((hostile + 1))
+        continue
+      fi
+      count_lines=$((count_lines + 1))
+      if [[ "$B64_VALUE" == -1 ]]; then
+        count_missing=1
+      elif [[ $((10#$B64_VALUE)) -gt $total_count ]]; then
+        total_count=$((10#$B64_VALUE))
+      fi
+      continue
+    fi
+    if [[ "$kind" != R ]]; then
       hostile=$((hostile + 1))
       continue
     fi
-    if [[ "$hostile_flag" == 1 ]]; then
-      hostile=$((hostile + 1))
-      continue
-    fi
-    status="$(b64d "$b_status")"
-    conclusion="$(b64d "$b_conclusion")"
-    app="$(b64d "$b_app")"
-    name="$(b64d "$b_name")"
-    if [[ ! "$status" =~ ^[a-z_]*$ || ! "$conclusion" =~ ^[a-z_]*$ || ! "$app" =~ ^[0-9]+$ || "$name" =~ [[:cntrl:]] ]]; then
+    runs_seen=$((runs_seen + 1))
+    # Anything that is not exactly the shape jq emits, a name that jq flagged, or a run for another
+    # commit is hostile.
+    if [[ ! "$f4" =~ ^0$ || ! "$f1" =~ $B64_RE || ! "$f2" =~ $B64_RE || ! "$f3" =~ $B64_RE || ! "$f5" =~ $B64_RE ||
+      ! "$f6" =~ $B64_RE || "$f5" != "$b_pin" ]]; then
       hostile=$((hostile + 1))
       continue
     fi
     # A run that carries a required name but comes from another app is ignored altogether.
-    if [[ $any_app -eq 0 && "$app" != "$app_id" ]] && is_context "$name"; then
+    if [[ $any_app -eq 0 && "$f3" != "$B_APP" ]] && is_context_enc "$f6"; then
       foreign=$((foreign + 1))
       continue
     fi
     total=$((total + 1))
-    if [[ "$status" == completed ]]; then
+    if [[ "$f1" == "$B_COMPLETED" ]]; then
       complete=$((complete + 1))
-      case "$conclusion" in
-        failure | cancelled | timed_out | action_required | startup_failure | stale)
-          bad=$((bad + 1))
-          badname="${badname:-${name} (${conclusion})}"
-          ;;
-      esac
+      if [[ -n "$f2" && -n "${BAD_CONCLUSION[$f2]:-}" ]]; then
+        bad=$((bad + 1))
+        badname="${badname:-$(dec_display "$f6") (${BAD_CONCLUSION[$f2]})}"
+      fi
     fi
-    for c in "${contexts[@]}"; do
-      [[ "$name" == "$c" ]] || continue
-      ctx_seen["$c"]=1
-      if [[ "$status" != completed ]]; then
-        ctx_open["$c"]=1
-      elif [[ "$conclusion" != success ]]; then
-        ctx_ok["$c"]=bad
-      elif [[ "${ctx_ok[$c]:-}" != bad ]]; then
-        ctx_ok["$c"]=ok
+    for i in "${!contexts[@]}"; do
+      [[ "$f6" == "${context_enc[$i]}" ]] || continue
+      ctx_seen[$i]=1
+      if [[ "$f1" != "$B_COMPLETED" ]]; then
+        ctx_open[$i]=1
+      elif [[ "$f2" != "$B_SUCCESS" ]]; then
+        ctx_ok[$i]=bad
+      elif [[ "${ctx_ok[$i]:-}" != bad ]]; then
+        ctx_ok[$i]=ok
       fi
     done
   done <<<"$lines"
@@ -325,7 +397,7 @@ evaluate() {
   verdict=pending
   if [[ $hostile -gt 0 ]]; then
     verdict=red
-    detail="${hostile} check run(s) on ${pin} with a control character in the name or malformed fields; refusing (possible forgery)"
+    detail="${hostile} check run(s) on ${pin} with a control character in the name, a head_sha other than the pinned commit or malformed fields; refusing (possible forgery)"
     return 0
   fi
   if [[ $foreign -gt 0 ]]; then
@@ -336,19 +408,23 @@ evaluate() {
     detail="${badname} on ${pin}"
     return 0
   fi
+  if [[ $count_lines -eq 0 || $count_missing -eq 1 || $total_count -gt $runs_seen || $total_count -ge $RUN_LIST_CAP ]]; then
+    detail="check-run list may be truncated (total_count ${total_count}, ${runs_seen} seen, cap ${RUN_LIST_CAP}); not trusting it"
+    return 0
+  fi
   if [[ $total -eq 0 ]]; then
     detail="no check runs on ${pin} yet"
     return 0
   fi
   seen_ok=1
   seen_any=""
-  for c in "${contexts[@]}"; do
-    if [[ -z "${ctx_seen[$c]:-}" ]]; then
+  for i in "${!contexts[@]}"; do
+    if [[ -z "${ctx_seen[$i]:-}" ]]; then
       seen_ok=0
-      seen_any="${seen_any}'${c}' not reported; "
-    elif [[ -n "${ctx_open[$c]:-}" || "${ctx_ok[$c]:-}" != ok ]]; then
+      seen_any="${seen_any}'${contexts[$i]}' not reported; "
+    elif [[ -n "${ctx_open[$i]:-}" || "${ctx_ok[$i]:-}" != ok ]]; then
       seen_ok=0
-      seen_any="${seen_any}'${c}' not finished; "
+      seen_any="${seen_any}'${contexts[$i]}' not finished; "
     fi
   done
   if [[ $seen_ok -eq 0 ]]; then

@@ -45,9 +45,38 @@ race seen on GYST #218), and a push that moved the head under the loop. This scr
   Any other failure (a conflict, a closed pull request, a 403) is exit 1 at once with `merge blocked: not a policy block`.
   An unknown message is treated as not retryable. When gh accepts the merge but the pull request is not merged afterwards
   (a merge queue, auto-merge), the result is `queued`, exit 5, and `merged` stays `false`. It never passes `--admin` or `--auto`.
+- **The list must be whole.** The check-runs endpoint shows at most the 1000 most recent check suites of a ref (GitHub's REST
+  description: "If there are more than 1000 check suites on a single git reference, this endpoint will limit check runs to the
+  1000 most recent check suites"). The script keeps the response's `total_count` (with `filter=latest` it equals the runs
+  returned; probed against live check runs on 2026-10-26: 95 of 95, where `filter=all` gave 180) and compares it with the runs
+  actually seen across the pages. If `total_count` is larger than the runs seen, or reaches 1000, or is missing, the commit is
+  not green: the output says `check-run list may be truncated`, the script keeps waiting and ends in exit 2 (timeout) or 3
+  (hung), never green. A run that is visibly failed is still red. The cap counts suites, not runs, and the suite count is not
+  exposed, so 1000 runs is the conservative stand-in: a commit with that many check runs cannot be passed by this tool.
+  Every run must also carry the pinned commit as its `head_sha`; one that does not is red.
 - **Hostile names are an error.** A check run whose name contains a control character (U+0000 to U+001F, DEL, U+0085, U+2028,
   U+2029) makes the result red with exit 1, whoever posted it. Names reach bash base64-encoded, so no name can add a line or a
   field to what the script parses; a forged `completed`, `success`, `CI green` line inside a name cannot satisfy the gate.
+  Only canonical base64 is accepted (exact shape, zero trailing bits), values are compared in their encoded form, and a
+  malformed field is treated as hostile. The real `gh api` already rewrites control characters other than tab, newline and
+  carriage return into caret notation before `--jq` runs (ESC becomes `^[`, NUL `^@`, observed with gh 2.100.0), so through
+  `gh` those names arrive as harmless printable text; the check still stands for the characters `gh` leaves alone and for any
+  other client.
+- **Numbers are plain and bounded.** Every numeric option is digits only: no sign, no spaces, no leading zero, no hex, no
+  other script's digits, at most nine digits. Anything else, or a value outside its range, is exit 64 naming the option.
+  Arithmetic is forced to base 10.
+
+| Option | Allowed |
+|---|---|
+| `--pr` | 1 to 999999999 |
+| `--app-id` | 1 to 999999999 |
+| `--min-checks` | 1 to 100000 |
+| `--timeout` | 1 to 604800 seconds (seven days) |
+| `--hung-after` | 1 to 604800 seconds |
+| `--interval` | 1 to 3600 seconds |
+| `--merge-retries` | 0 to 100 |
+| `--merge-retry-delay` | 0 to 3600 seconds |
+
 - **It prints the SHA it verified:** `wait-ci: verified <sha>: green`.
 - **It never prints a token.** Every line of `gh` output that reaches the log is cut to one line and has the value of `GH_TOKEN` and
   `GITHUB_TOKEN` replaced. The script does not trace (`set -x`) and does not `eval`.
@@ -146,4 +175,4 @@ is merged at that commit). The outputs are written even when the step fails, so 
 clock, so waits cost no time and every call is on record. It covers the pinned head, abort and reset on a push, no checks, a
 context that has not reported, exact matching, hostile check run names (newline, carriage return, the field separator, NUL, DEL, U+2028 and more, through the real `jq`), pages, reruns, failed and cancelled, timeout, hung, merge retry and its bound, a head that moves
 between the last check and the merge, a token that must not appear, bad input, and the action's own step run end to end.
-The fake `gh` serves GitHub-shaped JSON and applies the script's real `--jq` expression with the real `jq` (a test dependency; the test run fails in CI and skips locally without it), honors `per_page`, `--paginate` and `filter`, and keeps the newest run per name and app for `filter=latest`. The head pin, the required-context rule, the no-checks rule and the name encoding were each broken on purpose to confirm the tests go red. Not covered: GitHub's own `gh` uses gojq, not `jq`; the expression sticks to features both have.
+The fake `gh` serves GitHub-shaped JSON and applies the script's real `--jq` expression with the real `jq` (a test dependency; the test run fails in CI and skips locally without it). The key cases also run a second way: the real `gh` (whose embedded gojq is what runs the expression in production) talks to a loopback TLS server serving the same scenario, using a throwaway certificate from `openssl`; those cases fail in CI and skip locally without `gh` or `openssl`. honors `per_page`, `--paginate` and `filter`, and keeps the newest run per name and app for `filter=latest`. The head pin, the required-context rule, the no-checks rule and the name encoding were each broken on purpose to confirm the tests go red. Not covered: a merge through the real `gh` (it uses GraphQL, so merges run against the fake only).
