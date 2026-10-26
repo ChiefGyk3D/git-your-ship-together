@@ -1712,7 +1712,7 @@ Inputs of `security.yml`:
 | `scorecard` | `false` | OpenSSF Scorecard, published; runs only on the default branch (push or schedule) |
 | `python-version` | `3.13` | Python for pip-audit, Semgrep and Snyk. The tool locks cover CPython 3.10 through 3.14 |
 | `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `audit`, the measured list, empty | harden-runner, as in `python-ci.yml` |
-| `egress-policy-secretless` | `audit` | harden-runner policy for the jobs that hold no stored secret, no OIDC token and no write-scoped token, and whose output no privileged job consumes; exactly `audit` or `block`. Governed by security exception EX-0001, see [Known CI platform issue: westus2 (EX-0001)](#known-ci-platform-issue-westus2-ex-0001). `block` opts back in |
+| `egress-policy-secretless` | `audit` | harden-runner policy for the jobs that hold no stored secret, no OIDC token and no write-scoped token (`dependency-review` also holds its comment-scoped pull-requests write grant, a stated EX-0001 deviation), and whose output no privileged job consumes; exactly `audit` or `block`. Governed by security exception EX-0001, see [Known CI platform issue: westus2 (EX-0001)](#known-ci-platform-issue-westus2-ex-0001). `block` opts back in |
 | `doppler-project`, `doppler-config`, `doppler-identity-id` | empty | See [Doppler setup](#doppler-setup) |
 | `doppler-trusted-refs-only` | `true` | Fetch CI secrets only on the default branch, a version tag (vN.N.N) or a schedule; never on a pull request. See [Doppler setup](#doppler-setup) |
 | `timeout-minutes` | `15` | Per-job timeout |
@@ -2328,6 +2328,11 @@ latest or when the upstream defect is fixed:
   The existing `egress-policy` keeps governing every other job and keeps its default. A job that builds or
   generates something a privileged job then publishes or deploys stays under `egress-policy`. The exception
   record lists the jobs on each side and a test pins the list to the YAML.
+- Widened on 2026-10-26 (issue #225): `security.yml` `dependency-review` and `python-ci.yml` `test` now follow
+  `egress-policy-secretless` too. `dependency-review` holds a comment-scoped `pull-requests: write` token, the one
+  stated deviation from "secretless"; `test` holds nothing and only feeds the coverage report to Codecov. Every job
+  with a stored secret, an OIDC token or a publish-capable token, and the build jobs of the release paths, stay in
+  `block`. The expiry is unchanged.
 - The exception covers GitHub-hosted runners only, decided at run time: a secretless job is `audit` only when
   the policy input equals `audit` and `runner.environment` is `github-hosted` (GitHub's own context; a
   self-hosted runner can carry any label, so a label proves nothing). Where a caller also picks the runner

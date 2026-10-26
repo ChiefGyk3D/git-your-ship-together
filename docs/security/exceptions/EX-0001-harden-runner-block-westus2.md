@@ -6,7 +6,7 @@
 | Date | 2026-10-24 |
 | Owner | ChiefGyk3D |
 | Status | **active** |
-| Issue | ChiefGyk3D/git-your-ship-together#189 |
+| Issue | ChiefGyk3D/git-your-ship-together#189; widened 2026-10-26 under ChiefGyk3D/git-your-ship-together#225 |
 | Expires | 2026-11-07 at the latest, or earlier when the upstream defect is fixed (see "Expiry") |
 | Control relaxed | harden-runner `egress-policy: block` becomes `audit`, for secretless jobs only, by the new default of the `egress-policy-secretless` input |
 
@@ -130,11 +130,11 @@ Relaxed (policy follows `egress-policy-secretless`, default `audit`): the jobs b
 
 | Workflow | Jobs relaxed |
 |---|---|
-| `python-ci.yml` | `lint`, `typecheck`, `workflow-lint`, `distro`, `smoke`, `docker`, `fragment-check`, `commit-claims`, `ci-green` |
+| `python-ci.yml` | `lint`, `typecheck`, `workflow-lint`, `distro`, `smoke`, `docker`, `fragment-check`, `commit-claims`, `ci-green`, `test` (added 2026-10-26, #225) |
 | `bash-ci.yml` | `shellcheck`, `shfmt`, `test`, `distro`, `config-lint`, `workflow-lint`, `fragment-check`, `commit-claims`, `ci-green` |
 | `tofu-ci.yml` | `fmt`, `validate`, `test`, `tflint`, `trivy`, `policy`, `workflow-lint`, `ci-green` |
 | `arduino-ci.yml` | `compile`, `test`, `workflow-lint`, `ci-green` |
-| `security.yml` | `codeql`, `gitleaks`, `dependency-audit`, `semgrep` (SARIF upload with the default token only) |
+| `security.yml` | `codeql`, `gitleaks`, `dependency-audit`, `semgrep` (SARIF upload with the default token only), `dependency-review` (added 2026-10-26, #225; holds `pull-requests: write`, see "Widening of 2026-10-26") |
 | `dast.yml` | `upload` (SARIF upload only) |
 | `python-fuzz.yml` | `fuzz` |
 | `threat-model.yml` | `check` |
@@ -161,10 +161,8 @@ expression; exactly, by the policy check that runs first).
 | `wiki-publish.yml` | `publish` | `contents: write` |
 | `wiki-publish.yml` | `generate` | runs caller code; its artifact is pushed verbatim by `publish` |
 | `python-ci.yml` | `coverage` | `id-token`, Doppler, the Codecov upload |
-| `python-ci.yml` | `test` | its coverage artifact is uploaded to Codecov by `coverage` |
 | `dast.yml` | `scan` | its SARIF artifact is uploaded verbatim by `upload` (`security-events: write`) |
 | `security.yml` | `snyk`, `scorecard` | `id-token`, Doppler (`SNYK_TOKEN`) |
-| `security.yml` | `dependency-review` | **ambiguous**: `pull-requests: write` |
 | `tofu-ci.yml` | `plan` | `id-token`, Doppler |
 | `verify-published.yml` | `verify` | passes the job token to `gh attestation verify`; `packages: read` |
 | `verify-published.yml` | `verify-release` | passes the job token to `gh release download` and `gh attestation verify` |
@@ -179,6 +177,68 @@ holds any of those, or whose artifact or outputs feed a job kept in `block`, can
 input.
 
 Not in scope: this repository's own `ci.yml` jobs (already `audit` before this exception).
+
+## Widening of 2026-10-26
+
+Ordered by the maintainer on 2026-10-26 under ChiefGyk3D/git-your-ship-together#225, after the egress canary kept
+failing jobs on westus2 in the consumer repositories. The expiry above is unchanged (2026-11-07). The mechanism
+is the existing `egress-policy-secretless` input, the exact-string policy check, the `runner.environment ==
+'github-hosted'` runtime control, the label rule and the canary; only the set of jobs that follow the input grew.
+
+Evidence, read-only, from failed and cancelled runs since 2026-10-19 in `scrum-around-and-find-out`,
+`department-of-internal-arguments` and this repository (jobs whose canary step failed): `python-ci` `test` in
+seven runs, `security` `dependency-review` in three, `security` `scorecard` in four, `python-package-release`
+`build` in three, and one or two each for `artifact-release` `build`, `docs-pages` `build`, `wiki-publish`
+`generate` and `verify-published` `verify` (five runs). One run listing returned a server error and was not
+read, so the list may be short.
+
+**Relaxed by this widening: two jobs.**
+
+| Job | What it holds | Decision |
+|---|---|---|
+| `security.yml` `dependency-review` | `contents: read` and `pull-requests: write`, the job token, for the action's summary comment (`comment-summary-in-pr: on-failure`). No stored secret, no OIDC `id-token`, no publish scope, no Doppler. | relaxed (maintainer decision, 2026-10-26) |
+| `python-ci.yml` `test` | `contents: read` only. No `secrets.*`, no `id-token`, no Doppler, no token input. It runs the caller's own code. | relaxed |
+
+**`dependency-review` is the one deviation from the "secretless" definition above, stated plainly.** That
+definition excludes any write-scoped token. This job holds a write-scoped token: `pull-requests: write` on the job
+token, which lets the review action post, edit or delete a comment on pull requests of the calling repository.
+The maintainer decided on 2026-10-26 that the job is relaxed anyway. Why this is acceptable: the job runs on a
+GitHub-hosted runner (the runtime control keeps a self-hosted runner in `block`), which is ephemeral and thrown
+away after the run; the token is minted per run and expires with it; the scope covers pull-request comments
+and nothing that publishes, pushes, tags, releases, deploys or writes a package, a workflow or code; there is
+no stored secret, no OIDC token and no Doppler access in the job. In `audit` a compromised step could send that
+token to any host while the job runs, and in the meantime use it to write comments on the repository's pull
+requests; it could not change code or reach a secret. `tests/test_egress_canary.py` pins that this job holds
+exactly `pull-requests: write` beyond `contents: read` and nothing from the secret markers, so a further grant
+fails the test.
+
+**`test` is the second stated extension.** The secretless definition says no output that a privileged job
+consumes verbatim, and `test` uploads the coverage report that the kept-block `coverage` job sends to Codecov.
+That artifact is a data file (Cobertura XML), not code and not a build output, and no path from it reaches a
+publish, deploy or release step. The worst a poisoned report does is show a wrong coverage number or fail the
+Codecov upload. `test` itself holds no credential. The test suite lists it as the only job allowed to feed a
+kept-block job.
+
+**Kept in `block`, with the reason** (these jobs hold a stored secret, an OIDC token or a publish-capable token,
+or sit in a release path; a test lists the secret-bearing ones):
+
+| Workflow | Jobs | Reason |
+|---|---|---|
+| `security.yml` | `scorecard` | `id-token`, and the job publishes results |
+| `security.yml` | `snyk` | `id-token`, Doppler (`SNYK_TOKEN`) |
+| `python-ci.yml` | `coverage` | `id-token`, Doppler, the Codecov upload |
+| `tofu-ci.yml` | `plan` | `id-token`, Doppler |
+| `verify-published.yml` | `verify`, `verify-release` | the job token goes to `gh attestation verify` and `gh release download`; `packages: read` |
+| `python-package-release.yml` | `build` | builds the distribution that `github-release` signs and publishes |
+| `artifact-release.yml` | `build` | builds the file that `publish` signs and publishes |
+| `docs-pages.yml` | `build` | runs caller code; `deploy` publishes its artifact verbatim |
+| `wiki-publish.yml` | `generate` | runs caller code; `publish` pushes its artifact verbatim |
+| `container-release.yml`, `artifact-release.yml`, `python-package-release.yml`, `docs-pages.yml`, `wiki-publish.yml` | publish, push and deploy jobs | `contents`, `packages` or `pages: write`, `id-token`, Doppler, attestations |
+| `project-sync.yml`, `dependabot-auto-merge.yml`, `audit.yml` | all | a GitHub App token, `contents: write`, Doppler |
+
+The build and generate jobs hold no credential of their own; they stay in `block` because a release or a deployment
+consumes their output verbatim, which the definition excludes, and several of them were among the failures above.
+Moving them is a separate maintainer decision; this record does not make it.
 
 ## Compensating controls
 
@@ -238,9 +298,8 @@ without the Actions cache: a few tens of seconds per job on the short jobs measu
 dependency tree. Callers that run `block` get the caches back.
 
 **Residual.** In block mode the secretless jobs and the jobs that stay in `block` share the pip cache namespace
-(for example `python-ci` `lint`, `typecheck`, `smoke` and `test`). They run the same caller code under the same
-egress filter, which is the trust level the project already extends to its own `test` job; the exception does not
-widen it. This is the part a separate namespace would fix, and the action offers none.
+(for example `python-ci` `lint`, `typecheck` and `smoke`; `test` followed them until 2026-10-26, when it became an audit job
+and lost its cache). They run the same caller code under the same egress filter; the exception does not widen it. This is the part a separate namespace would fix, and the action offers none.
 
 Every cache and artifact that can cross a trust class, with the decision:
 
@@ -256,7 +315,7 @@ Every cache and artifact that can cross a trust class, with the decision:
 | `ci.yml` (this repository's own CI, always audit) | setup-python `cache: pip` in four jobs | removed: `audit.yml` (block, Doppler) restores the same key |
 | `audit.yml` | setup-python `cache: pip` | kept: both jobs are hardcoded `block` |
 | `python-package-release` `build`, `artifact-release` `build` | none (a publishing build never reads a cache; a test holds this) | no change |
-| artifacts: `python-ci` `test` to `coverage`, `dast` `scan` to `upload`, `docs-pages` `build` to `deploy`, `wiki-publish` `generate` to `publish`, `verify-published` `verify-release` to `rescan` | job to job within one run | the producer of each that feeds a privileged consumer is kept under `egress-policy` (see the table above); `rescan` is secretless and only reads what block-class jobs wrote |
+| artifacts: `python-ci` `test` to `coverage`, `dast` `scan` to `upload`, `docs-pages` `build` to `deploy`, `wiki-publish` `generate` to `publish`, `verify-published` `verify-release` to `rescan` | job to job within one run | the producer of each that feeds a privileged consumer is kept under `egress-policy` (see the table above), except `python-ci` `test`, whose artifact is a coverage report ("Widening of 2026-10-26"); `rescan` is secretless and only reads what block-class jobs wrote |
 
 `tests/test_egress_canary.py` collects every cache site in every workflow and requires each one to be either a
 hash-verified tool cache or gated on its own job's effective policy, then evaluates the gate for audit, block,

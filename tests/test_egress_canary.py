@@ -674,10 +674,8 @@ KEPT_BLOCK = {
     ("lory-audit.yml", "audit"),  # LORY_PIPELINE_TOKEN, a third-party bearer token
     ("project-sync.yml", "sync"),  # id-token, Doppler, a GitHub App token
     ("python-ci.yml", "coverage"),  # id-token, Doppler, the Codecov upload
-    ("python-ci.yml", "test"),  # its coverage artifact is uploaded to Codecov by `coverage`
     ("python-package-release.yml", "build"),  # builds the distribution that is published
     ("python-package-release.yml", "github-release"),  # contents: write, id-token, attestations
-    ("security.yml", "dependency-review"),  # pull-requests: write
     ("security.yml", "snyk"),  # id-token, Doppler, SNYK_TOKEN
     ("security.yml", "scorecard"),  # id-token
     ("tofu-ci.yml", "plan"),  # id-token, Doppler
@@ -686,6 +684,32 @@ KEPT_BLOCK = {
     ("wiki-publish.yml", "generate"),  # runs caller code; its artifact is pushed verbatim by `publish`
     ("wiki-publish.yml", "publish"),  # contents: write
 }
+# Documented extensions to "secretless" (EX-0001, "Widening of 2026-10-26", issue #225). Each is pinned exactly:
+# the job may hold that and nothing else, so a new grant or secret on it still fails the guard.
+ALLOWED_HOLDINGS = {
+    # the comment-scoped job token for the PR summary comment; no stored secret, no OIDC, no publish scope
+    ("security.yml", "dependency-review"): ["pull-requests: write"],
+}
+# A job whose artifact is a data report a kept-block job uploads to a third party, never code that is published.
+ARTIFACT_TO_PRIVILEGED_OK = {("python-ci.yml", "test")}  # the coverage report that `coverage` sends to Codecov
+# Jobs that hold a stored secret, an OIDC token or a publish-capable token: they must stay in block (issue #225).
+MUST_STAY_BLOCK = {
+    ("python-ci.yml", "coverage"),  # id-token, Doppler, Codecov
+    ("security.yml", "snyk"),  # Doppler, SNYK_TOKEN
+    ("security.yml", "scorecard"),  # id-token, publishes results
+    ("tofu-ci.yml", "plan"),  # id-token, Doppler
+    ("container-release.yml", "build"),  # packages: write, id-token, Doppler
+    ("container-release.yml", "merge"),  # packages: write, id-token, Doppler
+    ("artifact-release.yml", "publish"),  # contents: write, id-token, attestations
+    ("python-package-release.yml", "github-release"),  # contents: write, id-token, attestations
+    ("docs-pages.yml", "deploy"),  # pages: write, id-token
+    ("wiki-publish.yml", "publish"),  # contents: write
+    ("project-sync.yml", "sync"),  # GitHub App token, Doppler
+    ("verify-published.yml", "verify"),  # the job token goes to gh attestation verify
+    ("verify-published.yml", "verify-release"),  # the job token goes to gh release download
+}
+# The widening of 2026-10-26: these follow the secretless input although they were in block before.
+WIDENED = {("security.yml", "dependency-review"), ("python-ci.yml", "test")}
 SECRET_MARKERS = (
     "${{ secrets.",
     "doppler",
@@ -744,8 +768,61 @@ def test_a_job_follows_the_secretless_input_only_if_it_holds_nothing(path, name,
     follows_secretless = "egress-policy-secretless" in policy
     assert follows_secretless == ((path.name, name) not in KEPT_BLOCK), f"{path.name}:{name} is classified differently"
     if follows_secretless:
-        assert what_a_job_holds(job) == [], f"{path.name}:{name} holds something and must follow egress-policy"
-        assert not artifact_feeds_a_privileged_job(path, name), f"{path.name}:{name} feeds a privileged job"
+        key = (path.name, name)
+        assert what_a_job_holds(job) == ALLOWED_HOLDINGS.get(key, []), (
+            f"{path.name}:{name} holds something and must follow egress-policy"
+        )
+        assert key in ARTIFACT_TO_PRIVILEGED_OK or not artifact_feeds_a_privileged_job(path, name), (
+            f"{path.name}:{name} feeds a privileged job"
+        )
+
+
+def test_the_widening_of_2026_10_26_is_pinned_both_ways():
+    """Issue #225: the two widened jobs follow the secretless input; every job that holds a secret, OIDC or a
+    publish-capable token stays in block, and no widened job is also on the must-stay list."""
+    policies = {(p.name, n): s[0]["with"]["egress-policy"] for p, n, _j, s in workflow_jobs()}
+    for key in sorted(WIDENED):
+        assert "egress-policy-secretless" in policies[key], f"{key} must follow egress-policy-secretless"
+        assert key not in KEPT_BLOCK
+    for key in sorted(MUST_STAY_BLOCK):
+        assert key in policies, f"{key} is not a real job"
+        assert key in KEPT_BLOCK, f"{key} holds a secret, OIDC or a publish token and must stay in KEPT_BLOCK"
+        assert "egress-policy-secretless" not in policies[key], f"{key} must stay in block"
+        assert "runner.environment" not in policies[key]
+    assert not WIDENED & MUST_STAY_BLOCK
+
+
+def test_the_widened_jobs_hold_exactly_what_the_record_says():
+    by_key = {(p.name, n): j for p, n, j, _s in workflow_jobs()}
+    assert what_a_job_holds(by_key[("security.yml", "dependency-review")]) == ["pull-requests: write"]
+    assert what_a_job_holds(by_key[("python-ci.yml", "test")]) == []
+    # the comment token is the only write scope; nothing else is handed to the review action
+    review = yaml.safe_dump(by_key[("security.yml", "dependency-review")])
+    for marker in ("secrets.", "id-token", "doppler", "DOPPLER", "repo-token"):
+        assert marker not in review
+
+
+def test_the_extension_tables_do_not_hide_a_new_grant():
+    """Negative case: the extension allows exactly one holding on one job and nothing for any other."""
+    assert ALLOWED_HOLDINGS == {("security.yml", "dependency-review"): ["pull-requests: write"]}
+    widened_job = {"permissions": {"contents": "read", "pull-requests": "write", "id-token": "write"}}
+    assert what_a_job_holds(widened_job) != ALLOWED_HOLDINGS[("security.yml", "dependency-review")]
+    with_secret = {"permissions": {"contents": "read", "pull-requests": "write"}, "steps": [{"run": "doppler x"}]}
+    assert what_a_job_holds(with_secret) != ALLOWED_HOLDINGS[("security.yml", "dependency-review")]
+    assert ARTIFACT_TO_PRIVILEGED_OK == {("python-ci.yml", "test")}
+
+
+def test_the_record_lists_the_widened_jobs_and_the_order():
+    text = RECORD.read_text()
+    assert "Widening of 2026-10-26" in text and "#225" in text
+    relaxed = text.split("Relaxed (policy follows", 1)[1].split("**Kept in `block`**", 1)[0]
+    rows = {line.split("|")[1].strip(): line for line in relaxed.splitlines() if line.startswith("| `")}
+    assert "`dependency-review`" in rows["`security.yml`"]
+    assert "`test`" in rows["`python-ci.yml`"]
+    kept = text.split("**Kept in `block`**", 1)[1].split("Ambiguous means", 1)[0]
+    assert "`dependency-review`" not in kept
+    assert "| `python-ci.yml` | `test` |" not in kept
+    assert "| Expires | 2026-11-07" in text
 
 
 @pytest.mark.parametrize(
