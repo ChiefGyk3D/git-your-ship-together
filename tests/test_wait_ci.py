@@ -111,6 +111,24 @@ def shape_runs(st, runs, query):
     return total, runs
 
 
+def suites_body(st, sha):
+    # GET commits/{sha}/check-suites?per_page=1: total_count is every check suite on the ref, also those that
+    # hold no runs (probed live on 2026-10-26: 12 suites behind 3 with runs). The scenario can override it
+    # with any JSON value, drop it, or make the call fail.
+    st["suite_calls"] = st.get("suite_calls", 0) + 1
+    if st.get("suites_fail"):
+        return None
+    if st.get("suites_missing"):
+        return {"check_suites": []}
+    if "suites" in st:
+        return {"total_count": st["suites"], "check_suites": []}
+    fails = st.get("check_failures", 0)
+    snaps = st["checks"].get(sha, [[]])
+    idx = max(0, min(st["check_polls"] - 1 - fails, len(snaps) - 1))
+    apps = {run[3] if len(run) > 3 else 15368 for run in snaps[idx]}
+    return {"total_count": len(apps), "check_suites": []}
+
+
 def split_pages(runs, query):
     per_page = max(1, min(int(query.get("per_page", ["30"])[0]), 100))
     return [runs[i : i + per_page] for i in range(0, len(runs), per_page)] or [[]]
@@ -182,6 +200,19 @@ if argv[:1] == ["api"]:
                 out = out.replace(old, new)
             sys.stdout.write(out)
         sys.exit(0)
+    if "/check-suites" in path:
+        sha = urlsplit(path).path.split("/commits/")[1].split("/")[0]
+        body = suites_body(st, sha)
+        save()
+        if body is None:
+            sys.stderr.write("HTTP 500 using " + tok + "\n")
+            sys.exit(1)
+        proc = subprocess.run(["jq", "-r", jq], input=json.dumps(body), capture_output=True, text=True)
+        if proc.returncode != 0:
+            sys.stderr.write("jq: " + proc.stderr)
+            sys.exit(1)
+        sys.stdout.write(proc.stdout)
+        sys.exit(0)
     sys.stderr.write("fake gh: unexpected api path " + path + "\n")
     sys.exit(97)
 
@@ -229,7 +260,8 @@ def running(name: str, app: int = 15368) -> tuple:
 
 
 HELPER_SOURCE = "\n\n".join(
-    inspect.getsource(f) for f in (current_head, github_runs, latest_only, snapshot_runs, shape_runs, split_pages)
+    inspect.getsource(f)
+    for f in (current_head, github_runs, latest_only, snapshot_runs, shape_runs, suites_body, split_pages)
 )
 
 
@@ -300,6 +332,14 @@ class World:
                     world.state = st
                     world.save()
                     return self.reply(200, {"head": {"sha": current_head(st)}, "merged": st["merged"]})
+                m = re.fullmatch(r"/api/v3/repos/[^/]+/[^/]+/commits/([0-9a-f]+)/check-suites", url.path)
+                if m:
+                    body = suites_body(st, m.group(1))
+                    world.state = st
+                    world.save()
+                    if body is None:
+                        return self.reply(500, {"message": "boom"})
+                    return self.reply(200, body)
                 m = re.fullmatch(r"/api/v3/repos/[^/]+/[^/]+/commits/([0-9a-f]+)/check-runs", url.path)
                 if not m:
                     return self.reply(404, {"message": "Not Found"})
@@ -1053,6 +1093,85 @@ def test_runs_for_the_pinned_commit_are_green(world, engine):
     assert w.run("--repo", SLUG, "--pr", "7", *FAST).returncode == 0
 
 
+# --- the cap GitHub applies is on check SUITES -----------------------------------------------------------
+# "If there are more than 1000 check suites on a single git reference, this endpoint will limit check runs to the
+# 1000 most recent check suites" (REST: list check runs for a Git reference). The run count cannot show that.
+
+
+@ENGINES
+@pytest.mark.parametrize("suites", [1000, 1001, 5000])
+def test_a_suite_count_at_or_over_the_cap_is_not_green_however_few_runs_show(world, engine, suites):
+    # 600 runs, so the run count is nowhere near 1000, yet the suites say the answer may have been cut.
+    runs = [ok(f"job {n}") for n in range(599)] + [ok("CI green")]
+    w = world(checks={A: [runs]}, suites=suites)
+    p = w.run("--repo", SLUG, "--pr", "7", "--interval", "10", "--timeout", "60")
+    assert p.returncode == 2, shown(p)
+    assert "check-run list may be truncated" in p.stdout
+    assert "verified" not in p.stdout
+
+
+@ENGINES
+def test_999_suites_is_under_the_cap_and_green(world, engine):
+    w = world(checks={A: [GATE]}, suites=999)
+    assert w.run("--repo", SLUG, "--pr", "7", *FAST).returncode == 0
+
+
+@ENGINES
+def test_600_runs_in_400_suites_is_green(world, engine):
+    runs = [ok(f"job {n}") for n in range(599)] + [ok("CI green")]
+    w = world(checks={A: [runs]}, suites=400)
+    p = w.run("--repo", SLUG, "--pr", "7", *FAST)
+    assert p.returncode == 0, shown(p)
+    assert w.load()["pages_served"] == 6
+
+
+@ENGINES
+@pytest.mark.parametrize("label", ["null", "string", "negative", "float", "huge", "bool"])
+def test_an_unreadable_suite_count_is_not_green(world, engine, label):
+    value = {"null": None, "string": "7", "negative": -1, "float": 3.5, "huge": 10**12, "bool": True}[label]
+    w = world(checks={A: [GATE]}, suites=value)
+    p = w.run("--repo", SLUG, "--pr", "7", "--interval", "10", "--timeout", "60")
+    assert p.returncode == 2, f"{label}\n" + shown(p)
+    assert "check-run list may be truncated" in p.stdout
+
+
+@ENGINES
+def test_a_missing_suite_count_is_not_green(world, engine):
+    w = world(checks={A: [GATE]}, suites_missing=True)
+    p = w.run("--repo", SLUG, "--pr", "7", "--interval", "10", "--timeout", "60")
+    assert p.returncode == 2, shown(p)
+    assert "check-run list may be truncated" in p.stdout
+
+
+@ENGINES
+def test_a_failing_suite_call_is_not_green_and_backs_off(world, engine):
+    w = world(checks={A: [GATE]}, suites_fail=True)
+    p = w.run("--repo", SLUG, "--pr", "7", "--interval", "10", "--timeout", "100", "--hung-after", "100000")
+    assert p.returncode == 2, shown(p)
+    assert "verified" not in p.stdout
+    assert w.sleeps()[:3] == [10, 20, 40]
+
+
+@ENGINES
+def test_a_visible_failure_is_still_red_when_the_suite_count_is_over_the_cap(world, engine):
+    w = world(checks={A: [[ok("CI green"), done("lint", "failure")]]}, suites=1000)
+    assert w.run("--repo", SLUG, "--pr", "7", *FAST).returncode == 1
+
+
+@ENGINES
+def test_the_suite_count_is_asked_once_per_poll_not_once_per_page(world, engine):
+    runs = [ok(f"job {n}") for n in range(299)] + [ok("CI green")]
+    snaps = [[running("CI green")] + runs[:250], runs]
+    w = world(checks={A: snaps})
+    p = w.run("--repo", SLUG, "--pr", "7", *FAST)
+    assert p.returncode == 0, shown(p)
+    st = w.load()
+    assert st["check_polls"] == 2
+    assert st["suite_calls"] == st["check_polls"]
+    asked = [c for c in w.calls() if "check-suites" in c]
+    assert len(asked) == 2 and all("per_page=1" in c for c in asked)
+
+
 # --- base64 must be canonical ---------------------------------------------------------------------------
 
 SPELLINGS = {
@@ -1088,6 +1207,7 @@ def test_the_page_documents_the_numeric_limits_and_the_truncation_rule():
         assert re.search(rf"`{option}`[^\n]*\b{high}\b", text), f"the maximum of {option} is not in the page"
     assert "may be truncated" in text
     assert "1000" in text
+    assert "check-suites" in text
 
 
 # --- red -----------------------------------------------------------------------

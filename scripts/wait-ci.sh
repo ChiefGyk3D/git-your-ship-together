@@ -11,10 +11,11 @@
 #     failed, was cancelled, timed out or needs action. No check runs at all is NOT green, and a
 #     context that has not reported yet is NOT green (the aggregate-gate race seen on GYST #218).
 #   * The list of check runs must be whole. The endpoint shows at most the 1000 most recent check
-#     suites of a ref; the script keeps the response's total_count and is NOT green when it exceeds
-#     the runs actually seen, or reaches 1000 ("check-run list may be truncated": it waits, so the
-#     end is exit 2 or 3). A failure that is visible is still red. Every run must also carry the
-#     pinned commit as its head_sha, else red.
+#     suites of a ref, so the script asks for the suite count (GET .../check-suites, once per poll) and
+#     is NOT green when it is 1000 or more or cannot be read as a plain integer. It also keeps the
+#     check-runs total_count and is not green when that exceeds the runs actually seen or reaches 1000
+#     ("check-run list may be truncated": it waits, so the end is exit 2 or 3). A failure that is
+#     visible is still red. Every run must also carry the pinned commit as its head_sha, else red.
 #   * A required context counts only when the check run was reported by the expected GitHub App
 #     (--app-id, default 15368, GitHub Actions). A same-named run from any other app is ignored:
 #     it is neither green nor red, so another app cannot satisfy or block the gate by copying the name.
@@ -259,6 +260,20 @@ check_lines() {
     --jq '(["T", ((.total_count // -1) | tostring | @base64)] | join("\u001f")), (.check_runs[] | ["R", (.status // "" | tostring | @base64), (.conclusion // "" | tostring | @base64), ((.app.id // 0) | tostring | @base64), (.name // "" | tostring | if explode | any(. < 32 or . == 127 or . == 133 or . == 8232 or . == 8233) then "1" else "0" end), (.head_sha // "" | tostring | @base64), (.name // "" | tostring | @base64)] | join("\u001f"))'
 }
 
+# The number of CHECK SUITES on a commit, from a call of its own (one per poll). GitHub's cap is on suites:
+# "If there are more than 1000 check suites on a single git reference, this endpoint will limit check runs to
+# the 1000 most recent check suites" (REST, list check runs for a Git reference), and a truncated answer can hold
+# far fewer than 1000 runs, so the run count cannot show it. GET .../check-suites returns total_count, an
+# integer, for every suite on the ref (also those without runs). Anything that is not a plain integer is
+# "unreadable", never zero.
+suite_count() {
+  local n
+  n="$(gh_try api "repos/${repo}/commits/${1}/check-suites?per_page=1" \
+    --jq '.total_count | if type == "number" and . == floor and . >= 0 and . < 1000000000 then tostring else "bad" end')" || return 1
+  [[ "$n" =~ ^(0|[1-9][0-9]{0,8})$ ]] || return 1
+  printf '%s' "$n"
+}
+
 # Canonical base64 only. The pattern is the exact shape including the rule that the unused trailing bits
 # are zero (the last character before "==" is one of A Q g w, before "=" one of A E I M Q U Y c g k o s w
 # 0 4 8), so a value has exactly one spelling and equality of encodings is equality of values.
@@ -329,7 +344,10 @@ is_context_enc() {
   return 1
 }
 
-# Truncation: the endpoint lists at most the 1000 most recent check suites of a ref.
+# Truncation: the endpoint lists at most the 1000 most recent check suites of a ref. The suite count (read once
+# per poll into $suites, empty when unreadable) is the signal that cap applies to. The run-count checks stay as
+# extra guards: total_count larger than the runs seen, or 1000 runs or more.
+SUITE_CAP=1000
 RUN_LIST_CAP=1000
 
 # Sets verdict (green|red|pending) and detail for the lines passed in.
@@ -408,8 +426,8 @@ evaluate() {
     detail="${badname} on ${pin}"
     return 0
   fi
-  if [[ $count_lines -eq 0 || $count_missing -eq 1 || $total_count -gt $runs_seen || $total_count -ge $RUN_LIST_CAP ]]; then
-    detail="check-run list may be truncated (total_count ${total_count}, ${runs_seen} seen, cap ${RUN_LIST_CAP}); not trusting it"
+  if [[ -z "$suites" || ${suites:-0} -ge $SUITE_CAP || $count_lines -eq 0 || $count_missing -eq 1 || $total_count -gt $runs_seen || $total_count -ge $RUN_LIST_CAP ]]; then
+    detail="check-run list may be truncated (${suites:-unreadable} check suites, cap ${SUITE_CAP}; total_count ${total_count}, ${runs_seen} runs seen); not trusting it"
     return 0
   fi
   if [[ $total -eq 0 ]]; then
@@ -441,6 +459,7 @@ evaluate() {
 
 verdict=pending
 detail=""
+suites=""
 while :; do
   polls=$((polls + 1))
   t="$(now)"
@@ -467,8 +486,12 @@ while :; do
 
   lines=""
   if lines="$(check_lines "$pin")"; then
+    if ! suites="$(suite_count "$pin")"; then
+      suites=""
+      poll_failed=1
+    fi
     evaluate "$lines"
-    sig="$(printf '%s\n' "$pin" "$lines" | LC_ALL=C sort | cksum)"
+    sig="$(printf '%s\n' "$pin" "suites=${suites}" "$lines" | LC_ALL=C sort | cksum)"
   else
     verdict=pending
     detail="the check-runs call failed, will retry"

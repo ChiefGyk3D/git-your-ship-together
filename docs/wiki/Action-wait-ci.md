@@ -45,15 +45,22 @@ race seen on GYST #218), and a push that moved the head under the loop. This scr
   Any other failure (a conflict, a closed pull request, a 403) is exit 1 at once with `merge blocked: not a policy block`.
   An unknown message is treated as not retryable. When gh accepts the merge but the pull request is not merged afterwards
   (a merge queue, auto-merge), the result is `queued`, exit 5, and `merged` stays `false`. It never passes `--admin` or `--auto`.
-- **The list must be whole.** The check-runs endpoint shows at most the 1000 most recent check suites of a ref (GitHub's REST
-  description: "If there are more than 1000 check suites on a single git reference, this endpoint will limit check runs to the
-  1000 most recent check suites"). The script keeps the response's `total_count` (with `filter=latest` it equals the runs
-  returned; probed against live check runs on 2026-10-26: 95 of 95, where `filter=all` gave 180) and compares it with the runs
-  actually seen across the pages. If `total_count` is larger than the runs seen, or reaches 1000, or is missing, the commit is
-  not green: the output says `check-run list may be truncated`, the script keeps waiting and ends in exit 2 (timeout) or 3
-  (hung), never green. A run that is visibly failed is still red. The cap counts suites, not runs, and the suite count is not
-  exposed, so 1000 runs is the conservative stand-in: a commit with that many check runs cannot be passed by this tool.
-  Every run must also carry the pinned commit as its `head_sha`; one that does not is red.
+- **The list must be whole.** GitHub's REST description for listing check runs says: "If there are more than 1000 check suites
+  on a single git reference, this endpoint will limit check runs to the 1000 most recent check suites." The cap is on check
+  suites, and a cut-off answer can hold far fewer than 1000 runs (several suites with one run each, suites with none), so
+  counting runs cannot reveal it. Once per poll the script therefore asks for the suite count, `GET
+  /repos/{repo}/commits/{sha}/check-suites?per_page=1`, and reads its `total_count` (an integer, required in the response; it
+  counts every suite on the ref, also those without runs: 12 suites behind 3 with runs on live data, probed 2026-10-26).
+  A suite count of 1000 or more, or one that is missing, null, a string, negative, fractional, huge or unobtainable, makes the
+  commit not green: the output says `check-run list may be truncated`, the script keeps waiting and ends in exit 2 (timeout)
+  or 3 (hung), never green. Two guards on the runs stay: the check-runs `total_count` (with `filter=latest` it equals the runs
+  returned; probed live, 95 of 95 where `filter=all` gave 180) must not exceed the runs actually seen across the pages, and
+  must stay under 1000. A run that is visibly failed is still red. What this does and does not rule out: while the suite
+  count is under 1000 the cap GitHub describes does not apply, so no suite can have been displaced; this rests on the
+  documented behavior, not on anything the script can observe. The suite call is a separate request, so a suite created
+  between the two calls is not in the run list; it can only add to the count, and the next poll sees it. A commit with 1000
+  or more suites cannot be passed by this tool. Every run must also carry the pinned commit as its `head_sha`; one that does
+  not is red.
 - **Hostile names are an error.** A check run whose name contains a control character (U+0000 to U+001F, DEL, U+0085, U+2028,
   U+2029) makes the result red with exit 1, whoever posted it. Names reach bash base64-encoded, so no name can add a line or a
   field to what the script parses; a forged `completed`, `success`, `CI green` line inside a name cannot satisfy the gate.
