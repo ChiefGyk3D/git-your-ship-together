@@ -35,11 +35,19 @@ race seen on GYST #218), and a push that moved the head under the loop. This scr
   `--match-head-commit` is the one whose checks were verified, never a re-read value. A second check just before the merge
   enforces the same rule.
 - **Hung is not slow.** `--hung-after` counts seconds with no check run changing state. A slow run that keeps completing checks
-  does not trip it; a run frozen on one job does, with exit 3. A failing GitHub API counts as no progress.
+  does not trip it; a run frozen on one job does, with exit 3. The default is 600 seconds; raise it for a gate whose slowest
+  job runs longer. A failing GitHub API counts as no progress, and repeated errors back off (the wait between polls doubles,
+  at most eight times `--interval`). `--interval` must be at least 1.
 - **The merge is pinned.** `--merge` runs `gh pr merge N --squash --match-head-commit <verified sha>`. If it fails, the head is
-  read again: moved means exit 4 with nothing merged; already merged at the verified commit means success; anything else
-  (a branch policy block, a required context still arriving) is retried `--merge-retries` times, `--merge-retry-delay` seconds
-  apart, then exit 1 with `merge blocked`. It never passes `--admin` or `--auto`.
+  read again: moved means exit 4 with nothing merged; already merged at the verified commit means success. Only a policy block
+  (gh's "the base branch policy prohibits the merge", or a "Required status check ... is expected") is retried,
+  `--merge-retries` times, `--merge-retry-delay` seconds apart, then exit 1 with `merge blocked: policy block still in place`.
+  Any other failure (a conflict, a closed pull request, a 403) is exit 1 at once with `merge blocked: not a policy block`.
+  An unknown message is treated as not retryable. When gh accepts the merge but the pull request is not merged afterwards
+  (a merge queue, auto-merge), the result is `queued`, exit 5, and `merged` stays `false`. It never passes `--admin` or `--auto`.
+- **Hostile names are an error.** A check run whose name contains a control character (U+0000 to U+001F, DEL, U+0085, U+2028,
+  U+2029) makes the result red with exit 1, whoever posted it. Names reach bash base64-encoded, so no name can add a line or a
+  field to what the script parses; a forged `completed`, `success`, `CI green` line inside a name cannot satisfy the gate.
 - **It prints the SHA it verified:** `wait-ci: verified <sha>: green`.
 - **It never prints a token.** Every line of `gh` output that reaches the log is cut to one line and has the value of `GH_TOKEN` and
   `GITHUB_TOKEN` replaced. The script does not trace (`set -x`) and does not `eval`.
@@ -49,10 +57,11 @@ race seen on GYST #218), and a push that moved the head under the loop. This scr
 | Code | Meaning |
 |---|---|
 | `0` | Green. With `--merge`, merged (or already merged at the verified commit). |
-| `1` | Red: a check failed or was cancelled. Also: `--merge` ran out of retries (the output says `merge blocked`), or the head could not be read. |
+| `1` | Red: a check failed or was cancelled, or a check run name holds a control character. Also: `--merge` could not merge (the output says `merge blocked`: a non-policy failure, or a policy block that outlasted the retries), or the head could not be read or was not a full SHA. |
 | `2` | Timeout: no verdict after `--timeout` seconds. |
 | `3` | Hung: no check changed for `--hung-after` seconds. |
 | `4` | Head moved: the pull request head is no longer the pinned SHA (at the start, while waiting, between the last check and the merge, or during the merge). |
+| `5` | Queued: the merge was accepted but the pull request is not merged yet (a merge queue or auto-merge). Not reported as merged. |
 | `64` | Bad input; nothing was waited on and `gh` was not called. |
 
 The timeout is tested before hung, so a run that is past both reports `2`.
@@ -116,12 +125,17 @@ branch is supposed to trigger a deploy; pass a different `token` when it does.
 | `merge-retry-delay` | Seconds between merge attempts. |
 | `token` | Token for `gh`; default the workflow token. |
 
-Outputs: `result` (`green`, `red`, `timeout`, `hung`, `head-moved`, `merge-blocked`, `error` or `usage`), `sha` (the verified commit,
-empty unless green) and `merged`. The outputs are written even when the step fails, so a later `if: always()` step can read them.
+Outputs: `result` (`green`, `red`, `timeout`, `hung`, `head-moved`, `merge-blocked`, `queued`, `error` or `usage`), `sha` (the verified commit: set
+whenever the commit verified green, so also for `merge-blocked` and `queued`; empty otherwise) and `merged` (`true` only when the pull request
+is merged at that commit). The outputs are written even when the step fails, so a later `if: always()` step can read them.
 
 ## What it does not do
 
 - It reads check runs, not the older commit statuses. A required context that only reports as a commit status is never seen.
+- The default context, `CI green`, matches the check run name exactly. A job of a reusable workflow is reported as
+  `<caller job> / <called job>` (for example `ci / CI green`), which the default does not match; pass the full name
+  (`--context 'ci / CI green'`, or one line of the `context` input). The gate in this repository is a direct job named exactly
+  `CI green`. There is no prefix option, on purpose: a prefix is a looser match.
 - It does not rerun failed jobs and it does not read branch protection; name the contexts you require.
 - It does not wait for checks that are not part of the gate: with the gate green and an unrelated check still running, the
   commit is green. Add the check to `context` to require it.
@@ -130,6 +144,6 @@ empty unless green) and `merged`. The outputs are written even when the step fai
 
 `tests/test_wait_ci.py` runs the real script under bash against a fake `gh` (a Python program driven by a scenario) with a fake
 clock, so waits cost no time and every call is on record. It covers the pinned head, abort and reset on a push, no checks, a
-context that has not reported, exact matching, failed and cancelled, timeout, hung, merge retry and its bound, a head that moves
+context that has not reported, exact matching, hostile check run names (newline, carriage return, the field separator, NUL, DEL, U+2028 and more, through the real `jq`), pages, reruns, failed and cancelled, timeout, hung, merge retry and its bound, a head that moves
 between the last check and the merge, a token that must not appear, bad input, and the action's own step run end to end.
-The head pin, the required-context rule and the no-checks rule were each broken on purpose to confirm the tests go red.
+The fake `gh` serves GitHub-shaped JSON and applies the script's real `--jq` expression with the real `jq` (a test dependency; the test run fails in CI and skips locally without it), honors `per_page`, `--paginate` and `filter`, and keeps the newest run per name and app for `filter=latest`. The head pin, the required-context rule, the no-checks rule and the name encoding were each broken on purpose to confirm the tests go red. Not covered: GitHub's own `gh` uses gojq, not `jq`; the expression sticks to features both have.

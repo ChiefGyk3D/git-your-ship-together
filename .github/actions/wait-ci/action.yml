@@ -66,7 +66,7 @@ inputs:
     required: false
     default: "false"
   merge-retries:
-    description: Retries after a failed merge attempt, for a policy block that has not cleared. Zero means one attempt.
+    description: Retries after a merge attempt that hit a policy block that has not cleared; any other merge failure is not retried. Zero means one attempt.
     required: false
     default: "5"
   merge-retry-delay:
@@ -79,13 +79,13 @@ inputs:
     default: ${{ github.token }}
 outputs:
   result:
-    description: green, red, timeout, hung, head-moved, merge-blocked, error or usage.
+    description: green, red, timeout, hung, head-moved, merge-blocked, queued, error or usage.
     value: ${{ steps.wait.outputs.result }}
   sha:
-    description: The commit that was verified green; empty unless the result is green.
+    description: The commit that was verified green; set also when the result is merge-blocked or queued, empty otherwise.
     value: ${{ steps.wait.outputs.sha }}
   merged:
-    description: "true when the pull request was merged at the verified commit."
+    description: "true only when the pull request is merged at the verified commit; false when the merge was queued."
     value: ${{ steps.wait.outputs.merged }}
 runs:
   using: composite

@@ -18,17 +18,26 @@
 #   * A push (the head moves) aborts with exit 4, or with --on-push reset re-pins to the new head
 #     and starts over (the total timeout is NOT reset, so the wait stays bounded). When the caller
 #     gave --sha, ANY head move is exit 4 whatever --on-push says: an explicit SHA is never replaced.
-#   * --merge squash-merges with --match-head-commit <verified sha>, retrying a policy block a
-#     bounded number of times. The head is re-read after the last check and again when a merge
-#     fails, so a push between the check and the merge is exit 4, never a merge of unverified code.
+#   * A check run whose NAME contains a control character (U+0000-U+001F, U+007F, U+0085, U+2028,
+#     U+2029) is an error: red, never green. Names cross from jq to bash base64-encoded, so no name
+#     can add a line or a field to what bash parses (a forged "completed / success / CI green" line).
+#   * --merge squash-merges with --match-head-commit <verified sha>. Only a policy block (the base
+#     branch policy, a required check not yet satisfied) is retried, a bounded number of times;
+#     any other failure is exit 1 at once. The head is re-read after the last check and again when
+#     a merge fails, so a push between the check and the merge is exit 4, never a merge of unverified
+#     code. A merge gh accepts but that leaves the pull request open (a merge queue, auto-merge) is
+#     exit 5, never reported as merged.
 #   * It prints the SHA it verified. It never prints a token (output from gh is redacted).
 #
 # Exit codes:
 #   0   green (and merged, when --merge was given; or the PR was already merged at the verified SHA)
-#   1   red: a check failed or was cancelled; or --merge ran out of retries (a block, not a verdict)
+#   1   red: a check failed or was cancelled, or a check run name holds a control character; also
+#       --merge could not merge ("merge blocked": a non-policy failure, or a policy block that
+#       outlasted the retries) and an unreadable or malformed head
 #   2   timeout: --timeout seconds passed without a verdict
 #   3   hung: no check changed state for --hung-after seconds
 #   4   head moved: the pull request head is no longer the pinned SHA
+#   5   queued: the merge was accepted but the pull request is not merged yet (merge queue or auto-merge)
 #   64  usage error (bad flag or value); nothing was waited on
 #
 # Usage:
@@ -42,13 +51,13 @@
 #   --min-checks N          check runs that must be complete [1]
 #   --timeout S             total seconds to wait [1800]
 #   --hung-after S          seconds without any check changing before exit 3 [600]
-#   --interval S            seconds between polls [20]
+#   --interval S            seconds between polls, at least 1 [20]; repeated gh errors back off to 8x
 #   --app-id N              GitHub App id whose check runs may satisfy a context [15368]
 #   --any-app               accept a same-named run from any app (prints a warning)
 #   --on-push abort|reset   what a moved head does [abort]; reset is ignored when --sha is given
 #   --merge                 squash-merge the verified SHA once green (needs --pr)
 #   --delete-branch         with --merge, delete the head branch
-#   --merge-retries N       retries after a failed merge attempt [5]
+#   --merge-retries N       retries after a policy-blocked merge attempt [5]
 #   --merge-retry-delay S   seconds between merge attempts [30]
 #
 # Environment: GH_TOKEN (read by gh; checks: read and pull-requests: read, plus contents: write and
@@ -86,7 +95,12 @@ emit_outputs() {
     echo "merged=${merged}"
   } >>"$GITHUB_OUTPUT"
 }
-trap emit_outputs EXIT
+errfile=""
+on_exit() {
+  [[ -z "$errfile" ]] || rm -f "$errfile"
+  emit_outputs
+}
+trap on_exit EXIT
 
 say() { printf 'wait-ci: %s\n' "$*"; }
 die_usage() {
@@ -154,6 +168,8 @@ if [[ $contexts_given -eq 0 ]]; then
 fi
 
 [[ "$repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || die_usage "--repo must be OWNER/REPO (got '${repo}')"
+case "${repo%%/*}" in . | ..) die_usage "--repo owner must not be . or .." ;; esac
+case "${repo##*/}" in . | ..) die_usage "--repo name must not be . or .." ;; esac
 if [[ -n "$pr" ]]; then need_int --pr "$pr"; fi
 [[ -n "$pr" || -n "$want_sha" ]] || die_usage "give --pr N or --sha SHA"
 if [[ -n "$want_sha" ]]; then
@@ -163,6 +179,7 @@ need_int --min-checks "$min_checks"
 need_int --timeout "$timeout_s"
 need_int --hung-after "$hung_after"
 need_int --interval "$interval"
+[[ "$interval" -ge 1 ]] || die_usage "--interval must be at least 1 second"
 need_int --app-id "$app_id"
 need_int --merge-retries "$merge_retries"
 need_int --merge-retry-delay "$merge_retry_delay"
@@ -178,26 +195,43 @@ for c in "${contexts[@]}"; do
   esac
 done
 
-# gh with its failure text redacted and cut to one line; never lets a token reach the log.
+errfile="$(mktemp)"
+
+# gh with stdout and stderr kept apart. A failure is reported as one redacted line; a token never
+# reaches the log.
 gh_try() {
-  local out
-  if out="$("$gh_bin" "$@" 2>&1)"; then
+  local out first
+  if out="$("$gh_bin" "$@" 2>"$errfile")"; then
     printf '%s' "$out"
     return 0
   fi
-  say "gh call failed: $(redact "${out%%$'\n'*}")" >&2
+  first="$(grep -m1 . "$errfile" || true)"
+  say "gh call failed: $(redact "$first")" >&2
   return 1
 }
 
-pr_head() { gh_try api "repos/${repo}/pulls/${pr}" --jq '.head.sha'; }
+# A commit SHA from the API is used (and written to GITHUB_OUTPUT) only when it is 40 hex digits.
+pr_head() {
+  local h
+  h="$(gh_try api "repos/${repo}/pulls/${pr}" --jq '.head.sha')" || return 1
+  if [[ ! "$h" =~ ^[0-9a-f]{40}$ ]]; then
+    say "the API returned something that is not a full commit SHA for ${repo}#${pr}" >&2
+    return 1
+  fi
+  printf '%s' "$h"
+}
 pr_merged() { gh_try api "repos/${repo}/pulls/${pr}" --jq '.merged'; }
 
-# One line per check run on a commit: status, conclusion, app id, name, split by \x1f (not
-# whitespace, so an empty conclusion stays an empty field; the name is last, so it is kept verbatim).
+# One line per check run on a commit. Every field crosses as base64, so a hostile value (a name with
+# a newline or the field separator in it) cannot add a line or a field: the line is five fields split
+# by \x1f: status, conclusion, app id, hostile flag (1 when the name holds a control character, a
+# DEL, NEL or a Unicode line or paragraph separator, NUL included), and the name.
 check_lines() {
   gh_try api --paginate "repos/${repo}/commits/${1}/check-runs?per_page=100&filter=latest" \
-    --jq '.check_runs[] | [.status, (.conclusion // ""), ((.app.id // 0) | tostring), .name] | join("\u001f")'
+    --jq '.check_runs[] | [(.status // "" | tostring | @base64), (.conclusion // "" | tostring | @base64), ((.app.id // 0) | tostring | @base64), (.name // "" | tostring | if explode | any(. < 32 or . == 127 or . == 133 or . == 8232 or . == 8233) then "1" else "0" end), (.name // "" | tostring | @base64)] | join("\u001f")'
 }
+
+b64d() { printf '%s' "$1" | base64 -d 2>/dev/null || true; }
 
 pin=""
 if [[ -n "$pr" ]]; then
@@ -223,6 +257,7 @@ start="$(now)"
 last_change="$start"
 last_sig=""
 polls=0
+fails=0
 
 is_context() {
   local c
@@ -234,12 +269,31 @@ is_context() {
 
 # Sets verdict (green|red|pending) and detail for the lines passed in.
 evaluate() {
-  local lines="$1" status conclusion app name c
+  local lines="$1" status conclusion app name c b_status b_conclusion b_app hostile_flag b_name
   foreign=0
+  hostile=0
   local total=0 complete=0 bad=0 badname="" seen_ok seen_any
   local -A ctx_seen=() ctx_ok=() ctx_open=()
-  while IFS=$'\x1f' read -r status conclusion app name; do
-    [[ -n "$status" ]] || continue
+  while IFS=$'\x1f' read -r b_status b_conclusion b_app hostile_flag b_name; do
+    [[ -n "$b_status$b_conclusion$b_app$hostile_flag$b_name" ]] || continue
+    # Anything that is not exactly the shape jq emits is treated like a hostile name.
+    if [[ ! "$hostile_flag" =~ ^[01]$ || ! "$b_status" =~ ^[A-Za-z0-9+/]*=*$ || ! "$b_conclusion" =~ ^[A-Za-z0-9+/]*=*$ ||
+      ! "$b_app" =~ ^[A-Za-z0-9+/]*=*$ || ! "$b_name" =~ ^[A-Za-z0-9+/]*=*$ ]]; then
+      hostile=$((hostile + 1))
+      continue
+    fi
+    if [[ "$hostile_flag" == 1 ]]; then
+      hostile=$((hostile + 1))
+      continue
+    fi
+    status="$(b64d "$b_status")"
+    conclusion="$(b64d "$b_conclusion")"
+    app="$(b64d "$b_app")"
+    name="$(b64d "$b_name")"
+    if [[ ! "$status" =~ ^[a-z_]*$ || ! "$conclusion" =~ ^[a-z_]*$ || ! "$app" =~ ^[0-9]+$ || "$name" =~ [[:cntrl:]] ]]; then
+      hostile=$((hostile + 1))
+      continue
+    fi
     # A run that carries a required name but comes from another app is ignored altogether.
     if [[ $any_app -eq 0 && "$app" != "$app_id" ]] && is_context "$name"; then
       foreign=$((foreign + 1))
@@ -269,6 +323,11 @@ evaluate() {
   done <<<"$lines"
 
   verdict=pending
+  if [[ $hostile -gt 0 ]]; then
+    verdict=red
+    detail="${hostile} check run(s) on ${pin} with a control character in the name or malformed fields; refusing (possible forgery)"
+    return 0
+  fi
   if [[ $foreign -gt 0 ]]; then
     say "ignored ${foreign} run(s) named like a required check from an app other than ${app_id}"
   fi
@@ -311,17 +370,22 @@ while :; do
   t="$(now)"
 
   # The head first: a push makes everything below about a stale commit.
+  poll_failed=0
   if [[ -n "$pr" ]]; then
-    if cur="$(pr_head)" && [[ "$cur" != "$pin" ]]; then
-      if [[ "$on_push" == abort || -n "$want_sha" ]]; then
-        say "head moved: ${repo}#${pr} was ${pin}, now ${cur}"
-        result="head-moved"
-        exit 4
+    if cur="$(pr_head)"; then
+      if [[ "$cur" != "$pin" ]]; then
+        if [[ "$on_push" == abort || -n "$want_sha" ]]; then
+          say "head moved: ${repo}#${pr} was ${pin}, now ${cur}"
+          result="head-moved"
+          exit 4
+        fi
+        say "head moved: ${pin} -> ${cur}; resetting (the total timeout keeps running)"
+        pin="$cur"
+        last_sig=""
+        last_change="$t"
       fi
-      say "head moved: ${pin} -> ${cur}; resetting (the total timeout keeps running)"
-      pin="$cur"
-      last_sig=""
-      last_change="$t"
+    else
+      poll_failed=1
     fi
   fi
 
@@ -333,6 +397,7 @@ while :; do
     verdict=pending
     detail="the check-runs call failed, will retry"
     sig="$last_sig"
+    poll_failed=1
   fi
 
   if [[ "$sig" != "$last_sig" ]]; then
@@ -359,7 +424,15 @@ while :; do
     result="hung"
     exit 3
   fi
-  nap "$interval"
+  # Repeated gh errors back off (x2 each, at most x8) so a failing API is not hammered.
+  if [[ $poll_failed -eq 1 ]]; then
+    fails=$((fails + 1))
+  else
+    fails=0
+  fi
+  backoff=1
+  if [[ $fails -gt 1 ]]; then backoff=$((1 << (fails > 4 ? 3 : fails - 1))); fi
+  nap $((interval * backoff))
 done
 
 # Green on $pin. Re-read the head once more: a push after the last poll must not be merged.
@@ -391,19 +464,35 @@ if [[ $merge -eq 0 ]]; then
   exit 0
 fi
 
+# What gh says when a branch policy, not the code, is what stands in the way. Everything else
+# (a conflict, a closed pull request, a 403) is not retried. Messages seen in the maintainer's merge
+# logs (GYST #218 and another repository): "the base branch policy prohibits the merge"; GitHub's
+# wording for a missing required check: "Required status check ... is expected".
+is_policy_block() {
+  local m="${1,,}"
+  [[ "$m" == *"base branch policy prohibits"* || "$m" == *"required status check"* ]]
+}
+
 attempt=0
 last_err=""
 while :; do
   attempt=$((attempt + 1))
   args=(pr merge "$pr" -R "$repo" --squash --match-head-commit "$verified")
   [[ $delete_branch -eq 1 ]] && args+=(--delete-branch)
-  if out="$("$gh_bin" "${args[@]}" 2>&1)"; then
-    merged="true"
-    result="green"
-    say "merged ${repo}#${pr} (squash) at ${verified}"
-    exit 0
+  if "$gh_bin" "${args[@]}" >/dev/null 2>"$errfile"; then
+    # gh can accept a merge that is only queued (merge queue, auto-merge): confirm before reporting it.
+    if [[ "$(pr_merged || true)" == true ]]; then
+      merged="true"
+      result="green"
+      say "merged ${repo}#${pr} (squash) at ${verified}"
+      exit 0
+    fi
+    result="queued"
+    say "the merge of ${repo}#${pr} was accepted but the pull request is not merged (merge queue or auto-merge?); not reporting it as merged"
+    exit 5
   fi
-  last_err="$(redact "${out%%$'\n'*}")"
+  full_err="$(redact "$(cat "$errfile")")"
+  last_err="$(redact "$(grep -m1 . "$errfile" || true)")"
   say "merge attempt ${attempt} failed: ${last_err}"
 
   # Why did it fail: a push, a merge that landed anyway, or a block that may clear?
@@ -418,8 +507,13 @@ while :; do
     say "${repo}#${pr} is already merged at ${verified}"
     exit 0
   fi
+  if ! is_policy_block "$full_err"; then
+    say "merge blocked: not a policy block, so it is not retried"
+    result="merge-blocked"
+    exit 1
+  fi
   if [[ $attempt -gt $merge_retries ]]; then
-    say "merge blocked: ${attempt} attempts failed, last: ${last_err}"
+    say "merge blocked: policy block still in place after ${attempt} attempts"
     result="merge-blocked"
     exit 1
   fi

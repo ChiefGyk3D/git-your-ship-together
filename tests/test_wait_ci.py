@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -36,18 +37,20 @@ C = "c" * 40
 TOKEN = "ghs_FAKE0TOKEN0VALUE0DO0NOT0PRINT"
 US = "\x1f"
 
-FAKE_GH = """#!{python}
+FAKE_GH = r"""#!@PYTHON@
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 d = Path(os.environ["FAKE_DIR"])
 sf = d / "state.json"
 st = json.loads(sf.read_text())
 argv = sys.argv[1:]
 with open(d / "calls.log", "a") as log:
-    log.write(" ".join(argv) + "\\n")
+    log.write(" ".join(argv) + "\n")
 tok = os.environ.get("GH_TOKEN", "")
 
 
@@ -63,6 +66,36 @@ def current_head():
     return head
 
 
+def github_runs(snapshot, sha):
+    # GitHub-shaped check runs; list order is chronological (later is newer).
+    runs = []
+    for n, run in enumerate(snapshot):
+        status, conclusion, name = run[:3]
+        app = run[3] if len(run) > 3 else 15368
+        runs.append(
+            {
+                "id": 1000 + n,
+                "name": name,
+                "head_sha": sha,
+                "status": status,
+                "conclusion": conclusion or None,
+                "started_at": "2026-10-26T00:%02d:00Z" % (n % 60),
+                "completed_at": None if status != "completed" else "2026-10-26T01:%02d:00Z" % (n % 60),
+                "app": {"id": app, "slug": "app-%s" % app},
+            }
+        )
+    return runs
+
+
+def latest_only(runs):
+    # filter=latest: "returns the most recent check runs" (the docs key this on completed_at; an
+    # unfinished run has none and is the newest). Grouped here by (name, app), the newest of each.
+    newest = {}
+    for run in runs:
+        newest[(run["name"], run["app"]["id"])] = run
+    return list(newest.values())
+
+
 if argv[:1] == ["api"]:
     path = next(a for a in argv[1:] if "/" in a and not a.startswith("-"))
     jq = argv[argv.index("--jq") + 1] if "--jq" in argv else ""
@@ -70,31 +103,47 @@ if argv[:1] == ["api"]:
         st["head_reads"] += 1
         save()
         if st.get("head_read_fails"):
-            sys.stderr.write("HTTP 502 for token " + tok + "\\n")
+            sys.stderr.write("HTTP 502 for token " + tok + "\n")
             sys.exit(1)
+        if st.get("head_warns"):
+            sys.stderr.write("warning: a new gh is available\n")
+        if st.get("head_garbage"):
+            print(st["head_garbage"])
+            sys.exit(0)
         print(current_head() if jq == ".head.sha" else str(st["merged"]).lower())
         sys.exit(0)
     if "/check-runs" in path:
-        sha = path.split("/commits/")[1].split("/")[0]
+        url = urlsplit(path)
+        sha = url.path.split("/commits/")[1].split("/")[0]
+        query = parse_qs(url.query)
         st["check_polls"] += 1
         st["check_shas"].append(sha)
         fails = st.get("check_failures", 0)
         if st["check_polls"] <= fails:
             save()
-            sys.stderr.write("HTTP 500 using " + tok + "\\n")
+            sys.stderr.write("HTTP 500 using " + tok + "\n")
             sys.exit(1)
         snaps = st["checks"].get(sha, [[]])
         idx = min(st["check_polls"] - 1 - fails, len(snaps) - 1)
-        for run in snaps[idx]:
-            status, conclusion, name = run[:3]
-            app = str(run[3]) if len(run) > 3 else "15368"
-            fields = [status, conclusion or "", name]
-            if "app" in jq:
-                fields.insert(2, app)
-            print("\\x1f".join(fields))
+        runs = github_runs(snaps[idx], sha)
+        if query.get("filter", ["latest"])[0] == "latest":
+            runs = latest_only(runs)
+        per_page = max(1, min(int(query.get("per_page", ["30"])[0]), 100))
+        pages = [runs[i : i + per_page] for i in range(0, len(runs), per_page)] or [[]]
+        if "--paginate" not in argv:
+            wanted = int(query.get("page", ["1"])[0])
+            pages = pages[wanted - 1 : wanted]
+        st["pages_served"] = st.get("pages_served", 0) + len(pages)
         save()
+        for page in pages:
+            body = json.dumps({"total_count": len(runs), "check_runs": page})
+            proc = subprocess.run(["jq", "-r", jq], input=body, capture_output=True, text=True)
+            if proc.returncode != 0:
+                sys.stderr.write("jq: " + proc.stderr)
+                sys.exit(1)
+            sys.stdout.write(proc.stdout)
         sys.exit(0)
-    sys.stderr.write("fake gh: unexpected api path " + path + "\\n")
+    sys.stderr.write("fake gh: unexpected api path " + path + "\n")
     sys.exit(97)
 
 if argv[:2] == ["pr", "merge"]:
@@ -105,14 +154,14 @@ if argv[:2] == ["pr", "merge"]:
     if "set_head" in res:
         st["head"] = res["set_head"]
         st["moves"] = []
-    if res.get("merged"):
+    if res.get("merged") or (res["rc"] == 0 and not res.get("queued")):
         st["merged"] = True
     save()
     if res["rc"] != 0:
-        sys.stderr.write(res.get("err", "merge failed").replace("TOKEN", tok) + "\\n")
+        sys.stderr.write(res.get("err", "merge failed").replace("TOKEN", tok) + "\n")
     sys.exit(res["rc"])
 
-sys.stderr.write("fake gh: unexpected command " + " ".join(argv) + "\\n")
+sys.stderr.write("fake gh: unexpected command " + " ".join(argv) + "\n")
 sys.exit(98)
 """
 
@@ -149,7 +198,7 @@ class World:
         self.bin.mkdir()
         self.out = tmp / "github_output"
         python = sys.executable
-        for name, text in (("gh", FAKE_GH.format(python=python)), ("sleep", FAKE_SLEEP), ("date", FAKE_DATE)):
+        for name, text in (("gh", FAKE_GH.replace("@PYTHON@", python)), ("sleep", FAKE_SLEEP), ("date", FAKE_DATE)):
             path = self.bin / name
             path.write_text(text)
             path.chmod(0o755)
@@ -221,6 +270,13 @@ def shown(p: subprocess.CompletedProcess[str]) -> str:
 
 @pytest.fixture
 def world(tmp_path):
+    # The fake gh applies the real --jq expression with the real jq, so the script's parsing is under test.
+    if shutil.which("jq") is None:
+        message = "jq is required: the fake gh runs the script's --jq expression with it (apt-get install jq)"
+        if os.environ.get("CI"):
+            pytest.fail(message)
+        pytest.skip(message)
+
     def make(**kw):
         return World(tmp_path, **kw)
 
@@ -489,6 +545,201 @@ def test_without_an_explicit_sha_reset_still_follows_the_head(world):
     assert w.merges() == [f"pr merge 7 -R {SLUG} --squash --match-head-commit {B}"]
 
 
+# --- hostile check run names (the jq / bash boundary) ----------------------------------------
+
+FORGED = "x\ncompleted\x1fsuccess\x1f15368\x1fCI green"
+HOSTILE_NAMES = {
+    "newline": "x\nfoo",
+    "forged line (the reviewer's repro)": FORGED,
+    "carriage return": "x\rfoo",
+    "US 0x1f": "a\x1fb",
+    "tab": "a\tb",
+    "NUL": "a\x00b",
+    "DEL": "a\x7fb",
+    "NEL U+0085": "a\u0085b",
+    "line separator U+2028": "a b",
+    "paragraph separator U+2029": "a b",
+    "trailing newline": "CI green\n",
+    "escape": "a\x1b[31mb",
+}
+
+
+@pytest.mark.parametrize("label", sorted(HOSTILE_NAMES))
+def test_a_check_run_name_with_a_control_character_is_red_never_green(world, label):
+    # Another app (or a job name) can post a check run whose name carries a newline and a forged
+    # "completed / success / trusted app / CI green" line. No real CI green run exists here.
+    name = HOSTILE_NAMES[label]
+    w = world(checks={A: [[ok("lint"), ok(name, 57789)]]})
+    p = w.run("--repo", SLUG, "--pr", "7", "--merge", *FAST)
+    assert p.returncode == 1, f"{label!r}\n" + shown(p)
+    assert "verified" not in p.stdout
+    assert "control character" in p.stdout
+    assert w.merges() == []
+    assert w.outputs()["result"] == "red"
+
+
+@pytest.mark.parametrize("label", sorted(HOSTILE_NAMES))
+def test_a_hostile_name_is_red_even_when_the_real_gate_is_green(world, label):
+    w = world(checks={A: [[ok("CI green"), ok(HOSTILE_NAMES[label], 57789)]]})
+    p = w.run("--repo", SLUG, "--pr", "7", "--merge", *FAST)
+    assert p.returncode == 1, f"{label!r}\n" + shown(p)
+    assert w.merges() == []
+
+
+def test_the_forged_line_cannot_satisfy_a_gate_that_has_not_reported(world):
+    # Same forgery, but from a run of the trusted app itself (a job name in this repository).
+    w = world(checks={A: [[ok("lint"), ok(FORGED)]]})
+    p = w.run("--repo", SLUG, "--pr", "7", *FAST)
+    assert p.returncode == 1, shown(p)
+
+
+@pytest.mark.parametrize("name", ["CI green ✓", 'say "CI green"', "café \U0001f600 build", "a'b $(touch x) `id`"])
+def test_odd_but_printable_names_are_not_hostile_and_still_match_exactly(world, name):
+    w = world(checks={A: [[ok("CI green"), ok(name)]]})
+    assert w.run("--repo", SLUG, "--pr", "7", *FAST).returncode == 0
+    w2 = world(checks={A: [[ok(name)]]})
+    assert w2.run("--repo", SLUG, "--pr", "7", "--context", name, *FAST).returncode == 0
+
+
+# --- what the API call asks for, and what comes back ----------------------------------------
+
+
+def test_the_check_runs_request_asks_for_latest_runs_at_the_maximum_page_size(world):
+    w = world(checks={A: [GATE]})
+    assert w.run("--repo", SLUG, "--pr", "7", *FAST).returncode == 0
+    request = [c for c in w.calls() if "/check-runs" in c]
+    assert request and all("--paginate" in c for c in request)
+    assert all("filter=latest" in c and "per_page=100" in c for c in request)
+
+
+def test_the_gate_on_the_second_page_is_found(world):
+    many = [ok(f"job {n}") for n in range(130)] + [ok("CI green")]
+    w = world(checks={A: [many]})
+    p = w.run("--repo", SLUG, "--pr", "7", *FAST)
+    assert p.returncode == 0, shown(p)
+    assert w.load()["pages_served"] == 2
+
+
+def test_a_failure_on_the_second_page_is_red(world):
+    many = [ok(f"job {n}") for n in range(130)] + [done("late", "failure"), ok("CI green")]
+    w = world(checks={A: [many]})
+    assert w.run("--repo", SLUG, "--pr", "7", *FAST).returncode == 1
+
+
+def test_a_green_rerun_of_a_failed_run_is_green(world):
+    w = world(checks={A: [[done("CI green", "failure"), ok("CI green")]]})
+    assert w.run("--repo", SLUG, "--pr", "7", *FAST).returncode == 0
+
+
+def test_a_failed_rerun_of_a_green_run_is_red(world):
+    w = world(checks={A: [[ok("CI green"), done("CI green", "failure")]]})
+    assert w.run("--repo", SLUG, "--pr", "7", *FAST).returncode == 1
+
+
+def test_a_rerun_in_progress_after_a_green_run_is_not_green(world):
+    w = world(checks={A: [[ok("CI green"), running("CI green")]]})
+    assert w.run("--repo", SLUG, "--pr", "7", "--interval", "10", "--timeout", "60").returncode == 2
+
+
+def test_a_completed_run_with_a_null_conclusion_is_not_green(world):
+    w = world(checks={A: [[("completed", None, "CI green")]]})
+    p = w.run("--repo", SLUG, "--pr", "7", "--interval", "10", "--timeout", "60")
+    assert p.returncode == 2, shown(p)
+
+
+def test_a_null_conclusion_while_running_is_pending_then_green(world):
+    w = world(checks={A: [[("in_progress", None, "CI green")], GATE]})
+    assert w.run("--repo", SLUG, "--pr", "7", *FAST).returncode == 0
+
+
+# --- merge: retry only a policy block; a queue is not a merge -------------------------------
+
+POLICY = {
+    "rc": 1,
+    "err": "X Pull request N0TST/widgets#7 is not mergeable: the base branch policy prohibits the merge.",
+}
+REQUIRED = {"rc": 1, "err": 'Required status check "CI green" is expected.'}
+
+
+@pytest.mark.parametrize(
+    "err", ["merge conflict: not mergeable", "HTTP 403: Resource not accessible", "Pull request is closed", "boom"]
+)
+def test_any_other_merge_failure_is_not_retried(world, err):
+    w = world(checks={A: [GATE]}, merge_results=[{"rc": 1, "err": err}, {"rc": 0}])
+    p = w.run("--repo", SLUG, "--pr", "7", "--merge", "--merge-retry-delay", "30", *FAST)
+    assert p.returncode == 1, shown(p)
+    assert len(w.merges()) == 1
+    assert w.sleeps() == []
+    assert "merge blocked: not a policy block" in p.stdout
+    assert w.outputs()["result"] == "merge-blocked"
+
+
+@pytest.mark.parametrize("block", [POLICY, REQUIRED])
+def test_a_policy_or_required_check_block_is_retried(world, block):
+    w = world(checks={A: [GATE]}, merge_results=[block, {"rc": 0}])
+    p = w.run("--repo", SLUG, "--pr", "7", "--merge", "--merge-retry-delay", "30", *FAST)
+    assert p.returncode == 0, shown(p)
+    assert len(w.merges()) == 2 and w.sleeps() == [30]
+
+
+def test_a_policy_block_that_never_clears_says_so_after_the_bound(world):
+    w = world(checks={A: [GATE]}, merge_results=[POLICY])
+    p = w.run("--repo", SLUG, "--pr", "7", "--merge", "--merge-retries", "1", "--merge-retry-delay", "5", *FAST)
+    assert p.returncode == 1, shown(p)
+    assert len(w.merges()) == 2
+    assert "merge blocked: policy block still in place after 2 attempts" in p.stdout
+    assert w.outputs()["sha"] == A and w.outputs()["merged"] == "false"
+
+
+def test_a_merge_the_api_accepts_but_that_is_queued_is_not_reported_merged(world):
+    w = world(checks={A: [GATE]}, merge_results=[{"rc": 0, "queued": True}])
+    p = w.run("--repo", SLUG, "--pr", "7", "--merge", *FAST)
+    assert p.returncode == 5, shown(p)
+    assert "not merged" in p.stdout
+    assert w.outputs() == {"result": "queued", "sha": A, "merged": "false"}
+
+
+# --- the other input boundaries ------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("garbage", ["not-a-sha", A.upper(), A[:39], A + "0", "a" * 40 + "\n" + "b" * 40])
+def test_a_head_that_is_not_a_full_sha_is_refused(world, garbage):
+    w = world(checks={A: [GATE]}, head_garbage=garbage)
+    p = w.run("--repo", SLUG, "--pr", "7", *FAST)
+    assert p.returncode == 1, shown(p)
+    assert "verified" not in p.stdout
+    assert w.outputs().get("sha", "") == ""
+
+
+@pytest.mark.parametrize(
+    "repo", ["./widgets", "N0TST/..", "../widgets", "N0TST/.", "N0TST//widgets", "N0TST/widgets/x"]
+)
+def test_dot_segments_in_the_repo_are_a_usage_error(world, repo):
+    w = world(checks={A: [GATE]})
+    p = w.run("--repo", repo, "--pr", "7", *FAST)
+    assert p.returncode == 64, shown(p)
+    assert w.calls() == []
+
+
+def test_a_zero_interval_is_a_usage_error(world):
+    w = world(checks={A: [GATE]})
+    assert w.run("--repo", SLUG, "--pr", "7", "--interval", "0").returncode == 64
+
+
+def test_repeated_gh_errors_back_off_and_the_backoff_is_bounded(world):
+    w = world(checks={A: [GATE]}, check_failures=8)
+    p = w.run("--repo", SLUG, "--pr", "7", "--interval", "10", "--timeout", "100000", "--hung-after", "100000")
+    assert p.returncode == 0, shown(p)
+    assert w.sleeps() == [10, 20, 40, 80, 80, 80, 80, 80]
+
+
+def test_gh_stderr_is_not_mixed_into_the_data_stream(world):
+    # A gh that writes a warning on stderr while succeeding must not corrupt the parsed head.
+    w = world(checks={A: [GATE]}, head_warns=True)
+    p = w.run("--repo", SLUG, "--pr", "7", *FAST)
+    assert p.returncode == 0, shown(p)
+
+
 # --- red -----------------------------------------------------------------------
 
 
@@ -595,7 +846,7 @@ def test_merge_gives_up_after_the_retry_bound_with_exit_1(world):
 
 
 def test_zero_merge_retries_means_one_attempt(world):
-    w = world(checks={A: [GATE]}, merge_results=[{"rc": 1, "err": "blocked"}])
+    w = world(checks={A: [GATE]}, merge_results=[{"rc": 1, "err": "the base branch policy prohibits the merge"}])
     p = w.run("--repo", SLUG, "--pr", "7", "--merge", "--merge-retries", "0", *FAST)
     assert p.returncode == 1, shown(p)
     assert len(w.merges()) == 1
@@ -633,12 +884,12 @@ def test_the_token_is_never_printed(world):
     w = world(
         checks={A: [GATE]},
         check_failures=1,
-        merge_results=[{"rc": 1, "err": "denied for TOKEN here"}, {"rc": 0}],
+        merge_results=[{"rc": 1, "err": "the base branch policy prohibits the merge TOKEN here"}, {"rc": 0}],
     )
     p = w.run("--repo", SLUG, "--pr", "7", "--merge", "--merge-retry-delay", "1", *FAST)
     assert p.returncode == 0, shown(p)
     assert TOKEN not in p.stdout + p.stderr
-    assert "denied for *** here" in p.stdout
+    assert "prohibits the merge *** here" in p.stdout
     assert TOKEN not in (w.out.read_text() if w.out.exists() else "")
 
 
@@ -794,7 +1045,7 @@ def test_the_action_rejects_a_merge_value_that_is_not_true_or_false(world):
 
 def test_the_page_documents_every_exit_code_and_input():
     text = PAGE.read_text()
-    for code in ("0", "1", "2", "3", "4", "64"):
+    for code in ("0", "1", "2", "3", "4", "5", "64"):
         assert re.search(rf"^\| `{code}` \|", text, re.M), f"exit code {code} is not in the page's table"
     for name in action()["inputs"]:
         assert f"`{name}`" in text, f"input {name} is not documented"
@@ -803,7 +1054,7 @@ def test_the_page_documents_every_exit_code_and_input():
 
 def test_the_script_header_and_page_agree_on_the_exit_codes():
     header = {m.group(1) for m in re.finditer(r"^#\s+(\d+)\s{2,}", SCRIPT.read_text(), re.M)}
-    assert header == {"0", "1", "2", "3", "4", "64"}
+    assert header == {"0", "1", "2", "3", "4", "5", "64"}
 
 
 def test_the_action_is_listed_in_the_readme_and_repository_map():
