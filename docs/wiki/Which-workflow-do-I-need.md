@@ -26,6 +26,8 @@ the workflow's YAML so it cannot drift; the README is the authority.
 | An AI component whose threat model must stay current | `threat-model.yml` | [threat-model](Workflow-threat-model.md) |
 | A scheduled or on-demand deep-dive audit by Lory (not a per-PR gate) | `lory-audit.yml` | [lory-audit](Workflow-lory-audit.md) |
 
+Not a workflow, but a tool: to wait for a commit's CI and merge exactly that commit, use the `wait-ci` action or script ([wait-ci](Action-wait-ci.md)).
+
 A repository with several languages calls **one CI workflow per language**, each
 from its own caller job, and requires every gate. See
 [Getting started](Getting-started.md).

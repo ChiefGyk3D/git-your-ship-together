@@ -5,6 +5,18 @@ name what a caller sees after that.
 
 ## Unreleased
 
+### New: `wait-ci` watcher, script and composite action (issue #223)
+
+- **Added.** `scripts/wait-ci.sh` and `.github/actions/wait-ci`: one tested CI watcher for monitors and merge scripts, in
+  place of hand-written `mergeStateStatus` loops. It pins the head SHA at the start and checks only that commit; green needs
+  the named required check (`CI green` by default, matched exactly) to have reported and succeeded on that SHA, at least N check
+  runs complete, and none failed or cancelled. No check runs, or a required context that has not reported yet, is not green.
+  A moved head exits 4 (or, with `--on-push reset`, re-pins; the total timeout keeps running). `--merge` squash-merges with
+  `--match-head-commit` and retries a policy block a bounded number of times. It prints the verified SHA and never a token.
+  Exit codes: 0 green (and merged if asked), 1 red, 2 timeout, 3 hung, 4 head moved, 64 bad input.
+- **No change to any existing workflow.** Nothing calls the new action yet; a caller opts in by pinning a commit that has it.
+  Docs: [wait-ci](docs/wiki/Action-wait-ci.md). Tests: `tests/test_wait_ci.py`.
+
 ### Doppler decide step: only version tags are trusted (issue #209)
 
 - **Changed.** The trusted-ref rule in `doppler-secrets` and every inlined copy (python-ci, tofu-ci, security,
