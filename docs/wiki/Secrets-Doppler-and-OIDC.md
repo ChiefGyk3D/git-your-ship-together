@@ -148,7 +148,7 @@ In `outputs` mode every non-empty value is masked whatever Doppler's visibility 
 `DOPPLER_PROJECT`/`CONFIG`/`ENVIRONMENT` labels are never returned, a selected value that is empty fails the job (a
 missing credential must not come back as an empty string), a value shorter than 8 characters fails the job (masking a
 short or common-word value such as `true` or `prod` would redact that text from every later log line), and a value
-holding a NUL fails the job. The Doppler reply must be valid UTF-8 and at most 4,000,000 bytes. In `export: env` mode,
+holding a NUL or a U+FFFD replacement character (which is what an escaped lone surrogate would silently become) fails the job. The Doppler reply must be valid UTF-8 and at most 4,000,000 bytes, and every stage of reading it (request builder, curl, head) must succeed. In OIDC mode the job's request URL and token are shape-checked and the token masked before any request is made. In `export: env` mode,
 values Doppler marked unmasked stay unmasked (compatibility with the pinned action), and `outputs` mode is the form to
 use for production credentials. GitHub caps a step output at about 1 MB, counted in
 UTF-16; the action refuses more than 500,000 UTF-16 code units, so list fewer names.

@@ -50,11 +50,15 @@ STUB = r"""#!/usr/bin/env bash
 stdin=""
 if [ ! -t 0 ]; then stdin=$(cat); fi
 printf 'STDIN:%s\n' "$stdin" >>"$FAKE_LOG"
+# NOTE: this stub ignores --max-filesize; the argument's presence is asserted separately, and the real cap is the
+# `head -c` in the action, which the oversize tests exercise.
+[ -z "${FAKE_MARK:-}" ] || echo "CURL_CALLED" >&2
+if [ -n "${TMPDIR:-}" ]; then find "$TMPDIR" -mindepth 1 -printf 'TMP %m %y\n' >>"$FAKE_LOG" 2>/dev/null; fi
 if [ -n "${FAKE_CURL_FAIL:-}" ]; then echo "curl: (22) The requested URL returned error: 403" >&2; exit 22; fi
 case "$*" in
-  *token.example*) printf '{"count":1,"value":"fake.jwt.token"}\n' ;;
+  *githubusercontent.com*) printf '{"count":1,"value":"fake.jwt.token"}\n' ;;
   *auth/oidc*) printf '{"success":true,"token":"dp.sa.fakeexchange"}\n' ;;
-  *config/secrets*) cat "$FAKE_SECRETS" ;;
+  *config/secrets*) cat "$FAKE_SECRETS"; [ -z "${FAKE_CURL_EXIT_AFTER_BODY:-}" ] || exit "$FAKE_CURL_EXIT_AFTER_BODY" ;;
   *) echo "unexpected curl call: $*" >&2; exit 99 ;;
 esac
 """
@@ -107,7 +111,7 @@ class Harness:
             "CONFIG": "ci",
             "IDENTITY_ID": "",
             "TOKEN": "dp.st.synthetic-service-token",
-            "ACTIONS_ID_TOKEN_REQUEST_URL": "https://token.example/oidc?x=1",
+            "ACTIONS_ID_TOKEN_REQUEST_URL": "https://pipelines.actions.githubusercontent.com/abc/oidc?x=1",
             "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "synthetic-request-token",
         }
         base.update(extra)
@@ -691,7 +695,7 @@ def test_the_oidc_path_exchanges_the_job_token_and_masks_both_tokens(tmp_path):
     proc = h2.fetch("outputs", "PROD_TOKEN", MODE="oidc", IDENTITY_ID="00000000-0000-0000-0000-000000000000", TOKEN="")
     assert proc.returncode == 0, proc.stdout + proc.stderr
     log = h2.log.read_text()
-    assert "token.example" in log and "auth/oidc" in log and "config/secrets" in log
+    assert "githubusercontent.com" in log and "auth/oidc" in log and "config/secrets" in log
     masks = proc.stdout.splitlines()
     assert "::add-mask::fake.jwt.token" in masks and "::add-mask::dp.sa.fakeexchange" in masks
     assert json.loads(h2.outputs()["secrets"]) == {"PROD_TOKEN": "prod-synthetic-value-111"}
@@ -772,3 +776,211 @@ def test_the_docs_state_the_outputs_mode_rules(path):
     assert "authorization boundary" in text
     assert "outputs` mode is the form to use for production credentials" in text
     assert "marked unmasked stay unmasked" in text
+
+
+# --- round 4: one mask function, OIDC request credential, pipeline stages, lossy encodings -----------------------
+
+
+def test_every_mask_command_goes_through_one_function():
+    """Exactly one line of the action prints a mask command, so exactly one line needs a justification."""
+    lines = [ln for ln in ACTION.read_text().splitlines() if "::add-mask::" in ln and not ln.lstrip().startswith("#")]
+    assert len(lines) == 1, lines
+    assert "printf" in lines[0]
+    assert shipped("select").count("emit_mask") >= 4
+
+
+def test_the_mask_function_escapes_a_hostile_value(tmp_path):
+    """The escaping that makes the single flagged line safe: remove it and a value starts its own command."""
+    hostile = "prefix%0A::error::x\n::stop-commands::x\r::warning::y tail1234"
+    h2 = Harness(tmp_path, {"HOSTILE": hostile})
+    proc = h2.fetch("outputs", "HOSTILE")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    lines = proc.stdout.splitlines()
+    assert lines and all(ln.startswith("::add-mask::") for ln in lines), lines
+    assert not any(ln.startswith(("::stop-commands::", "::error", "::warning")) for ln in lines)
+    whole = hostile.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+    assert "::add-mask::" + whole in lines
+    assert json.loads(h2.outputs()["secrets"]) == {"HOSTILE": hostile}
+
+
+def test_the_oidc_request_token_is_masked_before_any_curl_call(tmp_path):
+    h2 = Harness(tmp_path)
+    code, normalized, out = h2.validate("outputs", "PROD_TOKEN")
+    assert code == 0, out
+    proc = subprocess.run(
+        ["bash", "-c", shipped("select")],
+        env=h2.env(
+            EXPORT="outputs",
+            WANT=normalized,
+            MODE="oidc",
+            IDENTITY_ID="00000000-0000-0000-0000-000000000000",
+            TOKEN="",
+            FAKE_MARK="1",
+        ),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    lines = proc.stdout.splitlines()
+    assert proc.returncode == 0, proc.stdout
+    assert "::add-mask::synthetic-request-token" in lines
+    assert lines.index("::add-mask::synthetic-request-token") < lines.index("CURL_CALLED")
+
+
+@pytest.mark.parametrize(
+    "token",
+    ["synthetic-request-token\nX-Evil: 1", "short", "has space in the token 1234", "x" * 9000, 'tok"en-with-quote-123'],
+    ids=["newline", "too-short", "space", "too-long", "quote"],
+)
+def test_a_hostile_oidc_request_token_fails_before_any_curl_call(tmp_path, token):
+    h2 = Harness(tmp_path)
+    proc = h2.fetch(
+        "outputs",
+        "PROD_TOKEN",
+        MODE="oidc",
+        IDENTITY_ID="00000000-0000-0000-0000-000000000000",
+        TOKEN="",
+        ACTIONS_ID_TOKEN_REQUEST_TOKEN=token,
+    )
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 1 and ("OIDC request token" in out or "unexpected shape" in out)
+    assert "ARGS:" not in h2.log.read_text(), "curl was called with a hostile request token"
+    assert "X-Evil" not in out
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://pipelines.actions.githubusercontent.com/abc",
+        "https://evil.example/abc",
+        "https://actions.githubusercontent.com.evil.example/abc",
+        "https://pipelines.actions.githubusercontent.com/abc\nHost: evil",
+        "https://user@pipelines.actions.githubusercontent.com/abc",
+        "file:///etc/passwd",
+    ],
+)
+def test_a_bad_oidc_request_url_fails_before_any_curl_call(tmp_path, url):
+    h2 = Harness(tmp_path)
+    proc = h2.fetch(
+        "outputs",
+        "PROD_TOKEN",
+        MODE="oidc",
+        IDENTITY_ID="00000000-0000-0000-0000-000000000000",
+        TOKEN="",
+        ACTIONS_ID_TOKEN_REQUEST_URL=url,
+    )
+    assert proc.returncode == 1 and "OIDC request URL" in proc.stdout + proc.stderr
+    assert "ARGS:" not in h2.log.read_text()
+
+
+# pipeline stages: 0 request builder (printf), 1 curl, 2 head
+
+
+def _run_select(h2, extra_env=None, path_prefix=None):
+    code, normalized, out = h2.validate("outputs", "PROD_TOKEN")
+    assert code == 0, out
+    env = h2.env(EXPORT="outputs", WANT=normalized, **(extra_env or {}))
+    if path_prefix:
+        env["PATH"] = f"{path_prefix}:{env['PATH']}"
+    h2.out.write_text("")
+    return subprocess.run(
+        ["bash", "-c", shipped("select")], env=env, capture_output=True, text=True, stdin=subprocess.DEVNULL
+    )
+
+
+def test_a_failing_curl_fails_even_though_a_complete_body_was_written(h):
+    proc = _run_select(h, {"FAKE_CURL_EXIT_AFTER_BODY": "7"})
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 1 and "at the curl stage" in out
+    assert h.out.read_text() == "" and "prod-synthetic-value-111" not in out
+
+
+def test_a_failing_head_fails_even_though_the_body_parses(tmp_path):
+    h2 = Harness(tmp_path)
+    fakebin = tmp_path / "fakebin"
+    fakebin.mkdir()
+    (fakebin / "head").write_text("#!/usr/bin/env bash\ncat\nexit 5\n")
+    (fakebin / "head").chmod(0o755)
+    proc = _run_select(h2, path_prefix=str(fakebin))
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 1 and "at the head stage" in out and h2.out.read_text() == ""
+
+
+def test_a_failing_request_builder_fails_even_though_the_body_parses(tmp_path):
+    h2 = Harness(tmp_path)
+    rc = tmp_path / "bashenv"
+    rc.write_text("printf() { case $1 in 'Authorization: Basic'*) return 3 ;; esac; builtin printf \"$@\"; }\n")
+    proc = _run_select(h2, {"BASH_ENV": str(rc)})
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 1 and "at the building the request stage" in out and h2.out.read_text() == ""
+
+
+def test_exactly_the_reply_cap_in_bytes_with_every_stage_clean_passes(tmp_path):
+    h2 = Harness(tmp_path)
+    body = b'{"secrets":{"PROD_TOKEN":{"computed":"prod-synthetic-value-111","computedVisibility":"masked"}}}'
+    h2.secrets_file.write_bytes(body + b" " * (4_000_000 - len(body)))
+    proc = _run_select(h2)
+    assert proc.returncode == 0, (proc.stdout + proc.stderr)[-300:]
+    h2.secrets_file.write_bytes(body + b" " * (4_000_001 - len(body)))
+    over = _run_select(h2)
+    assert over.returncode == 1 and "larger than 4000000 bytes" in over.stdout + over.stderr
+
+
+# lossy encodings
+
+
+def _body(value_escaped: str) -> bytes:
+    return ('{"secrets":{"BAD":{"computed":"' + value_escaped + '","computedVisibility":"masked"}}}').encode()
+
+
+@pytest.mark.parametrize("mode", ["outputs", "env"])
+def test_an_escaped_lone_low_surrogate_is_refused_by_name(tmp_path, mode):
+    """The body is pure ASCII so iconv passes it; jq 1.7 would silently rewrite the escape to U+FFFD."""
+    h2 = Harness(tmp_path)
+    h2.secrets_file.write_bytes(_body("\\udfffABCDEFGH"))
+    proc = h2.fetch(mode, "BAD")
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 1 and "BAD" in out and "U+FFFD" in out and "ABCDEFGH" not in out
+    assert h2.out.read_text() == "" and h2.env_file.read_text() == ""
+
+
+@pytest.mark.parametrize("mode", ["outputs", "env"])
+def test_an_escaped_lone_high_surrogate_still_fails(tmp_path, mode):
+    h2 = Harness(tmp_path)
+    h2.secrets_file.write_bytes(_body("\\ud800ABCDEFGH"))
+    proc = h2.fetch(mode, "BAD")
+    assert proc.returncode == 1 and "ABCDEFGH" not in proc.stdout + proc.stderr
+    assert h2.out.read_text() == "" and h2.env_file.read_text() == ""
+
+
+def test_a_valid_surrogate_pair_escape_round_trips_exactly(tmp_path):
+    h2 = Harness(tmp_path)
+    h2.secrets_file.write_bytes(_body("\\ud83d\\ude00ABCDEFGH"))
+    proc = h2.fetch("outputs", "BAD")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert json.loads(h2.outputs()["secrets"]) == {"BAD": "\U0001f600ABCDEFGH"}
+    h3dir = tmp_path / "env"
+    h3dir.mkdir()
+    h3 = Harness(h3dir)
+    h3.secrets_file.write_bytes(_body("\\ud83d\\ude00ABCDEFGH"))
+    assert h3.fetch("env", "BAD").returncode == 0
+    assert h3.exported() == {"BAD": "\U0001f600ABCDEFGH"}
+
+
+# the private work directory (names are already limited to ^[A-Z_][A-Z0-9_]*$, so U+FFFD cannot occur in one)
+
+
+def test_the_work_directory_is_private_and_removed_even_on_failure(tmp_path):
+    h2 = Harness(tmp_path)
+    tmpdir = tmp_path / "tmpdir"
+    tmpdir.mkdir()
+    proc = _run_select(h2, {"TMPDIR": str(tmpdir)})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    seen = [ln for ln in h2.log.read_text().splitlines() if ln.startswith("TMP ")]
+    assert "TMP 700 d" in seen and "TMP 600 f" in seen, seen
+    assert list(tmpdir.iterdir()) == []
+    h2.secrets_file.write_bytes(_body("\\udfffABCDEFGH"))
+    proc = _run_select(h2, {"TMPDIR": str(tmpdir)})
+    assert proc.returncode == 1
+    assert list(tmpdir.iterdir()) == [], "a failure left the reply on disk"

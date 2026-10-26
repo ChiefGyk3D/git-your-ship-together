@@ -122,6 +122,13 @@ name what a caller sees after that.
   `head -c`) and must be valid UTF-8 (`iconv -f UTF-8 -t UTF-8`) before jq parses it; the UTF-16 size is computed on
   parsed JSON because jq 1.7 raw input miscounts multibyte characters across read chunks. In `export: env` mode values
   Doppler marks unmasked stay unmasked (compatibility); `outputs` is the form for production credentials.
+- **Mask function and request checks.** Every mask command is printed by one function, `emit_mask`, which escapes `%`,
+  CR and LF (one line carries the Semgrep rule `unsafe-add-mask-workflow-command`, which flags any mask command; the
+  escaping is proved by `test_the_mask_function_escapes_a_hostile_value`). The OIDC request URL (https, a GitHub Actions
+  host) and request token (character class, length) are checked and the token masked before the first request. Every
+  pipeline stage of the reply read is checked (request builder, curl, head); only the oversize path tolerates curl's
+  write error. A selected value holding U+FFFD, which is what jq 1.7 makes of an escaped lone low surrogate, fails the
+  job in both modes. The reply and mask list live in a private (700/600) temp directory removed on every exit.
 - **Caller impact.** None unless a caller sets the new inputs. The default path still runs the pinned
   `dopplerhq/secrets-fetch-action`. The new paths call the Doppler API with curl and jq (that action can only export
   everything it reads), with credentials on standard input. The inlined decide step is untouched, so the five workflow

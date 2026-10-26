@@ -288,24 +288,50 @@ runs:
         # 4,000,000 bytes: the largest result this action accepts (500,000 UTF-16 units) is at most 1,000,000 UTF-8
         # bytes, the reply carries each value twice (raw and computed), and other secrets in the config ride along.
         reply_cap=4000000
-        raw=$(mktemp)
-        trap 'rm -f "$raw"' EXIT
+        # A private directory (umask 077: directory 700, files 600) holds the reply and the mask list; it is removed on
+        # every exit, including a failure.
+        work=$(mktemp -d)
+        trap 'rm -rf "$work"' EXIT
+        raw="$work/reply"
+        masks="$work/masks"
         fail() {
           echo "::error title=Doppler::$1"
           exit 1
         }
         # --fail keeps an error body (which can echo a request) out of the log; credentials arrive on stdin.
         call() { curl --disable --silent --show-error --fail --proto '=https' --tlsv1.2 --max-time 60 --retry 2 "$@"; }
+        # The ONE place a mask command is printed. % CR and LF are escaped first (the runner unescapes them when it
+        # reads the command), so a value can neither start another workflow command (an embedded newline followed by
+        # a stop-commands command) nor change what is masked. tests/test_doppler_outputs.py proves it with hostile
+        # values and fails if this escaping is removed.
+        emit_mask() {
+          local m=$1
+          [ -n "$m" ] || return 0
+          m=${m//'%'/%25}
+          m=${m//$'\r'/%0D}
+          m=${m//$'\n'/%0A}
+          printf '::add-mask::%s\n' "$m"
+        }
         # A credential is masked before it is used, and only if it cannot carry a newline or a workflow command.
         mask_token() {
           [[ $1 =~ ^[A-Za-z0-9._~+/=-]+$ ]] || fail "a credential has an unexpected shape"
-          echo "::add-mask::$1"
+          emit_mask "$1"
         }
 
         if [ "$MODE" = oidc ]; then
           if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ] || [ -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ]; then
             fail "no OIDC token is available; the calling job needs id-token: write"
           fi
+          # Both values are checked, and the token masked, BEFORE any request is built: a newline in the token could add
+          # header lines, and a token curl later echoes must already be masked.
+          oidc_url_re='^https://([A-Za-z0-9-]+\.)+(actions\.githubusercontent|ghe)\.com/[A-Za-z0-9._~:/?#@!$&()*+,;=%-]*$'
+          if [ "${#ACTIONS_ID_TOKEN_REQUEST_URL}" -gt 2048 ] || ! [[ $ACTIONS_ID_TOKEN_REQUEST_URL =~ $oidc_url_re ]]; then
+            fail "the OIDC request URL is not an https GitHub Actions URL"
+          fi
+          if [ "${#ACTIONS_ID_TOKEN_REQUEST_TOKEN}" -lt 16 ] || [ "${#ACTIONS_ID_TOKEN_REQUEST_TOKEN}" -gt 8192 ]; then
+            fail "the OIDC request token has an unexpected length"
+          fi
+          mask_token "$ACTIONS_ID_TOKEN_REQUEST_TOKEN"
           reply=$(printf 'Authorization: Bearer %s\n' "$ACTIONS_ID_TOKEN_REQUEST_TOKEN" |
             call --header @- "$ACTIONS_ID_TOKEN_REQUEST_URL") || fail "could not get the job's OIDC token"
           jwt=$(jq -r '.value // empty' <<<"$reply") || fail "the OIDC token reply was not JSON"
@@ -337,12 +363,19 @@ runs:
           head -c "$((reply_cap + 1))" >"$raw"
         statuses=("${PIPESTATUS[@]}")
         set -e
-        if [ "$(wc -c <"$raw" | tr -d ' ')" -gt "$reply_cap" ]; then
+        # Every stage is checked. Stage 0 is the request builder (printf), 1 is curl, 2 is head.
+        #   oversize: head read the cap plus one byte (so the file is over the cap), or curl stopped on its own size
+        #     cap (exit 63) - curl may then fail with a write error (23) or SIGPIPE (141) as head stops reading. That
+        #     one path reports the oversize message whatever the other statuses were.
+        #   otherwise: stage 0, 1 and 2 must each be 0, or the job fails naming only the stage.
+        if [ "$(wc -c <"$raw" | tr -d ' ')" -gt "$reply_cap" ] || [ "${statuses[1]}" -eq 63 ]; then
           fail "the Doppler reply is larger than $reply_cap bytes; not trusting it"
         fi
-        if [ "${statuses[1]}" -ne 0 ]; then
-          fail "could not read the Doppler config"
-        fi
+        for stage in 0:"building the request" 1:"curl" 2:"head"; do
+          if [ "${statuses[${stage%%:*}]}" -ne 0 ]; then
+            fail "reading the Doppler config failed at the ${stage#*:} stage"
+          fi
+        done
         # jq 1.7 silently turns malformed UTF-8 into U+FFFD, which would change a credential, so the bytes are checked
         # first. iconv (glibc or libiconv, present on GitHub-hosted Linux, macOS and Windows runners) exits non-zero on
         # an invalid sequence.
@@ -365,6 +398,13 @@ runs:
         nul=$(jq -r '[to_entries[] | select(.value.computed // "" | tostring | contains("\u0000")) | .key] | join(",")' <<<"$selected")
         if [ -n "$nul" ]; then
           fail "secret(s) $nul hold a NUL character; not returned"
+        fi
+        # iconv checks the bytes, not JSON escapes: jq 1.7 turns an escaped lone low surrogate into U+FFFD without an
+        # error, which would change the credential. A real credential holding U+FFFD is not realistic, so refusing it
+        # also closes any other lossy path. Names cannot hold it (^[A-Z_][A-Z0-9_]*$).
+        fffd=$(jq -r '[to_entries[] | select(.value.computed // "" | tostring | contains("\ufffd")) | .key] | join(",")' <<<"$selected")
+        if [ -n "$fffd" ]; then
+          fail "secret(s) $fffd hold a U+FFFD replacement character (a lossy or invalid encoding in the reply); not returned"
         fi
         result=$(jq -c 'map_values((.computed // "") | tostring)' <<<"$selected")
 
@@ -398,20 +438,21 @@ runs:
         # In outputs mode EVERY non-empty value is masked, whatever Doppler's computedVisibility says, because the
         # caller extracts it and passes it on. In env mode (names) Doppler's unmasked values and its own
         # project/config/environment labels are left readable, as the pinned action does.
-        jq -r --argjson all "$([ "$EXPORT" = outputs ] && echo true || echo false)" '
-          def esc: gsub("%"; "%25") | gsub("\r"; "%0D") | gsub("\n"; "%0A");
-          def mask: select(. != "") | "::add-mask::" + esc;
+        jq -j --argjson all "$([ "$EXPORT" = outputs ] && echo true || echo false)" '
           ["DOPPLER_PROJECT", "DOPPLER_CONFIG", "DOPPLER_ENVIRONMENT"] as $meta
           | [ to_entries[]
               | select((.key | IN($meta[])) | not)
               | select($all or (.value.computedVisibility != "unmasked"))
               | (.value.computed // "" | tostring) as $v
-              | ($v | mask), ($v | splits("[\r\n]+") | mask), ($v | tojson | .[1:-1] | select(. != $v) | mask) ]
-          | unique[]' <<<"$selected"
+              | $v, ($v | splits("[\r\n]+")), ($v | tojson | .[1:-1]) ]
+          | map(select(. != "")) | unique[] | . + "\u0000"' <<<"$selected" >"$masks"
+        while IFS= read -r -d '' m; do
+          emit_mask "$m"
+        done <"$masks"
 
         if [ "$EXPORT" = outputs ]; then
           if [ "$result" != "{}" ]; then
-            printf '%s' "$result" | jq -r 'tojson | "::add-mask::" + (gsub("%"; "%25") | gsub("\r"; "%0D"))'
+            emit_mask "$result"
           fi
           delim="GYST_$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
           case "$result" in *"$delim"*) fail "could not pick a safe output delimiter" ;; esac
