@@ -73,7 +73,7 @@ def doppler_response(values: dict[str, str]) -> str:
         }
         for k, v in values.items()
     }
-    return json.dumps({"success": True, "secrets": secrets})
+    return json.dumps({"success": True, "secrets": secrets}, ensure_ascii=False)
 
 
 class Harness:
@@ -87,7 +87,7 @@ class Harness:
         self.log = tmp / "curl.log"
         self.log.write_text("")
         self.secrets_file = tmp / "secrets.json"
-        self.secrets_file.write_text(doppler_response(SECRETS if values is None else values))
+        self.secrets_file.write_bytes(doppler_response(SECRETS if values is None else values).encode())
         self.out = tmp / "github_output"
         self.env_file = tmp / "github_env"
         self.out.write_text("")
@@ -425,25 +425,55 @@ def test_the_doppler_labels_are_never_returned_or_masked_in_outputs_mode(h):
 
 @pytest.mark.parametrize("label", ["DOPPLER_PROJECT", "DOPPLER_CONFIG", "DOPPLER_ENVIRONMENT"])
 def test_asking_for_a_doppler_label_in_outputs_mode_fails(h, label):
-    h.secrets_file.write_text(doppler_response({**SECRETS, label: "label-value-xyz"}))
+    h.secrets_file.write_bytes(doppler_response({**SECRETS, label: "label-value-xyz"}).encode())
     proc = h.fetch("outputs", f"PROD_TOKEN,{label}")
     out = proc.stdout + proc.stderr
     assert proc.returncode == 1 and label in out and "label-value-xyz" not in out
     assert h.out.read_text() == ""
 
 
-def test_empty_values_are_returned_but_not_masked(tmp_path):
-    h2 = Harness(tmp_path, {"EMPTY": "", "FULL": "synthetic-full-value"})
-    proc = h2.fetch("outputs", "EMPTY,FULL")
+def test_an_empty_selected_value_fails_closed_in_outputs_mode(tmp_path):
+    """Why: a credential that is missing in Doppler must not come back as "" - a downstream step could then fall back
+    to anonymous or default authentication without anyone noticing. The message names the secret, never a value."""
+    h2 = Harness(tmp_path, {"EMPTY_ONE": "", "FULL": "synthetic-full-value"})
+    proc = h2.fetch("outputs", "EMPTY_ONE,FULL")
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 1 and "EMPTY_ONE" in out and "empty" in out
+    assert "synthetic-full-value" not in out
+    assert h2.out.read_text() == "" and h2.env_file.read_text() == ""
+
+
+def test_an_empty_unselected_value_is_ignored(tmp_path):
+    h2 = Harness(tmp_path, {"EMPTY_ONE": "", "FULL": "synthetic-full-value"})
+    proc = h2.fetch("outputs", "FULL")
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert json.loads(h2.outputs()["secrets"]) == {"EMPTY": "", "FULL": "synthetic-full-value"}
-    assert "::add-mask::" not in proc.stdout.splitlines()
-    assert "::add-mask::synthetic-full-value" in proc.stdout.splitlines()
+    assert json.loads(h2.outputs()["secrets"]) == {"FULL": "synthetic-full-value"}
 
 
-@pytest.mark.parametrize("value, ok", [("~", False), ("~~~", False), ("~~~~", True)])
-def test_a_short_value_fails_closed_in_outputs_mode(tmp_path, value, ok):
-    """add-mask on a 1 to 3 character value would redact that text from every later log line."""
+def test_an_empty_value_is_still_allowed_in_env_mode(tmp_path):
+    h2 = Harness(tmp_path, {"EMPTY_ONE": ""})
+    assert h2.fetch("env", "EMPTY_ONE").returncode == 0
+
+
+@pytest.mark.parametrize(
+    "value, ok",
+    [
+        ("~", False),
+        ("~~~", False),
+        ("~~~~", False),
+        ("~~~~~~~", False),  # 7 characters
+        ("~~~~~~~~", True),  # 8 characters
+        ("true", False),
+        ("null", False),
+        ("prod", False),
+        ("http", False),
+        ("2026", False),
+        ("\u20ac" * 7, False),  # counted in characters, not bytes
+        ("\u20ac" * 8, True),
+    ],
+)
+def test_a_value_under_eight_characters_fails_closed_in_outputs_mode(tmp_path, value, ok):
+    """add-mask on a short or common-word value redacts that text from every later log line."""
     h2 = Harness(tmp_path, {"SHORT_ONE": value, "PROD_TOKEN": "prod-synthetic-value-111"})
     proc = h2.fetch("outputs", "SHORT_ONE,PROD_TOKEN")
     out = proc.stdout + proc.stderr
@@ -451,8 +481,9 @@ def test_a_short_value_fails_closed_in_outputs_mode(tmp_path, value, ok):
         assert proc.returncode == 0, out
         assert json.loads(h2.outputs()["secrets"])["SHORT_ONE"] == value
     else:
-        assert proc.returncode == 1 and "SHORT_ONE" in out and "shorter than 4" in out
-        assert "~" not in out and "prod-synthetic-value-111" not in out
+        assert proc.returncode == 1 and "SHORT_ONE" in out and "shorter than 8" in out
+        assert value not in out.replace("shorter than 8", "")
+        assert "prod-synthetic-value-111" not in out
         assert h2.out.read_text() == "" and h2.env_file.read_text() == ""
 
 
@@ -588,6 +619,70 @@ def test_characters_outside_the_bmp_count_as_two_units(tmp_path):
     assert bad.returncode == 1 and "UTF-16" in bad.stdout + bad.stderr
 
 
+# --- hostile Doppler replies ---------------------------------------------------------------------------------
+
+
+def _raw_reply(h2, body: bytes):
+    h2.secrets_file.write_bytes(body)
+
+
+def test_malformed_utf8_in_the_reply_fails_closed_before_parsing(tmp_path):
+    """jq 1.7 would turn the stray byte into U+FFFD and quietly change the credential."""
+    h2 = Harness(tmp_path)
+    _raw_reply(
+        h2,
+        b'{"success":true,"secrets":{"BAD":{"computed":"abc\xffdefghijkl","computedVisibility":"masked"}}}',
+    )
+    proc = h2.fetch("outputs", "BAD")
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 1 and "UTF-8" in out and "abcdefghijkl" not in out
+    assert h2.out.read_text() == "" and h2.env_file.read_text() == ""
+
+
+def test_malformed_utf8_also_fails_in_env_mode(tmp_path):
+    h2 = Harness(tmp_path)
+    _raw_reply(h2, b'{"secrets":{"BAD":{"computed":"abc\xc3(defghijkl"}}}')
+    proc = h2.fetch("env", "BAD")
+    assert proc.returncode == 1 and h2.env_file.read_text() == ""
+
+
+def test_an_oversize_reply_fails_closed_before_any_parsing(tmp_path):
+    h2 = Harness(tmp_path, {"BIG": "x" * 4_100_000})
+    proc = h2.fetch("outputs", "BIG")
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 1 and "larger than 4000000 bytes" in out
+    assert "xxxxxxxx" not in out and h2.out.read_text() == ""
+
+
+def test_curl_is_given_a_response_size_cap(h):
+    h.fetch("outputs", "PROD_TOKEN")
+    args = [ln for ln in h.log.read_text().splitlines() if ln.startswith("ARGS:") and "config/secrets" in ln]
+    assert args and all("--max-filesize 4000000" in ln for ln in args)
+
+
+@pytest.mark.parametrize("mode", ["outputs", "env"])
+def test_a_value_holding_a_nul_is_refused_by_name(tmp_path, mode):
+    h2 = Harness(tmp_path)
+    _raw_reply(h2, b'{"secrets":{"NUL_ONE":{"computed":"abcd\\u0000efghijkl","computedVisibility":"masked"}}}')
+    proc = h2.fetch(mode, "NUL_ONE")
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 1 and "NUL_ONE" in out and "NUL" in out and "abcd" not in out
+    assert h2.out.read_text() == "" and h2.env_file.read_text() == ""
+
+
+def test_the_utf16_count_edge_between_u_ffff_and_u_10000(tmp_path):
+    """U+FFFF is one UTF-16 unit and U+10000 is two. The JSON adds 10 units of overhead."""
+    overhead = len('{"BIG":""}')
+    _, one = _size_case(tmp_path, "\uffff" * (500_000 - overhead))  # exactly the limit, 1 unit each
+    assert one.returncode == 0, (one.stdout + one.stderr)[-300:]
+    (tmp_path / "b").mkdir()
+    _, two = _size_case(tmp_path / "b", "\U00010000" * ((500_000 - overhead) // 2 + 1))  # one unit over
+    assert two.returncode == 1 and "UTF-16" in two.stdout + two.stderr
+    (tmp_path / "c").mkdir()
+    _, edge = _size_case(tmp_path / "c", "\U00010000" * ((500_000 - overhead) // 2))  # exactly the limit
+    assert edge.returncode == 0
+
+
 # --- both ways in, and what goes on a command line ---------------------------------------------------------------
 
 
@@ -660,4 +755,20 @@ def test_the_action_text_names_the_trade_off_and_the_waiting_callers():
     assert "export: outputs" in head and "names" in head and "post-run" in head
     assert "requires `names`" in head and "authorization boundary" in head and "GITHUB_STEP_SUMMARY" in head
     assert "whole as an env" in head and "job outputs" in head and "steal" in head
+    assert "8 characters" in head and "empty" in head
     assert "fromJSON" in head and "no-php-no-cry" in head and "Reach-Around" in head
+
+
+@pytest.mark.parametrize("path", ["README.md", "docs/wiki/Secrets-Doppler-and-OIDC.md"])
+def test_the_docs_state_the_outputs_mode_rules(path):
+    text = " ".join((REPO / path).read_text().split())
+    assert "Required with `export: outputs`" in text or "**Required with `export: outputs`**" in text
+    assert "shorter than 8 characters" in text
+    assert "empty" in text and "fails the job" in text
+    assert (
+        "Never pass `steps.<id>.outputs.secrets` whole" in text
+        or "Never** pass `steps.<id>.outputs.secrets` whole" in text
+    )
+    assert "authorization boundary" in text
+    assert "outputs` mode is the form to use for production credentials" in text
+    assert "marked unmasked stay unmasked" in text

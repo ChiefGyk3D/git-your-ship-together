@@ -145,8 +145,12 @@ holds a production credential.** The README shows a worked step ("Handing a secr
 are the `no-php-no-cry` and `Reach-Around` deploy workflows.
 
 In `outputs` mode every non-empty value is masked whatever Doppler's visibility says, Doppler's own
-`DOPPLER_PROJECT`/`CONFIG`/`ENVIRONMENT` labels are never returned, and a value shorter than 4 characters fails the job
-(masking it would redact that text from every later log line). GitHub caps a step output at about 1 MB, counted in
+`DOPPLER_PROJECT`/`CONFIG`/`ENVIRONMENT` labels are never returned, a selected value that is empty fails the job (a
+missing credential must not come back as an empty string), a value shorter than 8 characters fails the job (masking a
+short or common-word value such as `true` or `prod` would redact that text from every later log line), and a value
+holding a NUL fails the job. The Doppler reply must be valid UTF-8 and at most 4,000,000 bytes. In `export: env` mode,
+values Doppler marked unmasked stay unmasked (compatibility with the pinned action), and `outputs` mode is the form to
+use for production credentials. GitHub caps a step output at about 1 MB, counted in
 UTF-16; the action refuses more than 500,000 UTF-16 code units, so list fewer names.
 
 **Caller rules.** Pass one extracted value to one step through its `env:`. Never pass `steps.<id>.outputs.secrets` whole

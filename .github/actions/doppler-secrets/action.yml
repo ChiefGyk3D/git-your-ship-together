@@ -40,9 +40,10 @@
 #     fromJSON(steps.<id>.outputs.secrets).NAME and passes it to the single step
 #     that needs it through that step's `env:`. With nothing fetched the output
 #     is `{}`. This is the form for a job that holds a production credential.
-#     EVERY returned value is masked, whatever Doppler's visibility says; a value
-#     shorter than 4 characters fails the job (masking it would redact that text
-#     from later logs); Doppler's own DOPPLER_PROJECT/CONFIG/ENVIRONMENT labels
+#     EVERY returned value is masked, whatever Doppler's visibility says; an empty
+#     selected value, or one shorter than 8 characters, fails the job (a missing
+#     credential must not come back as "", and masking a short or common-word
+#     value would redact that text from later logs); Doppler's own DOPPLER_PROJECT/CONFIG/ENVIRONMENT labels
 #     are never returned; the JSON is refused above 500,000 UTF-16 code units.
 #   Caller rules for the `secrets` output. Pass ONE extracted value to ONE step
 #     through its `env:`. Never pass `steps.<id>.outputs.secrets` whole as an env
@@ -283,6 +284,12 @@ runs:
         # code units and refused above 500,000 of them (1,000,000 bytes in UTF-16): conservative, and correct for
         # multibyte text, where counting UTF-8 bytes would under-count an ASCII-heavy value by half.
         limit=500000
+        # The Doppler reply is capped before any jq runs (jq's explode would otherwise hold a huge value in memory).
+        # 4,000,000 bytes: the largest result this action accepts (500,000 UTF-16 units) is at most 1,000,000 UTF-8
+        # bytes, the reply carries each value twice (raw and computed), and other secrets in the config ride along.
+        reply_cap=4000000
+        raw=$(mktemp)
+        trap 'rm -f "$raw"' EXIT
         fail() {
           echo "::error title=Doppler::$1"
           exit 1
@@ -322,34 +329,65 @@ runs:
           dp.pt.* | dp.sa.* | dp.said.*)
             query="?$(jq -rn '"project=" + (env.PROJECT | @uri) + "&config=" + (env.CONFIG | @uri)')" ;;
         esac
-        response=$(printf 'Authorization: Basic %s\n' "$auth" |
-          call --header @- --header 'Accept: application/json' "$api/v3/configs/config/secrets$query") || fail "could not read the Doppler config"
-        jq -e '.secrets | type == "object"' <<<"$response" >/dev/null 2>&1 || fail "the Doppler reply held no secrets"
+        # head -c stops reading one byte past the cap, so a body with no Content-Length (which --max-filesize cannot see)
+        # still cannot grow without bound. The body goes to a private file; nothing parses it until it is checked.
+        set +e # the statuses are read below; a curl failure or the head cut-off must reach fail, not end the script
+        printf 'Authorization: Basic %s\n' "$auth" |
+          call --max-filesize "$reply_cap" --header @- --header 'Accept: application/json' "$api/v3/configs/config/secrets$query" |
+          head -c "$((reply_cap + 1))" >"$raw"
+        statuses=("${PIPESTATUS[@]}")
+        set -e
+        if [ "$(wc -c <"$raw" | tr -d ' ')" -gt "$reply_cap" ]; then
+          fail "the Doppler reply is larger than $reply_cap bytes; not trusting it"
+        fi
+        if [ "${statuses[1]}" -ne 0 ]; then
+          fail "could not read the Doppler config"
+        fi
+        # jq 1.7 silently turns malformed UTF-8 into U+FFFD, which would change a credential, so the bytes are checked
+        # first. iconv (glibc or libiconv, present on GitHub-hosted Linux, macOS and Windows runners) exits non-zero on
+        # an invalid sequence.
+        if ! iconv -f UTF-8 -t UTF-8 <"$raw" >/dev/null 2>&1; then
+          fail "the Doppler reply is not valid UTF-8; not trusting it"
+        fi
+        jq -e '.secrets | type == "object"' "$raw" >/dev/null 2>&1 || fail "the Doppler reply held no secrets"
 
         want='[]'
         if [ -n "$WANT" ]; then
           want=$(jq -cn --arg w "$WANT" '$w | split(",")')
         fi
-        missing=$(jq -r --argjson want "$want" '$want - (.secrets | keys_unsorted) | join(",")' <<<"$response")
+        missing=$(jq -r --argjson want "$want" '$want - (.secrets | keys_unsorted) | join(",")' "$raw")
         if [ -n "$missing" ]; then
           fail "requested secret(s) not in the Doppler config: $missing"
         fi
         selected=$(jq -c --argjson want "$want" '
-          .secrets | if ($want | length) == 0 then . else with_entries(select(.key as $k | $want | index($k) != null)) end' <<<"$response")
+          .secrets | if ($want | length) == 0 then . else with_entries(select(.key as $k | $want | index($k) != null)) end' "$raw")
+        # A NUL cannot be placed in a process environment and its handling by runner command parsing is unverified.
+        nul=$(jq -r '[to_entries[] | select(.value.computed // "" | tostring | contains("\u0000")) | .key] | join(",")' <<<"$selected")
+        if [ -n "$nul" ]; then
+          fail "secret(s) $nul hold a NUL character; not returned"
+        fi
         result=$(jq -c 'map_values((.computed // "") | tostring)' <<<"$selected")
 
         if [ "$EXPORT" = outputs ]; then
           # The Doppler labels are not secrets and are never returned (or masked) in outputs mode.
-          labels=$(jq -r --argjson want "$want" '[$want[] | select(IN("DOPPLER_PROJECT", "DOPPLER_CONFIG", "DOPPLER_ENVIRONMENT"))] | join(",")' <<<"$response")
+          labels=$(jq -r --argjson want "$want" '[$want[] | select(IN("DOPPLER_PROJECT", "DOPPLER_CONFIG", "DOPPLER_ENVIRONMENT"))] | join(",")' "$raw")
           if [ -n "$labels" ]; then
             fail "export: outputs does not return Doppler's own labels ($labels); remove them from names"
           fi
-          # add-mask on a short value redacts that text from every later log line, so refuse rather than mask it.
-          short=$(jq -r '[to_entries[] | select((.value.computed // "" | tostring | length) as $n | $n > 0 and $n < 4) | .key] | join(",")' <<<"$selected")
-          if [ -n "$short" ]; then
-            fail "secret(s) $short hold a value shorter than 4 characters; masking it would redact that text from later logs. Not returned"
+          # A credential that is missing must not come back as "": a downstream step could fall back to anonymous or
+          # default authentication.
+          empty=$(jq -r '[to_entries[] | select((.value.computed // "" | tostring) == "") | .key] | join(",")' <<<"$selected")
+          if [ -n "$empty" ]; then
+            fail "secret(s) $empty hold an empty value; a missing credential is not returned as an empty string"
           fi
-          units=$(printf '%s' "$result" | jq -Rs 'explode | map(if . > 65535 then 2 else 1 end) | add // 0')
+          # add-mask on a short or common-word value (true, null, prod, http, 2026) redacts that text from every later
+          # log line, and real credentials and account ids are far longer, so refuse rather than mask it.
+          short=$(jq -r '[to_entries[] | select((.value.computed // "" | tostring | length) < 8) | .key] | join(",")' <<<"$selected")
+          if [ -n "$short" ]; then
+            fail "secret(s) $short hold a value shorter than 8 characters; masking it would redact that text from later logs. Not returned"
+          fi
+          # Parsed, not read with jq -R: jq 1.7 raw input miscounts multibyte characters that straddle a read chunk.
+          units=$(printf '%s' "$result" | jq 'tojson | explode | map(if . > 65535 then 2 else 1 end) | add // 0')
           if [ "$units" -gt "$limit" ]; then
             fail "the secrets JSON is $units UTF-16 code units, over this action's limit of $limit (GitHub's output size limit is 1 MB); list fewer secrets in names"
           fi
@@ -373,7 +411,7 @@ runs:
 
         if [ "$EXPORT" = outputs ]; then
           if [ "$result" != "{}" ]; then
-            printf '%s' "$result" | jq -Rr '"::add-mask::" + (gsub("%"; "%25") | gsub("\r"; "%0D"))'
+            printf '%s' "$result" | jq -r 'tojson | "::add-mask::" + (gsub("%"; "%25") | gsub("\r"; "%0D"))'
           fi
           delim="GYST_$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
           case "$result" in *"$delim"*) fail "could not pick a safe output delimiter" ;; esac

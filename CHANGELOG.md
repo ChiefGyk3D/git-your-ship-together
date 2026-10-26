@@ -110,13 +110,18 @@ name what a caller sees after that.
   returned (`{}` when nothing was fetched) for the caller to read with `fromJSON(steps.<id>.outputs.secrets).NAME` and
   hand to single steps through `env:`. `names` narrows either mode and is **required** with `export: outputs` (an empty
   list would return the whole config). In `outputs` mode every non-empty value is masked whatever Doppler's visibility
-  says, Doppler's own `DOPPLER_PROJECT`/`CONFIG`/`ENVIRONMENT` labels are never returned, and a value under 4 characters
-  fails the job (masking it would redact that text from later logs). A missing name, an invalid `export`, a malformed
+  says, Doppler's own `DOPPLER_PROJECT`/`CONFIG`/`ENVIRONMENT` labels are never returned, an empty selected value fails
+  the job, as does a value under 8 characters (masking a short or common-word value redacts that text from later logs)
+  or one containing a NUL. A missing name, an invalid `export`, a malformed
   or empty-after-parsing `names`, and a result over 500,000 UTF-16 code units (GitHub's 1 MB output limit is counted in
   UTF-16) each fail the job without echoing a value. Caller rules: never pass the whole `secrets` output as an env value
   or put it in `GITHUB_ENV`, `GITHUB_STEP_SUMMARY`, artifacts, caches, debug output or job outputs; `add-mask` protects
   logs only and is not an authorization boundary; any step that receives an extracted value can steal it.
   Both authentication paths and the trusted-refs-only guard are kept; the `mode` output is unchanged.
+- **Reply handling.** The Doppler reply is read into a private file capped at 4,000,000 bytes (`--max-filesize` plus
+  `head -c`) and must be valid UTF-8 (`iconv -f UTF-8 -t UTF-8`) before jq parses it; the UTF-16 size is computed on
+  parsed JSON because jq 1.7 raw input miscounts multibyte characters across read chunks. In `export: env` mode values
+  Doppler marks unmasked stay unmasked (compatibility); `outputs` is the form for production credentials.
 - **Caller impact.** None unless a caller sets the new inputs. The default path still runs the pinned
   `dopplerhq/secrets-fetch-action`. The new paths call the Doppler API with curl and jq (that action can only export
   everything it reads), with credentials on standard input. The inlined decide step is untouched, so the five workflow

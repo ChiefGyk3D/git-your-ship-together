@@ -2258,13 +2258,23 @@ In `outputs` mode every non-empty value is masked (each line, the whole multi-li
 value, and its JSON-escaped form) before it is written, whatever Doppler's
 visibility says, and the JSON goes through a random-delimiter `GITHUB_OUTPUT`
 write. Doppler's own `DOPPLER_PROJECT`, `DOPPLER_CONFIG` and `DOPPLER_ENVIRONMENT`
-labels are never returned (naming one fails). A value shorter than 4 characters
-fails the job, because masking it would redact that text from every later log line.
+labels are never returned (naming one fails). A selected value that is empty fails
+the job (a missing credential must not come back as `""`, where a later step could
+fall back to anonymous authentication). A value shorter than 8 characters fails the
+job, because masking a short or common-word value (`true`, `prod`, `2026`) would
+redact that text from every later log line. A value containing a NUL character
+fails the job. The Doppler reply must be valid UTF-8 and at most 4,000,000 bytes, or
+the job fails before anything is parsed. No failure message holds a value.
 GitHub caps one step output at about 1 MB, counted in UTF-16; the action refuses a
 result over 500,000 UTF-16 code units (1,000,000 bytes in UTF-16) and asks for a
 shorter `names`. With nothing fetched (an untrusted ref, or
 Doppler not configured) the output is `{}`. The callers waiting on this are the
 deploy workflows of `ChiefGyk3D/no-php-no-cry` and `ChiefGyk3D/Reach-Around`.
+
+In `export: env` mode, values Doppler marked unmasked stay unmasked (the
+documented compatibility behavior of the pinned action), and the whole config or
+`names` selection reaches every later step. `outputs` mode is the form to use for
+production credentials.
 
 Rules for the caller. Pass one extracted value to the one step that needs it,
 through that step's `env:`. **Never** pass `steps.<id>.outputs.secrets` whole as an
