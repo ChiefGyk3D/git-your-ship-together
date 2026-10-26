@@ -54,15 +54,16 @@ def current_head(st):
 
 def github_runs(snapshot, sha):
     # GitHub-shaped check runs; list order is chronological (later is newer). A run is
-    # (status, conclusion, name[, app id[, head_sha]]); head_sha defaults to the commit asked about.
+    # (status, conclusion, name[, app id[, head_sha[, run id]]]); head_sha defaults to the commit asked about.
     runs = []
     for n, run in enumerate(snapshot):
         status, conclusion, name = run[:3]
         app = run[3] if len(run) > 3 else 15368
-        head_sha = run[4] if len(run) > 4 else sha
+        head_sha = run[4] if len(run) > 4 and run[4] else sha
+        run_id = run[5] if len(run) > 5 else 1000 + n
         runs.append(
             {
-                "id": 1000 + n,
+                "id": run_id,
                 "name": name,
                 "head_sha": head_sha,
                 "status": status,
@@ -86,16 +87,15 @@ def latest_only(runs):
     return list(newest.values())
 
 
-def snapshot_runs(st, sha):
-    # One poll of the check-runs endpoint: advance the counters; None while the scenario has the API failing.
-    st["check_polls"] += 1
-    st["check_shas"].append(sha)
-    fails = st.get("check_failures", 0)
-    if st["check_polls"] <= fails:
-        return None
-    snaps = st["checks"].get(sha, [[]])
-    idx = min(st["check_polls"] - 1 - fails, len(snaps) - 1)
-    return github_runs(snaps[idx], sha)
+def pop_script(st, key):
+    # A scripted sequence: one entry per request to an endpoint, then the optional <key>_repeat forever, then
+    # (found False) the ordinary snapshot behavior. This is how a test makes the collection change between
+    # the page requests of one read.
+    queue = st.get(key) or []
+    if queue:
+        return queue.pop(0), True
+    repeat = st.get(key + "_repeat")
+    return repeat, repeat is not None
 
 
 def shape_runs(st, runs, query):
@@ -111,27 +111,75 @@ def shape_runs(st, runs, query):
     return total, runs
 
 
-def suites_body(st, sha):
+def split_pages(runs, query):
+    per_page = max(1, min(int(query.get("per_page", ["30"])[0]), 100))
+    return [runs[i : i + per_page] for i in range(0, len(runs), per_page)] or [[]]
+
+
+def runs_response(st, sha, query):
+    # One request to the check-runs endpoint: (http status, body). The first page of a read advances the poll
+    # counter; later pages are served from what the first page saw, unless a scripted response replaces them.
+    page = int(query.get("page", ["1"])[0])
+    if page == 1:
+        st["check_polls"] += 1
+        st["check_shas"].append(sha)
+    st["run_requests"] = st.get("run_requests", 0) + 1
+    item, found = pop_script(st, "runs_script")
+    if found:
+        if item.get("fail"):
+            return 500, None
+        return 200, item
+    if page == 1:
+        fails = st.get("check_failures", 0)
+        if st["check_polls"] <= fails:
+            return 500, None
+        snaps = st["checks"].get(sha, [[]])
+        idx = min(st["check_polls"] - 1 - fails, len(snaps) - 1)
+        st["cached"] = list(shape_runs(st, github_runs(snaps[idx], sha), query))
+    total, runs = st["cached"]
+    pages = split_pages(runs, query)
+    st["pages_served"] = st.get("pages_served", 0) + 1
+    shown_page = pages[page - 1] if page <= len(pages) else []
+    return 200, {"total_count": total, "check_runs": shown_page, "pages": len(pages)}
+
+
+def suites_response(st, sha):
     # GET commits/{sha}/check-suites?per_page=1: total_count is every check suite on the ref, also those that
-    # hold no runs (probed live on 2026-10-26: 12 suites behind 3 with runs). The scenario can override it
-    # with any JSON value, drop it, or make the call fail.
+    # hold no runs (probed live on 2026-10-26: 12 suites behind 3 with runs). A scripted sequence
+    # (suites_script, then suites_script_repeat; "@fail" and "@missing" are special) or an override can
+    # replace it with any JSON value.
     st["suite_calls"] = st.get("suite_calls", 0) + 1
+    item, found = pop_script(st, "suites_script")
+    if found:
+        if item == "@fail":
+            return 500, None
+        if item == "@missing":
+            return 200, {"check_suites": []}
+        return 200, {"total_count": item, "check_suites": []}
     if st.get("suites_fail"):
-        return None
+        return 500, None
     if st.get("suites_missing"):
-        return {"check_suites": []}
+        return 200, {"check_suites": []}
     if "suites" in st:
-        return {"total_count": st["suites"], "check_suites": []}
+        return 200, {"total_count": st["suites"], "check_suites": []}
     fails = st.get("check_failures", 0)
     snaps = st["checks"].get(sha, [[]])
     idx = max(0, min(st["check_polls"] - 1 - fails, len(snaps) - 1))
     apps = {run[3] if len(run) > 3 else 15368 for run in snaps[idx]}
-    return {"total_count": len(apps), "check_suites": []}
+    return 200, {"total_count": len(apps), "check_suites": []}
 
 
-def split_pages(runs, query):
-    per_page = max(1, min(int(query.get("per_page", ["30"])[0]), 100))
-    return [runs[i : i + per_page] for i in range(0, len(runs), per_page)] or [[]]
+def pulls_response(st):
+    # GET pulls/N: ONE response carries merged, head.sha and merge_commit_sha. A scripted sequence
+    # (pulls_script) can return a different state on each request.
+    st["head_reads"] = st.get("head_reads", 0) + 1
+    item, found = pop_script(st, "pulls_script")
+    if found:
+        return 200, item
+    if st.get("head_read_fails"):
+        return 502, None
+    head = st.get("head_garbage") or current_head(st)
+    return 200, {"merged": st["merged"], "head": {"sha": head}, "merge_commit_sha": st.get("merge_commit_sha")}
 
 
 FAKE_GH = r"""#!@PYTHON@
@@ -157,61 +205,56 @@ def save():
 
 # @HELPERS@
 
+def emit(body):
+    proc = subprocess.run(["jq", "-r", jq], input=json.dumps(body), capture_output=True, text=True)
+    if proc.returncode != 0:
+        sys.stderr.write("jq: " + proc.stderr)
+        sys.exit(1)
+    out = proc.stdout
+    for old, new in st.get("mangle", []):
+        out = out.replace(old, new)
+    sys.stdout.write(out)
+
+
 if argv[:1] == ["api"]:
     path = next(a for a in argv[1:] if "/" in a and not a.startswith("-"))
     jq = argv[argv.index("--jq") + 1] if "--jq" in argv else ""
+    url = urlsplit(path)
+    query = parse_qs(url.query)
     if "/pulls/" in path:
-        st["head_reads"] += 1
+        code, body = pulls_response(st)
         save()
-        if st.get("head_read_fails"):
+        if code != 200:
             sys.stderr.write("HTTP 502 for token " + tok + "\n")
             sys.exit(1)
         if st.get("head_warns"):
             sys.stderr.write("warning: a new gh is available\n")
-        if st.get("head_garbage"):
-            print(st["head_garbage"])
-            sys.exit(0)
-        print(current_head(st) if jq == ".head.sha" else str(st["merged"]).lower())
+        emit(body)
         sys.exit(0)
     if "/check-runs" in path:
-        url = urlsplit(path)
         sha = url.path.split("/commits/")[1].split("/")[0]
-        query = parse_qs(url.query)
-        runs = snapshot_runs(st, sha)
-        if runs is None:
-            save()
-            sys.stderr.write("HTTP 500 using " + tok + "\n")
-            sys.exit(1)
-        total, runs = shape_runs(st, runs, query)
-        pages = split_pages(runs, query)
-        if "--paginate" not in argv:
-            wanted = int(query.get("page", ["1"])[0])
-            pages = pages[wanted - 1 : wanted]
-        st["pages_served"] = st.get("pages_served", 0) + len(pages)
-        save()
-        for page in pages:
-            body = json.dumps({"total_count": total, "check_runs": page})
-            proc = subprocess.run(["jq", "-r", jq], input=body, capture_output=True, text=True)
-            if proc.returncode != 0:
-                sys.stderr.write("jq: " + proc.stderr)
+        page = int(query.get("page", ["1"])[0])
+        while True:
+            query["page"] = [str(page)]
+            code, body = runs_response(st, sha, query)
+            if code != 200:
+                save()
+                sys.stderr.write("HTTP 500 using " + tok + "\n")
                 sys.exit(1)
-            out = proc.stdout
-            for old, new in st.get("mangle", []):
-                out = out.replace(old, new)
-            sys.stdout.write(out)
+            emit(body)
+            if "--paginate" not in argv or page >= body.get("pages", 1):
+                break
+            page += 1
+        save()
         sys.exit(0)
     if "/check-suites" in path:
-        sha = urlsplit(path).path.split("/commits/")[1].split("/")[0]
-        body = suites_body(st, sha)
+        sha = url.path.split("/commits/")[1].split("/")[0]
+        code, body = suites_response(st, sha)
         save()
-        if body is None:
+        if code != 200:
             sys.stderr.write("HTTP 500 using " + tok + "\n")
             sys.exit(1)
-        proc = subprocess.run(["jq", "-r", jq], input=json.dumps(body), capture_output=True, text=True)
-        if proc.returncode != 0:
-            sys.stderr.write("jq: " + proc.stderr)
-            sys.exit(1)
-        sys.stdout.write(proc.stdout)
+        emit(body)
         sys.exit(0)
     sys.stderr.write("fake gh: unexpected api path " + path + "\n")
     sys.exit(97)
@@ -261,7 +304,17 @@ def running(name: str, app: int = 15368) -> tuple:
 
 HELPER_SOURCE = "\n\n".join(
     inspect.getsource(f)
-    for f in (current_head, github_runs, latest_only, snapshot_runs, shape_runs, suites_body, split_pages)
+    for f in (
+        current_head,
+        github_runs,
+        latest_only,
+        pop_script,
+        shape_runs,
+        split_pages,
+        runs_response,
+        suites_response,
+        pulls_response,
+    )
 )
 
 
@@ -327,43 +380,30 @@ class World:
                 st = world.load()
                 url = urlsplit(self.path)
                 query = parse_qs(url.query)
-                if re.fullmatch(r"/api/v3/repos/[^/]+/[^/]+/pulls/\d+", url.path):
-                    st["head_reads"] += 1
+
+                def finish(code, body, headers=()):
                     world.state = st
                     world.save()
-                    return self.reply(200, {"head": {"sha": current_head(st)}, "merged": st["merged"]})
+                    if code != 200:
+                        return self.reply(code, {"message": "boom"})
+                    return self.reply(200, body, headers)
+
+                if re.fullmatch(r"/api/v3/repos/[^/]+/[^/]+/pulls/\d+", url.path):
+                    return finish(*pulls_response(st))
                 m = re.fullmatch(r"/api/v3/repos/[^/]+/[^/]+/commits/([0-9a-f]+)/check-suites", url.path)
                 if m:
-                    body = suites_body(st, m.group(1))
-                    world.state = st
-                    world.save()
-                    if body is None:
-                        return self.reply(500, {"message": "boom"})
-                    return self.reply(200, body)
+                    return finish(*suites_response(st, m.group(1)))
                 m = re.fullmatch(r"/api/v3/repos/[^/]+/[^/]+/commits/([0-9a-f]+)/check-runs", url.path)
                 if not m:
                     return self.reply(404, {"message": "Not Found"})
                 page = int(query.get("page", ["1"])[0])
-                if page == 1:
-                    runs = snapshot_runs(st, m.group(1))
-                    if runs is None:
-                        world.state = st
-                        world.save()
-                        return self.reply(500, {"message": "boom"})
-                    total, runs = shape_runs(st, runs, query)
-                    st["cached"] = [total, runs]
-                else:
-                    total, runs = st["cached"]
-                pages = split_pages(runs, query)
-                st["pages_served"] = st.get("pages_served", 0) + 1
-                world.state = st
-                world.save()
+                code, body = runs_response(st, m.group(1), query)
                 headers = []
-                if page < len(pages):
+                if code == 200 and page < body.get("pages", 1):
                     q = "&".join(f"{k}={v[0]}" for k, v in query.items() if k != "page")
                     nxt = f"https://localhost:{world.port}{url.path}?{q}&page={page + 1}"
                     headers.append(("Link", f'<{nxt}>; rel="next"'))
-                self.reply(200, {"total_count": total, "check_runs": pages[page - 1]}, headers)
+                return finish(code, body, headers)
 
         self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -609,7 +649,7 @@ def test_the_context_reporting_late_turns_it_green_on_that_poll(world):
     w = world(checks={A: [others, others, others + [running("CI green")], others + [ok("CI green")]]})
     p = w.run("--repo", SLUG, "--pr", "7", *FAST)
     assert p.returncode == 0, shown(p)
-    assert w.load()["check_polls"] == 4
+    assert w.load()["check_polls"] == 5  # four polls and the confirming read
 
 
 @pytest.mark.parametrize(
@@ -843,7 +883,8 @@ def test_the_check_runs_request_asks_for_latest_runs_at_the_maximum_page_size(wo
     w = world(checks={A: [GATE]})
     assert w.run("--repo", SLUG, "--pr", "7", *FAST).returncode == 0
     request = [c for c in w.calls() if "/check-runs" in c]
-    assert request and all("--paginate" in c for c in request)
+    assert request and all("page=" in c for c in request), "pages are requested one by one, never by following links"
+    assert not any("--paginate" in c for c in request)
     assert all("filter=latest" in c and "per_page=100" in c for c in request)
 
 
@@ -853,7 +894,7 @@ def test_the_gate_on_the_second_page_is_found(world, engine):
     w = world(checks={A: [many]})
     p = w.run("--repo", SLUG, "--pr", "7", *FAST)
     assert p.returncode == 0, shown(p)
-    assert w.load()["pages_served"] == 2
+    assert w.load()["pages_served"] == 4  # two pages, read twice (the second read confirms the first)
 
 
 @ENGINES
@@ -1069,7 +1110,7 @@ def test_a_consistent_list_just_under_the_cap_is_green(world, engine):
     w = world(checks={A: [runs]})
     p = w.run("--repo", SLUG, "--pr", "7", *FAST)
     assert p.returncode == 0, shown(p)
-    assert w.load()["pages_served"] == 10
+    assert w.load()["pages_served"] == 20  # ten pages, read twice
 
 
 @ENGINES
@@ -1122,7 +1163,7 @@ def test_600_runs_in_400_suites_is_green(world, engine):
     w = world(checks={A: [runs]}, suites=400)
     p = w.run("--repo", SLUG, "--pr", "7", *FAST)
     assert p.returncode == 0, shown(p)
-    assert w.load()["pages_served"] == 6
+    assert w.load()["pages_served"] == 12  # six pages, read twice
 
 
 @ENGINES
@@ -1159,17 +1200,236 @@ def test_a_visible_failure_is_still_red_when_the_suite_count_is_over_the_cap(wor
 
 
 @ENGINES
-def test_the_suite_count_is_asked_once_per_poll_not_once_per_page(world, engine):
+def test_the_suite_count_is_read_before_and_after_each_read_not_per_page(world, engine):
     runs = [ok(f"job {n}") for n in range(299)] + [ok("CI green")]
     snaps = [[running("CI green")] + runs[:250], runs]
     w = world(checks={A: snaps})
     p = w.run("--repo", SLUG, "--pr", "7", *FAST)
     assert p.returncode == 0, shown(p)
     st = w.load()
-    assert st["check_polls"] == 2
-    assert st["suite_calls"] == st["check_polls"]
+    assert st["check_polls"] == 3  # the pending poll, the green poll and the confirming read
+    assert st["suite_calls"] == 2 * st["check_polls"], "the count is read before and after each read, not per page"
     asked = [c for c in w.calls() if "check-suites" in c]
-    assert len(asked) == 2 and all("per_page=1" in c for c in asked)
+    assert len(asked) == 6 and all("per_page=1" in c for c in asked)
+
+
+# --- a collection that changes while it is read ------------------------------------------------------------
+
+
+def raw_run(run_id, name=None, status="completed", conclusion="success", app=15368, sha=A):
+    return {
+        "id": run_id,
+        "name": name or f"job {run_id}",
+        "head_sha": sha,
+        "status": status,
+        "conclusion": conclusion,
+        "app": {"id": app, "slug": "x"},
+    }
+
+
+def page_of(total, runs, pages=None):
+    # "pages" is the fake's own note of how many pages the collection has (it also drives the Link header).
+    return {"total_count": total, "check_runs": runs, "pages": pages or max(1, -(-total // 100))}
+
+
+def hundred(first, gate_id=None):
+    return [raw_run(i, "CI green" if i == gate_id else None) for i in range(first, first + 100)]
+
+
+NO_RUNS = page_of(0, [])
+
+
+@ENGINES
+def test_codex_repro_a_rerun_shifts_the_offsets_and_a_run_appears_on_two_pages(world, engine):
+    # Page 1 holds the gate (id 10). Before page 2 `lint` is rerun and fails; offset paging then repeats id 10 and
+    # never shows the failed run. Counts add up (101 and 101), every run seen is a success: the old check went green.
+    first = page_of(101, hundred(1, gate_id=10))
+    second = page_of(101, [raw_run(10, "CI green")])
+    w = world(checks={}, runs_script=[first, second], runs_script_repeat=page_of(101, [raw_run(10, "CI green")]))
+    p = w.run("--repo", SLUG, "--pr", "7", "--interval", "10", "--timeout", "60")
+    assert p.returncode == 2, shown(p)
+    assert "verified" not in p.stdout
+    assert "changed while it was read" in p.stdout
+
+
+@ENGINES
+def test_duplicate_run_ids_make_the_read_inconsistent(world, engine):
+    w = world(
+        checks={},
+        runs_script=[page_of(102, hundred(1, gate_id=10)), page_of(102, [raw_run(5), raw_run(103)])],
+        runs_script_repeat=NO_RUNS,
+    )
+    p = w.run("--repo", SLUG, "--pr", "7", "--interval", "10", "--timeout", "30")
+    assert "verified" not in p.stdout
+    assert "changed while it was read" in p.stdout
+
+
+@ENGINES
+def test_a_total_count_that_changes_between_pages_is_inconsistent(world, engine):
+    first = page_of(101, hundred(1, gate_id=10))
+    second = page_of(102, [raw_run(101), raw_run(102)])  # 102 runs seen in all, and the last page says 102
+    w = world(checks={}, runs_script=[first, second], runs_script_repeat=NO_RUNS)
+    p = w.run("--repo", SLUG, "--pr", "7", "--interval", "10", "--timeout", "30")
+    assert p.returncode != 0
+    assert "verified" not in p.stdout
+    assert "changed while it was read" in p.stdout
+
+
+@ENGINES
+def test_more_runs_than_the_total_count_is_inconsistent(world, engine):
+    w = world(checks={}, runs_script=[page_of(2, hundred(1, gate_id=10))], runs_script_repeat=NO_RUNS)
+    p = w.run("--repo", SLUG, "--pr", "7", "--interval", "10", "--timeout", "30")
+    assert "verified" not in p.stdout
+    assert "changed while it was read" in p.stdout
+
+
+@ENGINES
+def test_a_run_without_a_numeric_id_is_hostile(world, engine):
+    bad = raw_run(1, "CI green")
+    bad["id"] = "not-a-number"
+    w = world(checks={}, runs_script_repeat=page_of(1, [bad]))
+    p = w.run("--repo", SLUG, "--pr", "7", *FAST)
+    assert p.returncode == 1, shown(p)
+    assert "verified" not in p.stdout
+
+
+@ENGINES
+def test_the_read_is_confirmed_by_a_second_identical_read(world, engine):
+    gate = [raw_run(1, "lint"), raw_run(2, "test"), raw_run(3, "CI green")]
+    w = world(checks={}, runs_script_repeat=page_of(3, gate))
+    p = w.run("--repo", SLUG, "--pr", "7", *FAST)
+    assert p.returncode == 0, shown(p)
+    assert w.load()["check_polls"] == 2, "one poll and the confirming read"
+
+
+@ENGINES
+def test_a_confirming_read_that_differs_is_not_trusted(world, engine):
+    one = [raw_run(1, "lint"), raw_run(2, "test"), raw_run(3, "CI green")]
+    other = [raw_run(9, "lint"), raw_run(2, "test"), raw_run(3, "CI green")]  # lint was rerun in between
+    w = world(checks={}, runs_script=[page_of(3, one), page_of(3, other)], runs_script_repeat=page_of(3, other))
+    p = w.run("--repo", SLUG, "--pr", "7", *FAST)
+    assert p.returncode == 0, shown(p)
+    assert "waiting for a stable snapshot" in p.stdout
+    assert w.load()["check_polls"] == 4, "poll one differed on confirmation; poll two and its confirmation agreed"
+
+
+@ENGINES
+def test_a_collection_that_never_holds_still_is_never_green(world, engine):
+    one = page_of(3, [raw_run(1, "lint"), raw_run(2, "test"), raw_run(3, "CI green")])
+    other = page_of(3, [raw_run(9, "lint"), raw_run(2, "test"), raw_run(3, "CI green")])
+    w = world(checks={}, runs_script=[one, other] * 20)
+    p = w.run("--repo", SLUG, "--pr", "7", "--interval", "10", "--timeout", "100", "--hung-after", "100000")
+    assert p.returncode == 2, shown(p)
+    assert "verified" not in p.stdout
+
+
+@ENGINES
+def test_a_status_change_between_the_reads_is_not_stable(world, engine):
+    one = page_of(2, [raw_run(1, "CI green"), raw_run(2, "lint")])
+    other = page_of(2, [raw_run(1, "CI green"), raw_run(2, "lint", status="in_progress", conclusion=None)])
+    w = world(checks={}, runs_script=[one, other] * 20)
+    p = w.run("--repo", SLUG, "--pr", "7", "--interval", "10", "--timeout", "100", "--hung-after", "100000")
+    assert p.returncode == 2, shown(p)
+
+
+def test_pages_are_capped_and_requested_one_by_one(world):
+    pages = [page_of(5000, hundred(1 + 100 * n)) for n in range(40)]
+    w = world(checks={}, runs_script=pages)
+    p = w.run("--repo", SLUG, "--pr", "7", "--interval", "10", "--timeout", "15", "--hung-after", "100000")
+    assert p.returncode == 2, shown(p)
+    st = w.load()
+    assert st["run_requests"] <= 12 * st["check_polls"], "no read may ask for more than twelve pages"
+    assert "verified" not in p.stdout
+
+
+# --- the suite count is read before AND after the runs -------------------------------------------------------
+
+
+@ENGINES
+def test_a_suite_count_that_rises_to_the_cap_during_the_read_is_not_green(world, engine):
+    w = world(checks={A: [GATE]}, suites_script=[999, 1000], suites_script_repeat=999)
+    p = w.run("--repo", SLUG, "--pr", "7", *FAST)
+    assert "check suite count changed while reading (999 then 1000)" in p.stdout
+    assert w.load()["check_polls"] >= 2, "the first read must not have been trusted"
+
+
+@ENGINES
+def test_a_suite_count_that_falls_below_the_cap_during_the_read_is_not_green(world, engine):
+    w = world(checks={A: [GATE]}, suites_script=[1000, 999], suites_script_repeat=999)
+    p = w.run("--repo", SLUG, "--pr", "7", *FAST)
+    assert "check suite count changed while reading (1000 then 999)" in p.stdout
+    assert p.returncode == 0, "the next, steady read is trusted"
+    assert w.load()["check_polls"] == 3
+
+
+@ENGINES
+@pytest.mark.parametrize("script", [["@fail"], [999, "@fail"], ["@missing"], [999, "@missing"], [999, None], [999, -1]])
+def test_an_unreadable_suite_count_on_either_side_is_not_green(world, engine, script):
+    w = world(checks={A: [GATE]}, suites_script=script, suites_script_repeat="@fail")
+    p = w.run("--repo", SLUG, "--pr", "7", "--interval", "10", "--timeout", "40")
+    assert p.returncode == 2, shown(p)
+    assert "verified" not in p.stdout
+
+
+@ENGINES
+def test_equal_readable_suite_counts_around_both_reads_are_green(world, engine):
+    w = world(checks={A: [GATE]}, suites_script=[999, 999, 999, 999])
+    p = w.run("--repo", SLUG, "--pr", "7", *FAST)
+    assert p.returncode == 0, shown(p)
+    assert w.load()["suite_calls"] == 4
+
+
+@ENGINES
+def test_the_suite_count_is_checked_again_around_the_confirming_read(world, engine):
+    # Equal around the first read, then it jumps to the cap around the confirming read.
+    w = world(checks={A: [GATE]}, suites_script=[999, 999, 999, 1000], suites_script_repeat=999)
+    p = w.run("--repo", SLUG, "--pr", "7", *FAST)
+    assert "check suite count changed while reading (999 then 1000)" in p.stdout
+
+
+# --- a merge is attributed to the head it merged -----------------------------------------------------------------
+
+PIN = {"merged": False, "head": {"sha": A}}
+
+
+def test_a_concurrent_merge_of_a_different_head_is_not_attributed_to_the_verified_sha(world):
+    # The old script read the head (A) and, in a second request, `merged` (true, after another push B and a merge of B).
+    w = world(
+        checks={A: [GATE]},
+        merge_results=[{"rc": 1, "err": "boom"}],
+        pulls_script=[PIN, PIN, PIN, PIN, {"merged": True, "head": {"sha": B}}],
+    )
+    p = w.run("--repo", SLUG, "--pr", "7", "--merge", *FAST)
+    assert p.returncode == 1, shown(p)
+    assert "already merged" not in p.stdout
+    assert w.outputs()["merged"] == "false"
+
+
+def test_a_failed_merge_call_on_a_pr_merged_at_another_head_is_head_moved(world):
+    w = world(
+        checks={A: [GATE]}, merge_results=[{"rc": 1, "err": "head branch was modified", "set_head": B, "merged": True}]
+    )
+    p = w.run("--repo", SLUG, "--pr", "7", "--merge", *FAST)
+    assert p.returncode == 4, shown(p)
+    assert "merged at a different head" in p.stdout
+    assert w.outputs()["merged"] == "false"
+
+
+def test_a_successful_merge_call_on_a_pr_that_shows_another_head_is_head_moved(world):
+    w = world(checks={A: [GATE]}, merge_results=[{"rc": 0, "set_head": B}])
+    p = w.run("--repo", SLUG, "--pr", "7", "--merge", *FAST)
+    assert p.returncode == 4, shown(p)
+    assert "merged at a different head" in p.stdout
+    assert w.outputs() == {"result": "head-moved", "sha": A, "merged": "false"}
+
+
+def test_merged_and_head_come_from_one_response(world):
+    w = world(checks={A: [GATE]})
+    assert w.run("--repo", SLUG, "--pr", "7", "--merge", *FAST).returncode == 0
+    reads = [c for c in w.calls() if "/pulls/" in c]
+    assert reads and all("merge_commit_sha" in c for c in reads), (
+        "one request reads merged, head.sha and merge_commit_sha"
+    )
 
 
 # --- base64 must be canonical ---------------------------------------------------------------------------
@@ -1274,7 +1534,7 @@ def test_a_transient_api_failure_is_retried(world):
     w = world(checks={A: [GATE]}, check_failures=2)
     p = w.run("--repo", SLUG, "--pr", "7", *FAST)
     assert p.returncode == 0, shown(p)
-    assert w.load()["check_polls"] == 3
+    assert w.load()["check_polls"] == 4  # two failed polls, a green one and the confirming read
 
 
 # --- merge ------------------------------------------------------------------------
@@ -1338,12 +1598,13 @@ def test_head_moved_during_the_merge_is_exit_4_and_not_retried(world):
     assert len(w.merges()) == 1
 
 
-def test_a_merge_that_landed_before_the_error_is_success(world):
+def test_a_merge_that_landed_before_the_error_is_success_only_at_the_verified_head(world):
     w = world(checks={A: [GATE]}, merge_results=[{"rc": 1, "err": "already merged?", "merged": True}])
     p = w.run("--repo", SLUG, "--pr", "7", "--merge", *FAST)
     assert p.returncode == 0, shown(p)
     assert len(w.merges()) == 1
-    assert w.outputs()["merged"] == "true"
+    assert w.outputs() == {"result": "green", "sha": A, "merged": "true"}
+    assert "already merged at " + A in p.stdout
 
 
 # --- secrets and input -----------------------------------------------------------

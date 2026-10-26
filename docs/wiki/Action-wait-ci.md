@@ -61,6 +61,31 @@ race seen on GYST #218), and a push that moved the head under the loop. This scr
   between the two calls is not in the run list; it can only add to the count, and the next poll sees it. A commit with 1000
   or more suites cannot be passed by this tool. Every run must also carry the pinned commit as its `head_sha`; one that does
   not is red.
+- **The list must hold still.** Check runs come from an offset-paged collection that can change between two page requests: a
+  rerun inserts its replacement ahead of a run already returned and drops its old entry, so one run can appear on two pages
+  while a current failed run is skipped, and the counts can still add up. The script therefore requests the pages one by
+  one (`page=1`, `2`, ... at most twelve, never by following links, so a repeating cursor cannot loop) and accepts a read only
+  when every page reports the same `total_count`, no run `id` appears twice, and the distinct ids equal `total_count`
+  exactly (more or fewer). Each run's `id` crosses the boundary as plain digits and must be a plain integer, else the run is
+  hostile (red). A read that contradicts itself is not a snapshot: the output says `check-run list changed while it was
+  read`, the script waits and tries again on the next poll.
+- **Two reads agree before green.** When a read looks green the whole read is made a second time. The sorted set of (run id,
+  status, conclusion) must be identical and so must the suite counts; otherwise the script says `waiting for a stable
+  snapshot` and keeps going. A collection that never holds still is never green (exit 2 or 3).
+- **The suite count is read before and after.** In each read the check-suite count is asked first, then the run pages, then the
+  suite count again (so the confirming read asks twice more). Both must be readable, equal to each other, and under 1000, or
+  the read is not trusted; a count that moves during a read says `check suite count changed while reading`. This closes the
+  window in which a suite could be deleted, or created, between the run list and a single later count.
+- **Cost.** One read is two suite-count requests plus one request per hundred runs: three for a commit with up to 100 runs, twelve
+  for one with 1000 (ten pages). A poll that finds nothing yet does one read; a poll that looks green does two, so six and
+  twenty-four requests, plus the pull request reads (one per poll and one before the merge). Against the 5000 requests an
+  hour a workflow token has, a 20 second interval on a 100-run commit is about 540 an hour.
+- **A merge belongs to the head it merged.** After any merge attempt, successful or not, `merged`, `head.sha` and
+  `merge_commit_sha` are read from ONE response of `GET /repos/{repo}/pulls/{n}`. The merge counts as the verified commit's only
+  when `merged` is true and that response's `head.sha` is the verified SHA. A pull request that reads as merged at any other
+  head (another push, then a merge of it) is exit 4 with `merged at a different head`, `merged` stays `false`, and nothing is
+  attributed to the verified commit. A merge that gh reports as successful but that leaves the pull request unmerged is
+  exit 5 as before.
 - **Hostile names are an error.** A check run whose name contains a control character (U+0000 to U+001F, DEL, U+0085, U+2028,
   U+2029) makes the result red with exit 1, whoever posted it. Names reach bash base64-encoded, so no name can add a line or a
   field to what the script parses; a forged `completed`, `success`, `CI green` line inside a name cannot satisfy the gate.
@@ -182,4 +207,4 @@ is merged at that commit). The outputs are written even when the step fails, so 
 clock, so waits cost no time and every call is on record. It covers the pinned head, abort and reset on a push, no checks, a
 context that has not reported, exact matching, hostile check run names (newline, carriage return, the field separator, NUL, DEL, U+2028 and more, through the real `jq`), pages, reruns, failed and cancelled, timeout, hung, merge retry and its bound, a head that moves
 between the last check and the merge, a token that must not appear, bad input, and the action's own step run end to end.
-The fake `gh` serves GitHub-shaped JSON and applies the script's real `--jq` expression with the real `jq` (a test dependency; the test run fails in CI and skips locally without it). The key cases also run a second way: the real `gh` (whose embedded gojq is what runs the expression in production) talks to a loopback TLS server serving the same scenario, using a throwaway certificate from `openssl`; those cases fail in CI and skip locally without `gh` or `openssl`. honors `per_page`, `--paginate` and `filter`, and keeps the newest run per name and app for `filter=latest`. The head pin, the required-context rule, the no-checks rule and the name encoding were each broken on purpose to confirm the tests go red. Not covered: a merge through the real `gh` (it uses GraphQL, so merges run against the fake only).
+The fake `gh` serves GitHub-shaped JSON and applies the script's real `--jq` expression with the real `jq` (a test dependency; the test run fails in CI and skips locally without it). A scripted-sequence capability lets a test make the collection change between the page requests of one read (a different response per request for the check runs, the suite count and the pull request), which is how the shifting-offset repro, the confirming read and the before/after suite counts are tested. The key cases also run a second way: the real `gh` (whose embedded gojq is what runs the expression in production) talks to a loopback TLS server serving the same scenario, using a throwaway certificate from `openssl`; those cases fail in CI and skip locally without `gh` or `openssl`. honors `per_page`, `--paginate` and `filter`, and keeps the newest run per name and app for `filter=latest`. The head pin, the required-context rule, the no-checks rule and the name encoding were each broken on purpose to confirm the tests go red. Not covered: a merge through the real `gh` (it uses GraphQL, so merges run against the fake only).

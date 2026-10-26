@@ -16,6 +16,12 @@
 #     check-runs total_count and is not green when that exceeds the runs actually seen or reaches 1000
 #     ("check-run list may be truncated": it waits, so the end is exit 2 or 3). A failure that is
 #     visible is still red. Every run must also carry the pinned commit as its head_sha, else red.
+#   * The list must also hold still. Pages are requested one by one (page=1, 2, ... at most 12) from an
+#     offset-paged collection that can change between requests, so a read is accepted only when every
+#     page reports the same total_count, no run id repeats, and the distinct ids equal total_count
+#     exactly; the suite count is read before AND after the run pages and the two must be equal; and
+#     before it can be called green the whole read is made a second time and must show the same
+#     (id, status, conclusion) set and the same suite counts. Anything else waits.
 #   * A required context counts only when the check run was reported by the expected GitHub App
 #     (--app-id, default 15368, GitHub Actions). A same-named run from any other app is ignored:
 #     it is neither green nor red, so another app cannot satisfy or block the gate by copying the name.
@@ -237,27 +243,46 @@ gh_try() {
   return 1
 }
 
-# A commit SHA from the API is used (and written to GITHUB_OUTPUT) only when it is 40 hex digits.
-pr_head() {
-  local h
-  h="$(gh_try api "repos/${repo}/pulls/${pr}" --jq '.head.sha')" || return 1
-  if [[ ! "$h" =~ ^[0-9a-f]{40}$ ]]; then
-    say "the API returned something that is not a full commit SHA for ${repo}#${pr}" >&2
+# The state of the pull request from ONE response: merged, head.sha and merge_commit_sha are read together,
+# so a merge can be attributed to the head it merged and not to a head read a moment earlier. Every value is
+# validated (a full SHA, a boolean); a response with more than one line is refused.
+PR_MERGED=""
+PR_HEAD=""
+PR_MERGE_SHA=""
+pr_state() {
+  local out
+  out="$(gh_try api "repos/${repo}/pulls/${pr}" \
+    --jq '[(.merged | tostring), (.head.sha // "" | tostring), (.merge_commit_sha // "" | tostring)] | join("\u001f")')" || return 1
+  PR_MERGED=""
+  PR_HEAD=""
+  PR_MERGE_SHA=""
+  if [[ "$out" == *$'\n'* ]]; then
+    say "the API returned a malformed pull request state for ${repo}#${pr}" >&2
     return 1
   fi
-  printf '%s' "$h"
+  IFS=$'\x1f' read -r PR_MERGED PR_HEAD PR_MERGE_SHA <<<"$out"
+  if [[ "$PR_MERGED" != true && "$PR_MERGED" != false ]] || [[ ! "$PR_HEAD" =~ ^[0-9a-f]{40}$ ]] ||
+    [[ -n "$PR_MERGE_SHA" && ! "$PR_MERGE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+    say "the API returned something that is not a pull request state with a full commit SHA for ${repo}#${pr}" >&2
+    return 1
+  fi
 }
-pr_merged() { gh_try api "repos/${repo}/pulls/${pr}" --jq '.merged'; }
+# A commit SHA from the API is used (and written to GITHUB_OUTPUT) only when it is 40 hex digits.
+pr_head() {
+  pr_state || return 1
+  printf '%s' "$PR_HEAD"
+}
 
-# The check runs of a commit as lines, every value crossing as base64 so a hostile value (a name with a
-# newline or the field separator in it) cannot add a line or a field. Fields are split by \x1f.
-#   T <total_count>                                  once per page
-#   R <status> <conclusion> <app id> <hostile> <head_sha> <name>   once per run
-# hostile is 1 when the name holds a control character, DEL, NEL or a Unicode line or paragraph
-# separator (NUL included).
-check_lines() {
-  gh_try api --paginate "repos/${repo}/commits/${1}/check-runs?per_page=100&filter=latest" \
-    --jq '(["T", ((.total_count // -1) | tostring | @base64)] | join("\u001f")), (.check_runs[] | ["R", (.status // "" | tostring | @base64), (.conclusion // "" | tostring | @base64), ((.app.id // 0) | tostring | @base64), (.name // "" | tostring | if explode | any(. < 32 or . == 127 or . == 133 or . == 8232 or . == 8233) then "1" else "0" end), (.head_sha // "" | tostring | @base64), (.name // "" | tostring | @base64)] | join("\u001f"))'
+# One page of the check runs of a commit as lines, every free-text value crossing as base64 so a hostile
+# value (a name with a newline or the field separator in it) cannot add a line or a field. Fields are split
+# by \x1f.
+#   T <total_count>                                                       once per page
+#   R <id> <status> <conclusion> <app id> <hostile> <head_sha> <name>     once per run
+# The run id is plain digits (or "bad"), checked again in bash. hostile is 1 when the name holds a control
+# character, DEL, NEL or a Unicode line or paragraph separator (NUL included).
+check_page() {
+  gh_try api "repos/${repo}/commits/${1}/check-runs?per_page=100&filter=latest&page=${2}" \
+    --jq '(["T", ((.total_count // -1) | tostring | @base64)] | join("\u001f")), (.check_runs[] | ["R", (.id | if type == "number" and . == floor and . >= 0 and . < 1000000000000000 then tostring else "bad" end), (.status // "" | tostring | @base64), (.conclusion // "" | tostring | @base64), ((.app.id // 0) | tostring | @base64), (.name // "" | tostring | if explode | any(. < 32 or . == 127 or . == 133 or . == 8232 or . == 8233) then "1" else "0" end), (.head_sha // "" | tostring | @base64), (.name // "" | tostring | @base64)] | join("\u001f"))'
 }
 
 # The number of CHECK SUITES on a commit, from a call of its own (one per poll). GitHub's cap is on suites:
@@ -295,6 +320,54 @@ dec_display() {
   local d
   d="$(printf '%s' "$1" | base64 -d 2>/dev/null | tr -d '\000-\037\177')" || d=""
   printf '%s' "${d:-unnamed}"
+}
+
+# A fingerprint of a read: the sorted (id, status, conclusion) of every run, in their encoded form.
+fingerprint() {
+  local kind f1 f2 f3 rest out=""
+  while IFS=$'\x1f' read -r kind f1 f2 f3 rest; do
+    if [[ "$kind" == R ]]; then out+="${f1} ${f2} ${f3}"$'\n'; fi
+  done <<<"$1"
+  printf '%s' "$out" | LC_ALL=C sort
+}
+
+# One complete read of a commit: the suite count, then the run pages one by one, then the suite count again.
+# Sets W_A (suites before), W_LINES (every page), W_B (suites after). Returns 1 when a call failed, 2 when the
+# list needs more pages than it is allowed to. W_SUITE_FAILED is 1 when a suite call failed.
+MAX_RUN_PAGES=12
+W_A=""
+W_B=""
+W_LINES=""
+W_SUITE_FAILED=0
+read_world() {
+  local sha="$1" page=1 chunk first rest total_seen accumulated=0 n_r want
+  W_A=""
+  W_B=""
+  W_LINES=""
+  W_SUITE_FAILED=0
+  if ! W_A="$(suite_count "$sha")"; then
+    W_A=""
+    W_SUITE_FAILED=1
+  fi
+  while :; do
+    chunk="$(check_page "$sha" "$page")" || return 1
+    W_LINES+="${chunk}"$'\n'
+    n_r="$(grep -c $'^R\x1f' <<<"$chunk" || true)"
+    accumulated=$((accumulated + n_r))
+    if [[ $n_r -lt 100 ]]; then break; fi
+    first="${chunk%%$'\n'*}"
+    IFS=$'\x1f' read -r total_seen want rest <<<"$first"
+    if [[ "$total_seen" == T ]] && b64_strict "$want" && [[ "$B64_VALUE" =~ ^(0|[1-9][0-9]{0,8})$ ]] &&
+      [[ $accumulated -ge $((10#$B64_VALUE)) ]]; then
+      break
+    fi
+    if [[ $page -ge $MAX_RUN_PAGES ]]; then return 2; fi
+    page=$((page + 1))
+  done
+  if ! W_B="$(suite_count "$sha")"; then
+    W_B=""
+    W_SUITE_FAILED=1
+  fi
 }
 
 pin=""
@@ -344,33 +417,39 @@ is_context_enc() {
   return 1
 }
 
-# Truncation: the endpoint lists at most the 1000 most recent check suites of a ref. The suite count (read once
-# per poll into $suites, empty when unreadable) is the signal that cap applies to. The run-count checks stay as
-# extra guards: total_count larger than the runs seen, or 1000 runs or more.
+# Truncation: the endpoint lists at most the 1000 most recent check suites of a ref. The suite count (read
+# before and after the run pages into $suites_a and $suites_b, empty when unreadable) is the signal that cap
+# applies to; the two must be readable, equal and under the cap. The run-count checks stay as extra guards.
 SUITE_CAP=1000
 RUN_LIST_CAP=1000
 
-# Sets verdict (green|red|pending) and detail for the lines passed in.
+# Sets verdict (green|red|pending) and detail for the lines passed in, using $suites_a and $suites_b.
 evaluate() {
-  local lines="$1" kind f1 f2 f3 f4 f5 f6 i b_pin
+  local lines="$1" kind f1 f2 f3 f4 f5 f6 f7 i b_pin first_count=""
   foreign=0
   hostile=0
-  local runs_seen=0 count_lines=0 count_missing=0 total_count=0
+  local runs_seen=0 count_lines=0 count_missing=0 count_mismatch=0 dups=0 total_count=0
   local total=0 complete=0 bad=0 badname="" seen_ok seen_any
-  local -A ctx_seen=() ctx_ok=() ctx_open=()
+  local -A ctx_seen=() ctx_ok=() ctx_open=() seen_id=()
   b_pin="$(enc "$pin")"
-  while IFS=$'\x1f' read -r kind f1 f2 f3 f4 f5 f6; do
-    [[ -n "$kind$f1$f2$f3$f4$f5$f6" ]] || continue
+  while IFS=$'\x1f' read -r kind f1 f2 f3 f4 f5 f6 f7; do
+    [[ -n "$kind$f1$f2$f3$f4$f5$f6$f7" ]] || continue
     if [[ "$kind" == T ]]; then
-      if [[ -n "$f2$f3$f4$f5$f6" ]] || ! b64_strict "$f1" || [[ ! "$B64_VALUE" =~ ^(-1|0|[1-9][0-9]{0,8})$ ]]; then
+      if [[ -n "$f2$f3$f4$f5$f6$f7" ]] || ! b64_strict "$f1" || [[ ! "$B64_VALUE" =~ ^(-1|0|[1-9][0-9]{0,8})$ ]]; then
         hostile=$((hostile + 1))
         continue
       fi
       count_lines=$((count_lines + 1))
       if [[ "$B64_VALUE" == -1 ]]; then
         count_missing=1
-      elif [[ $((10#$B64_VALUE)) -gt $total_count ]]; then
-        total_count=$((10#$B64_VALUE))
+      else
+        # Every page of one read must report the same total_count.
+        if [[ -z "$first_count" ]]; then
+          first_count="$B64_VALUE"
+        elif [[ "$B64_VALUE" != "$first_count" ]]; then
+          count_mismatch=1
+        fi
+        if [[ $((10#$B64_VALUE)) -gt $total_count ]]; then total_count=$((10#$B64_VALUE)); fi
       fi
       continue
     fi
@@ -379,32 +458,42 @@ evaluate() {
       continue
     fi
     runs_seen=$((runs_seen + 1))
+    # The run id: plain digits, and never twice in one read.
+    if [[ ! "$f1" =~ ^(0|[1-9][0-9]{0,14})$ ]]; then
+      hostile=$((hostile + 1))
+      continue
+    fi
+    if [[ -n "${seen_id[$f1]:-}" ]]; then
+      dups=$((dups + 1))
+    else
+      seen_id[$f1]=1
+    fi
     # Anything that is not exactly the shape jq emits, a name that jq flagged, or a run for another
     # commit is hostile.
-    if [[ ! "$f4" =~ ^0$ || ! "$f1" =~ $B64_RE || ! "$f2" =~ $B64_RE || ! "$f3" =~ $B64_RE || ! "$f5" =~ $B64_RE ||
-      ! "$f6" =~ $B64_RE || "$f5" != "$b_pin" ]]; then
+    if [[ ! "$f5" =~ ^0$ || ! "$f2" =~ $B64_RE || ! "$f3" =~ $B64_RE || ! "$f4" =~ $B64_RE || ! "$f6" =~ $B64_RE ||
+      ! "$f7" =~ $B64_RE || "$f6" != "$b_pin" ]]; then
       hostile=$((hostile + 1))
       continue
     fi
     # A run that carries a required name but comes from another app is ignored altogether.
-    if [[ $any_app -eq 0 && "$f3" != "$B_APP" ]] && is_context_enc "$f6"; then
+    if [[ $any_app -eq 0 && "$f4" != "$B_APP" ]] && is_context_enc "$f7"; then
       foreign=$((foreign + 1))
       continue
     fi
     total=$((total + 1))
-    if [[ "$f1" == "$B_COMPLETED" ]]; then
+    if [[ "$f2" == "$B_COMPLETED" ]]; then
       complete=$((complete + 1))
-      if [[ -n "$f2" && -n "${BAD_CONCLUSION[$f2]:-}" ]]; then
+      if [[ -n "$f3" && -n "${BAD_CONCLUSION[$f3]:-}" ]]; then
         bad=$((bad + 1))
-        badname="${badname:-$(dec_display "$f6") (${BAD_CONCLUSION[$f2]})}"
+        badname="${badname:-$(dec_display "$f7") (${BAD_CONCLUSION[$f3]})}"
       fi
     fi
     for i in "${!contexts[@]}"; do
-      [[ "$f6" == "${context_enc[$i]}" ]] || continue
+      [[ "$f7" == "${context_enc[$i]}" ]] || continue
       ctx_seen[$i]=1
-      if [[ "$f1" != "$B_COMPLETED" ]]; then
+      if [[ "$f2" != "$B_COMPLETED" ]]; then
         ctx_open[$i]=1
-      elif [[ "$f2" != "$B_SUCCESS" ]]; then
+      elif [[ "$f3" != "$B_SUCCESS" ]]; then
         ctx_ok[$i]=bad
       elif [[ "${ctx_ok[$i]:-}" != bad ]]; then
         ctx_ok[$i]=ok
@@ -418,6 +507,12 @@ evaluate() {
     detail="${hostile} check run(s) on ${pin} with a control character in the name, a head_sha other than the pinned commit or malformed fields; refusing (possible forgery)"
     return 0
   fi
+  # A read that contradicts itself is not a snapshot: pages that disagree on total_count, a run id that
+  # appears twice, or more runs than total_count (the collection moved between page requests).
+  if [[ $count_mismatch -eq 1 || $dups -gt 0 || $runs_seen -gt $total_count ]] && [[ $count_lines -gt 0 && $count_missing -eq 0 ]]; then
+    detail="check-run list changed while it was read (${count_lines} pages, total_count ${total_count}, ${runs_seen} runs seen, ${dups} repeated ids); waiting for a stable snapshot"
+    return 0
+  fi
   if [[ $foreign -gt 0 ]]; then
     say "ignored ${foreign} run(s) named like a required check from an app other than ${app_id}"
   fi
@@ -426,8 +521,13 @@ evaluate() {
     detail="${badname} on ${pin}"
     return 0
   fi
-  if [[ -z "$suites" || ${suites:-0} -ge $SUITE_CAP || $count_lines -eq 0 || $count_missing -eq 1 || $total_count -gt $runs_seen || $total_count -ge $RUN_LIST_CAP ]]; then
-    detail="check-run list may be truncated (${suites:-unreadable} check suites, cap ${SUITE_CAP}; total_count ${total_count}, ${runs_seen} runs seen); not trusting it"
+  if [[ -n "$suites_a" && -n "$suites_b" && "$suites_a" != "$suites_b" ]]; then
+    detail="check-run list may be truncated (check suite count changed while reading (${suites_a} then ${suites_b})); not trusting it"
+    return 0
+  fi
+  if [[ -z "$suites_a" || -z "$suites_b" || ${suites_a:-0} -ge $SUITE_CAP || $count_lines -eq 0 || $count_missing -eq 1 ||
+    $total_count -gt $runs_seen || $total_count -ge $RUN_LIST_CAP ]]; then
+    detail="check-run list may be truncated (${suites_a:-unreadable} then ${suites_b:-unreadable} check suites, cap ${SUITE_CAP}; total_count ${total_count}, ${runs_seen} runs seen); not trusting it"
     return 0
   fi
   if [[ $total -eq 0 ]]; then
@@ -459,7 +559,8 @@ evaluate() {
 
 verdict=pending
 detail=""
-suites=""
+suites_a=""
+suites_b=""
 while :; do
   polls=$((polls + 1))
   t="$(now)"
@@ -484,14 +585,42 @@ while :; do
     fi
   fi
 
-  lines=""
-  if lines="$(check_lines "$pin")"; then
-    if ! suites="$(suite_count "$pin")"; then
-      suites=""
-      poll_failed=1
+  rc=0
+  read_world "$pin" || rc=$?
+  if [[ $rc -eq 0 ]]; then
+    suites_a="$W_A"
+    suites_b="$W_B"
+    if [[ $W_SUITE_FAILED -eq 1 ]]; then poll_failed=1; fi
+    evaluate "$W_LINES"
+    sig="$(printf '%s\n' "$pin" "suites=${suites_a}/${suites_b}" "$W_LINES" | LC_ALL=C sort | cksum)"
+    if [[ "$verdict" == green ]]; then
+      # Green is only believed after a second, complete read shows the same runs and suite counts.
+      fp_first="$(fingerprint "$W_LINES")"
+      a_first="$W_A"
+      b_first="$W_B"
+      rc=0
+      read_world "$pin" || rc=$?
+      if [[ $rc -ne 0 ]]; then
+        verdict=pending
+        detail="the confirming read failed, will retry"
+        poll_failed=1
+      else
+        suites_a="$W_A"
+        suites_b="$W_B"
+        if [[ $W_SUITE_FAILED -eq 1 ]]; then poll_failed=1; fi
+        evaluate "$W_LINES"
+        if [[ "$verdict" == green ]] &&
+          [[ "$(fingerprint "$W_LINES")" != "$fp_first" || "$W_A" != "$a_first" || "$W_B" != "$b_first" ]]; then
+          verdict=pending
+          detail="check runs or suite counts changed between two reads; waiting for a stable snapshot"
+        fi
+      fi
     fi
-    evaluate "$lines"
-    sig="$(printf '%s\n' "$pin" "suites=${suites}" "$lines" | LC_ALL=C sort | cksum)"
+  elif [[ $rc -eq 2 ]]; then
+    verdict=pending
+    detail="check-run list may be truncated (more than ${MAX_RUN_PAGES} pages of check runs); not trusting it"
+    sig="$last_sig"
+    poll_failed=1
   else
     verdict=pending
     detail="the check-runs call failed, will retry"
@@ -572,6 +701,20 @@ is_policy_block() {
   [[ "$m" == *"base branch policy prohibits"* || "$m" == *"required status check"* ]]
 }
 
+# The pull request reads as merged (from one response): that is the verified commit's merge only when the head
+# in that same response is the verified commit.
+attribute_merge() {
+  if [[ "$PR_HEAD" == "$verified" ]]; then
+    merged="true"
+    result="green"
+    say "$1"
+    exit 0
+  fi
+  say "${repo}#${pr} was merged at a different head (${PR_HEAD}, not the verified ${verified}); nothing is attributed to the verified commit"
+  result="head-moved"
+  exit 4
+}
+
 attempt=0
 last_err=""
 while :; do
@@ -579,12 +722,10 @@ while :; do
   args=(pr merge "$pr" -R "$repo" --squash --match-head-commit "$verified")
   [[ $delete_branch -eq 1 ]] && args+=(--delete-branch)
   if "$gh_bin" "${args[@]}" >/dev/null 2>"$errfile"; then
-    # gh can accept a merge that is only queued (merge queue, auto-merge): confirm before reporting it.
-    if [[ "$(pr_merged || true)" == true ]]; then
-      merged="true"
-      result="green"
-      say "merged ${repo}#${pr} (squash) at ${verified}"
-      exit 0
+    # gh can accept a merge that is only queued (merge queue, auto-merge), or that another push turned into
+    # the merge of a different head: confirm from ONE response before reporting anything.
+    if pr_state && [[ "$PR_MERGED" == true ]]; then
+      attribute_merge "merged ${repo}#${pr} (squash) at ${verified}"
     fi
     result="queued"
     say "the merge of ${repo}#${pr} was accepted but the pull request is not merged (merge queue or auto-merge?); not reporting it as merged"
@@ -594,17 +735,17 @@ while :; do
   last_err="$(redact "$(grep -m1 . "$errfile" || true)")"
   say "merge attempt ${attempt} failed: ${last_err}"
 
-  # Why did it fail: a push, a merge that landed anyway, or a block that may clear?
-  if cur="$(pr_head)" && [[ "$cur" != "$verified" ]]; then
-    say "head moved before the merge: ${verified} -> ${cur}; nothing merged"
-    result="head-moved"
-    exit 4
-  fi
-  if [[ "$(pr_merged || true)" == true ]]; then
-    merged="true"
-    result="green"
-    say "${repo}#${pr} is already merged at ${verified}"
-    exit 0
+  # Why did it fail: a push, a merge that landed anyway, or a block that may clear? One response answers
+  # both questions (merged and head), so a merge is never tied to a head read earlier.
+  if pr_state; then
+    if [[ "$PR_MERGED" == true ]]; then
+      attribute_merge "${repo}#${pr} is already merged at ${verified}"
+    fi
+    if [[ "$PR_HEAD" != "$verified" ]]; then
+      say "head moved before the merge: ${verified} -> ${PR_HEAD}; nothing merged"
+      result="head-moved"
+      exit 4
+    fi
   fi
   if ! is_policy_block "$full_err"; then
     say "merge blocked: not a policy block, so it is not retried"
