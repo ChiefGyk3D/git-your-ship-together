@@ -121,8 +121,11 @@ in the repository variable `DOPPLER_IDENTITY_ID`; it is an identifier, not a
 secret.
 
 **Secrets are fetched only on a trusted ref.** The shared Doppler step (every
-copy of it) fetches only on a push to the default branch, a tag, or a schedule.
-A pull request from anywhere and a push to any other branch get nothing, and
+copy of it) fetches only on a push to the default branch, a version tag (vN.N.N), or a schedule.
+A tag counts only as `vMAJOR.MINOR.PATCH`. This narrows which refs receive
+secrets and does not remove the exposure: the tag ruleset above blocks deleting,
+moving and force-pushing a version tag, not creating one, and the identity's
+subject list is the control that holds. A pull request from anywhere and a push to any other branch get nothing, and
 the job says so in a notice. This is `doppler-trusted-refs-only`, on by
 default; a caller that turns it off is choosing to let a pull request's code
 run beside a secret.

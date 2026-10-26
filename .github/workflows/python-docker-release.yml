@@ -152,7 +152,7 @@ on:
         type: string
         default: ''
       doppler-trusted-refs-only:
-        description: Fetch CI secrets only on the default branch, a tag or a schedule; never on a pull request or another branch. `false` restores fetching on every same-repository run.
+        description: Fetch CI secrets only on the default branch, a version tag (vN.N.N) or a schedule; never on a pull request or another branch. `false` restores fetching on every same-repository run.
         type: boolean
         default: true
       timeout-minutes:

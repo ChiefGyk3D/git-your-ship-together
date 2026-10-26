@@ -54,7 +54,8 @@ def decide(tmp_path: Path, **env: str) -> tuple[int, str, str]:
 TRUSTED = [
     pytest.param({"EVENT": "push", "REF": "refs/heads/main", "DEFAULT_BRANCH": "main"}, id="push-default-branch"),
     pytest.param({"EVENT": "push", "REF": "refs/heads/master", "DEFAULT_BRANCH": "master"}, id="push-master-default"),
-    pytest.param({"EVENT": "push", "REF": "refs/tags/v1.2.3", "DEFAULT_BRANCH": "main"}, id="push-tag"),
+    pytest.param({"EVENT": "push", "REF": "refs/tags/v1.2.3", "DEFAULT_BRANCH": "main"}, id="push-version-tag"),
+    pytest.param({"EVENT": "push", "REF": "refs/tags/v10.20.300", "DEFAULT_BRANCH": "main"}, id="push-multidigit-tag"),
     pytest.param(
         {"EVENT": "schedule", "REF": "refs/heads/main", "DEFAULT_BRANCH": ""}, id="schedule-without-repo-payload"
     ),
@@ -62,6 +63,29 @@ TRUSTED = [
         {"EVENT": "workflow_dispatch", "REF": "refs/heads/main", "DEFAULT_BRANCH": "main"}, id="dispatch-default-branch"
     ),
 ]
+
+NOT_A_RELEASE_TAG = {
+    "tag-anything": "refs/tags/anything",
+    "tag-v1": "refs/tags/v1",
+    "tag-v1.2": "refs/tags/v1.2",
+    "tag-four-parts": "refs/tags/v1.2.3.4",
+    "tag-traversal": "refs/tags/v1.2.3/../x",
+    "tag-subpath": "refs/tags/v1.2.3/x",
+    "tag-capital-v": "refs/tags/V1.2.3",
+    "tag-no-v": "refs/tags/1.2.3",
+    "tag-prerelease": "refs/tags/v1.2.3-rc.1",
+    "tag-suffix": "refs/tags/v1.2.3x",
+    "tag-newline": "refs/tags/v1.2.3\nx",
+    "tag-trailing-newline": "refs/tags/v1.2.3\n",
+    "tag-leading-newline": "refs/tags/\nv1.2.3",
+    "tag-space": "refs/tags/v1.2.3 x",
+    "tag-empty": "refs/tags/",
+    "tag-glob": "refs/tags/v*.*.*",
+    "tag-nondigit": "refs/tags/va.b.c",
+    "branch-like-tag": "refs/heads/v1.2.3",
+    "bare-tag-name": "v1.2.3",
+    "tag-prefix-twice": "refs/tags/refs/tags/v1.2.3",
+}
 
 UNTRUSTED = [
     pytest.param({"EVENT": "pull_request", "REF": "refs/pull/7/merge", "DEFAULT_BRANCH": "main"}, id="pull-request"),
@@ -77,6 +101,14 @@ UNTRUSTED = [
     pytest.param(
         {"EVENT": "push", "REF": "refs/heads/main-2", "DEFAULT_BRANCH": "main"}, id="push-branch-with-default-prefix"
     ),
+    # Only a semantic version release tag (vMAJOR.MINOR.PATCH, the shape this
+    # repository's own tags have) is trusted; every other tag name is not, and
+    # neither is a branch spelled like one.
+    *[
+        pytest.param({"EVENT": event, "REF": ref, "DEFAULT_BRANCH": "main"}, id=f"{event}-{label}")
+        for event in ("push", "workflow_dispatch")
+        for label, ref in NOT_A_RELEASE_TAG.items()
+    ],
 ]
 
 

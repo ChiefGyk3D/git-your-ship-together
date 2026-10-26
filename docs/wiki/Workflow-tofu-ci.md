@@ -19,7 +19,7 @@ test a Spacelift push policy; both are the same job in every repository with tes
 | `fmt`, `validate`, `tflint`, `trivy`, `workflow-lint` | `contents: read` | No credential. OpenTofu and tflint are downloaded at a pinned version and sha256 |
 | `test` (with `test: true`) | `contents: read` | `init -backend=false`, then `tofu test`, in each directory. No credential, so a test that reaches a real provider fails here; that is what `mock_provider` is for |
 | `policy` (with `policy-directories`) | `contents: read` | `opa fmt --list --fail`, `opa check --strict` and `opa test` in each policy directory. OPA is downloaded at a pinned version and sha256 |
-| `plan` | `contents: read`, `id-token: write` | Runs only on a push to the default branch, a tag or a schedule; fetches the Doppler config's secrets into the environment and runs `plan-command`. The one place in this workflow a secret exists |
+| `plan` | `contents: read`, `id-token: write` | Runs only on a push to the default branch, a version tag (vN.N.N) or a schedule; fetches the Doppler config's secrets into the environment and runs `plan-command`. The one place in this workflow a secret exists |
 | `ci-green` | none | Needs all of the above |
 
 ## A minimal caller

@@ -20,7 +20,7 @@
 # missing secret must fail the job instead.
 #
 # Secrets are fetched only on a trusted ref: a push to the default branch, a
-# tag, or a schedule. A pull request - from this repository or a fork - and a
+# version tag (vN.N.N), or a schedule. A pull request - from this repository or a fork - and a
 # push to any other branch get nothing, whatever `required` says. A pull
 # request runs the code it proposes, so a secret in that job is a secret the
 # proposal can read; `trusted-refs-only: "false"` restores the old behaviour
@@ -54,7 +54,7 @@ inputs:
     required: false
     default: "false"
   trusted-refs-only:
-    description: Fetch only on the default branch, a tag or a schedule; never on a pull request or another branch.
+    description: Fetch only on the default branch, a version tag (vN.N.N) or a schedule; never on a pull request or another branch.
     required: false
     default: "true"
 
@@ -85,7 +85,7 @@ runs:
         mode=none
         skip=""
         # A trusted ref is one only a push by someone with write access, or the
-        # schedule, can produce: the default branch, a tag, or a scheduled run
+        # schedule, can produce: the default branch, a version tag (vN.N.N), or a scheduled run
         # (which GitHub always starts from the default branch). A pull request
         # is never trusted, whichever repository its head is in.
         trusted=false
@@ -95,7 +95,7 @@ runs:
           *)
             if [ -n "$DEFAULT_BRANCH" ] && [ "$REF" = "refs/heads/$DEFAULT_BRANCH" ]; then
               trusted=true
-            elif [ "${REF#refs/tags/}" != "$REF" ]; then
+            elif [[ "$REF" =~ ^refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
               trusted=true
             fi ;;
         esac
@@ -104,7 +104,7 @@ runs:
           # secret. Silent skip is correct here, whatever `required` says.
           skip="pull request from a fork"
         elif [ "$TRUSTED_ONLY" = "true" ] && [ "$trusted" != "true" ]; then
-          skip="$EVENT on $REF is not the default branch, a tag or a schedule (trusted-refs-only)"
+          skip="$EVENT on $REF is not the default branch, a version tag (vN.N.N) or a schedule (trusted-refs-only)"
         elif [ -n "$IDENTITY_ID" ]; then
           mode=oidc
         elif [ -n "$TOKEN" ]; then

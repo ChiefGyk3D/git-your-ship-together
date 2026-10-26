@@ -5,6 +5,15 @@ name what a caller sees after that.
 
 ## Unreleased
 
+### Doppler decide step: only version tags are trusted (issue #209)
+
+- **Changed.** The trusted-ref rule in `doppler-secrets` and every inlined copy (python-ci, tofu-ci, security,
+  container-release, project-sync, audit) now treats a tag as trusted only when it is exactly
+  `refs/tags/vMAJOR.MINOR.PATCH`. Any other tag name no longer receives secrets, so a caller that fetched on a
+  pre-release or free-form tag gets a notice and no secrets until it releases from a `vN.N.N` tag. The default
+  branch, schedule, pull request and fork rules are unchanged. This narrows which refs receive secrets; the docs say
+  what the Doppler identity must still restrict.
+
 ### New workflow: `lory-audit.yml` (issue #202)
 
 - **Added.** An optional reusable workflow that asks Lory (Lorikeet Security's AI pentester) for a deep-dive audit

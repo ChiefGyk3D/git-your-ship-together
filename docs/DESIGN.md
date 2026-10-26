@@ -119,7 +119,7 @@ else, and the Codecov upload happens in a separate `coverage` job that
 downloads the report artifact and never sees a pull request.
 
 **Secrets are fetched only on a trusted ref.** A push to the default branch, a
-tag, or a schedule. A pull request from anywhere, and a push to any other
+version tag (vN.N.N), or a schedule. A pull request from anywhere, and a push to any other
 branch, gets a notice and nothing. A pull request from a fork never fetches
 anything whichever way the input is set, because GitHub mints no OIDC token
 for it and the Doppler step refuses it regardless.

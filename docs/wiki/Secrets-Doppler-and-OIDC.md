@@ -58,11 +58,31 @@ The workflows try, in order:
    that need a secret then skip (Docker Hub publish) or fail naming the missing
    secret (Snyk).
 
-The fetch is gated on a **trusted ref**: a push to the default branch, a tag or a
+The fetch is gated on a **trusted ref**: a push to the default branch, a version tag (`vN.N.N`) or a
 schedule. A pull request from anywhere and a push to any other branch get a notice
 and nothing else. That is `doppler-trusted-refs-only`, on by default in every
 workflow. A pull request from a fork never fetches whichever way the input is set,
 because GitHub mints no OIDC token for it and the step refuses it regardless.
+
+**Which tags count.** Only a ref shaped exactly `refs/tags/vMAJOR.MINOR.PATCH`
+(digits only, for example `refs/tags/v1.2.3`). Any other tag name, such as
+`refs/tags/anything`, `refs/tags/v1`, `refs/tags/v1.2.3.4`, `refs/tags/V1.2.3`
+or `refs/tags/v1.2.3-rc.1`, and any branch spelled like a tag, gets no secrets.
+This repository's own tags are all that shape. A caller that releases from a
+pre-release tag does not fetch secrets on it; it fetches on the default branch
+or on a release tag.
+
+**What this does not do.** It narrows which refs receive secrets; it does not
+remove the exposure. The check reads the name of the ref, and anyone with write
+access can still create a tag with a matching name on any commit. The
+`Version tags are immutable` ruleset in the baseline (see `BASELINE.md`) blocks
+deleting, moving and force-pushing a `v*` tag, so a published version cannot be
+reused. It does not restrict who may create one. Restricting creation needs a
+separate ruleset on the tag namespace that limits creation to chosen actors, and
+that is not part of the baseline today. Treat the Doppler identity as the
+control that holds: list only the subjects that must fetch (the default branch,
+and a tag subject only where a release job really reads a secret), never a
+pull request, and keep the Viewer role on the one config the repository needs.
 
 Why: a pull request runs the code it proposes. A secret in that job is a secret
 the proposal can read. `tests/test_doppler_gate.py` runs the decision under bash

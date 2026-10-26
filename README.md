@@ -145,7 +145,7 @@ Applied throughout, and each one is a test:
   has `contents: read` and nothing else. Coverage goes to Codecov from a
   separate job that only ever touches the report artifact.
 - **Secrets are fetched only on a trusted ref.** A push to the default
-  branch, a tag or a schedule. A pull request gets a notice and nothing.
+  branch, a version tag (vN.N.N) or a schedule. A pull request gets a notice and nothing.
 - **A publishing build never reads the Actions cache.** Anyone who can open
   a pull request can write to that cache, and a poisoned layer inside a
   signed release is the one outcome the signature cannot undo.
@@ -306,7 +306,7 @@ Inputs of `python-ci.yml`:
 | `allowed-endpoints` | the measured list | harden-runner allow-list for `block`, space-separated `host:port`; see [Egress](#egress) |
 | `extra-allowed-endpoints` | empty | Appended to the list, for hosts only this repository reaches |
 | `doppler-project`, `doppler-config`, `doppler-identity-id` | empty | See [Doppler setup](#doppler-setup) |
-| `doppler-trusted-refs-only` | `true` | Fetch CI secrets only on the default branch, a tag or a schedule; never on a pull request. See [Doppler setup](#doppler-setup) |
+| `doppler-trusted-refs-only` | `true` | Fetch CI secrets only on the default branch, a version tag (vN.N.N) or a schedule; never on a pull request. See [Doppler setup](#doppler-setup) |
 | `timeout-minutes` | `15` | Per-job timeout |
 
 Every command input (`lint-command`, `test-command`, `smoke-command`,
@@ -897,7 +897,7 @@ Inputs of `tofu-ci.yml`:
 | `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `audit`, the tool downloads, Trivy's checks bundle and workflow-lint hosts, empty | harden-runner, as in `python-ci.yml`. A provider registry or a cloud API the plan reaches goes in `extra-allowed-endpoints` |
 | `egress-policy-secretless` | `audit` | harden-runner policy for the jobs that hold no stored secret, no OIDC token and no write-scoped token, and whose output no privileged job consumes; exactly `audit` or `block`. Governed by security exception EX-0001, see [Known CI platform issue: westus2 (EX-0001)](#known-ci-platform-issue-westus2-ex-0001). `block` opts back in |
 | `doppler-project`, `doppler-config`, `doppler-identity-id` | empty | See [Doppler setup](#doppler-setup); only the plan job reads them |
-| `doppler-trusted-refs-only` | `true` | Fetch only on the default branch, a tag or a schedule; never on a pull request |
+| `doppler-trusted-refs-only` | `true` | Fetch only on the default branch, a version tag (vN.N.N) or a schedule; never on a pull request |
 | `timeout-minutes` | `16` | Per-job timeout |
 
 ### Arduino CI
@@ -1069,7 +1069,7 @@ Inputs of `container-release.yml`:
 | `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `audit`, the measured list, empty | harden-runner, as in `python-ci.yml` |
 | `egress-policy-secretless` | `audit` | harden-runner policy for the jobs that hold no stored secret, no OIDC token and no write-scoped token, and whose output no privileged job consumes; exactly `audit` or `block`. Governed by security exception EX-0001, see [Known CI platform issue: westus2 (EX-0001)](#known-ci-platform-issue-westus2-ex-0001). `block` opts back in |
 | `doppler-project`, `doppler-config`, `doppler-identity-id` | empty | See [Doppler setup](#doppler-setup) |
-| `doppler-trusted-refs-only` | `true` | Fetch CI secrets only on the default branch, a tag or a schedule; never on a pull request. See [Doppler setup](#doppler-setup) |
+| `doppler-trusted-refs-only` | `true` | Fetch CI secrets only on the default branch, a version tag (vN.N.N) or a schedule; never on a pull request. See [Doppler setup](#doppler-setup) |
 | `timeout-minutes` | `60` | Timeout of each platform's build job; a platform built under QEMU is slow |
 
 Outputs: `digest` and `image` (`ghcr.io/...@sha256:...`) of the published
@@ -1714,7 +1714,7 @@ Inputs of `security.yml`:
 | `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `audit`, the measured list, empty | harden-runner, as in `python-ci.yml` |
 | `egress-policy-secretless` | `audit` | harden-runner policy for the jobs that hold no stored secret, no OIDC token and no write-scoped token, and whose output no privileged job consumes; exactly `audit` or `block`. Governed by security exception EX-0001, see [Known CI platform issue: westus2 (EX-0001)](#known-ci-platform-issue-westus2-ex-0001). `block` opts back in |
 | `doppler-project`, `doppler-config`, `doppler-identity-id` | empty | See [Doppler setup](#doppler-setup) |
-| `doppler-trusted-refs-only` | `true` | Fetch CI secrets only on the default branch, a tag or a schedule; never on a pull request. See [Doppler setup](#doppler-setup) |
+| `doppler-trusted-refs-only` | `true` | Fetch CI secrets only on the default branch, a version tag (vN.N.N) or a schedule; never on a pull request. See [Doppler setup](#doppler-setup) |
 | `timeout-minutes` | `15` | Per-job timeout |
 
 Only one job in `security.yml` is Python-shaped, and only by default: the
@@ -1932,7 +1932,7 @@ Inputs of `project-sync.yml`:
 | `allowed-endpoints` | `api.doppler.com:443 api.github.com:443` | The allow-list for `block`; these two are all the job reaches |
 | `extra-allowed-endpoints` | empty | Appended to the list |
 | `doppler-project`, `doppler-config`, `doppler-identity-id` | empty | See [Doppler setup](#doppler-setup) |
-| `doppler-trusted-refs-only` | `true` | Fetch the App key only on the default branch, a tag or a schedule. A caller that triggers on `pull_request_target` sets it `false`; see below |
+| `doppler-trusted-refs-only` | `true` | Fetch the App key only on the default branch, a version tag (vN.N.N) or a schedule. A caller that triggers on `pull_request_target` sets it `false`; see below |
 | `timeout-minutes` | `15` | Job timeout |
 
 ##### A repository on a personal account, a board in an organization
@@ -2125,7 +2125,7 @@ is the same thing as a composite action) try, in order:
    message naming the missing name (Snyk).
 
 A fetch happens only on a **trusted ref**: a push to the default branch, a
-tag, or a schedule. A pull request from anywhere and a push to any other branch
+version tag (vN.N.N), or a schedule. A pull request from anywhere and a push to any other branch
 get nothing and a notice saying so. That is `doppler-trusted-refs-only`, on by
 default in every workflow; turning it off means a pull request's proposed code
 runs in a job that holds a secret. A pull request from a fork never fetches

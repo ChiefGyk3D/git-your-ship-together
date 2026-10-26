@@ -47,7 +47,7 @@ makes `v*` tags immutable.
 **Concurrency.** A way to make one run cancel or queue behind another for the
 same group. It belongs to the caller; a reusable workflow cannot carry it.
 
-**Trusted ref.** A push to the default branch, a tag, or a schedule. Anything
+**Trusted ref.** A push to the default branch, a version tag (vN.N.N), or a schedule. Anything
 else (a pull request, a push to another branch) is untrusted, and the secret
 fetch skips it.
 

@@ -211,7 +211,7 @@ on:
         type: string
         default: ""
       doppler-trusted-refs-only:
-        description: Fetch CI secrets only on the default branch, a tag or a schedule; never on a pull request or another branch. `false` restores fetching on every same-repository run.
+        description: Fetch CI secrets only on the default branch, a version tag (vN.N.N) or a schedule; never on a pull request or another branch. `false` restores fetching on every same-repository run.
         type: boolean
         default: true
       timeout-minutes:
@@ -1134,7 +1134,7 @@ jobs:
           mode=none
           skip=""
           # A trusted ref is one only a push by someone with write access, or the
-          # schedule, can produce: the default branch, a tag, or a scheduled run
+          # schedule, can produce: the default branch, a version tag (vN.N.N), or a scheduled run
           # (which GitHub always starts from the default branch). A pull request
           # is never trusted, whichever repository its head is in.
           trusted=false
@@ -1144,7 +1144,7 @@ jobs:
             *)
               if [ -n "$DEFAULT_BRANCH" ] && [ "$REF" = "refs/heads/$DEFAULT_BRANCH" ]; then
                 trusted=true
-              elif [ "${REF#refs/tags/}" != "$REF" ]; then
+              elif [[ "$REF" =~ ^refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
                 trusted=true
               fi ;;
           esac
@@ -1153,7 +1153,7 @@ jobs:
             # secret. Silent skip is correct here, whatever `required` says.
             skip="pull request from a fork"
           elif [ "$TRUSTED_ONLY" = "true" ] && [ "$trusted" != "true" ]; then
-            skip="$EVENT on $REF is not the default branch, a tag or a schedule (trusted-refs-only)"
+            skip="$EVENT on $REF is not the default branch, a version tag (vN.N.N) or a schedule (trusted-refs-only)"
           elif [ -n "$IDENTITY_ID" ]; then
             mode=oidc
           elif [ -n "$TOKEN" ]; then
