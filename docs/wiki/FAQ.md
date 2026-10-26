@@ -39,7 +39,7 @@ The free plan meters tests per month across the account, and per-push scans in t
 `snyk-on: push` restores it ([Security Workflow](Workflow-security.md)).
 
 ## Why can't a pull request get my secrets?
-That is the point. A pull request's code could be anything. Secrets are fetched only on the default branch, a version tag (vN.N.N), or a schedule, and a fork never
+That is the point. A pull request's code could be anything. Secrets are fetched only on the default branch, a version tag (vN.N.N), or a schedule, and a fork's `pull_request` never
 gets an OIDC token at all ([Secrets: Doppler and OIDC](Secrets-Doppler-and-OIDC.md)).
 
 ## What is `CI green`?

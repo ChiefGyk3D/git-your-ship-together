@@ -289,11 +289,14 @@ jobs:
           set -euo pipefail
           mode=none
           skip=""
+          untrusted_tag=false
           # A trusted ref is one only a push by someone with write access, or the
           # schedule, can produce: the default branch, a version tag (vN.N.N), or a scheduled run
           # (which GitHub always starts from the default branch). A pull request
           # is never trusted, whichever repository its head is in.
           trusted=false
+          # An inherited BASHOPTS must not make a comparison below case-insensitive.
+          shopt -u nocasematch nocaseglob
           case "$EVENT" in
             schedule) trusted=true ;;
             pull_request|pull_request_target) trusted=false ;;
@@ -310,6 +313,9 @@ jobs:
             skip="pull request from a fork"
           elif [ "$TRUSTED_ONLY" = "true" ] && [ "$trusted" != "true" ]; then
             skip="$EVENT on $REF is not the default branch, a version tag (vN.N.N) or a schedule (trusted-refs-only)"
+            # A tag this rule refused is reported, so a job that was asked for a
+            # secret-backed feature can fail instead of skipping it quietly.
+            case "$REF" in refs/tags/*) untrusted_tag=true ;; esac
           elif [ -n "$IDENTITY_ID" ]; then
             mode=oidc
           elif [ -n "$TOKEN" ]; then
@@ -330,6 +336,7 @@ jobs:
             echo "::notice title=Doppler::not configured (no identity-id, no DOPPLER_TOKEN) - continuing without CI secrets"
           fi
           echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo "untrusted-tag=$untrusted_tag" >> "$GITHUB_OUTPUT"
           echo "Doppler auth mode: $mode"
 
       - name: Fetch CI secrets from Doppler (OIDC)

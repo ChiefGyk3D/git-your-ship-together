@@ -421,7 +421,7 @@ def doppler_script(path: Path) -> list[str]:
 
 
 def test_the_inlined_doppler_script_matches_the_composite_action():
-    """Four copies, one source. The composite action is the source; a copy that drifts is a bug."""
+    """Seven bodies, one source: the composite action, and a copy that drifts from it is a bug."""
     composite = doppler_script(ACTIONS / "doppler-secrets" / "action.yml")
     assert len(composite) == 1
     copies = {path.name: doppler_script(path) for path in DOPPLER}

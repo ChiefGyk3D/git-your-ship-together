@@ -2128,10 +2128,17 @@ A fetch happens only on a **trusted ref**: a push to the default branch, a
 version tag (vN.N.N), or a schedule. A pull request from anywhere and a push to any other branch
 get nothing and a notice saying so. That is `doppler-trusted-refs-only`, on by
 default in every workflow; turning it off means a pull request's proposed code
-runs in a job that holds a secret. A pull request from a fork never fetches
-anything, whichever way the input is set: GitHub mints no OIDC token for it,
-and the step refuses it regardless. `tests/test_doppler_gate.py` runs that
-decision under bash for every event and ref shape.
+runs in a job that holds a secret. A `pull_request` from a fork never
+fetches anything, whichever way the input is set: GitHub mints no OIDC token
+for it, and the step refuses it. `pull_request_target` is different: it runs
+the base branch's workflow with secrets, the step does not detect a fork for
+it, and with the input `false` it fetches, so set it only in a workflow that
+never checks out or runs the pull request's code (see "Why pull_request_target"
+below). A tag counts only as `vMAJOR.MINOR.PATCH`; on any other tag a job that
+asked for Snyk, or for Docker Hub with `push: true`, fails with an error naming
+the ref instead of skipping, and a GHCR-only release is unaffected.
+`tests/test_doppler_gate.py` runs that decision under bash for every event and
+ref shape.
 
 ### Once, for the workplace
 
@@ -2577,7 +2584,7 @@ The tests are the contract, one file per thing they hold still:
 | File | Holds |
 |---|---|
 | `tests/test_workflows.py` | SHA pins with version comments; no reference to this repository by branch; no `pull_request_target`; the write-permission allow-list; per-job permissions and timeouts; harden-runner first in every job; `persist-credentials: false` on every checkout; no untrusted interpolation; the inlined Doppler script identical to the composite action and gated on the decide step; no OIDC token on a job a pull request can run, and none on the test job; every input declared, defaulted, used and documented here; `CI green` needing every other job; signing and attestation only after a push; no Actions cache on a publishing build; the allow-list defaults one sorted line; every reusable workflow run against the fixture from this repository at the pull request's ref, never publishing |
-| `tests/test_doppler_gate.py` | The decide script, run under bash for every event and ref shape: trusted refs fetch, untrusted refs get a notice and never fail, forks never fetch, the Service Token path is gated the same way |
+| `tests/test_doppler_gate.py` | The decide script, run under bash for every event and ref shape: trusted refs fetch, untrusted refs get a notice and never fail, a fork's `pull_request` never fetches (`pull_request_target` with the gate off is pinned as it is), a refused tag fails a job that asked for a secret, the Service Token path is gated the same way |
 | `tests/test_audit_baseline.py` | The audit, fed a passing repository and a broken one per criterion; a 403 comes back UNKNOWN, never PASS; exit codes tell FAIL from UNKNOWN |
 | `tests/test_security_policy.py` | The shared SECURITY.md template's reporting, support, scope and response terms, and the baseline's copy-and-fill instructions |
 | `tests/test_risk_register.py` | The register's shape, its dates, no duplicate advisory, every repository named is in the baseline list, and no entry has expired |

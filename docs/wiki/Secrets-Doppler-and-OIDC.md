@@ -61,8 +61,17 @@ The workflows try, in order:
 The fetch is gated on a **trusted ref**: a push to the default branch, a version tag (`vN.N.N`) or a
 schedule. A pull request from anywhere and a push to any other branch get a notice
 and nothing else. That is `doppler-trusted-refs-only`, on by default in every
-workflow. A pull request from a fork never fetches whichever way the input is set,
-because GitHub mints no OIDC token for it and the step refuses it regardless.
+workflow. A `pull_request` from a fork never fetches whichever way the input is set,
+because GitHub mints no OIDC token for it and the step refuses it.
+
+**`pull_request_target` is different.** It runs the workflow file from the base
+branch with access to secrets, and the step computes its fork check for
+`pull_request` only. With `doppler-trusted-refs-only: true` (the default) a
+`pull_request_target` run fetches nothing. With `false` it selects OIDC, forks
+included, and `tests/test_doppler_gate.py` pins that behavior so nobody mistakes
+it for closed. Set `false` only in a workflow that never checks out or runs the
+pull request's code and never expands its text into a shell; project-sync is the
+one such caller here (README, "Why pull_request_target").
 
 **Which tags count.** Only a ref shaped exactly `refs/tags/vMAJOR.MINOR.PATCH`
 (digits only, for example `refs/tags/v1.2.3`). Any other tag name, such as
@@ -71,6 +80,19 @@ or `refs/tags/v1.2.3-rc.1`, and any branch spelled like a tag, gets no secrets.
 This repository's own tags are all that shape. A caller that releases from a
 pre-release tag does not fetch secrets on it; it fetches on the default branch
 or on a release tag.
+
+**A refused tag fails a job that asked for a secret.** When a tag is not a
+`vMAJOR.MINOR.PATCH` release tag, the decide step fetches nothing and reports
+`untrusted-tag=true`. A job that was asked for a secret-backed feature then fails
+with an error naming the ref (`ref is not a vMAJOR.MINOR.PATCH release tag:
+Doppler secrets are not fetched`) instead of skipping it and staying green:
+`security.yml` with `snyk: true`, and `container-release.yml` with `push: true`
+and `dockerhub: true`. A GHCR-only release (`dockerhub: false`) is unaffected, and
+so are the default branch, schedules and pull requests, which still skip with a
+notice. A caller that triggers on a loose tag pattern such as `v*` and tags a
+pre-release (`v1.2.3-rc.1`) will see these jobs fail; to opt out, do not trigger
+the Doppler-backed jobs on such tags (for example `tags: ['v*.*.*']` plus a
+branch filter, or an `if:` on the job).
 
 **What this does not do.** It narrows which refs receive secrets; it does not
 remove the exposure. The check reads the name of the ref, and anyone with write

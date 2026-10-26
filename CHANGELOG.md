@@ -13,6 +13,16 @@ name what a caller sees after that.
   pre-release or free-form tag gets a notice and no secrets until it releases from a `vN.N.N` tag. The default
   branch, schedule, pull request and fork rules are unchanged. This narrows which refs receive secrets; the docs say
   what the Doppler identity must still restrict.
+- **Changed (round 2).** A refused tag now fails a job that asked for a secret-backed feature instead of skipping it.
+  The decide step has a new output, `untrusted-tag` (also exposed by `doppler-secrets`), true when the ref is a tag
+  that is not `vMAJOR.MINOR.PATCH`. `security.yml` with `snyk: true` and `container-release.yml` with `push: true` and
+  `dockerhub: true` then fail with an error naming the ref, where they used to warn and stay green. GHCR-only releases,
+  the default branch, schedules, pull requests and forks are unchanged. A caller that triggers those jobs on a loose
+  tag pattern (`v*`) and cuts a pre-release such as `v1.2.3-rc.1` now sees a red job; to opt out, do not trigger the
+  Doppler-backed jobs on such tags. The decide step also resets `nocasematch` and `nocaseglob`, so an inherited
+  `BASHOPTS` cannot make `V1.2.3` look like a release tag.
+- **Docs.** The fork claim is now exact: a `pull_request` from a fork never fetches; `pull_request_target` with
+  `doppler-trusted-refs-only: false` does, and the test now pins that.
 
 ### New workflow: `lory-audit.yml` (issue #202)
 

@@ -20,8 +20,8 @@ somewhere it can be read back. Each item below closes one of those.
 
 **Only the owner can push.** No collaborator holds write, maintain or admin.
 Anyone else contributes by pull request from a fork, and a fork's workflow run
-never receives a secret (no OIDC token is minted for it, and the Doppler step
-refuses it regardless).
+never receives a secret on `pull_request` (no OIDC token is minted for it, and the
+Doppler step refuses it).
 
 Checked: `collaborators` lists nobody but the owner with push permission.
 Under an organization the repository's owner is the organization, not a

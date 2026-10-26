@@ -120,9 +120,12 @@ downloads the report artifact and never sees a pull request.
 
 **Secrets are fetched only on a trusted ref.** A push to the default branch, a
 version tag (vN.N.N), or a schedule. A pull request from anywhere, and a push to any other
-branch, gets a notice and nothing. A pull request from a fork never fetches
+branch, gets a notice and nothing. A `pull_request` from a fork never fetches
 anything whichever way the input is set, because GitHub mints no OIDC token
-for it and the Doppler step refuses it regardless.
+for it and the Doppler step refuses it. `pull_request_target` is different: it
+runs the base branch's workflow with secrets, the step does not detect a fork
+for it, and with the input set to `false` it fetches. Only a workflow that never
+checks out or runs the pull request's code may do that (project-sync is one).
 
 **Every third-party action is pinned to a commit SHA.** A tag can be moved; a
 SHA cannot. The version rides in a comment so a human can read it and so

@@ -98,7 +98,9 @@ runs on a pull request. **Held by.**
 **Why.** A pull request's proposed code would otherwise run in a job that holds a
 secret. Only a push to the default branch, a version tag (vN.N.N) or a schedule fetches. A pull
 request from a fork never fetches whatever the input says, because GitHub mints
-no OIDC token for it and the step refuses it regardless. **Held by.**
+no OIDC token for it and the step refuses it. `pull_request_target` is not covered
+by that: with the input `false` it fetches, so only a workflow that never checks
+out or runs the pull request's code may set it. **Held by.**
 `tests/test_doppler_gate.py`, which runs the decide script under bash for every
 event and ref shape, and `test_doppler_fetch_steps_are_gated_on_the_decision`.
 
