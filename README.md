@@ -145,7 +145,7 @@ Applied throughout, and each one is a test:
   has `contents: read` and nothing else. Coverage goes to Codecov from a
   separate job that only ever touches the report artifact.
 - **Secrets are fetched only on a trusted ref.** A push to the default
-  branch, a tag or a schedule. A pull request gets a notice and nothing.
+  branch, a version tag (vN.N.N) or a schedule. A pull request gets a notice and nothing.
 - **A publishing build never reads the Actions cache.** Anyone who can open
   a pull request can write to that cache, and a poisoned layer inside a
   signed release is the one outcome the signature cannot undo.
@@ -306,7 +306,7 @@ Inputs of `python-ci.yml`:
 | `allowed-endpoints` | the measured list | harden-runner allow-list for `block`, space-separated `host:port`; see [Egress](#egress) |
 | `extra-allowed-endpoints` | empty | Appended to the list, for hosts only this repository reaches |
 | `doppler-project`, `doppler-config`, `doppler-identity-id` | empty | See [Doppler setup](#doppler-setup) |
-| `doppler-trusted-refs-only` | `true` | Fetch CI secrets only on the default branch, a tag or a schedule; never on a pull request. See [Doppler setup](#doppler-setup) |
+| `doppler-trusted-refs-only` | `true` | Fetch CI secrets only on the default branch, a version tag (vN.N.N) or a schedule; never on a pull request. See [Doppler setup](#doppler-setup) |
 | `timeout-minutes` | `15` | Per-job timeout |
 
 Every command input (`lint-command`, `test-command`, `smoke-command`,
@@ -897,7 +897,7 @@ Inputs of `tofu-ci.yml`:
 | `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `audit`, the tool downloads, Trivy's checks bundle and workflow-lint hosts, empty | harden-runner, as in `python-ci.yml`. A provider registry or a cloud API the plan reaches goes in `extra-allowed-endpoints` |
 | `egress-policy-secretless` | `audit` | harden-runner policy for the jobs that hold no stored secret, no OIDC token and no write-scoped token, and whose output no privileged job consumes; exactly `audit` or `block`. Governed by security exception EX-0001, see [Known CI platform issue: westus2 (EX-0001)](#known-ci-platform-issue-westus2-ex-0001). `block` opts back in |
 | `doppler-project`, `doppler-config`, `doppler-identity-id` | empty | See [Doppler setup](#doppler-setup); only the plan job reads them |
-| `doppler-trusted-refs-only` | `true` | Fetch only on the default branch, a tag or a schedule; never on a pull request |
+| `doppler-trusted-refs-only` | `true` | Fetch only on the default branch, a version tag (vN.N.N) or a schedule; never on a pull request |
 | `timeout-minutes` | `16` | Per-job timeout |
 
 ### Arduino CI
@@ -1069,7 +1069,7 @@ Inputs of `container-release.yml`:
 | `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `audit`, the measured list, empty | harden-runner, as in `python-ci.yml` |
 | `egress-policy-secretless` | `audit` | harden-runner policy for the jobs that hold no stored secret, no OIDC token and no write-scoped token, and whose output no privileged job consumes; exactly `audit` or `block`. Governed by security exception EX-0001, see [Known CI platform issue: westus2 (EX-0001)](#known-ci-platform-issue-westus2-ex-0001). `block` opts back in |
 | `doppler-project`, `doppler-config`, `doppler-identity-id` | empty | See [Doppler setup](#doppler-setup) |
-| `doppler-trusted-refs-only` | `true` | Fetch CI secrets only on the default branch, a tag or a schedule; never on a pull request. See [Doppler setup](#doppler-setup) |
+| `doppler-trusted-refs-only` | `true` | Fetch CI secrets only on the default branch, a version tag (vN.N.N) or a schedule; never on a pull request. See [Doppler setup](#doppler-setup) |
 | `timeout-minutes` | `60` | Timeout of each platform's build job; a platform built under QEMU is slow |
 
 Outputs: `digest` and `image` (`ghcr.io/...@sha256:...`) of the published
@@ -1714,7 +1714,7 @@ Inputs of `security.yml`:
 | `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `audit`, the measured list, empty | harden-runner, as in `python-ci.yml` |
 | `egress-policy-secretless` | `audit` | harden-runner policy for the jobs that hold no stored secret, no OIDC token and no write-scoped token, and whose output no privileged job consumes; exactly `audit` or `block`. Governed by security exception EX-0001, see [Known CI platform issue: westus2 (EX-0001)](#known-ci-platform-issue-westus2-ex-0001). `block` opts back in |
 | `doppler-project`, `doppler-config`, `doppler-identity-id` | empty | See [Doppler setup](#doppler-setup) |
-| `doppler-trusted-refs-only` | `true` | Fetch CI secrets only on the default branch, a tag or a schedule; never on a pull request. See [Doppler setup](#doppler-setup) |
+| `doppler-trusted-refs-only` | `true` | Fetch CI secrets only on the default branch, a version tag (vN.N.N) or a schedule; never on a pull request. See [Doppler setup](#doppler-setup) |
 | `timeout-minutes` | `15` | Per-job timeout |
 
 Only one job in `security.yml` is Python-shaped, and only by default: the
@@ -1932,7 +1932,7 @@ Inputs of `project-sync.yml`:
 | `allowed-endpoints` | `api.doppler.com:443 api.github.com:443` | The allow-list for `block`; these two are all the job reaches |
 | `extra-allowed-endpoints` | empty | Appended to the list |
 | `doppler-project`, `doppler-config`, `doppler-identity-id` | empty | See [Doppler setup](#doppler-setup) |
-| `doppler-trusted-refs-only` | `true` | Fetch the App key only on the default branch, a tag or a schedule. A caller that triggers on `pull_request_target` sets it `false`; see below |
+| `doppler-trusted-refs-only` | `true` | Fetch the App key only on the default branch, a version tag (vN.N.N) or a schedule. A caller that triggers on `pull_request_target` sets it `false`; see below |
 | `timeout-minutes` | `15` | Job timeout |
 
 ##### A repository on a personal account, a board in an organization
@@ -2124,14 +2124,31 @@ is the same thing as a composite action) try, in order:
    Steps that need a secret then skip (Docker Hub publish) or fail with a
    message naming the missing name (Snyk).
 
-A fetch happens only on a **trusted ref**: a push to the default branch, a
-tag, or a schedule. A pull request from anywhere and a push to any other branch
-get nothing and a notice saying so. That is `doppler-trusted-refs-only`, on by
+A fetch happens only on a **trusted ref**: the default branch, a version tag
+(vN.N.N), or a schedule. A pull request from anywhere and a push to any other branch
+get nothing and a notice saying so.
+
+What the step does, exactly: a `schedule` run fetches; any other event that is not a pull request event
+(`pull_request`, `pull_request_target`) fetches when the ref is the default branch or a release-shaped tag,
+which includes a `push` and a `workflow_dispatch` on those refs and also `issues`, `issue_comment`,
+`workflow_run` and `repository_dispatch`. So the rule is a ref rule, not an event allow-list. A caller whose
+workflow runs on events that carry attacker-controlled data and holds fetched secrets must not process that
+data unsafely (no shell expansion, no checkout or execution of it). Narrowing the events is tracked in #219;
+`tests/test_doppler_gate.py` pins the current behavior as a documented residual.
+
+ That is `doppler-trusted-refs-only`, on by
 default in every workflow; turning it off means a pull request's proposed code
-runs in a job that holds a secret. A pull request from a fork never fetches
-anything, whichever way the input is set: GitHub mints no OIDC token for it,
-and the step refuses it regardless. `tests/test_doppler_gate.py` runs that
-decision under bash for every event and ref shape.
+runs in a job that holds a secret. A `pull_request` from a fork never
+fetches anything, whichever way the input is set: GitHub mints no OIDC token
+for it, and the step refuses it. `pull_request_target` is different: it runs
+the base branch's workflow with secrets, the step does not detect a fork for
+it, and with the input `false` it fetches, so set it only in a workflow that
+never checks out or runs the pull request's code (see "Why pull_request_target"
+below). A tag counts only as `vMAJOR.MINOR.PATCH`; on any other tag a job that
+asked for Snyk, or for Docker Hub with `push: true`, fails with an error naming
+the ref instead of skipping, and a GHCR-only release is unaffected.
+`tests/test_doppler_gate.py` runs that decision under bash for the event and
+ref shape.
 
 ### Once, for the workplace
 
@@ -2577,7 +2594,7 @@ The tests are the contract, one file per thing they hold still:
 | File | Holds |
 |---|---|
 | `tests/test_workflows.py` | SHA pins with version comments; no reference to this repository by branch; no `pull_request_target`; the write-permission allow-list; per-job permissions and timeouts; harden-runner first in every job; `persist-credentials: false` on every checkout; no untrusted interpolation; the inlined Doppler script identical to the composite action and gated on the decide step; no OIDC token on a job a pull request can run, and none on the test job; every input declared, defaulted, used and documented here; `CI green` needing every other job; signing and attestation only after a push; no Actions cache on a publishing build; the allow-list defaults one sorted line; every reusable workflow run against the fixture from this repository at the pull request's ref, never publishing |
-| `tests/test_doppler_gate.py` | The decide script, run under bash for every event and ref shape: trusted refs fetch, untrusted refs get a notice and never fail, forks never fetch, the Service Token path is gated the same way |
+| `tests/test_doppler_gate.py` | The decide script, run under bash for the push, schedule, dispatch, pull request and non-PR events and the ref shapes listed there: trusted refs fetch, untrusted refs get a notice and never fail, a fork's `pull_request` never fetches (`pull_request_target` with the gate off is pinned as it is), a refused tag fails a job that asked for a secret, the Service Token path is gated the same way |
 | `tests/test_audit_baseline.py` | The audit, fed a passing repository and a broken one per criterion; a 403 comes back UNKNOWN, never PASS; exit codes tell FAIL from UNKNOWN |
 | `tests/test_security_policy.py` | The shared SECURITY.md template's reporting, support, scope and response terms, and the baseline's copy-and-fill instructions |
 | `tests/test_risk_register.py` | The register's shape, its dates, no duplicate advisory, every repository named is in the baseline list, and no entry has expired |

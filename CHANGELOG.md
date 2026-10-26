@@ -5,6 +5,31 @@ name what a caller sees after that.
 
 ## Unreleased
 
+### Doppler decide step: only version tags are trusted (issue #209)
+
+- **Changed.** The trusted-ref rule in `doppler-secrets` and every inlined copy (python-ci, tofu-ci, security,
+  container-release, project-sync, audit) now treats a tag as trusted only when it is exactly
+  `refs/tags/vMAJOR.MINOR.PATCH`. Any other tag name no longer receives secrets, so a caller that fetched on a
+  pre-release or free-form tag gets a notice and no secrets until it releases from a `vN.N.N` tag. The default
+  branch, schedule, pull request and fork rules are unchanged. This narrows which refs receive secrets; the docs say
+  what the Doppler identity must still restrict.
+- **Changed (round 2).** A refused tag now fails a job that asked for a secret-backed feature instead of skipping it.
+  The decide step has a new output, `untrusted-tag` (also exposed by `doppler-secrets`), true when the ref is a tag
+  that is not `vMAJOR.MINOR.PATCH`. `security.yml` with `snyk: true` and `container-release.yml` with `push: true` and
+  `dockerhub: true` then fail with an error naming the ref, where they used to warn and stay green. GHCR-only releases,
+  the default branch, schedules, pull requests and forks are unchanged. A caller that triggers those jobs on a loose
+  tag pattern (`v*`) and cuts a pre-release such as `v1.2.3-rc.1` now sees a red job; to opt out, do not trigger the
+  Doppler-backed jobs on such tags. The decide step also resets `nocasematch` and `nocaseglob`, so an inherited
+  `BASHOPTS` cannot make `V1.2.3` look like a release tag.
+- **Docs (round 3).** The docs now say what the decide step does about events: any event other than a pull request
+  event fetches on the default branch or a release-shaped tag (issues, issue_comment, workflow_run and
+  repository_dispatch included), and a caller that holds fetched secrets on such events must not process their data
+  unsafely. Narrowing the events is #219; the tests pin the current behavior. In `container-release.yml` the
+  refused-tag guard sits in the `merge` job, so the run fails after per-architecture images were pushed to GHCR; no
+  index and no Docker Hub image is published.
+- **Docs.** The fork claim is now exact: a `pull_request` from a fork never fetches; `pull_request_target` with
+  `doppler-trusted-refs-only: false` does, and the test now pins that.
+
 ### New workflow: `lory-audit.yml` (issue #202)
 
 - **Added.** An optional reusable workflow that asks Lory (Lorikeet Security's AI pentester) for a deep-dive audit

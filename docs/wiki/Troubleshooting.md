@@ -16,7 +16,7 @@ Symptom, likely cause, fix. Many of these cost an afternoon the first time; the 
 | Symptom | Cause | Fix |
 |---|---|---|
 | `claim "sub" does not match identity auth config` | The Doppler identity lists only the plain subject; the repository sends the **immutable** one (default from mid-2026) | Add **both** subject forms, each with its tag twin. Doppler has no identity update: create a new identity, point `DOPPLER_IDENTITY_ID` at it, delete the old |
-| Snyk, Docker Hub or project-sync step "skipped" with a notice | A pull request or non-default branch: secrets are fetched only on trusted refs | Working as designed. Test on the default branch, a tag or a schedule |
+| Snyk, Docker Hub or project-sync step "skipped" with a notice | A pull request or non-default branch: secrets are fetched only on trusted refs | Working as designed. Test on the default branch, a version tag (vN.N.N) or a schedule |
 | Secret step does nothing, no error | `doppler-identity-id` unset and no `DOPPLER_TOKEN`: path 3 ("nothing") | Set `DOPPLER_IDENTITY_ID` (a repository **variable**) and pass `doppler-identity-id: ${{ vars.DOPPLER_IDENTITY_ID }}` |
 | Snyk job fails with exit 2 | Expired or revoked `SNYK_TOKEN` | Renew it with `scripts/doppler-ci-set.sh SNYK_TOKEN`. The token expires; note the date |
 | `project-sync` needs a fetch on `pull_request_target` but skips | `doppler-trusted-refs-only` is `true` | Set `false` in *that caller only*; never in a caller that checks out the PR |

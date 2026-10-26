@@ -199,7 +199,7 @@ on:
         type: string
         default: ""
       doppler-trusted-refs-only:
-        description: Fetch CI secrets only on the default branch, a tag or a schedule; never on a pull request or another branch. `false` restores fetching on every same-repository run.
+        description: Fetch CI secrets only on the default branch, a version tag (vN.N.N) or a schedule; never on a pull request or another branch. `false` restores fetching on every same-repository run.
         type: boolean
         default: true
       timeout-minutes:
@@ -947,18 +947,21 @@ jobs:
           set -euo pipefail
           mode=none
           skip=""
+          untrusted_tag=false
           # A trusted ref is one only a push by someone with write access, or the
-          # schedule, can produce: the default branch, a tag, or a scheduled run
+          # schedule, can produce: the default branch, a version tag (vN.N.N), or a scheduled run
           # (which GitHub always starts from the default branch). A pull request
           # is never trusted, whichever repository its head is in.
           trusted=false
+          # An inherited BASHOPTS must not make a comparison below case-insensitive.
+          shopt -u nocasematch nocaseglob
           case "$EVENT" in
             schedule) trusted=true ;;
             pull_request|pull_request_target) trusted=false ;;
             *)
               if [ -n "$DEFAULT_BRANCH" ] && [ "$REF" = "refs/heads/$DEFAULT_BRANCH" ]; then
                 trusted=true
-              elif [ "${REF#refs/tags/}" != "$REF" ]; then
+              elif [[ "$REF" =~ ^refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
                 trusted=true
               fi ;;
           esac
@@ -967,7 +970,10 @@ jobs:
             # secret. Silent skip is correct here, whatever `required` says.
             skip="pull request from a fork"
           elif [ "$TRUSTED_ONLY" = "true" ] && [ "$trusted" != "true" ]; then
-            skip="$EVENT on $REF is not the default branch, a tag or a schedule (trusted-refs-only)"
+            skip="$EVENT on $REF is not the default branch, a version tag (vN.N.N) or a schedule (trusted-refs-only)"
+            # A tag this rule refused is reported, so a job that was asked for a
+            # secret-backed feature can fail instead of skipping it quietly.
+            case "$REF" in refs/tags/*) untrusted_tag=true ;; esac
           elif [ -n "$IDENTITY_ID" ]; then
             mode=oidc
           elif [ -n "$TOKEN" ]; then
@@ -988,6 +994,7 @@ jobs:
             echo "::notice title=Doppler::not configured (no identity-id, no DOPPLER_TOKEN) - continuing without CI secrets"
           fi
           echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo "untrusted-tag=$untrusted_tag" >> "$GITHUB_OUTPUT"
           echo "Doppler auth mode: $mode"
 
       - name: Fetch CI secrets from Doppler (OIDC)
@@ -1018,8 +1025,15 @@ jobs:
           DOCKERHUB: ${{ inputs.dockerhub }}
           DOCKERHUB_REPOSITORY: ${{ inputs.dockerhub-repository }}
           PUSH: ${{ inputs.push }}
+          UNTRUSTED_TAG: ${{ steps.doppler.outputs.untrusted-tag }}
+          REF: ${{ github.ref }}
         run: |
           set -euo pipefail
+          if [ "$PUSH" = "true" ] && [ "$DOCKERHUB" = "true" ] && [ "${UNTRUSTED_TAG:-}" = "true" ]; then
+            # Asked for, and refused on this ref: fail rather than publish to GHCR alone and stay green.
+            echo "::error title=Docker Hub::dockerhub is true but $REF: ref is not a vMAJOR.MINOR.PATCH release tag: Doppler secrets are not fetched"
+            exit 1
+          fi
           repo_name="${REPOSITORY#*/}"
           repo_name="$(printf '%s' "$repo_name" | tr '[:upper:]' '[:lower:]')"
           owner="$(printf '%s' "${REPOSITORY%%/*}" | tr '[:upper:]' '[:lower:]')"

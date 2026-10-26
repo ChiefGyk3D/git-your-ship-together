@@ -58,15 +58,68 @@ The workflows try, in order:
    that need a secret then skip (Docker Hub publish) or fail naming the missing
    secret (Snyk).
 
-The fetch is gated on a **trusted ref**: a push to the default branch, a tag or a
+The fetch is gated on a **trusted ref**: the default branch, a version tag (`vN.N.N`) or a
 schedule. A pull request from anywhere and a push to any other branch get a notice
 and nothing else. That is `doppler-trusted-refs-only`, on by default in every
-workflow. A pull request from a fork never fetches whichever way the input is set,
-because GitHub mints no OIDC token for it and the step refuses it regardless.
+workflow. A `pull_request` from a fork never fetches whichever way the input is set,
+because GitHub mints no OIDC token for it and the step refuses it.
+
+**Which events.** a `schedule` run fetches; any other event that is not a pull request event
+(`pull_request`, `pull_request_target`) fetches when the ref is the default branch or a release-shaped tag,
+which includes a `push` and a `workflow_dispatch` on those refs and also `issues`, `issue_comment`,
+`workflow_run` and `repository_dispatch`. So the rule is a ref rule, not an event allow-list. A caller whose
+workflow runs on events that carry attacker-controlled data and holds fetched secrets must not process that
+data unsafely (no shell expansion, no checkout or execution of it). Narrowing the events is tracked in #219;
+`tests/test_doppler_gate.py` pins the current behavior as a documented residual.
+
+**`pull_request_target` is different.** It runs the workflow file from the base
+branch with access to secrets, and the step computes its fork check for
+`pull_request` only. With `doppler-trusted-refs-only: true` (the default) a
+`pull_request_target` run fetches nothing. With `false` it selects OIDC, forks
+included, and `tests/test_doppler_gate.py` pins that behavior so nobody mistakes
+it for closed. Set `false` only in a workflow that never checks out or runs the
+pull request's code and never expands its text into a shell; project-sync is the
+one such caller here (README, "Why pull_request_target").
+
+**Which tags count.** Only a ref shaped exactly `refs/tags/vMAJOR.MINOR.PATCH`
+(digits only, for example `refs/tags/v1.2.3`). Any other tag name, such as
+`refs/tags/anything`, `refs/tags/v1`, `refs/tags/v1.2.3.4`, `refs/tags/V1.2.3`
+or `refs/tags/v1.2.3-rc.1`, and any branch spelled like a tag, gets no secrets.
+This repository's own tags are all that shape. A caller that releases from a
+pre-release tag does not fetch secrets on it; it fetches on the default branch
+or on a release tag.
+
+**A refused tag fails a job that asked for a secret.** When a tag is not a
+`vMAJOR.MINOR.PATCH` release tag, the decide step fetches nothing and reports
+`untrusted-tag=true`. A job that was asked for a secret-backed feature then fails
+with an error naming the ref (`ref is not a vMAJOR.MINOR.PATCH release tag:
+Doppler secrets are not fetched`) instead of skipping it and staying green:
+`security.yml` with `snyk: true`, and `container-release.yml` with `push: true`
+and `dockerhub: true`. In `container-release.yml` the guard sits in the `merge` job, after the `build` job has already pushed the
+per-architecture images to GHCR: the run fails after per-architecture images were pushed to GHCR, and no
+index and no Docker Hub image is published. The orphaned per-architecture manifests remain until deleted.
+A GHCR-only release (`dockerhub: false`) is unaffected, and
+so are the default branch, schedules and pull requests, which still skip with a
+notice. A caller that triggers on a loose tag pattern such as `v*` and tags a
+pre-release (`v1.2.3-rc.1`) will see these jobs fail; to opt out, do not trigger
+the Doppler-backed jobs on such tags (for example `tags: ['v*.*.*']` plus a
+branch filter, or an `if:` on the job).
+
+**What this does not do.** It narrows which refs receive secrets; it does not
+remove the exposure. The check reads the name of the ref, and anyone with write
+access can still create a tag with a matching name on any commit. The
+`Version tags are immutable` ruleset in the baseline (see `BASELINE.md`) blocks
+deleting, moving and force-pushing a `v*` tag, so a published version cannot be
+reused. It does not restrict who may create one. Restricting creation needs a
+separate ruleset on the tag namespace that limits creation to chosen actors, and
+that is not part of the baseline today. Treat the Doppler identity as the
+control that holds: list only the subjects that must fetch (the default branch,
+and a tag subject only where a release job really reads a secret), never a
+pull request, and keep the Viewer role on the one config the repository needs.
 
 Why: a pull request runs the code it proposes. A secret in that job is a secret
 the proposal can read. `tests/test_doppler_gate.py` runs the decision under bash
-for every event and ref shape.
+for the event kinds and ref shapes it lists.
 
 The Doppler steps are copied into each workflow that needs them rather than called
 as a shared action, because a reusable workflow cannot name the commit it runs
