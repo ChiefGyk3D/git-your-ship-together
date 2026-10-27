@@ -143,13 +143,20 @@ on:
             if grep -qx 'ID=parrot' /etc/os-release; then
               sed -i 's|https://deb.parrot.sh/parrot|https://deb.parrot.sh/direct/parrot|g' /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources 2>/dev/null || true
             fi
-            # A mirror that answers 502 is not retried by apt itself, so the
-            # whole step is tried three times with a pause between.
-            for attempt in 1 2 3; do
+            # A mirror that answers 502, or is caught mid-sync (Kali's "File has
+            # unexpected size", #228), is not retried by apt itself, so the whole
+            # step is tried six times with a growing pause (20 s up to 60 s). The
+            # package lists are cleared between tries so a partial index is never
+            # reused; the last failure exits non-zero with apt's own error shown.
+            for attempt in 1 2 3 4 5 6; do
               apt-get -o Acquire::Retries=3 update -qq &&
                 apt-get -o Acquire::Retries=3 install -y -qq --no-install-recommends bash git ca-certificates && break
-              [ "$attempt" = 3 ] && exit 1
-              sleep 15
+              if [ "$attempt" = 6 ]; then
+                echo "apt-get still failing after 6 attempts" >&2
+                exit 1
+              fi
+              rm -rf /var/lib/apt/lists/*
+              sleep $((attempt * 20 > 60 ? 60 : attempt * 20))
             done
           elif command -v dnf >/dev/null 2>&1; then
             dnf install -y -q bash git ca-certificates

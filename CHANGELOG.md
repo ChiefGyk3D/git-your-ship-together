@@ -5,6 +5,15 @@ name what a caller sees after that.
 
 ## Unreleased
 
+### Distro legs: a Kali mirror caught mid-sync no longer reddens the gate (issue #228)
+
+- **Fixed.** The default `distro-setup-command` of `bash-ci.yml` and `python-ci.yml` retried `apt-get update` three times, 15 s apart,
+  which is shorter than Kali's mirror takes to settle ("File has unexpected size ... Mirror sync in progress?" for hours). It now tries
+  six times with a pause of 20, 40, then 60 s, clears `/var/lib/apt/lists/*` between tries so a partial index is not reused, and after
+  the sixth failure exits non-zero with apt's error and an `apt-get still failing after 6 attempts` line. A healthy mirror takes the
+  same single pass as before. The leg is not advisory and no egress endpoint was added. A caller with its own `distro-setup-command`
+  is unchanged. Tests: `tests/test_distro_apt_retry.py`.
+
 ### New: `wait-ci` watcher, script and composite action (issue #223)
 
 - **Added.** `scripts/wait-ci.sh` and `.github/actions/wait-ci`: one tested CI watcher for monitors and merge scripts, in
