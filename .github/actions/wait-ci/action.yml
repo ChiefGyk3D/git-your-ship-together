@@ -79,7 +79,7 @@ inputs:
     default: ${{ github.token }}
 outputs:
   result:
-    description: green, red, timeout, hung, head-moved, merge-blocked, queued, error or usage.
+    description: green, red, timeout, hung, head-moved, merge-blocked, queued (a positively observed unmerged pull request), error (including a pull request that could not be read after the merge call) or usage.
     value: ${{ steps.wait.outputs.result }}
   sha:
     description: The commit that was verified green; set also when the result is merge-blocked or queued, empty otherwise.

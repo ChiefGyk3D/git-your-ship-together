@@ -175,6 +175,10 @@ def pulls_response(st):
     st["head_reads"] = st.get("head_reads", 0) + 1
     item, found = pop_script(st, "pulls_script")
     if found:
+        if isinstance(item, dict) and "fail" in item:  # an HTTP error: 500, 403 (rate limit), ...
+            return item["fail"], None
+        if isinstance(item, dict) and "raw" in item:  # a body that is not what the API sends
+            return 200, {"__raw__": item["raw"]}
         return 200, item
     if st.get("head_read_fails"):
         return 502, None
@@ -206,7 +210,8 @@ def save():
 # @HELPERS@
 
 def emit(body):
-    proc = subprocess.run(["jq", "-r", jq], input=json.dumps(body), capture_output=True, text=True)
+    data = body["__raw__"] if "__raw__" in body else json.dumps(body)
+    proc = subprocess.run(["jq", "-r", jq], input=data, capture_output=True, text=True)
     if proc.returncode != 0:
         sys.stderr.write("jq: " + proc.stderr)
         sys.exit(1)
@@ -365,7 +370,7 @@ class World:
                 pass
 
             def reply(self, code, obj, headers=()):
-                body = json.dumps(obj).encode()
+                body = obj["__raw__"].encode() if "__raw__" in obj else json.dumps(obj).encode()
                 self.send_response(code)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(body)))
@@ -1421,6 +1426,67 @@ def test_a_successful_merge_call_on_a_pr_that_shows_another_head_is_head_moved(w
     assert p.returncode == 4, shown(p)
     assert "merged at a different head" in p.stdout
     assert w.outputs() == {"result": "head-moved", "sha": A, "merged": "false"}
+
+
+# After `gh pr merge` the pull request state is read once more. Only a positively observed merged=false at the
+# verified head is "queued" (exit 5); a state that cannot be read is an error (exit 1), never "queued",
+# "already merged" or "head moved".
+UNREADABLE = {
+    "http 500": {"fail": 500},
+    "rate limit 403": {"fail": 403},
+    "malformed json": {"raw": "not json{"},
+    "empty body": {"raw": ""},
+    "invalid sha": {"merged": False, "head": {"sha": "zz"}},
+    "empty object": {},
+    "merged not a boolean": {"merged": "maybe", "head": {"sha": A}},
+}
+
+
+@pytest.mark.parametrize("label", sorted(UNREADABLE))
+def test_an_unreadable_pull_request_after_a_successful_merge_call_is_an_error_not_queued(world, label):
+    w = world(
+        checks={A: [GATE]},
+        merge_results=[{"rc": 0, "queued": True}],
+        pulls_script=[PIN, PIN, PIN, UNREADABLE[label]],
+    )
+    p = w.run("--repo", SLUG, "--pr", "7", "--merge", *FAST)
+    assert p.returncode == 1, f"{label}\n" + shown(p)
+    assert "could not read the pull request after the merge call" in p.stdout
+    assert "not merged" not in p.stdout
+    assert w.outputs() == {"result": "error", "sha": A, "merged": "false"}
+
+
+@pytest.mark.parametrize("label", sorted(UNREADABLE))
+def test_an_unreadable_pull_request_after_a_failed_merge_call_is_an_error(world, label):
+    w = world(
+        checks={A: [GATE]},
+        merge_results=[{"rc": 1, "err": "the base branch policy prohibits the merge"}],
+        pulls_script=[PIN, PIN, PIN, UNREADABLE[label]],
+    )
+    p = w.run("--repo", SLUG, "--pr", "7", "--merge", *FAST)
+    assert p.returncode == 1, f"{label}\n" + shown(p)
+    assert "could not read the pull request after the merge call" in p.stdout
+    assert "already merged" not in p.stdout and "head moved" not in p.stdout
+    assert len(w.merges()) == 1, "an unreadable state ends the attempt; it is not retried blindly"
+    assert w.outputs()["result"] == "error" and w.outputs()["merged"] == "false"
+
+
+def test_queued_needs_a_positively_observed_unmerged_pull_request_at_the_verified_head(world):
+    w = world(checks={A: [GATE]}, merge_results=[{"rc": 0, "queued": True}], pulls_script=[PIN, PIN, PIN, PIN])
+    p = w.run("--repo", SLUG, "--pr", "7", "--merge", *FAST)
+    assert p.returncode == 5, shown(p)
+    assert w.outputs() == {"result": "queued", "sha": A, "merged": "false"}
+
+
+def test_an_unmerged_pull_request_at_another_head_after_a_successful_merge_call_is_head_moved(world):
+    w = world(
+        checks={A: [GATE]},
+        merge_results=[{"rc": 0, "queued": True}],
+        pulls_script=[PIN, PIN, PIN, {"merged": False, "head": {"sha": B}}],
+    )
+    p = w.run("--repo", SLUG, "--pr", "7", "--merge", *FAST)
+    assert p.returncode == 4, shown(p)
+    assert w.outputs()["merged"] == "false"
 
 
 def test_merged_and_head_come_from_one_response(world):

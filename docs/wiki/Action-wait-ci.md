@@ -44,7 +44,11 @@ race seen on GYST #218), and a push that moved the head under the loop. This scr
   `--merge-retries` times, `--merge-retry-delay` seconds apart, then exit 1 with `merge blocked: policy block still in place`.
   Any other failure (a conflict, a closed pull request, a 403) is exit 1 at once with `merge blocked: not a policy block`.
   An unknown message is treated as not retryable. When gh accepts the merge but the pull request is not merged afterwards
-  (a merge queue, auto-merge), the result is `queued`, exit 5, and `merged` stays `false`. It never passes `--admin` or `--auto`.
+  (a merge queue, auto-merge), the result is `queued`, exit 5, and `merged` stays `false`, but only when the read-back is a
+  successful response showing `merged` false at the verified head. If the read-back fails for any reason (an HTTP error,
+  a rate limit, a malformed or invalid response), after a successful or a failed merge call, the outcome is unknown: exit 1,
+  result `error`, "could not read the pull request after the merge call"; it is never `queued`, `already merged` or
+  `head moved`. An unmerged pull request at a different head is exit 4. It never passes `--admin` or `--auto`.
 - **The list must be whole.** GitHub's REST description for listing check runs says: "If there are more than 1000 check suites
   on a single git reference, this endpoint will limit check runs to the 1000 most recent check suites." The cap is on check
   suites, and a cut-off answer can hold far fewer than 1000 runs (several suites with one run each, suites with none), so
@@ -118,11 +122,11 @@ race seen on GYST #218), and a push that moved the head under the loop. This scr
 | Code | Meaning |
 |---|---|
 | `0` | Green. With `--merge`, merged (or already merged at the verified commit). |
-| `1` | Red: a check failed or was cancelled, or a check run name holds a control character. Also: `--merge` could not merge (the output says `merge blocked`: a non-policy failure, or a policy block that outlasted the retries), or the head could not be read or was not a full SHA. |
+| `1` | Red: a check failed or was cancelled, or a check run name holds a control character. Also: `--merge` could not merge (the output says `merge blocked`: a non-policy failure, or a policy block that outlasted the retries), or the head could not be read or was not a full SHA, or the pull request could not be read after the merge call (`result` is `error`, `merged` stays `false`). |
 | `2` | Timeout: no verdict after `--timeout` seconds. |
 | `3` | Hung: no check changed for `--hung-after` seconds. |
 | `4` | Head moved: the pull request head is no longer the pinned SHA (at the start, while waiting, between the last check and the merge, or during the merge). |
-| `5` | Queued: the merge was accepted but the pull request is not merged yet (a merge queue or auto-merge). Not reported as merged. |
+| `5` | Queued: the merge was accepted and the pull request, read back, is positively not merged yet at the verified head (a merge queue or auto-merge). Not reported as merged. A pull request that cannot be read back is exit `1`, never `5`. |
 | `64` | Bad input; nothing was waited on and `gh` was not called. |
 
 The timeout is tested before hung, so a run that is past both reports `2`.

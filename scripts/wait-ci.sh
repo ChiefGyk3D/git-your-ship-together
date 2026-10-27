@@ -49,7 +49,8 @@
 #   2   timeout: --timeout seconds passed without a verdict
 #   3   hung: no check changed state for --hung-after seconds
 #   4   head moved: the pull request head is no longer the pinned SHA
-#   5   queued: the merge was accepted but the pull request is not merged yet (merge queue or auto-merge)
+#   5   queued: the merge was accepted and the pull request, read back, is positively not merged yet at the
+#       verified head (merge queue or auto-merge); a pull request that cannot be read back is exit 1
 #   64  usage error (bad flag or value); nothing was waited on
 #
 # Numbers are plain base-10 integers, no sign, space or leading zero (0 only where it is legal), and
@@ -715,6 +716,14 @@ attribute_merge() {
   exit 4
 }
 
+# After a merge call the pull request must be readable: an unreadable state (HTTP error, rate limit, malformed
+# or invalid response) says nothing about whether it merged, so it is an error, never queued, merged or moved.
+state_unreadable() {
+  say "could not read the pull request after the merge call (${repo}#${pr}); the outcome is unknown, so it is reported neither as merged nor as queued"
+  result="error"
+  exit 1
+}
+
 attempt=0
 last_err=""
 while :; do
@@ -724,9 +733,16 @@ while :; do
   if "$gh_bin" "${args[@]}" >/dev/null 2>"$errfile"; then
     # gh can accept a merge that is only queued (merge queue, auto-merge), or that another push turned into
     # the merge of a different head: confirm from ONE response before reporting anything.
-    if pr_state && [[ "$PR_MERGED" == true ]]; then
+    if ! pr_state; then state_unreadable; fi
+    if [[ "$PR_MERGED" == true ]]; then
       attribute_merge "merged ${repo}#${pr} (squash) at ${verified}"
     fi
+    if [[ "$PR_HEAD" != "$verified" ]]; then
+      say "head moved: ${repo}#${pr} is not merged and its head is ${PR_HEAD}, not the verified ${verified}"
+      result="head-moved"
+      exit 4
+    fi
+    # Only here, with merged=false observed at the verified head, is the merge known to be queued.
     result="queued"
     say "the merge of ${repo}#${pr} was accepted but the pull request is not merged (merge queue or auto-merge?); not reporting it as merged"
     exit 5
@@ -737,15 +753,14 @@ while :; do
 
   # Why did it fail: a push, a merge that landed anyway, or a block that may clear? One response answers
   # both questions (merged and head), so a merge is never tied to a head read earlier.
-  if pr_state; then
-    if [[ "$PR_MERGED" == true ]]; then
-      attribute_merge "${repo}#${pr} is already merged at ${verified}"
-    fi
-    if [[ "$PR_HEAD" != "$verified" ]]; then
-      say "head moved before the merge: ${verified} -> ${PR_HEAD}; nothing merged"
-      result="head-moved"
-      exit 4
-    fi
+  if ! pr_state; then state_unreadable; fi
+  if [[ "$PR_MERGED" == true ]]; then
+    attribute_merge "${repo}#${pr} is already merged at ${verified}"
+  fi
+  if [[ "$PR_HEAD" != "$verified" ]]; then
+    say "head moved before the merge: ${verified} -> ${PR_HEAD}; nothing merged"
+    result="head-moved"
+    exit 4
   fi
   if ! is_policy_block "$full_err"; then
     say "merge blocked: not a policy block, so it is not retried"
