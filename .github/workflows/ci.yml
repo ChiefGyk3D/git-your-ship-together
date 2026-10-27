@@ -86,6 +86,11 @@ jobs:
           ruff check tests/
           ruff format --check tests/
 
+      # tests/test_wait_ci.py runs the watcher's jq expression with the real jq; ubuntu-latest ships it, this keeps a
+      # missing one from skipping the tests (they fail when CI is set and jq is absent).
+      - name: Require jq
+        run: command -v jq >/dev/null || sudo apt-get install -y --no-install-recommends jq
+
       - name: Run the tests
         run: pytest -q
 

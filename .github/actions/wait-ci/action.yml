@@ -1,0 +1,142 @@
+# Wait for CI on one pinned commit, and optionally squash-merge exactly that commit.
+#
+# A thin wrapper: every rule lives in scripts/wait-ci.sh (a copy would drift), which this step
+# calls by path from the action's own checkout. The inputs reach it through env and quoted
+# arguments only, never through the script text. The exit codes are the script's: 0 green (and
+# merged if asked), 1 red, 2 timeout, 3 hung, 4 head moved, 64 bad input. Outputs are written even
+# when the step fails, so a later `if: always()` step can read them.
+#
+# Not for a job that the gate itself waits on: the step would wait for the check run of the very job
+# it is in. Run it from a separate workflow, a monitor or a script on a machine.
+#
+# tests/test_wait_ci.py runs this step's script against a fake gh.
+name: Wait for CI
+description: Pin a commit, wait for its required check to pass, and optionally squash-merge exactly that commit.
+inputs:
+  repo:
+    description: Repository as OWNER/REPO.
+    required: false
+    default: ${{ github.repository }}
+  pr:
+    description: Pull request number. Its head is pinned and re-read; needed for `merge`. Give this or `sha`.
+    required: false
+    default: ""
+  sha:
+    description: Full 40-character commit SHA to verify. With `pr` it must equal the pull request head, else the step exits 4.
+    required: false
+    default: ""
+  context:
+    description: Required check run names, one per line, matched exactly (no globs, no case folding, no trimming). Empty means no named gate; at least `min-checks` completed runs and none failed are still needed.
+    required: false
+    default: CI green
+  app-id:
+    description: GitHub App id whose check runs may satisfy a context. The default is GitHub Actions. A same-named run from any other app is ignored, neither green nor red.
+    required: false
+    default: "15368"
+  any-app:
+    description: Set `true` to accept a same-named run from any app (prints a warning). Then only branch protection pinning the app stands between a copycat check and the merge.
+    required: false
+    default: "false"
+  min-checks:
+    description: How many check runs must be complete. At least 1, because no check runs is never green.
+    required: false
+    default: "1"
+  timeout:
+    description: Seconds to wait in total before exiting 2.
+    required: false
+    default: "1800"
+  hung-after:
+    description: Seconds in which no check may change before exiting 3.
+    required: false
+    default: "600"
+  interval:
+    description: Seconds between polls.
+    required: false
+    default: "20"
+  on-push:
+    description: What a moved pull request head does while waiting, `abort` (exit 4) or `reset` (pin the new head and start over; the total timeout keeps running). With an explicit `sha`, any head move is exit 4 whichever is set. After the pinned commit has verified green a push is always exit 4.
+    required: false
+    default: abort
+  merge:
+    description: Set `true` to squash-merge the verified commit once green, with `--match-head-commit`. Needs `pr`. Anything but `true` or `false` is a usage error.
+    required: false
+    default: "false"
+  delete-branch:
+    description: With `merge`, delete the head branch (`true` or `false`).
+    required: false
+    default: "false"
+  merge-retries:
+    description: Retries after a merge attempt that hit a policy block that has not cleared; any other merge failure is not retried. Zero means one attempt.
+    required: false
+    default: "5"
+  merge-retry-delay:
+    description: Seconds between merge attempts.
+    required: false
+    default: "30"
+  token:
+    description: "Token for gh. Reading needs checks: read and pull-requests: read; `merge` also needs contents: write and pull-requests: write. A merge by the default workflow token does not start other workflows."
+    required: false
+    default: ${{ github.token }}
+outputs:
+  result:
+    description: green, red, timeout, hung, head-moved, merge-blocked, queued (a positively observed unmerged pull request), error (including a pull request that could not be read after the merge call) or usage.
+    value: ${{ steps.wait.outputs.result }}
+  sha:
+    description: The commit that was verified green; set also when the result is merge-blocked or queued, empty otherwise.
+    value: ${{ steps.wait.outputs.sha }}
+  merged:
+    description: "true only when the pull request is merged at the verified commit; false when the merge was queued."
+    value: ${{ steps.wait.outputs.merged }}
+runs:
+  using: composite
+  steps:
+    - name: Wait for CI
+      id: wait
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        WAIT_CI_REPO: ${{ inputs.repo }}
+        WAIT_CI_PR: ${{ inputs.pr }}
+        WAIT_CI_SHA: ${{ inputs.sha }}
+        WAIT_CI_CONTEXT: ${{ inputs.context }}
+        WAIT_CI_APP_ID: ${{ inputs.app-id }}
+        WAIT_CI_ANY_APP: ${{ inputs.any-app }}
+        WAIT_CI_MIN_CHECKS: ${{ inputs.min-checks }}
+        WAIT_CI_TIMEOUT: ${{ inputs.timeout }}
+        WAIT_CI_HUNG_AFTER: ${{ inputs.hung-after }}
+        WAIT_CI_INTERVAL: ${{ inputs.interval }}
+        WAIT_CI_ON_PUSH: ${{ inputs.on-push }}
+        WAIT_CI_MERGE: ${{ inputs.merge }}
+        WAIT_CI_DELETE_BRANCH: ${{ inputs.delete-branch }}
+        WAIT_CI_MERGE_RETRIES: ${{ inputs.merge-retries }}
+        WAIT_CI_MERGE_RETRY_DELAY: ${{ inputs.merge-retry-delay }}
+      run: |
+        set -euo pipefail
+        args=()
+        flag() {
+          case "$2" in
+            true) args+=("$1") ;;
+            false) ;;
+            *)
+              echo "wait-ci: usage: $3 must be true or false (got '$2')" >&2
+              exit 64
+              ;;
+          esac
+        }
+        args+=(--repo "$WAIT_CI_REPO" --min-checks "$WAIT_CI_MIN_CHECKS" --timeout "$WAIT_CI_TIMEOUT")
+        args+=(--hung-after "$WAIT_CI_HUNG_AFTER" --interval "$WAIT_CI_INTERVAL" --on-push "$WAIT_CI_ON_PUSH")
+        args+=(--merge-retries "$WAIT_CI_MERGE_RETRIES" --merge-retry-delay "$WAIT_CI_MERGE_RETRY_DELAY")
+        if [ -n "$WAIT_CI_PR" ]; then args+=(--pr "$WAIT_CI_PR"); fi
+        if [ -n "$WAIT_CI_SHA" ]; then args+=(--sha "$WAIT_CI_SHA"); fi
+        flag --merge "$WAIT_CI_MERGE" merge
+        flag --delete-branch "$WAIT_CI_DELETE_BRANCH" delete-branch
+        flag --any-app "$WAIT_CI_ANY_APP" any-app
+        args+=(--app-id "$WAIT_CI_APP_ID")
+        if [ -z "${WAIT_CI_CONTEXT//[[:space:]]/}" ]; then
+          args+=(--context "")
+        else
+          while IFS= read -r line || [ -n "$line" ]; do
+            if [ -n "$line" ]; then args+=(--context "$line"); fi
+          done <<<"$WAIT_CI_CONTEXT"
+        fi
+        exec "$GITHUB_ACTION_PATH/../../../scripts/wait-ci.sh" "${args[@]}"

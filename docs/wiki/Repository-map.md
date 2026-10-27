@@ -92,6 +92,7 @@ publish).
 |---|---|
 | `.github/actions/doppler-secrets/` | Composite action: fetch a Doppler config as masked env vars. The source of the inlined copies |
 | `.github/actions/egress-canary/` | Composite action: fail fast when an address of the GitHub hosts is unreachable under harden-runner `block` (EX-0001). The source of the inlined copies |
+| `.github/actions/wait-ci/` | Composite action: pin a commit, wait for its required check, optionally squash-merge exactly that commit ([wait-ci](Action-wait-ci.md)). Wraps `scripts/wait-ci.sh` |
 | `.github/actions/egress-policy-check/` | Composite action: fail unless every egress policy input is exactly `audit` or `block`. The source of the inlined copies that precede each canary |
 | `examples/lory-audit-caller.yml` | Caller template for `lory-audit.yml`: a monthly cron plus `workflow_dispatch`, advisory, not a per-PR gate |
 | `docs/security/exceptions/` | Dated, time-boxed security exceptions; EX-0001 is the westus2 harden-runner one |
@@ -104,6 +105,7 @@ publish).
 | `.githooks/pre-commit` | The gitleaks hook on staged changes, same pin as `security.yml`; copied byte for byte by `new-repo.sh` |
 | `.githooks/pre-commit` | The gitleaks hook on staged changes, same pin as `security.yml`; copied byte for byte by `new-repo.sh` |
 | `scripts/new-repo.sh` | Adopt or start a repository: writes callers, opens the PR, applies settings |
+| `scripts/wait-ci.sh` | The CI watcher: pinned head SHA, exit codes 0 to 4, optional pinned squash merge ([wait-ci](Action-wait-ci.md)) |
 | `scripts/doppler-ci-set.sh` | Set one Doppler secret without the value touching a command line |
 | `.github/requirements/` | `pip-audit` and `semgrep`: the one-line `.in` and the hash lock `security.yml` carries inline |
 | `scripts/tool_locks.py` | Resolves those locks (`--relock`) and copies them into `security.yml`; `--check` fails on a difference |
