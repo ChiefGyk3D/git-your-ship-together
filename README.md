@@ -302,7 +302,7 @@ Inputs of `python-ci.yml`:
 | `workflow-lint` | `true` | actionlint and zizmor over the caller's own `.github/workflows` |
 | `zizmor-persona` | `regular` | zizmor strictness: `regular`, `pedantic`, `auditor` |
 | `egress-policy` | `audit` | harden-runner on every job except `distro`: `audit` logs outbound connections, `block` allows only `allowed-endpoints` |
-| `egress-policy-secretless` | `audit` | harden-runner policy for the jobs that hold no stored secret, no OIDC token and no write-scoped token, and whose output no privileged job consumes; exactly `audit` or `block`. Governed by security exception EX-0001, see [Known CI platform issue: westus2 (EX-0001)](#known-ci-platform-issue-westus2-ex-0001). `block` opts back in |
+| `egress-policy-secretless` | `audit` | harden-runner policy for the jobs that hold no stored secret, no OIDC token and no write-scoped token, and whose output no privileged job consumes verbatim as code or a build output (`test` is a stated EX-0001 extension: its coverage report is a data file that the privileged `coverage` job sends to Codecov); exactly `audit` or `block`. Governed by security exception EX-0001, see [Known CI platform issue: westus2 (EX-0001)](#known-ci-platform-issue-westus2-ex-0001). `block` opts back in |
 | `allowed-endpoints` | the measured list | harden-runner allow-list for `block`, space-separated `host:port`; see [Egress](#egress) |
 | `extra-allowed-endpoints` | empty | Appended to the list, for hosts only this repository reaches |
 | `doppler-project`, `doppler-config`, `doppler-identity-id` | empty | See [Doppler setup](#doppler-setup) |

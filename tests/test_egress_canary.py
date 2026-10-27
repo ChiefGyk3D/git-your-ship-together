@@ -10,6 +10,8 @@ the shell GitHub gives a `shell: bash` step. A second composite action, `egress-
 input validation that precedes the canary; its copies are held identical the same way.
 """
 
+import copy
+import functools
 import itertools
 import json
 import os
@@ -728,8 +730,34 @@ def test_the_classification_table_names_real_jobs():
     assert KEPT_BLOCK <= real, sorted(KEPT_BLOCK - real)
 
 
+EXPRESSION = re.compile(r"\$\{\{(.*?)\}\}", re.DOTALL)
+# The `secrets` context in every spelling: secrets.X, secrets['X'], secrets["X"], secrets[expr], toJSON(secrets),
+# any whitespace or case; a name that merely contains the word (secretless, my-secrets) does not count.
+SECRETS_CONTEXT = re.compile(r"(?<![\w.\-'\"])secrets(?![\w\-])", re.IGNORECASE)
+GITHUB_TOKEN_CONTEXT = re.compile(r"github\s*(\.\s*token\b|\[\s*['\"]token['\"]\s*\])", re.IGNORECASE)
+# An upstream output that carries a credential (a plain data output, such as a file name, is not one).
+NEEDS_OUTPUT = re.compile(
+    r"(?<![\w.\-])needs\b[^}]*?(token|secret|password|passwd|credential|apikey|api-key|api_key)", re.IGNORECASE
+)
+JOB_LEVEL_SECRET_KEYS = ("secrets", "container", "services")
+
+
+def strings_in(node):
+    """Every key and every string value anywhere in a mapping, so no placement is skipped."""
+    if isinstance(node, dict):
+        for k, v in node.items():
+            yield str(k)
+            yield from strings_in(v)
+    elif isinstance(node, list):
+        for v in node:
+            yield from strings_in(v)
+    elif isinstance(node, str):
+        yield node
+
+
 def what_a_job_holds(job: dict) -> list[str]:
-    """Everything that disqualifies a job from the secretless input (EX-0001, "Scope")."""
+    """Everything that disqualifies a job from the secretless input (EX-0001, "Scope"). Scans the whole job
+    mapping (job-level env, with, secrets, container, services, every step), not only the steps."""
     found = []
     grants = dict(job.get("permissions") or {})
     if grants.pop("contents", "read") != "read":
@@ -738,10 +766,25 @@ def what_a_job_holds(job: dict) -> list[str]:
         found.append("security-events")
     found += [f"{scope}: {level}" for scope, level in grants.items()]
     steps = [s for s in job.get("steps") or [] if s.get("name") != "Egress canary (EX-0001)"]
-    text = [yaml.safe_dump(s) for s in steps]
-    found += [m for m in SECRET_MARKERS if any(m in t for t in text)]
+    scanned = {k: v for k, v in job.items() if k != "steps"}
+    scanned["steps"] = steps
+    texts = list(strings_in(scanned))
+    # `if:` conditions are expressions without the ${{ }} wrapper
+    expressions = [e for t in texts for e in EXPRESSION.findall(t)]
+    expressions += [str(v) for node in [job, *steps] for v in [node.get("if")] if v is not None]
+    if any(SECRETS_CONTEXT.search(e) for e in expressions) or any(k in job for k in JOB_LEVEL_SECRET_KEYS):
+        found.append("secrets context")
+    if any(GITHUB_TOKEN_CONTEXT.search(e) for e in expressions):
+        found.append("github.token")
+    if any(NEEDS_OUTPUT.search(e) for e in expressions):
+        found.append("needs output")
+    dumped = [yaml.safe_dump(scanned)]
+    found += [m for m in SECRET_MARKERS if m not in ("${{ secrets.", "github.token") and any(m in t for t in dumped)]
+    if "github.token" in dumped[0] and "github.token" not in found:
+        found.append("github.token")
     # A token handed to an action beyond the default (checkout and harden-runner use the job token themselves).
     found += [f"with.{k}" for s in steps for k in (s.get("with") or {}) if k in TOKEN_KEYS]
+    found += [f"with.{k}" for k in (job.get("with") or {}) if k in TOKEN_KEYS]
     return found
 
 
@@ -831,7 +874,7 @@ def test_the_record_lists_the_widened_jobs_and_the_order():
         ({"permissions": {"contents": "write"}}, "contents write"),
         ({"permissions": {"contents": "read", "id-token": "write"}}, "id-token: write"),
         ({"permissions": {"contents": "read", "packages": "read"}}, "packages: read"),
-        ({"permissions": {"contents": "read"}, "steps": [{"env": {"T": "${{ secrets.X }}"}}]}, "${{ secrets."),
+        ({"permissions": {"contents": "read"}, "steps": [{"env": {"T": "${{ secrets.X }}"}}]}, "secrets context"),
         ({"permissions": {"contents": "read"}, "steps": [{"run": "doppler run -- true"}]}, "doppler"),
         ({"permissions": {"contents": "read"}, "steps": [{"env": {"T": "${{ github.token }}"}}]}, "github.token"),
         ({"permissions": {"contents": "read"}, "steps": [{"env": {"GH_TOKEN": "x"}, "run": "gh x"}]}, "GH_TOKEN"),
@@ -1050,3 +1093,89 @@ def test_the_linux_guard_bites():
         assert mutated["if"] != step["if"]
         assert linux_gate_problem(job, mutated) is not None
         assert linux_gate_problem(job, {k: v for k, v in step.items() if k != "if"}) is not None
+
+
+SECRET_SPELLINGS = [
+    "${{ secrets.NEW_SECRET }}",
+    "${{ secrets['NEW_SECRET'] }}",
+    '${{ secrets["NEW_SECRET"] }}',
+    "${{ secrets[format('{0}', 'NEW_SECRET')] }}",
+    "${{ secrets[inputs.name] }}",
+    "${{ toJSON(secrets) }}",
+    "${{ toJson( secrets ) }}",
+    "${{SECRETS.NEW_SECRET}}",
+    "${{   Secrets  [ 'NEW_SECRET' ]   }}",
+    "${{ secrets.GITHUB_TOKEN }}",
+    "${{ github.token }}",
+    "${{ github['token'] }}",
+    "${{ GitHub . Token }}",
+]
+
+
+@functools.cache
+def _jobs_by_key():
+    return {(p.name, n): j for p, n, j, _s in workflow_jobs()}
+
+
+def widened_job(key):
+    return copy.deepcopy(_jobs_by_key()[key])
+
+
+def place(job, where, value):
+    """Add `value` to a job in one placement; the placements are every place a secret can be handed in."""
+    last = job["steps"][-1]
+    if where == "job-env":
+        job.setdefault("env", {})["T"] = value
+    elif where == "step-env":
+        last.setdefault("env", {})["T"] = value
+    elif where == "step-with":
+        last.setdefault("with", {})["x"] = value
+    elif where == "step-run":
+        last["run"] = f"echo {value}"
+    elif where == "step-if":
+        last["if"] = value
+    elif where == "job-if":
+        job["if"] = value
+    elif where == "job-with":
+        job.setdefault("with", {})["x"] = value
+    elif where == "job-secrets":
+        job["secrets"] = {"T": value}
+    elif where == "container":
+        job["container"] = {"image": "x", "credentials": {"username": "u", "password": value}}
+    elif where == "services":
+        job["services"] = {"db": {"image": "x", "credentials": {"username": "u", "password": value}}}
+    elif where == "other-key":
+        job["outputs"] = {"o": value}
+    else:
+        raise AssertionError(where)
+
+
+PLACEMENTS = [
+    "job-env", "step-env", "step-with", "step-run", "step-if", "job-if", "job-with", "job-secrets", "container",
+    "services", "other-key",
+]  # fmt: skip
+
+
+@pytest.mark.parametrize("key", sorted(WIDENED), ids=lambda k: k[1])
+@pytest.mark.parametrize("where", PLACEMENTS)
+@pytest.mark.parametrize("spelling", SECRET_SPELLINGS)
+def test_a_secret_added_to_a_widened_job_fails_the_guard(key, where, spelling):
+    job = widened_job(key)
+    baseline = what_a_job_holds(job)
+    value = spelling[3:-2].strip() if where in ("step-if", "job-if") else spelling
+    place(job, where, value)
+    assert what_a_job_holds(job) != baseline, f"{where} {spelling!r} on {key} went unnoticed"
+
+
+@pytest.mark.parametrize("where", ["job-env", "step-env", "step-run", "step-if"])
+def test_a_needs_output_added_to_a_widened_job_fails_the_guard(where):
+    job = widened_job(("python-ci.yml", "test"))
+    value = "needs.setup.outputs.token" if where == "step-if" else "${{ needs.setup.outputs.token }}"
+    place(job, where, value)
+    assert "needs output" in what_a_job_holds(job)
+
+
+def test_the_secrets_guard_does_not_cry_wolf_on_look_alikes():
+    job = {"permissions": {"contents": "read"}, "env": {"A": "${{ inputs.egress-policy-secretless }}"}}
+    job["steps"] = [{"name": "my-secrets notes", "run": "echo secrets-are-not-here ${{ vars.secretsish }}"}]
+    assert what_a_job_holds(job) == []
