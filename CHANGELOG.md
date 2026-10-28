@@ -14,6 +14,24 @@ name what a caller sees after that.
   same single pass as before. The leg is not advisory and no egress endpoint was added. A caller with its own `distro-setup-command`
   is unchanged. Tests: `tests/test_distro_apt_retry.py`.
 
+### EX-0001 widened: `dependency-review` and `python-ci` `test` follow `egress-policy-secretless` (issue #225)
+
+- **Changed.** With `egress-policy-secretless` at its default (`audit`), `security.yml` `dependency-review` and
+  `python-ci.yml` `test` now run harden-runner in `audit` on GitHub-hosted runners (the runtime
+  `runner.environment == 'github-hosted'` control and, for `test`, the hosted-label rule apply as for the other
+  relaxed jobs). Both kept failing at the egress canary on westus2. A caller that sets
+  `egress-policy-secretless: block` gets `block` and the canary back for both. `test` also stops using the pip cache
+  while it is in `audit`, like the other audit jobs.
+- **Deviation, stated.** `dependency-review` holds `pull-requests: write` (the summary comment), which the
+  "secretless" definition excluded; the maintainer decided on 2026-10-26 to relax it anyway. The record
+  (`docs/security/exceptions/EX-0001-harden-runner-block-westus2.md`, "Widening of 2026-10-26") says what the token
+  can do and why that is acceptable. `test` uploads the coverage report that `coverage` sends to Codecov; the
+  record explains why that data file is not a privileged output.
+- **Unchanged.** Every job with a stored secret, an OIDC token or a publish-capable token (`coverage`, `snyk`,
+  `scorecard`, `plan`, `verify`, `verify-release`, the publish, deploy and container jobs, the Doppler jobs) stays in
+  `block`, and so do the `build` and `generate` jobs whose output a release or deployment consumes verbatim. The
+  expiry (2026-11-07) is unchanged.
+
 ### New: `wait-ci` watcher, script and composite action (issue #223)
 
 - **Added.** `scripts/wait-ci.sh` and `.github/actions/wait-ci`: one tested CI watcher for monitors and merge scripts, in
