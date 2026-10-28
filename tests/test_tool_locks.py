@@ -200,3 +200,42 @@ def test_semgrep_version_other_than_the_locked_one_fails_naming_it_and_installs_
     assert result.returncode == 1
     assert locked_semgrep() in result.stdout and "deprecated" in result.stdout and "will be removed" in result.stdout
     assert calls == ""
+
+
+def override_pins(tool):
+    path = REQS / f"{tool}.overrides"
+    if not path.exists():
+        return {}
+    pins = {}
+    for line in path.read_text().splitlines():
+        line = line.split("#", 1)[0].strip()
+        if line:
+            name, version = line.split("==")
+            pins[name] = version
+    return pins
+
+
+def locked_versions(tool):
+    lock = (REQS / f"{tool}.txt").read_text()
+    return {n: v for n, v in re.findall(r"^([A-Za-z0-9_.\-]+)==(\S+)", lock, re.M)}
+
+
+@pytest.mark.parametrize("tool", TOOLS)
+def test_every_override_is_what_the_lock_holds(tool):
+    """An override replaces a version the tool itself pins (uv pip compile --overrides); the lock must carry it."""
+    locked = locked_versions(tool)
+    for name, version in override_pins(tool).items():
+        assert locked.get(name) == version, (
+            f"{tool}.overrides pins {name}=={version}; {tool}.txt has {locked.get(name)}"
+        )
+
+
+def test_the_semgrep_lock_holds_the_overridden_versions():
+    """The guard bites: the override file must exist and name what the lock is meant to hold."""
+    pins = override_pins("semgrep")
+    assert pins, "semgrep.overrides is missing or empty"
+    assert {"mcp", "opentelemetry-api"} <= set(pins)
+
+
+def test_relock_hands_the_overrides_file_to_uv():
+    assert '"--overrides"' in SCRIPT.read_text(), "scripts/tool_locks.py --relock ignores <tool>.overrides"

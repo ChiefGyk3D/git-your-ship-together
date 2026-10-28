@@ -46,6 +46,12 @@ name what a caller sees after that.
   same single pass as before. The leg is not advisory and no egress endpoint was added. A caller with its own `distro-setup-command`
   is unchanged. Tests: `tests/test_distro_apt_retry.py`.
 
+### CI tooling requirements updated (issue #230)
+
+- **Changed.** The Semgrep lock in `security.yml` now resolves with `.github/requirements/semgrep.overrides`, which
+  replaces dependency versions the tool itself pins. `scripts/tool_locks.py --relock` reads the file and
+  `tests/test_tool_locks.py` checks the lock holds each pin. Details are tracked privately.
+
 ### EX-0001 widened: `dependency-review` and `python-ci` `test` follow `egress-policy-secretless` (issue #225)
 
 - **Changed.** With `egress-policy-secretless` at its default (`audit`), `security.yml` `dependency-review` and

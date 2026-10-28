@@ -21,6 +21,10 @@ pruned lock back). Resolve in a throwaway venv on CPython 3.13:
     python3.13 -m venv /tmp/locks && /tmp/locks/bin/pip install uv packaging
     /tmp/locks/bin/python scripts/tool_locks.py --relock
 
+A tool that hard-pins a dependency with a known advisory (`==` in its own metadata) cannot be moved by
+Dependabot, which resolves from the `.in` alone. `<tool>.overrides` (uv's override format, `name==version`)
+replaces such a pin when --relock resolves; tests/test_tool_locks.py checks the lock holds each override.
+
 The lock is pruned to what the jobs install on: ubuntu-latest is x86_64 Linux, a
 caller may run on `ubuntu-24.04-arm`, and the wheels kept are the manylinux
 x86_64 and aarch64 and pure-Python ones for CPython 3.10
@@ -89,6 +93,9 @@ def relock(tool: str) -> str:
         full = Path(tmp) / "full.txt"
         command = [sys.executable, "-m", "uv", "pip", "compile", "--universal", "--python-version", f"3.{oldest}"]
         command += ["--generate-hashes", "--no-annotate", "--no-header", "--quiet", "--output-file", str(full)]
+        overrides = REQS / f"{tool}.overrides"
+        if overrides.exists():
+            command += ["--overrides", str(overrides)]
         subprocess.run([*command, str(REQS / f"{tool}.in")], check=True)
         blocks = re.split(r"\n(?=\S)", full.read_text().strip())
     out = [HEADER.format(tool=tool, oldest=oldest).rstrip("\n")]
