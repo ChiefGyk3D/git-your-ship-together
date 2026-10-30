@@ -56,6 +56,12 @@ name what a caller sees after that.
   same single pass as before. The leg is not advisory and no egress endpoint was added. A caller with its own `distro-setup-command`
   is unchanged. Tests: `tests/test_distro_apt_retry.py`.
 
+### Semgrep 1.181.0 (issue #240)
+
+- **Changed.** The Semgrep lock moves from 1.180.0 to 1.181.0, relocked with `scripts/tool_locks.py --relock` (the
+  `semgrep.overrides` still apply), so `semgrep.txt` and the lock inside `security.yml` change together. No transitive
+  version moved. A caller that still sets the deprecated `semgrep-version` to a value other than `1.181.0` fails the install step.
+
 ### CI tooling requirements updated (issue #230)
 
 - **Changed.** The Semgrep lock in `security.yml` now resolves with `.github/requirements/semgrep.overrides`, which
