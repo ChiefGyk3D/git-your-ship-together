@@ -181,7 +181,7 @@ def test_a_library_that_already_publishes_to_pypi_keeps_publishing(tmp_path):
     out = tmp_path / "out"
     adopt(write(tmp_path / "tree", LIBRARY), out)
     ci = workflow(out, "ci.yml")["jobs"]["ci"]["with"]
-    assert ci["python-versions"] == '["3.10", "3.11", "3.12", "3.13"]', "from requires-python up"
+    assert ci["python-versions"] == '["3.10", "3.11", "3.12", "3.13", "3.14", "3.15"]', "from requires-python up"
     assert 'pip install -e ".[dev]"' in ci["install-command"]
     assert ci["docker-build"] is False
     release = workflow(out, "release.yml")["jobs"]

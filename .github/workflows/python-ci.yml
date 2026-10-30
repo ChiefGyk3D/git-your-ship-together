@@ -13,7 +13,7 @@
 #       secrets:
 #         DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}   # optional fallback
 #       with:
-#         python-versions: '["3.11", "3.12", "3.13"]'
+#         python-versions: '["3.11", "3.12", "3.13", "3.14", "3.15"]'
 #         test-command: pytest --cov=my_pkg --cov-report=xml
 #
 # Every input has a default that matches the most common shape across the
@@ -35,9 +35,9 @@ on:
   workflow_call:
     inputs:
       python-versions:
-        description: JSON array of Python versions for the test matrix.
+        description: JSON array of Python versions for the test matrix. The default is the CPython versions still in security support (.github/python-support.json in this repository).
         type: string
-        default: '["3.11", "3.12", "3.13"]'
+        default: '["3.11", "3.12", "3.13", "3.14", "3.15"]'
       coverage-python-version:
         description: The matrix leg that uploads the coverage report.
         type: string
