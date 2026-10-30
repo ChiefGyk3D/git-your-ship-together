@@ -1862,5 +1862,5 @@ def test_the_action_is_listed_in_the_readme_and_repository_map():
 
 def test_the_changelog_names_the_watcher():
     changelog = (REPO / "CHANGELOG.md").read_text()
-    unreleased = changelog.split("## Unreleased", 1)[1].split("\n## ", 1)[0]
-    assert "wait-ci" in unreleased and "#223" in unreleased
+    release = changelog.split("## v1.26.0", 1)[1].split("\n## ", 1)[0]
+    assert "wait-ci" in release and "#223" in release
