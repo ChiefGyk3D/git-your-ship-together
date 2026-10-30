@@ -45,6 +45,16 @@
 # For an image published through container-release.yml that is the reusable
 # workflow's own ref, so the default, any workflow in the owner's repositories,
 # covers it; narrow it to pin one workflow and one tag pattern.
+#
+# That regexp cannot tell repositories apart: every repository that calls
+# container-release.yml gets a certificate with the same subject. So both cosign
+# commands also pin the certificate's repository claim (GitHub Workflow
+# Repository) to `source-repository`, which defaults to the calling repository.
+# A caller that verifies an image another repository built sets it:
+#
+#         with:
+#           image: ghcr.io/chiefgyk3d/star-daemon:latest
+#           source-repository: ChiefGyk3D/Star-Daemon
 
 name: Verify published image (reusable)
 
@@ -71,6 +81,10 @@ on:
         description: Regular expression the cosign certificate identity must match. Both cosign commands use it.
         type: string
         default: ^https://github.com/ChiefGyk3D/
+      source-repository:
+        description: owner/name of the repository whose workflow built and signed the image; the signing certificate must name it. Empty means the calling repository, which is right when a repository verifies its own image. Set it when the image was built by another repository. The comparison is exact and case-sensitive, so use the repository's own spelling.
+        type: string
+        default: ""
       oidc-issuer:
         description: OIDC issuer the signing certificate must name.
         type: string
@@ -288,16 +302,38 @@ jobs:
       - name: Install cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
+      # The identity regexp can only name the reusable workflow that signed, and
+      # every repository calling that workflow gets a certificate naming it. The
+      # repository claim in the certificate is what tells them apart: for a
+      # workflow signed through container-release.yml it is the calling
+      # repository, never this one. cosign compares it exactly.
+      - name: Check the source repository
+        id: source
+        env:
+          REQUESTED: ${{ inputs.source-repository }}
+          DEFAULT_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          repo="${REQUESTED:-$DEFAULT_REPOSITORY}"
+          if ! [[ "$repo" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]]; then
+            echo "::error::source-repository must look like owner/name"
+            exit 1
+          fi
+          echo "repository=$repo" >> "$GITHUB_OUTPUT"
+          echo "the signing certificate must name the repository $repo"
+
       - name: Verify the signature
         env:
           IMAGE: ${{ steps.digest.outputs.ref }}
           IDENTITY_REGEXP: ${{ inputs.identity-regexp }}
           OIDC_ISSUER: ${{ inputs.oidc-issuer }}
+          SOURCE_REPOSITORY: ${{ steps.source.outputs.repository }}
         run: |
           set -euo pipefail
           cosign verify "$IMAGE" \
             --certificate-identity-regexp "$IDENTITY_REGEXP" \
-            --certificate-oidc-issuer "$OIDC_ISSUER" > /dev/null
+            --certificate-oidc-issuer "$OIDC_ISSUER" \
+            --certificate-github-workflow-repository "$SOURCE_REPOSITORY" > /dev/null
           echo "signature verified: $IMAGE"
 
       - name: Verify the SBOM attestation
@@ -306,11 +342,13 @@ jobs:
           IMAGE: ${{ steps.digest.outputs.ref }}
           IDENTITY_REGEXP: ${{ inputs.identity-regexp }}
           OIDC_ISSUER: ${{ inputs.oidc-issuer }}
+          SOURCE_REPOSITORY: ${{ steps.source.outputs.repository }}
         run: |
           set -euo pipefail
           cosign verify-attestation --type spdxjson "$IMAGE" \
             --certificate-identity-regexp "$IDENTITY_REGEXP" \
-            --certificate-oidc-issuer "$OIDC_ISSUER" > /dev/null
+            --certificate-oidc-issuer "$OIDC_ISSUER" \
+            --certificate-github-workflow-repository "$SOURCE_REPOSITORY" > /dev/null
           echo "SPDX SBOM attestation verified: $IMAGE"
 
       - name: Verify the build provenance

@@ -40,6 +40,22 @@ matches an image from [container-release](Workflow-container-release.md); narrow
 change the default**, which names the maintainer. The allow-list was measured in block mode: this repository's `fixture verify`
 job refused GitHub's attestation store until its blob host was added.
 
+## Which repository built the image
+
+The identity regexp can only name the reusable workflow that signed, and every repository calling
+[container-release](Workflow-container-release.md) gets a certificate with that same subject. What differs is the
+certificate's repository claim, which is the *calling* repository. Both cosign commands pass it as
+`--certificate-github-workflow-repository`, set from `source-repository`:
+
+- **Empty (the default)** is the calling repository, so a repository verifying its own image needs no change.
+- **An image built by another repository** needs `source-repository: OWNER/NAME`; without it the check fails, by
+  design. This repository's own `fixture verify` job does this for the star-daemon image.
+- **Exact and case-sensitive**, the spelling GitHub reports (`ChiefGyk3D/Star-Daemon`, not `chiefgyk3d/star-daemon`).
+  The value must match `^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$` and reaches cosign through the environment only.
+
+Measured with cosign v3.1.4 against the published star-daemon image: the right repository verifies both the
+signature and the SBOM attestation; a different repository, or the right one in the wrong case, fails both.
+
 ## The post-release rescan
 
 Verification proves an artefact is what the producer published. It says nothing about what has been

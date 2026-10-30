@@ -5,6 +5,16 @@ name what a caller sees after that.
 
 ## Unreleased
 
+### Changed (breaking default for cross-repo callers): `verify-published.yml` pins the signing certificate to a source repository (issue #186)
+
+- **Changed.** `identity-regexp` can only name the reusable workflow, so any repository calling the same reusable workflow
+  produced a certificate that matched. New optional input `source-repository` is passed to both `cosign verify` and
+  `cosign verify-attestation` as `--certificate-github-workflow-repository`. It is shape-checked (`owner/name`) and passed
+  through the environment, never interpolated.
+- **Default.** The calling repository (`github.repository`). A caller verifying its own image changes nothing.
+- **Breaking for cross-repo callers.** A caller that verifies an image built by another repository must set `source-repository`
+  to that repository when it re-pins to this version, or verification fails. This repository's own fixture jobs already set it.
+
 ### New: `agent-scan.yml`, optional advisory scans of agent skills and MCP tool definitions (issue #234)
 
 - **Added.** A reusable workflow that runs two static scanners from Cisco AI Defense: `cisco-ai-skill-scanner` over the skill
