@@ -5,6 +5,12 @@ name what a caller sees after that.
 
 ## Unreleased
 
+### Fix: trusted-ref gate hardening (issue #238)
+
+- **Changed.** With `doppler-trusted-refs-only` on, only listed events can be trusted. The input
+  accepts `true` or `false` in any casing; any other value fails the job instead of switching the gate off. A `vN.N.N` tag
+  is also refused when a complete checkout shows its commit is not in the default branch's history (best effort; see the README).
+
 ### Changed (breaking default for cross-repo callers): `verify-published.yml` pins the signing certificate to a source repository (issue #186)
 
 - **Changed.** `identity-regexp` can only name the reusable workflow, so any repository calling the same reusable workflow

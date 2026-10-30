@@ -151,29 +151,64 @@ runs:
         mode=none
         skip=""
         untrusted_tag=false
-        # A trusted ref is one only a push by someone with write access, or the
-        # schedule, can produce: the default branch, a version tag (vN.N.N), or a scheduled run
-        # (which GitHub always starts from the default branch). A pull request
-        # is never trusted, whichever repository its head is in.
+        # A trusted run is one only a push by someone with write access, a manual
+        # dispatch by such a person, or the schedule can produce, on the default
+        # branch or a version tag (vN.N.N). The event must be on this allow-list:
+        # any other event (issue_comment, workflow_run, an event added later) is
+        # refused when the gate is on, because the ref alone does not say who
+        # triggered it. A pull request is never trusted, whichever repository its
+        # head is in. For a version tag the job also checks, when it can, that the
+        # tagged commit is in the default branch's history (see the README).
         trusted=false
         # An inherited BASHOPTS must not make a comparison below case-insensitive.
         shopt -u nocasematch nocaseglob
+        # The gate is parsed strictly: true or false in any casing, and anything else
+        # stops the job. A typo must never switch the gate off.
+        case "${TRUSTED_ONLY,,}" in
+          true) TRUSTED_ONLY=true ;;
+          false) TRUSTED_ONLY=false ;;
+          *)
+            echo "::error title=Doppler::trusted-refs-only must be true or false"
+            exit 1 ;;
+        esac
         case "$EVENT" in
           schedule) trusted=true ;;
-          pull_request|pull_request_target) trusted=false ;;
-          *)
+          push|workflow_dispatch)
             if [ -n "$DEFAULT_BRANCH" ] && [ "$REF" = "refs/heads/$DEFAULT_BRANCH" ]; then
               trusted=true
             elif [[ "$REF" =~ ^refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
               trusted=true
+              # Best effort: refuse a tag only on a clean "not an ancestor" answer from a
+              # complete history. No checkout, a shallow clone, a missing remote ref or any
+              # git error cannot show where the tag points, so the name rule stands and a
+              # notice says the tag was not verified.
+              if [ "$TRUSTED_ONLY" = "true" ]; then
+                verdict=unknown
+                if [ -n "$DEFAULT_BRANCH" ] && [ -n "${GITHUB_WORKSPACE:-}" ] && [ -n "${GITHUB_SHA:-}" ] \
+                  && git -C "$GITHUB_WORKSPACE" rev-parse --verify --quiet "refs/remotes/origin/$DEFAULT_BRANCH^{commit}" >/dev/null 2>&1 \
+                  && git -C "$GITHUB_WORKSPACE" rev-parse --verify --quiet "$GITHUB_SHA^{commit}" >/dev/null 2>&1 \
+                  && [ "$(git -C "$GITHUB_WORKSPACE" rev-parse --is-shallow-repository 2>/dev/null)" = "false" ]; then
+                  rc=0
+                  git -C "$GITHUB_WORKSPACE" merge-base --is-ancestor "$GITHUB_SHA" "refs/remotes/origin/$DEFAULT_BRANCH" >/dev/null 2>&1 || rc=$?
+                  case "$rc" in
+                    0) verdict=in ;;
+                    1) verdict=out ;;
+                  esac
+                fi
+                case "$verdict" in
+                  out) trusted=false ;;
+                  unknown) echo "::notice title=Doppler::tag $REF not verified against the default branch history (no checkout, incomplete history or git error); only its name was checked" ;;
+                esac
+              fi
             fi ;;
+          *) trusted=false ;;
         esac
         if [ "$IS_FORK" = "true" ]; then
           # A fork's pull request has no id-token and must never receive a
           # secret. Silent skip is correct here, whatever `required` says.
           skip="pull request from a fork"
         elif [ "$TRUSTED_ONLY" = "true" ] && [ "$trusted" != "true" ]; then
-          skip="$EVENT on $REF is not the default branch, a version tag (vN.N.N) or a schedule (trusted-refs-only)"
+          skip="$EVENT on $REF is not a push or dispatch on the default branch or a version tag (vN.N.N, in the default branch history), or a schedule (trusted-refs-only)"
           # A tag this rule refused is reported, so a job that was asked for a
           # secret-backed feature can fail instead of skipping it quietly.
           case "$REF" in refs/tags/*) untrusted_tag=true ;; esac

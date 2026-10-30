@@ -2308,13 +2308,21 @@ A fetch happens only on a **trusted ref**: the default branch, a version tag
 (vN.N.N), or a schedule. A pull request from anywhere and a push to any other branch
 get nothing and a notice saying so.
 
-What the step does, exactly: a `schedule` run fetches; any other event that is not a pull request event
-(`pull_request`, `pull_request_target`) fetches when the ref is the default branch or a release-shaped tag,
-which includes a `push` and a `workflow_dispatch` on those refs and also `issues`, `issue_comment`,
-`workflow_run` and `repository_dispatch`. So the rule is a ref rule, not an event allow-list. A caller whose
-workflow runs on events that carry attacker-controlled data and holds fetched secrets must not process that
-data unsafely (no shell expansion, no checkout or execution of it). Narrowing the events is tracked in #219;
-`tests/test_doppler_gate.py` pins the current behavior as a documented residual.
+What the step does, exactly (trusted-ref gate hardening, #238): the event must be on a short list, `push`, `workflow_dispatch` or `schedule`; only listed events can be trusted when the gate is
+on, whatever the ref. A `schedule`
+run fetches; a `push` or `workflow_dispatch` fetches on the default branch or a release-shaped tag. The
+`doppler-trusted-refs-only` value is `true` or `false` in any casing; anything else (empty, a typo) stops the
+job and never means off.
+
+**Tags, and the residual risk.** The step trusts a tag by its name (`vN.N.N`), and when the job has a checkout
+with the default branch's remote ref and a complete (not shallow) history, it also requires the tagged commit to be in that
+history; a tag that a clean ancestry check shows not to be is refused and flagged `untrusted-tag`. A job with no checkout, a
+shallow clone (for example the default `actions/checkout` depth) or no `origin/<default branch>` ref cannot show
+it, and then only the name is checked (a notice says so). The action holds no credential to ask GitHub whether a
+tag is protected, so anyone who can push a `vN.N.N` tag can still reach a fetch from a job that cannot verify
+it. Close that with a tag protection ruleset on `v*` in the repository, and check out with `fetch-depth: 0`
+before the step if releases are cut from the default branch. A release cut from another branch is refused when
+the history is available.
 
  That is `doppler-trusted-refs-only`, on by
 default in every workflow; turning it off means a pull request's proposed code
