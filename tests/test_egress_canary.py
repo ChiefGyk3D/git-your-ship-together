@@ -664,6 +664,11 @@ def test_the_canary_is_never_called_by_path_from_a_workflow():
 
 # Kept in block on purpose (docs/security/exceptions/EX-0001-harden-runner-block-westus2.md, "Scope").
 KEPT_BLOCK = {
+    (
+        "agent-scan.yml",
+        "skill-scan",
+    ),  # its SARIF artifact is uploaded verbatim by the job that holds security-events: write
+    ("agent-scan.yml", "mcp-scan"),  # likewise
     ("artifact-release.yml", "build"),  # builds the file that is signed and published
     ("artifact-release.yml", "publish"),  # contents: write, id-token, attestations
     ("container-release.yml", "plan"),  # its outputs choose the runners and the image name of the privileged build

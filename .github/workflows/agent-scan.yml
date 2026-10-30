@@ -1,0 +1,2019 @@
+# Reusable, optional scans of agent content: skills and MCP tool definitions.
+#
+#   skill-scan   cisco-ai-skill-scanner over the skill directories or entry files you name.
+#   mcp-scan     cisco-ai-mcp-scanner, `static` mode, over the MCP `tools/list` JSON files you name.
+#
+# Off unless you pass paths, and advisory unless you pass `fail-on-severity`: findings go to the job summary and
+# to code scanning as SARIF, and the job stays green. Call it with:
+#
+#   on:
+#     push: { branches: [main] }
+#     pull_request:
+#   jobs:
+#     agent-scan:
+#       uses: ChiefGyk3D/git-your-ship-together/.github/workflows/agent-scan.yml@<sha> # vX.Y.Z
+#       permissions:
+#         contents: read
+#         security-events: write   # declared by the upload jobs; a caller grants it even with `upload-sarif: false`
+#       with:
+#         skill-paths: |
+#           .claude/skills/*
+#           roles/*.md
+#         mcp-tool-files: mcp/tools-list.json
+#         fail-on-severity: high   # optional; leave it out and the scans only report
+#
+# Static engines only. Both scanners run their pattern, YARA-rule and structure checks on files already on the
+# runner. There is no LLM engine, no cloud engine, no VirusTotal, no AI Defense API and no API key: the workflow
+# takes no secret, passes the scanners an environment of its own making (no token, nothing from the repository's
+# `.env`), runs them from an empty directory, and never passes a flag that would leave the machine
+# (tests/test_agent_scan.py holds all of that). The skill scanner is not given `--use-behavioral` either.
+#
+# What the scan is and is not: a detector for known-bad text patterns in instruction files and tool descriptions
+# (prompt-injection phrases, `curl | bash`, credential reads, hidden instructions). A clean result does not show
+# that a skill or a tool is safe, and the checks cannot judge instruction text that is malicious in meaning
+# alone. Read a finding as a lead.
+#
+# Supply chain. Each scanner is installed from a hash lock that travels inside this file (a reusable workflow
+# cannot check out its own commit): `.github/requirements/cisco-ai-skill-scanner.{in,txt}` and
+# `cisco-ai-mcp-scanner.{in,txt}`, copied in by scripts/tool_locks.py, installed with `--require-hashes --no-deps
+# --only-binary=:all:`. Both are Apache-2.0 on PyPI; the `.in` files name the exact versions.
+#
+# Jobs. The scan jobs read the repository and hold `contents: read` only. The upload jobs hold the one write
+# (`security-events: write`), check nothing out and run nothing of the repository's: they carry one SARIF file
+# from the scan job to the Security tab, as dast.yml does. A scan that could not cover every target (a bad path,
+# a scanner that crashed, a file that is not a tools list) fails the job and uploads nothing, so an unreadable
+# file never closes the alerts of the last good run.
+#
+# Skill targets. A directory is scanned as a skill (it needs a SKILL.md). A file is scanned as the entry file of
+# its directory, one scanner run per file, so `roles/*.md` works. A scanner run covers the whole directory of its
+# target, so findings in a sibling file can show up under a run of another; the report holds each one once.
+#
+# MCP targets. A JSON file of the form {"tools": [...]}, the output of a `tools/list` call. Prompts and
+# resources are not scanned. The MCP scanner has no exit-code flag, so `fail-on-severity` is applied by this
+# workflow to the severity the scanner reports, and the scanner reports at most HIGH: `critical` never fails
+# there, and `info` counts any finding.
+
+name: Agent scan (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      skill-paths:
+        description: "Skill directories or skill entry files to scan, relative to the repository root, whitespace- or newline-separated. Globs work (`.claude/skills/*`, `roles/*.md`, `**/SKILL.md`). A pattern that matches nothing fails the job. Paths with spaces are not supported. Empty skips the skill scan."
+        type: string
+        default: ""
+      mcp-tool-files:
+        description: "MCP tool-definition JSON files to scan (the output of `tools/list`, `{\"tools\": [...]}`), relative to the repository root, whitespace- or newline-separated; globs work. Empty skips the MCP scan."
+        type: string
+        default: ""
+      fail-on-severity:
+        description: "Fail the job when a finding is at or above this severity - `critical`, `high`, `medium`, `low` or `info`. Empty (the default) is advisory: findings are reported and the job stays green. The skill scan passes it to the scanner's own `--fail-on-severity`; the MCP scanner has no such flag, so the workflow applies it to the severity the scanner reports (at most HIGH)."
+        type: string
+        default: ""
+      upload-sarif:
+        description: Upload the SARIF reports to code scanning. Turn it off on a private repository without GitHub Advanced Security, where code scanning is unavailable and the upload fails the job; the scan, the job summary and the threshold still work. Fork pull requests never upload.
+        type: boolean
+        default: true
+      sarif-category:
+        description: Code scanning category prefix and artifact name prefix; the scans append `-skill` and `-mcp`. Change it when a repository calls this workflow twice in one run, so the two reports do not replace each other.
+        type: string
+        default: agent-scan
+      python-version:
+        description: Python for the scanners, 3.12 to 3.14 (the hash locks cover CPython 3.12 for the MCP scanner and 3.11 for the skill scanner, through 3.14). A version the runner does not already carry is downloaded, which needs more hosts than the default allow-list.
+        type: string
+        default: "3.13"
+      egress-policy:
+        description: harden-runner egress policy for the scan jobs - `audit` logs outbound connections, `block` allows only `allowed-endpoints`. The upload jobs hold no secret and follow `egress-policy-secretless` instead (EX-0001).
+        type: string
+        default: audit
+      egress-policy-secretless:
+        description: harden-runner egress policy for the jobs that hold no stored secret, no OIDC token and no write-scoped or publish-capable token (read-only contents, a SARIF upload at most), and whose output no privileged job consumes - exactly `audit` or `block`. Defaults to `audit` while security exception EX-0001 is active (GitHub-hosted runners in westus2 break harden-runner `block`; expires 2026-11-07 or when step-security/harden-runner#708 is fixed; see docs/security/exceptions/). Every job still has the default read-only job token. Set `block` to opt back in. Any other job follows `egress-policy`. Any other value fails the job.
+        type: string
+        default: audit
+      allowed-endpoints:
+        description: harden-runner allow-list for `block`, space-separated host:port entries. The default is the checkout and the pip install of the scanners from PyPI; the scanners themselves reach nothing (the MCP scanner is told not to fetch its price list). Wildcards are not supported and a newline-separated list matches nothing. The runner's own infrastructure needs no entry.
+        type: string
+        default: "api.github.com:443 files.pythonhosted.org:443 github.com:443 pypi.org:443"
+      extra-allowed-endpoints:
+        description: Appended to `allowed-endpoints`, for hosts only this repository reaches. Same format.
+        type: string
+        default: ""
+      timeout-minutes:
+        description: Per-job timeout of the scan jobs.
+        type: number
+        default: 15
+    outputs:
+      skill-findings:
+        description: Number of skill-scan findings, after de-duplication. Empty when the skill scan did not run.
+        value: ${{ jobs.skill-scan.outputs.findings }}
+      skill-max-severity:
+        description: Highest skill-scan severity - `critical`, `high`, `medium`, `low`, `info` or `none`. Empty when the skill scan did not run.
+        value: ${{ jobs.skill-scan.outputs.max-severity }}
+      mcp-findings:
+        description: Number of MCP scan findings. Empty when the MCP scan did not run.
+        value: ${{ jobs.mcp-scan.outputs.findings }}
+      mcp-max-severity:
+        description: Highest MCP scan severity - `high`, `medium`, `low` or `none`. Empty when the MCP scan did not run.
+        value: ${{ jobs.mcp-scan.outputs.max-severity }}
+
+permissions:
+  contents: read
+
+jobs:
+  skill-scan:
+    name: Skill scan
+    if: inputs.skill-paths != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read  # this job reads the repository's content and holds nothing else
+    outputs:
+      findings: ${{ steps.scan.outputs.findings }}
+      max-severity: ${{ steps.scan.outputs.max-severity }}
+      sarif: ${{ steps.scan.outputs.sarif }}
+    steps:
+      - name: Validate the egress policy inputs (EX-0001)
+        timeout-minutes: 1
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        env:
+          POLICY_EGRESS_POLICY: ${{ inputs.egress-policy }}
+          POLICY_EGRESS_POLICY_SECRETLESS: ${{ inputs.egress-policy-secretless }}
+        run: |
+          set -u
+          bad=0
+          check() {
+            if [ "$2" = set ] && [ "$3" != audit ] && [ "$3" != block ]; then
+              echo "::error title=egress policy::the $1 input must be exactly 'audit' or 'block' (its value is ${#3} characters long)"
+              bad=1
+            fi
+          }
+          check egress-policy "${POLICY_EGRESS_POLICY+set}" "${POLICY_EGRESS_POLICY-}"
+          check egress-policy-secretless "${POLICY_EGRESS_POLICY_SECRETLESS+set}" "${POLICY_EGRESS_POLICY_SECRETLESS-}"
+          check distro-egress-policy "${POLICY_DISTRO_EGRESS_POLICY+set}" "${POLICY_DISTRO_EGRESS_POLICY-}"
+          check semgrep-egress-policy "${POLICY_SEMGREP_EGRESS_POLICY+set}" "${POLICY_SEMGREP_EGRESS_POLICY-}"
+          exit "$bad"
+
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: ${{ inputs.egress-policy == 'audit' && 'audit' || 'block' }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
+          disable-sudo: true
+          # The agent may only stop reporting to StepSecurity in block mode.
+          disable-telemetry: ${{ (inputs.egress-policy == 'audit' && 'audit' || 'block') == 'block' }}
+
+      - name: Egress canary (EX-0001)
+        if: ${{ runner.os == 'Linux' && ((inputs.egress-policy == 'audit' && 'audit' || 'block') == 'block') }}
+        timeout-minutes: 2
+        shell: bash
+        # The workspace root exists before checkout; a job default working-directory may not.
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -u
+          NAMES="github.com api.github.com results-receiver.actions.githubusercontent.com"
+          PORT=443
+          canary_resolve() { timeout 5 getent ahostsv4 "$1" 2>/dev/null | awk '$2 == "STREAM" { print $1 }'; }
+          canary_probe() { timeout 3 bash -c "exec 3<>\"/dev/tcp/\$0/\$1\"" "$1" "$PORT" 2>/dev/null; }
+          canary_reach() {
+            local i
+            for i in 1 2 3 4; do
+              canary_probe "$1" && return 0
+              [ "$i" -lt 4 ] && sleep 1
+            done
+            return 1
+          }
+          canary_show() { local n=$1; shift; echo "+ $*"; { timeout 10 "$@" 2>&1 || true; } | head -n "$n" || true; }
+          canary_diag() {
+            local name
+            echo "::group::egress canary diagnostics (EX-0001, for the GitHub Support ticket)"
+            canary_show 5 uname -srmo
+            canary_show 20 cat /etc/resolv.conf
+            canary_show 20 bash -c "resolvectl status 2>/dev/null | grep -E '^ *(Current DNS Server|DNS Servers?|DNS Domain):'"
+            canary_show 20 bash -c "ss -lun | grep ':53 '"
+            for name in $NAMES pipelines.actions.githubusercontent.com; do
+              canary_show 20 getent ahostsv4 "$name"
+              canary_show 5 curl -sS -o /dev/null -w '%{http_code} %{remote_ip} %{time_connect}\n' --max-time 8 "https://$name"
+            done
+            echo "::endgroup::"
+          }
+          canary_main() {
+            local tmp name addr n=0 bad
+            tmp=$(mktemp -d) || return 1
+            for _ in 1 2 3; do
+              for name in $NAMES; do canary_resolve "$name" >>"$tmp/res.$name" & done
+              wait
+              sleep 1
+            done
+            for name in $NAMES; do
+              if [ -s "$tmp/res.$name" ]; then sort -u "$tmp/res.$name"; else echo "-"; fi | sed "s|^|$name |" >>"$tmp/pairs"
+            done
+            while read -r name addr; do
+              n=$((n + 1))
+              ( { [ "$addr" != "-" ] && canary_reach "$addr"; } || echo "$name $addr" >"$tmp/bad.$n" ) </dev/null &
+            done <"$tmp/pairs"
+            wait
+            bad=$(cat "$tmp"/bad.* 2>/dev/null | sort || true)
+            rm -rf "$tmp"
+            if [ -z "$bad" ]; then
+              echo "egress canary: all $n addresses of $NAMES accept TCP $PORT"
+              return 0
+            fi
+            echo "::error title=egress canary::egress broken on this runner (known westus2 DNS issue, EX-0001): rerun the job"
+            echo "unreachable addresses (name address; '-' means the name did not resolve):"
+            printf '%s\n' "$bad"
+            canary_diag
+            echo "EX-0001 egress canary failed, unreachable: $(printf '%s' "$bad" | tr '\n' ';')" >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
+            return 1
+          }
+          set -m
+          canary_main &
+          main=$!
+          (sleep 90; kill -TERM -- "-$main"; sleep 2; kill -KILL -- "-$main") >/dev/null 2>&1 &
+          dog=$!
+          wait "$main" && rc=0 || rc=$?
+          kill -TERM -- "-$dog" >/dev/null 2>&1 || true
+          if kill -0 -- "-$main" >/dev/null 2>&1; then
+            kill -TERM -- "-$main" >/dev/null 2>&1 || true
+            sleep 1
+            kill -KILL -- "-$main" >/dev/null 2>&1 || true
+          fi
+          if [ "$rc" -eq 143 ] || [ "$rc" -eq 137 ]; then
+            echo "::error title=egress canary::the canary hit its 90 s deadline (EX-0001): rerun the job"
+            rc=124
+          fi
+          exit "$rc"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      # The lock is .github/requirements/cisco-ai-skill-scanner.txt, copied here by scripts/tool_locks.py.
+      - name: Install skill-scanner
+        env:
+          REQUIREMENTS: |
+            # cisco-ai-skill-scanner: generated by scripts/tool_locks.py from cisco-ai-skill-scanner.in; do not edit.
+            # Wheels for x86_64 and aarch64 Linux and CPython 3.11-3.14 only (see that script).
+            aiohappyeyeballs==2.7.1 \
+                --hash=sha256:9243213661e29250eb41368e5daa826fc017156c3b8a11440826b2e3ed376472
+            aiohttp==3.14.5 \
+                --hash=sha256:1eb8167961ec4dfcc8cb9dd50bd0ee72519f7ef496be95203e49e27b01618382 \
+                --hash=sha256:1ffa3a523a36d8628f98c06492ae16a31a23d14c0b4ec721757b477319f656d6 \
+                --hash=sha256:20f085697d7e911f1f73c43ed03fafbed1e7121797e2eb5428efa80398060584 \
+                --hash=sha256:32e8fa6644e541fcd7e02430588c7fc93b602c1778ea0bc345505db76b61cfb4 \
+                --hash=sha256:50a195903119008fe9cc68710535eb37f556ffffd6a7759afe70a2c145587045 \
+                --hash=sha256:74efb69332b85675b1eabd760a8cfc2e2cf42c60607c66f88014c1bdfb40942d \
+                --hash=sha256:94684b879ac1d71e4238850c99b62dc1b28d9086b156a2555f082010b85a865c \
+                --hash=sha256:abfda5cb094a829f7bc25216a32f7db2e85cc65bd59910f8e7b40b3d9b224764 \
+                --hash=sha256:efc21a454892828368b11c2c780de0ff8bc991f73f6b99c6b66e56205470929b
+            aiosignal==1.4.0 \
+                --hash=sha256:053243f8b92b990551949e63930a839ff0cf0b0ebbe0597b0f3fb19e1a0fe82e
+            annotated-doc==0.0.5 \
+                --hash=sha256:117bac03a25ede5df5440e855b32d556049ca169ead221505badf432fed4b101
+            annotated-types==0.8.0 \
+                --hash=sha256:f072f4d804ea359e4eaf198b1af7a8b0943881a87f31bb764f8bf219bb9419e0
+            anthropic==0.125.0 \
+                --hash=sha256:3486013602eca76d8b12540764e53654f02cf4951110bca86cf06e67428a9f21
+            anyio==4.15.1 \
+                --hash=sha256:6152fdbbf9a77fdec97731721bebf7c4c44f7c29b424b0065826173efc7ed101
+            attrs==26.1.0 \
+                --hash=sha256:c647aa4a12dfbad9333ca4e71fe62ddc36f4e63b2d260a37a8b83d2f043ac309
+            boto3==1.43.122 \
+                --hash=sha256:cca51b3650080594a1df344b8a2e76007eab6d5fa50504a0b622dfdc14cdeaa1
+            botocore==1.43.122 \
+                --hash=sha256:668e608edf8847fc4c3c6b38688e183c3bcf19b8a1f7f58d33c03a6f3039bd49
+            certifi==2026.10.23 \
+                --hash=sha256:e9b54de76e530bb6cf0ccd036787103acb58fd42ba930ea8bf948ddbaa2f61d1
+            cffi==2.1.1 ; platform_python_implementation != 'PyPy' \
+                --hash=sha256:3311ed60d36f83378794e1009ac6258bafbf81f7888b4caa7b35a521e3f95813 \
+                --hash=sha256:34e261f78cb6ceaaa36f42f2613f4380d94d9c759a9c73c769ee6e0247364632 \
+                --hash=sha256:58acb8ab8e295e6c5ea12f888cbb13cf21511ef2a3303a23f4325c29d17fe5c1 \
+                --hash=sha256:68e62fe11f30d5ca8289242866f0a5291402d8529ca2178ab8afc5c9694ae890 \
+                --hash=sha256:a931079504ecc49efed7744c476a5c343a92fabf66dec2db95edb1b2fdc770e2 \
+                --hash=sha256:b0431303acaea1089ad4b3e9ce4e6518193def1118d4073ca848635ee4ea2e96 \
+                --hash=sha256:c1453022f490d2459a11819d83ad1d586e9ff65a12ac3e705ffebd46d3685dcf \
+                --hash=sha256:f16c709686a78c727bbbf059f92b0bf41c6fc60deec706d2dc19f529175a6125
+            charset-normalizer==3.5.2 \
+                --hash=sha256:1c50fe28bbc2ced33386f298650d91218076c05420e6cbd790b913adc41659e7 \
+                --hash=sha256:211d5a3eb6af8f513b8d4ca19a8c1b7accab1b5f0d3175f9826b03c1a920dc1f \
+                --hash=sha256:34276fd796040bf0993ab33a369aa572e6979c7aab225a88893667ad8eac8f7a \
+                --hash=sha256:3d31298449090ab8d47b7b1b2a555ff73cac7ed438a08b7ac160980c7ebed649 \
+                --hash=sha256:7218e8f32b0956cfcd048fd42d9d5779809745ca1d86113ca56f66e7ae1549c4 \
+                --hash=sha256:849df64e889b2e17230d58410a03dba311a65b163508fd33679b2b737d4b7858 \
+                --hash=sha256:8d86d6fc60743dc916eb79e2eb1ec4818e21e427731543af40a3021851174a13 \
+                --hash=sha256:b6b751274acb69d77b3323d6b7dbaa3c7fdfc1eb829b7eb61d262f32e1af9685 \
+                --hash=sha256:b91363207bd9dc966a691e959bb47f64b30f7ac4b072be9968b366982f7db77c \
+                --hash=sha256:d19fbd981a488e22cd04883659ca6b08f50b5974f9fd7c95655ef6a043e5893f \
+                --hash=sha256:d760fe2a4d7c3b226cb9026d6a842868d52a7901bd98420e1baf14e80da85cf5
+            cisco-ai-skill-scanner==2.3.2 \
+                --hash=sha256:0222d84c9c98419623d1e2a1b56a52af4b9ca07a6e9767cb6241dc7a16f0efa5 \
+                --hash=sha256:e97e9a9cb9bd0ca71116c1b5185dffc3ad7b20c9bec25468fdffa6720f959557
+            click==8.5.0 \
+                --hash=sha256:255bc9599cf7748b4b1a446ccc735421bd08a2ae529a8b88597d3de5664ee360
+            colorclass==2.2.2 \
+                --hash=sha256:6f10c273a0ef7a1150b1120b6095cbdd68e5cf36dfd5d0fc957a2500bbf99a55
+            confusable-homoglyphs==3.3.1 \
+                --hash=sha256:84c92cb79dc7f55aa290d0762b2349abd8dee4c16fbe6f99eac978d394e2e6a1
+            cryptography==50.0.2 ; platform_python_implementation != 'PyPy' or (sys_platform != 'darwin' and sys_platform != 'win32') \
+                --hash=sha256:0ddc924c04591c2811ca024d62ecad4f7f6f08af8939c211438f48a16bd23602 \
+                --hash=sha256:1981f1db4630889b9ef7803fadef12b056f428cb6b85c27ba57b774793b6093c \
+                --hash=sha256:4061c0079120205fb760c58acab6443e217307dcf05e3702cf970e0689972856 \
+                --hash=sha256:630ebfea3bf689d075f82316324ff7433dc447fe6bc1bfc76524b74b4a9567d2 \
+                --hash=sha256:79def8d059362e7831389ed3be0ecdf58a89386e1271e35dd9f5af84e81bffd0 \
+                --hash=sha256:87e9ce85beb6b328ba370cc6e6aea483c92617b4c95b1d33a49297eb662bfb04 \
+                --hash=sha256:9dab55f57c74c3cad24c323bacbbd04be4705ba6eb0d92e920b1fc4837ed5079 \
+                --hash=sha256:c5e67125c7dca78d199ec4e116aa93dbb83494808ecbb8211a2cb09b1bf41dbd \
+                --hash=sha256:dfe9763530994147d9af1def057a5b9658b00e8f8fe8743d144d1e0911c2e454 \
+                --hash=sha256:ee247f5c245c9a2fe7c8e2214e295918838e44e00a45a6718451e4004219e767 \
+                --hash=sha256:f21e8a22c8605750c7af886bab299a363721264061b4ac0a30efb73cfd58efc5 \
+                --hash=sha256:f9f6143a8c75945eb960d9eb98905a441394abfa24afaae239d514ffb2586480
+            distro==1.9.0 \
+                --hash=sha256:7bffd925d65168f85027d8da9af6bddab658135b840670a223589bc0c8ef02b2
+            docstring-parser==0.18.0 \
+                --hash=sha256:b3fcbed555c47d8479be0796ef7e19c2670d428d72e96da63f3a40122860374b
+            easygui==0.98.3 \
+                --hash=sha256:33498710c68b5376b459cd3fc48d1d1f33822139eb3ed01defbc0528326da3ba
+            fastapi==0.162.0 \
+                --hash=sha256:3785963de305dd09912426cb81f2d230fce98ab3521cdfe97265c8d14983128c
+            fastuuid==0.14.0 \
+                --hash=sha256:09378a05020e3e4883dfdab438926f31fea15fd17604908f3d39cbeb22a0b4dc \
+                --hash=sha256:0c9ec605ace243b6dbe3bd27ebdd5d33b00d8d1d3f580b39fdd15cd96fd71796 \
+                --hash=sha256:33e678459cf4addaedd9936bbb038e35b3f6b2061330fd8f2f6a1d80414c0f87 \
+                --hash=sha256:808527f2407f58a76c916d6aa15d58692a4a019fdf8d4c32ac7ff303b7d7af09 \
+                --hash=sha256:a8a0dfea3972200f72d4c7df02c8ac70bad1bb4c58d7e0ec1e6f341679073a7f \
+                --hash=sha256:aa75b6657ec129d0abded3bec745e6f7ab642e6dba3a5272a68247e85f5f316f \
+                --hash=sha256:ab32f74bd56565b186f036e33129da77db8be09178cd2f5206a5d4035fb2a23f \
+                --hash=sha256:bbb0c4b15d66b435d2538f3827f05e44e2baafcc003dd7d8472dc67807ab8fd8
+            filelock==3.32.7 \
+                --hash=sha256:65ff0d0190ea42038b32bda4b77834fb05be2cad4c5b9b01aa4dfb3614536e52
+            flatbuffers==25.12.19 \
+                --hash=sha256:7634f50c427838bb021c2d66a3d1168e9d199b0607e6329399f04846d42e20b4
+            frozenlist==1.8.0 \
+                --hash=sha256:0c18a16eab41e82c295618a77502e17b195883241c563b00f0aa5106fc4eaa0d \
+                --hash=sha256:2552f44204b744fba866e573be4c1f9048d6a324dfe14475103fd51613eb1d1f \
+                --hash=sha256:494a5952b1c597ba44e0e78113a7266e656b9794eec897b19ead706bd7074383 \
+                --hash=sha256:778a11b15673f6f1df23d9586f83c4846c471a8af693a22e066508b77d201ec8 \
+                --hash=sha256:957e7c38f250991e48a9a73e6423db1bb9dd14e722a10f6b8bb8e16a0f55f695 \
+                --hash=sha256:96f423a119f4777a4a056b66ce11527366a8bb92f54e541ade21f2374433f6d4 \
+                --hash=sha256:cba69cb73723c3f329622e34bdbf5ce1f80c21c290ff04256cff1cd3c2036ed2 \
+                --hash=sha256:eaa352d7047a31d87dafcacbabe89df0aa506abb5b1b85a2fb91bc3faa02d822 \
+                --hash=sha256:fb30f9626572a76dfe4293c7194a09fb1fe93ba94c7d4f720dfae3b646b45027
+            fsspec==2026.9.0 \
+                --hash=sha256:8dd6e646e99ea382bd85f97a45e6b526a442d79423a7dc673f1e2756d05fcb5f
+            h11==0.16.0 \
+                --hash=sha256:63cf8bbe7522de3bf65932fda1d9c2772064ffb3dae62d55932da54b31cb6c86
+            h2==4.4.1 \
+                --hash=sha256:0e25f1462b23c9cb82d9eb02e28bc706dac2a68cb457c6a0d74d63c8a2a5d0e6
+            hf-xet==1.7.1 ; platform_machine == 'AMD64' or platform_machine == 'aarch64' or platform_machine == 'amd64' or platform_machine == 'arm64' or platform_machine == 'x86_64' \
+                --hash=sha256:b7fe4b5c4cc912a2c7b36538c6696d3312bd1471835ee814c3dd3dfc5509c3b9 \
+                --hash=sha256:f26bfd4a6e31b4e37e749a07e8642589406e8537be05eccfd633a92b95e2fb51
+            hpack==4.2.0 \
+                --hash=sha256:858ac0b02280fa582b5080d68db0899c62a80375e0e5413a74970c5e518b6986
+            httpcore==1.0.9 \
+                --hash=sha256:2d400746a40668fc9dec9810239072b40b4484b640a8c38fd654a024c7a1bf55
+            httptools==0.9.0 \
+                --hash=sha256:088de1738e1af624466a01c35d652dbe6fb825be887c76d68aa850621d81db88 \
+                --hash=sha256:18d800aaa2d6bff7d889df810d1b19a5fde72b1f6c0ca96e8d9f28a692fe5460 \
+                --hash=sha256:3e3201fe4d46e0d15d7ff9fafc94a605da9eb82d2c5b9837f0368acb325481f1 \
+                --hash=sha256:58a1b0ec4cbb930e69669f9771715b2c7898d3cdf064d9811f7a66afef96b544 \
+                --hash=sha256:6b1ac7f1bc6c0dbf90684b77571a51a21b2463909fd916ce0ac9bfc4d566dc75 \
+                --hash=sha256:6e2780e33a58a93f27cc3bb74a55bae6f9a8278a1dbabdff392940d30d381671 \
+                --hash=sha256:b68fb053b37c258a473ab67f4965c3b439500dc160fe364667035a6833eaf50a \
+                --hash=sha256:c0e45def4d9ce7073e2226535572442d9d6efb4047c7a5fd8960807e877ce70a
+            httpx==0.28.1 \
+                --hash=sha256:d909fcccc110f8c7faf814ca82a9a4d816bc5a6dbfea25d6591d6985b8ba59ad
+            huggingface-hub==1.33.0 \
+                --hash=sha256:04e434b06e100eddbce9a6e817d72693a7884b10a79bd67ab48080d5c07eb899
+            hyperframe==6.1.0 \
+                --hash=sha256:b03380493a519fce58ea5af42e4a42317bf9bd425596f7a0835ffce80f1a42e5
+            idna==3.20 \
+                --hash=sha256:ab7ae7122974553370f0bdb919e1a960b2cd1bc1ef0276416d896db81c14582c
+            importlib-metadata==8.9.0 \
+                --hash=sha256:e0f761b6ea91ced3b0844c14c9d955224d538105921f8e6754c00f6ca79fba7f
+            jinja2==3.1.6 \
+                --hash=sha256:85ece4451f492d0c13c5dd7c13a64681a86afae63a5f347908daf103ce6d2f67
+            jiter==0.18.0 \
+                --hash=sha256:0a41d8ef9f757fd5c11ce2fa56c9c4d008d857e97b6d0edfccbaacbd50830a75 \
+                --hash=sha256:55f808bce951fae459fc916359cc54097d386bef3e72265ddf02b39ba3275118 \
+                --hash=sha256:6e3350b7431f7b8315b925d9ca0f29a44e8fb6ed45c1fe552392cb6297966bb9 \
+                --hash=sha256:9623fc90f1a4754452a525383ce70476476c16556098944709b8cdbd9ad905f0 \
+                --hash=sha256:a01642d403b8925f2b1e1bb51b4ba49ece8a2bdc9b9560fc8ed0b1f2b35b567a \
+                --hash=sha256:b3c741e6b778c951a6861964ee475118812a33208426c54fb92bf4e318bda834 \
+                --hash=sha256:d7424194e68ef44e94290961f59319850d7ce11a329a3957f91709c15ded6618 \
+                --hash=sha256:d8013186f2b9a8c27ededa601050392527aa9d27ffd35d49aae424fbd2062f38
+            jmespath==1.1.0 \
+                --hash=sha256:a5663118de4908c91729bea0acadca56526eb2698e83de10cd116ae0f4e97c64
+            jsonschema==4.26.0 \
+                --hash=sha256:d489f15263b8d200f8387e64b4c3a75f06629559fb73deb8fdfb525f2dab50ce
+            jsonschema-specifications==2025.9.1 \
+                --hash=sha256:98802fee3a11ee76ecaca44429fda8a41bff98b00a0f2838151b113f210cc6fe
+            linkify-it-py==2.2.0 \
+                --hash=sha256:3adc40eb5af300b2605fcfdb968c24e1d780a90f1f2221af7c15e5111e94d443
+            litellm==1.106.6 \
+                --hash=sha256:af0b6f4a3df53194b74188a972f103f41ee5ed86afeefc7d9a1ea40156cc0f2e \
+                --hash=sha256:ec3cae6c87971657c9ae905b6d23aef456e979c8848f22bbc5096a31e1a1da4d
+            magika==1.0.3 \
+                --hash=sha256:3e9b49134e8116ee40b431664dcbed9e199413efddcce1a173c734b4e0521529 \
+                --hash=sha256:938d8e033953f2ddeb8c35dc423aa289ca116bfa7a71a778f6e77460f9025803
+            markdown-it-py==4.2.0 \
+                --hash=sha256:9f7ebbcd14fe59494226453aed97c1070d83f8d24b6fc3a3bcf9a38092641c4a
+            markupsafe==3.0.4 \
+                --hash=sha256:1caa2fa5a6184fb233153b35f654e6687bd555476f6170f29d8ee9be1a8b0af9 \
+                --hash=sha256:434139499bb20b502ed3baa1f169e618f924a97e7a777fea1a49446d80106cf6 \
+                --hash=sha256:6a45c3d514f2436064db00d7fc8778d888f0236ebfed649b53d13a59e69ad51b \
+                --hash=sha256:6da83a088f8ef93b2d483a8232a4dbf4d69d3d8496b568a03c56becac43e1808 \
+                --hash=sha256:7018d4af1cd272e847aa5917983ab5e83e4f6579f9dbfecd4a79c0ca80b144c2 \
+                --hash=sha256:849dd2bb0e5e4ab2b71c7191726a4a8d5aa8a610daa584728cbee0b710ddc4ef \
+                --hash=sha256:8e124f974786f831d6043728e38296969d3579db8896fe004682f5758e613581 \
+                --hash=sha256:a8e9f292fcda89b324f2f5c91d13f1424a153e40fc2756f38ee23b15835ff300
+            mdit-py-plugins==0.6.1 \
+                --hash=sha256:214c82fb2ac524472ab6a5bcab1de80f73b50443e187f401bfd77efbc7c6481d
+            mdurl==0.1.2 \
+                --hash=sha256:84008a41e51615a49fc9966191ff91509e3c40b939176e643fd50a5c2196b8f8
+            msoffcrypto-tool==6.0.0 ; platform_python_implementation != 'PyPy' or (sys_platform != 'darwin' and sys_platform != 'win32') \
+                --hash=sha256:46c394ed5d9641e802fc79bf3fb0666a53748b23fa8c4aa634ae9d30d46fe397
+            multidict==7.2.1 \
+                --hash=sha256:08ea94663d9e7c25d14d78222f7aee906c472d4837766bec62477c38f6e419dc \
+                --hash=sha256:1fb8c1a3480c130c3a6422d5f16f3cad6552bf08c2089dd288ba7134649183b5 \
+                --hash=sha256:295a15ccb8cfde9351dd6062b80af4e839460636b3c46813b4aa443905ded86a \
+                --hash=sha256:335f715f8c111654f29e4bf19086bdf0245579d2b4f4f59ca8dd9b3003b859c1 \
+                --hash=sha256:3b7542fad2706595c1b1853b46f2c3c4ae5cc5a6252b7225f294d607a29e1bdf \
+                --hash=sha256:6efdeed2723431999cf3bcbc84c72dbe0f65d16bb1f84e15a657f5b60ff18ca6 \
+                --hash=sha256:822a7fcd33f6922b650e1b26594f09d53c5d011fe655fea7ded27b2728ce2a1b \
+                --hash=sha256:cd69c99affd1b4debc1f9a53058ea6e3a9b34f2e733840bb45891666cd8ede0a \
+                --hash=sha256:fa0ecd064b0ae18d235283abb5adbc4e07304dba8f2aa7c0d61f28bebcc70d4c
+            numpy==2.4.6 ; python_full_version < '3.12' \
+                --hash=sha256:0ab0a9c4ffb1a6d95ef519fe4247dba8eb6b18ad93999f76b7f657039acabd47 \
+                --hash=sha256:40fdc1ae7125e518ea98e53e69a4ebc27e1fd50510c47b7ea130cf21e5e1d42b \
+                --hash=sha256:5f9fb9157b4ce2971008323afe46053787b526ef624fea915b261468a8421a0f \
+                --hash=sha256:72fbe16c6fac95aedf5937fa873445cec2110be35d8a4e9433d7501fd98dae6b \
+                --hash=sha256:89cd468399cfd2504718f0ba50e410dca55a170b61a02ad92bb18c8a65186e93 \
+                --hash=sha256:90f9849678c75fe7afa2d348ac842c168b0a4d3d61919687216dfc547976d853 \
+                --hash=sha256:a2c306dea656c12c68f51f4cea133cbe78ca7435eb28c735eac1d3ebe73be6e8 \
+                --hash=sha256:a7830bab239b79cda9c08c2da014761cafb48da6150e1da17ac06283f43b6089
+            numpy==2.5.4 ; python_full_version >= '3.12' \
+                --hash=sha256:1c2e71b04c6cad90026e544501bbe0ab9290fa8a4d845e7e8c0d124fb429c988 \
+                --hash=sha256:4054173604cd8658796053f1f3bc0befb68ec1c0762c57fdad61e199256a8617 \
+                --hash=sha256:6ffa07666f8da0eef81d149934a626d0d95fbd6838432a33e66245423a9062c0 \
+                --hash=sha256:d549420b8858885cea8838a727842249218b9c1da24dd517e25c9c7a948310a3 \
+                --hash=sha256:fbde6962867ee75b48b0ee29b2b9372ec5d617799dbaf38e82dc0596f2f7738a \
+                --hash=sha256:fe4d21ab149f15e4e6043dfb0de87e6e5f34ac176cde83060e9802981fca2ac2
+            olefile==0.47 \
+                --hash=sha256:543c7da2a7adadf21214938bb79c83ea12b473a4b6ee4ad4bf854e7715e13d1f
+            oletools==0.60.2 \
+                --hash=sha256:72ad8bd748fd0c4e7b5b4733af770d11543ebb2bf2697455f99f975fcd50cc96
+            onnxruntime==1.31.1 \
+                --hash=sha256:0b9a492176886992e0e875f06bc0367e333f5fff11711a2d642e18b02f3009cc \
+                --hash=sha256:1f3dea47f2f0e5117c2404cea7d21fd253ae7836a3bf167a501cdfbb2600d536 \
+                --hash=sha256:5752bd508126ae7c49894d3b9d2e83f0c3d487319246d04c444b393308d7ad7f \
+                --hash=sha256:74a6a52994616c4d18b33db1e13c226333a70a6ba07480a5cab9c2a50dff1430 \
+                --hash=sha256:c20d7f15d84427db070b163f78c2c7146cc93edd6113fa7327671259a24184fe \
+                --hash=sha256:c878686b75cade1ed59131aa018ab004b1e64368b0d54041912450b9642cf04f \
+                --hash=sha256:da05378364c44d4407e463982d2bf8d5e4cfea873283757e48beeb41df97b7f3 \
+                --hash=sha256:dcaedc50333876f3829ab966b242147f0e548229e29c36fe44622ecf748c25ee
+            openai==2.54.0 \
+                --hash=sha256:89089789197ccdb87f173a03145ed1598d00795220c93e96cf712b1cbf5e5f2b
+            opentelemetry-api==1.45.2 \
+                --hash=sha256:2cbd737377e710ee740d261c94e93fa0f08e6d037c18f17513cc0a2d94479a34
+            packaging==26.3 \
+                --hash=sha256:d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c
+            pcodedmp==1.2.6 \
+                --hash=sha256:4441f7c0ab4cbda27bd4668db3b14f36261d86e5059ce06c0828602cbe1c4278
+            pdfid==1.1.3 \
+                --hash=sha256:9b9b72145a81759c6e9f327eb0e115a30a3fbd140fa5bd5da0d1956ec4c9f65a
+            platformdirs==4.14.0 \
+                --hash=sha256:1dadfc59a8a5d7565b3d9270ae8fa71c065595352c4277b41c11ee6c222c4b91
+            propcache==0.5.4 \
+                --hash=sha256:251c63dd46a0659bb875cb254dc4c1e79ee91a847c737cd62373295afc2235dc \
+                --hash=sha256:2814ecd8e818f487bee4b0f921bc4d1c176cc5fc71ac0f072d0fa67eda4ac14b \
+                --hash=sha256:60a64cbccaa11b7760ce705a14ada17ba459e7ca9f23ba587eb013821032d7ef \
+                --hash=sha256:62530ca89187827e4a4fe733f971abe81a7542eeea48ff61995f19b64d7199c8 \
+                --hash=sha256:62c60aec739ed00124573cce1178138fd690c7676352d67a37328c1cf51d7468 \
+                --hash=sha256:6e9368e87a3efc285e559131092c5db643eb8e56de4ee42064d5baec22ef2bb5 \
+                --hash=sha256:cc07876cfb079b6f6f36d21ce75784ad6c2c6b563eeac0ed26c2fa2669b85df9 \
+                --hash=sha256:dbab5f5ff6897c81f355d079010cdae85b02e5a0b518b5251523b8ad8ae9ac3c \
+                --hash=sha256:f85915e00dcb1cd9f2f890ead064ed40a27df06f0db65be427b29482ae357572
+            protobuf==6.33.6 \
+                --hash=sha256:77179e006c476e69bf8e8ce866640091ec42e1beb80b213c3900006ecfba6901 \
+                --hash=sha256:e2afbae9b8e1825e3529f88d514754e094278bb95eadc0e199751cdd9a2e82a2 \
+                --hash=sha256:e9db7e292e0ab79dd108d7f1a94fe31601ce1ee3f7b79e0692043423020b0593
+            pycparser==3.12 ; implementation_name != 'PyPy' and platform_python_implementation != 'PyPy' \
+                --hash=sha256:a076f3f489b39b43ed13563a1dafe42447445bec2e294154ec5c57fcdda4c85e
+            pydantic==2.14.2 \
+                --hash=sha256:7efbf7507b937931cd32a5755acb00ea1cf5ccb1d4e8067a5850d5069e382118
+            pydantic-core==2.50.2 \
+                --hash=sha256:1db9cab6197e797824f0479dd2ae5fd2e272aa61c61b7faa5a6e450ca7a0d3b7 \
+                --hash=sha256:31a1fb3ffbd1195b24490f671d12623dd4c9bfa56d6af0a299fa43b516134f5b \
+                --hash=sha256:43a8fd56f3c681f3cda2d5c842ad28e88241df742dfcbe8fd1dd437a3056e1f6 \
+                --hash=sha256:86e7abd24a67f61a4bfe8df059b67a2bdd8bf33705178e98463195d140bd3780 \
+                --hash=sha256:9667637665acba166a7dbbc786f14c50512d3a01f7199e0e1a13b929e92d7c7a \
+                --hash=sha256:b29b7c5adf4b2be7c941f7f76432aa3269cd5052ff8610376b8ece24d7b02c51 \
+                --hash=sha256:e80c47314c7233e7105a7efcfffd89d56e479e558189d1959eeeaf2639a27680 \
+                --hash=sha256:f142cd663d1148ed32993ed9a58e5c67ea312f446a01a6c13a956945aafc9f23
+            pydantic-settings==2.16.2 \
+                --hash=sha256:8d523e5c129b097686bde019bd6109bff53f4c8c3f63f1ddf9933ffa42e5ab4f
+            pygments==2.21.0 \
+                --hash=sha256:2363c69b61c4a97c838da3b130dcd6468f4848992b21a82f2a63ec34377137d9
+            pyjwt==2.15.1 \
+                --hash=sha256:42d59d631f7768a1028a64c7ff581a9bf7519804daf91fc5b6c56e30eec5e193
+            pyparsing==3.3.3 \
+                --hash=sha256:ece8c00a69cf01b45d0b1dedabb469c90d8caf996d4fda40f147627a122849a4
+            python-dateutil==2.9.0.post0 \
+                --hash=sha256:a8b2bc7bffae282281c8140a97d3aa9c14da0b136dfe83f850eea9a5f7470427
+            python-dotenv==1.2.4 \
+                --hash=sha256:42269a8a5b3fd54ffa6f3d84b18abed50064717576b4ecf03dc4a55d8aa04fdc
+            python-frontmatter==1.3.0 \
+                --hash=sha256:9f7dd9260bec99044219159a329f64f039087f9d1a2124c9442556f2fe6f82ec
+            python-multipart==0.0.32 \
+                --hash=sha256:ff6d3f776f16878c894e52e107296ffc890e913c611b1a4ec6c44e2821fe2e23
+            pyyaml==6.0.3 \
+                --hash=sha256:0f29edc409a6392443abf94b9cf89ce99889a1dd5376d94316ae5145dfedd5d6 \
+                --hash=sha256:10892704fc220243f5305762e276552a0395f7beb4dbf9b14ec8fd43b57f126c \
+                --hash=sha256:501a031947e3a9025ed4405a168e6ef5ae3126c59f90ce0cd6f2bfc477be31b7 \
+                --hash=sha256:9149cad251584d5fb4981be1ecde53a1ca46c891a79788c0df828d2f166bda28 \
+                --hash=sha256:b8bb0864c5a28024fac8a632c443c87c5aa6f215c0b126c449ae1a150412f31d \
+                --hash=sha256:ba1cc08a7ccde2d2ec775841541641e4548226580ab850948cbfda66a1befcdc \
+                --hash=sha256:c458b6d084f9b935061bc36216e8a69a7e293a2f1e68bf956dcd9e6cbcd143f5 \
+                --hash=sha256:ee2922902c45ae8ccada2c5b501ab86c36525b883eff4255313a253a3160861c
+            referencing==0.37.0 \
+                --hash=sha256:381329a9f99628c9069361716891d34ad94af76e461dcb0335825aecc7692231
+            regex==2026.9.29 \
+                --hash=sha256:2f7f7aa47b229f2b39a2ae2596d2ad5625d77b5eb9856fac2dab3eb506cdd0a0 \
+                --hash=sha256:39ab5894d971f9ac68baa6eca5c50387db579cfcacf36ae8df3feceb1815e6d0 \
+                --hash=sha256:612b709381c0355b70d89cdb51b7f670591ed5cbbc0e3b5337488019dc667b65 \
+                --hash=sha256:7020ed44df30b3aa492c00ee3b52d0548c1f30c2c6c5bb13ae897680900d3413 \
+                --hash=sha256:b97a38fb4c732b6832db6bf108963adbcd82ef1268ba2025dce390f45af75efa \
+                --hash=sha256:d49c18f1ea294cf4adde2e5ac256e98c82ea9d708462ce4bf799dffa7cfe8a2c \
+                --hash=sha256:e11edba5bc344a32b029a7af9d4b3173982dd79eeafa0b9dbd787364414b0509 \
+                --hash=sha256:f93bc1c3486ef3747e07c9d7c1d0a147b8fbaab975f80e348aed6f71309dfaca
+            requests==2.34.2 \
+                --hash=sha256:2a0d60c172f83ac6ab31e4554906c0f3b3588d37b5cb939b1c061f4907e278e0
+            rich==14.3.4 \
+                --hash=sha256:07e7adb4690f68864777b1450859253bed81a99a31ac321ac1817b2313558952
+            rpds-py==2026.9.1 \
+                --hash=sha256:07deecbfce94c78473018bc7d10b337cc651d12df87a1eb2cb3e4024bc9c33d0 \
+                --hash=sha256:136a1c3fe4402b7008bc81cb62ee538481795b61a7e83df88dff3b3f02b726ff \
+                --hash=sha256:2693b2728bbcc48d09a981a356954b0c47c53ff25b545856f28a889ea619f69a \
+                --hash=sha256:457866b85daf5034296666168b84a69e0b2e89dc4f1af102b46f6448a60b9063 \
+                --hash=sha256:7868b85224291c6cb6759f9b5adb9745f486d226f62b16a614dd5a2a5ab2b35b \
+                --hash=sha256:addeda51556dac7c1a2f14cda62db8b621cd12afba3091d03a96c72932387eab \
+                --hash=sha256:e01b3c878c8641913e688edd1b3f08658c6783d29cf6b826bd3c0d1ae7a1ffaa \
+                --hash=sha256:eac2f5dbafd585dfe31f86a23ebf0d3ba480a9d49ebc87947267b5608d4ea0cd
+            s3transfer==0.19.3 \
+                --hash=sha256:24eb7535804306355e31c952a90022bf5b2f9d760f9a11062c7493a217c08553
+            six==1.17.0 \
+                --hash=sha256:4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274
+            sniffio==1.3.1 \
+                --hash=sha256:2f6da418d1f1e0fddd844478f41680e794e6051915791a034ff65e5f100525a2
+            starlette==1.10.0 \
+                --hash=sha256:478c0ab3b4ced6e82719849c118fa406f0278a3499c1a898cd15cd31bdc38ce4
+            tabulate==0.10.0 \
+                --hash=sha256:f0b0622e567335c8fabaaa659f1b33bcb6ddfe2e496071b743aa113f8774f2d3
+            textual==8.2.8 \
+                --hash=sha256:267375fd402dc8d981457212efa71f0e3365fd17bba144ba9bb3ed7563cb374a
+            tiktoken==0.14.0 \
+                --hash=sha256:1f83081065ee5833d35b49e9180f3d8d15622a603dd1c435da0da6cc12b3662f \
+                --hash=sha256:2157f52e4b4d7ac5ecc7457b3716834706e7ef9a46f5144029bfeb7cf71f4e06 \
+                --hash=sha256:26e60f6a956ee171ab728b37b8439905d7ea1db435c30f9822f291e9861c861d \
+                --hash=sha256:7896eea257fe497a2b7134474d909156c6744ce8da35bce88011a960e008aa0d \
+                --hash=sha256:7db45b98e94adf4173a5cd7422b150999a7ee11ff847783a14f6e1b80cc38cb6 \
+                --hash=sha256:e3442bbb2f0c588cec876061e37ae67b455b9df9978b003c8fe30e45f2ef5b42 \
+                --hash=sha256:f5e7665f6624e052e5e7f6a36919ab69279decdc976d7b16b4fa15e1897d0513 \
+                --hash=sha256:f702e0aeeb6506e57687e881c59e844ebe8f0a6a097ddafe20e3ab25f387be4e
+            tokenizers==0.23.3 \
+                --hash=sha256:376851d22bcf9d650a5c3090bb83e6cf9e895fbf0595369fa4cd43c1f69b5f87 \
+                --hash=sha256:ec82e80e65a862275b97c3d90b7a523df8d9519ee48aeb4e9625b2cc909274e0
+            tqdm==4.70.1 \
+                --hash=sha256:c293e525e6fef9c20e8728fd4612df02a0aa31bb5fe91ecd93e123b1b7bffa73
+            typing-extensions==4.16.0 \
+                --hash=sha256:481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8
+            typing-inspection==0.4.4 \
+                --hash=sha256:65b8397ba37ccbce054456aaccddfc91e6e3083c92824df348d96ca832f3f147
+            urllib3==2.8.0 \
+                --hash=sha256:0cf3cae568d36aa9576b28dfb35f11328f1cb974ca7647d9475ebb86c75ac6e3
+            uvicorn==0.54.0 \
+                --hash=sha256:505bdb0f318731d45f1f712071fc781a8981f6847a31c902c9f5e652d4f67faf
+            uvloop==0.23.0 ; platform_python_implementation != 'PyPy' and sys_platform != 'cygwin' and sys_platform != 'win32' \
+                --hash=sha256:090865d8ce7a03986755a3ce711b7dd0d4b44eb14ab74368b717f3fad1180208 \
+                --hash=sha256:1748321e3c59a14a75404b1ae8d5a8d81c4e201803ea0e14c1b6fd84421024b5 \
+                --hash=sha256:31e0cf90bc8fd88784f6802cdba968a51fb1aec1cc3feec74d862b2d371d1330 \
+                --hash=sha256:6b3cbc4f96ddfa1fb88a78a69dd851369825b7816d9702eee8c4461505ba172e \
+                --hash=sha256:8fcd721113260ffb5e38bf14a8725b17d431f34209f7d1c7005b667946e630b3 \
+                --hash=sha256:ab17b3a8aa754be0de0e397f7b95f13b14e56f077a4c6ae295e3d4afd199b325 \
+                --hash=sha256:e2cba180d6451822763eda8364f342435a873bcfb3849cbd82fdeca248ca65eb \
+                --hash=sha256:f7548ede3ee908cfabc0d068106e303a9a2d811af959cdf6ab85676344cedcda
+            watchfiles==1.3.0 \
+                --hash=sha256:4af9c464d410e8c44b58ddf1cbec7c3a02c1cb2c6c80df9c74659ba2fbda0ab5 \
+                --hash=sha256:b5768b49e426fd5b550b012c866db347cdf15c398ef98dc557b6e6b72fa74cd1
+            websockets==17.3 \
+                --hash=sha256:56d43c311f3519fb1057b6114dc24e9060bc3fb6aedf4aa11160484154b66b63 \
+                --hash=sha256:5ad409b7ea102339041281117cf2dadfe71edbb653dc48037cc55d516fb7f448 \
+                --hash=sha256:8dbb3862aa649de95660b6337d97101977f160b5b354d07b82fe309874d2c8bc \
+                --hash=sha256:a7f391838e8adcf1f2fe71561d9e5a9f74ea7ffa5052eb2db329aac677383136 \
+                --hash=sha256:af37a1e6b6bd506b597d5fb4cf111fb527d1b2223608a5d441d4738827cfd166 \
+                --hash=sha256:c15a165673bb3fb57facbf040edf5c0556d20ccd2e0ccc5f23ebb69fb715fdc1 \
+                --hash=sha256:c95d25b5382ee0e6191ecafdeabefdc1f7bff8dfee29239b9b79e760ef3b04bd \
+                --hash=sha256:dc2b495a92b3971966bf102e73589f950db3ec1ca6713265355ce7771d97b199 \
+                --hash=sha256:de2c12555bf05546f3ee75733f2c81de70aab7f530e86d0d2162b0ddcb3c39ae
+            yara-x==1.22.1 \
+                --hash=sha256:5dcb9db77784f0ad62460506923031673e0aadc525c1a5d25e53965a7f91587f \
+                --hash=sha256:8ec9a6706d4acf83b8045c1630d5a058180e59da361d38098d8e86ce3e8576b0
+            yarl==1.25.1 \
+                --hash=sha256:14b79a30a93a3ce2e8832603fd0ab780ada281b0ba5110b519a634f2d7d7d1fc \
+                --hash=sha256:30eec96e8a91bd588ce897c9543f6d5d8d34b28fbcba28a4dedf20ebeae9fe57 \
+                --hash=sha256:4d781294bb815ecb5ea57ff6bbf8038e0a31a95fdf3e1788f66e0dc100d64b58 \
+                --hash=sha256:681c758b0490f9e96b78e5fa8e8dc6e648e9185bb6eaebe73183c33ea0c445f3 \
+                --hash=sha256:77e5099b99b37f3cf79c246998ca9f7313a78054cd1809ec46bc1afad47e1c4c \
+                --hash=sha256:acae6b45d1ace09b6ba3876da43b88366ef368f73b988c7f57e14231753d4420 \
+                --hash=sha256:be80550d9bfe83d9b62398a37081a90434e6df2d978ec345c3d2820de6beddab \
+                --hash=sha256:c6f117789d22dce188e5754e8bc65b7e6ebf8cb73963b9fa761f672a5883769d \
+                --hash=sha256:d5add7b4ca7afeea91d52e4d4e4db3b1fe9885b71f07054560d8c4296b7441a2
+            zipp==4.1.2 \
+                --hash=sha256:b30cb6cd253122169c47de245ca24a86bac2a5d3802ba15bf7ba6414eb9e144d
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$REQUIREMENTS" > "$RUNNER_TEMP/cisco-ai-skill-scanner-requirements.txt"
+          python -m pip install --require-hashes --no-deps --only-binary=:all: -r "$RUNNER_TEMP/cisco-ai-skill-scanner-requirements.txt"
+
+      # The script below is the same text in both scan jobs (tests/test_agent_scan.py holds them equal and runs it).
+      # It reads its inputs from the environment only, runs the scanner from an empty directory with an environment
+      # of its own making (no token, no repository .env), and writes the report only when every target was scanned.
+      - name: Skill scan (static engines only)
+        id: scan
+        env:
+          KIND: skill
+          TARGETS: ${{ inputs.skill-paths }}
+          FAIL_ON: ${{ inputs.fail-on-severity }}
+          WORKSPACE: ${{ github.workspace }}
+          SARIF_OUT: ${{ runner.temp }}/skill-scanner.sarif
+        run: |
+          python -I - <<'PY'
+          import glob
+          import hashlib
+          import json
+          import os
+          import re
+          import subprocess
+          import sys
+          import tempfile
+          from pathlib import Path
+
+          KIND = os.environ["KIND"]
+          RANKS = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
+          NAMES = {v: k for k, v in RANKS.items()}
+          WORKSPACE = Path(os.environ["WORKSPACE"]).resolve()
+          SARIF_OUT = Path(os.environ["SARIF_OUT"])
+          MAX_TARGETS = 200
+          MAX_BYTES = 5 * 1024 * 1024
+          TIMEOUT = 300
+          errors = []
+
+
+          def clean(value, limit=120):
+              """Text from the scanner or the repository, reduced to characters that cannot start a command, a link or a mention."""
+              return re.sub(r"[^A-Za-z0-9_./ :+,*-]", "?", str(value))[:limit]
+
+
+          def error(message):
+              errors.append(message)
+              print(f"::error title=Agent scan::{clean(message, 300)}")
+
+
+          fail_on = os.environ.get("FAIL_ON", "").strip().lower()
+          if fail_on and fail_on not in RANKS:
+              error(f"fail-on-severity must be empty or one of {', '.join(RANKS)}")
+              fail_on = ""
+          threshold = RANKS[fail_on] if fail_on else None
+          if KIND not in ("skill", "mcp"):
+              sys.exit("KIND must be skill or mcp")
+
+
+          def find_targets():
+              """The files or directories the caller named: relative to the workspace, inside it, never through `..`."""
+              found = []
+              for token in os.environ.get("TARGETS", "").split():
+                  parts = Path(token).parts
+                  if token.startswith(("/", "-", "~")) or ".." in parts or ".git" in parts:
+                      error(f"{clean(token)} is not a path inside the repository")
+                      continue
+                  matches = sorted(glob.glob(token, root_dir=WORKSPACE, recursive=True))
+                  if not matches:
+                      error(f"{clean(token)} matches nothing")
+                  for match in matches:
+                      real = (WORKSPACE / match).resolve()
+                      if WORKSPACE not in real.parents:
+                          error(f"{clean(match)} leads outside the repository")
+                      elif ".git" in Path(match).parts:
+                          error(f"{clean(match)} is inside .git")
+                      elif real not in found:
+                          found.append(real)
+              if not found and not errors:
+                  error("no paths to scan")
+              if len(found) > MAX_TARGETS:
+                  error(f"{len(found)} targets; the limit is {MAX_TARGETS}")
+                  found = []
+              return found
+
+
+          def relative(path):
+              return Path(path).relative_to(WORKSPACE).as_posix()
+
+
+          def run(command, home):
+              env = {
+                  "PATH": os.environ["PATH"],
+                  "HOME": home,
+                  "LITELLM_LOCAL_MODEL_COST_MAP": "True",
+                  "NO_COLOR": "1",
+                  "PYTHONNOUSERSITE": "1",
+              }
+              try:
+                  return subprocess.run(command, cwd=home, env=env, capture_output=True, text=True, timeout=TIMEOUT, check=False)
+              except (OSError, subprocess.TimeoutExpired) as exc:
+                  error(f"{command[0]} did not finish: {clean(type(exc).__name__)}")
+                  return None
+
+
+          def level_rank(result):
+              severity = str((result.get("properties") or {}).get("severity", "")).lower()
+              if severity in RANKS:
+                  return RANKS[severity]
+              return {"error": 3, "warning": 2}.get(result.get("level"), 0)
+
+
+          def links_stay_inside(directory):
+              """True when no symlink under `directory` leads outside the repository (the scanner would read what it points at)."""
+              seen = 0
+              for root, names, files in os.walk(directory):
+                  for name in names + files:
+                      seen += 1
+                      path = Path(root, name)
+                      if seen > 20000 or (path.is_symlink() and WORKSPACE not in path.resolve().parents):
+                          error(f"{clean(relative(directory))}: too many files, or a symlink that leaves the repository")
+                          return False
+              return True
+
+
+          def scan_skill(target, home, index):
+              directory, name = (target, None) if target.is_dir() else (target.parent, target.name)
+              if not links_stay_inside(directory):
+                  return [], [], False
+              out = Path(home) / f"skill-{index}.sarif"
+              command = ["skill-scanner", "scan", str(directory), "--format", "sarif", "--output-sarif", str(out)]
+              if name and name != "SKILL.md":
+                  command.append(f"--skill-file={name}")
+              if fail_on:
+                  command += ["--fail-on-severity", fail_on]
+              done = run(command, home)
+              if done is None:
+                  return [], [], False
+              try:
+                  run_ = json.loads(out.read_text())["runs"][0]
+                  results, rules = list(run_["results"]), list(run_["tool"]["driver"].get("rules") or [])
+              except (OSError, ValueError, KeyError, IndexError, TypeError):
+                  error(f"{clean(relative(target))}: the scanner wrote no report (exit {done.returncode})")
+                  return [], [], False
+              prefix = str(WORKSPACE).lstrip("/") + "/"
+              for result in results:
+                  for location in result.get("locations") or []:
+                      artifact = (location.get("physicalLocation") or {}).get("artifactLocation") or {}
+                      uri = str(artifact.get("uri", ""))
+                      artifact["uri"] = uri[len(prefix) :] if uri.startswith(prefix) else relative(target)
+                      artifact["uriBaseId"] = "%SRCROOT%"
+              worst = max((level_rank(r) for r in results), default=-1)
+              tripped = threshold is not None and (done.returncode != 0 or worst >= threshold)
+              if done.returncode != 0 and not tripped:
+                  error(f"{clean(relative(target))}: the scanner exited {done.returncode} without a finding to explain it")
+              return results, rules, tripped
+
+
+          MCP_SEVERITY = {"LOW": "low", "MEDIUM": "medium", "HIGH": "high"}
+          MCP_SCORE = {"low": "3.0", "medium": "5.5", "high": "8.0"}
+          MCP_LEVEL = {"low": "note", "medium": "warning", "high": "error"}
+
+
+          def scan_mcp(target, home, index):
+              label = clean(relative(target))
+              try:
+                  if not target.is_file() or target.stat().st_size > MAX_BYTES:
+                      raise ValueError("not a file, or over 5 MiB")
+                  tools = json.loads(target.read_text(encoding="utf-8"))["tools"]
+                  if not isinstance(tools, list) or not tools or not all(isinstance(t, dict) for t in tools):
+                      raise ValueError("tools must be a non-empty list of objects")
+              except (OSError, ValueError, KeyError, TypeError, RecursionError) as exc:
+                  error(f"{label}: not an MCP tools list ({clean(exc)})")
+                  return [], [], False
+              done = run(["mcp-scanner", "--analyzers", "yara", "--raw", "static", "--tools", str(target)], home)
+              if done is None:
+                  return [], [], False
+              try:
+                  scanned = json.loads(done.stdout)
+                  if done.returncode != 0 or not isinstance(scanned, list) or len(scanned) != len(tools):
+                      raise ValueError("exit status or tool count")
+              except ValueError:
+                  error(f"{label}: the scanner did not report on all {len(tools)} tools (exit {done.returncode})")
+                  return [], [], False
+              results, rules, tripped = [], {}, False
+              for entry in scanned:
+                  tool = clean(entry.get("tool_name", "?"), 60)
+                  if entry.get("status") != "completed" or not isinstance(entry.get("is_safe"), bool):
+                      error(f"{label}: tool {tool} was not scanned")
+                      continue
+                  found = False
+                  for analyzer, finding in (entry.get("findings") or {}).items():
+                      if not isinstance(finding, dict):
+                          error(f"{label}: tool {tool}: unreadable finding from {clean(analyzer, 40)}")
+                          continue
+                      raw = str(finding.get("severity", "")).upper()
+                      if raw == "SAFE":
+                          continue
+                      severity = MCP_SEVERITY.get(raw)
+                      if severity is None:
+                          error(f"{label}: tool {tool}: unknown severity {clean(raw, 20)} from {clean(analyzer, 40)}")
+                          continue
+                      for threat in finding.get("threat_names") or ["UNSPECIFIED"]:
+                          found = True
+                          rule = "mcp-scanner/" + re.sub(r"[^a-z0-9]+", "-", str(threat).lower()).strip("-")[:60]
+                          rules.setdefault(
+                              rule,
+                              {
+                                  "id": rule,
+                                  "shortDescription": {"text": clean(threat, 80)},
+                                  "properties": {"security-severity": MCP_SCORE[severity], "tags": ["security", "mcp"]},
+                              },
+                          )
+                          digest = hashlib.sha256(f"{label}|{tool}|{rule}|{analyzer}".encode()).hexdigest()[:32]
+                          results.append(
+                              {
+                                  "ruleId": rule,
+                                  "level": MCP_LEVEL[severity],
+                                  "message": {"text": f"Tool {tool}: {clean(finding.get('threat_summary', threat), 200)}"},
+                                  "properties": {"severity": severity.upper()},
+                                  "locations": [
+                                      {
+                                          "physicalLocation": {
+                                              "artifactLocation": {"uri": relative(target), "uriBaseId": "%SRCROOT%"}
+                                          }
+                                      }
+                                  ],
+                                  "partialFingerprints": {"agentScan/v1": digest},
+                              }
+                          )
+                          tripped = tripped or (threshold is not None and RANKS[severity] >= threshold)
+                  if not entry["is_safe"] and not found:
+                      error(f"{label}: tool {tool} is reported unsafe with no finding to show")
+              return results, list(rules.values()), tripped
+
+
+          def main():
+              targets = find_targets()
+              results, rules, tripped, scanned, seen = [], {}, False, 0, set()
+              with tempfile.TemporaryDirectory() as home:
+                  for index, target in enumerate(targets):
+                      if KIND == "skill":
+                          found, found_rules, trip = scan_skill(target, home, index)
+                      else:
+                          found, found_rules, trip = scan_mcp(target, home, index)
+                      scanned += 1
+                      for result in found:
+                          place = ((result.get("locations") or [{}])[0].get("physicalLocation") or {})
+                          key = (
+                              result.get("ruleId"),
+                              (place.get("artifactLocation") or {}).get("uri"),
+                              (place.get("region") or {}).get("startLine"),
+                              (result.get("message") or {}).get("text"),
+                          )
+                          # Scanning one file of a directory scans its siblings too; a finding is reported once.
+                          if key not in seen:
+                              seen.add(key)
+                              results.append(result)
+                      for rule in found_rules:
+                          rules.setdefault(rule.get("id"), rule)
+                      tripped = tripped or trip
+                      top = max((level_rank(r) for r in found), default=-1)
+                      print(f"scanned {clean(relative(target))}: {len(found)} finding(s), highest {NAMES.get(top, 'none')}")
+              counts = {name: 0 for name in RANKS}
+              for result in results:
+                  counts[NAMES[level_rank(result)]] += 1
+              highest = max((level_rank(r) for r in results), default=-1)
+              highest_name = NAMES.get(highest, "none")
+              if not errors:
+                  driver = {
+                      "skill": {"name": "skill-scanner", "informationUri": "https://github.com/cisco-ai-defense/skill-scanner"},
+                      "mcp": {"name": "mcp-scanner", "informationUri": "https://github.com/cisco-ai-defense/mcp-scanner"},
+                  }[KIND]
+                  sarif = {
+                      "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+                      "version": "2.1.0",
+                      "runs": [{"tool": {"driver": {**driver, "rules": list(rules.values())}}, "results": results}],
+                  }
+                  SARIF_OUT.write_text(json.dumps(sarif))
+              summary = [
+                  f"### {'Skill' if KIND == 'skill' else 'MCP tool'} scan (static engines only, advisory unless a threshold is set)",
+                  "",
+                  f"Scanned {scanned} target(s); {len(results)} finding(s); highest severity {highest_name}.",
+                  "",
+                  "| Severity | Findings |",
+                  "| --- | --- |",
+                  *[f"| {name} | {counts[name]} |" for name in reversed(list(RANKS))],
+              ]
+              shown = sorted(results, key=lambda r: -level_rank(r))[:50]
+              if shown:
+                  summary += ["", "| Severity | Rule | File |", "| --- | --- | --- |"]
+                  for result in shown:
+                      location = ((result.get("locations") or [{}])[0].get("physicalLocation") or {}).get("artifactLocation") or {}
+                      name = NAMES[level_rank(result)]
+                      summary.append(f"| {name} | `{clean(result.get('ruleId', ''), 60)}` | `{clean(location.get('uri', ''), 100)}` |")
+                  if len(results) > len(shown):
+                      summary.append(f"\n{len(results) - len(shown)} more in the SARIF report.")
+              if errors:
+                  summary += ["", f"The scan did not complete: {len(errors)} error(s). No report was uploaded."]
+              if tripped:
+                  summary += ["", f"A finding is at or above `{fail_on}`, so this job fails."]
+              if os.environ.get("GITHUB_STEP_SUMMARY"):
+                  with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as handle:
+                      handle.write("\n".join(summary) + "\n")
+              if os.environ.get("GITHUB_OUTPUT"):
+                  with open(os.environ["GITHUB_OUTPUT"], "a") as handle:
+                      handle.write(f"findings={len(results)}\nmax-severity={highest_name}\nscanned={scanned}\n")
+                      handle.write(f"sarif={'false' if errors else 'true'}\n")
+              if tripped:
+                  print(f"::error title=Agent scan::a finding is at or above {fail_on}")
+              sys.exit(1 if errors or tripped else 0)
+
+
+          main()
+          PY
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always() && steps.scan.outputs.sarif == 'true'
+        with:
+          name: ${{ inputs.sarif-category }}-skill
+          path: ${{ runner.temp }}/skill-scanner.sarif
+          if-no-files-found: error
+          retention-days: 14
+
+  skill-upload:
+    name: Upload skill-scan SARIF
+    needs: skill-scan
+    if: >-
+      always() && inputs.upload-sarif && needs.skill-scan.outputs.sarif == 'true' &&
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      security-events: write  # the SARIF upload
+    steps:
+      - name: Validate the egress policy inputs (EX-0001)
+        timeout-minutes: 1
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        env:
+          POLICY_EGRESS_POLICY: ${{ inputs.egress-policy }}
+          POLICY_EGRESS_POLICY_SECRETLESS: ${{ inputs.egress-policy-secretless }}
+        run: |
+          set -u
+          bad=0
+          check() {
+            if [ "$2" = set ] && [ "$3" != audit ] && [ "$3" != block ]; then
+              echo "::error title=egress policy::the $1 input must be exactly 'audit' or 'block' (its value is ${#3} characters long)"
+              bad=1
+            fi
+          }
+          check egress-policy "${POLICY_EGRESS_POLICY+set}" "${POLICY_EGRESS_POLICY-}"
+          check egress-policy-secretless "${POLICY_EGRESS_POLICY_SECRETLESS+set}" "${POLICY_EGRESS_POLICY_SECRETLESS-}"
+          check distro-egress-policy "${POLICY_DISTRO_EGRESS_POLICY+set}" "${POLICY_DISTRO_EGRESS_POLICY-}"
+          check semgrep-egress-policy "${POLICY_SEMGREP_EGRESS_POLICY+set}" "${POLICY_SEMGREP_EGRESS_POLICY-}"
+          exit "$bad"
+
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: ${{ (inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block' }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
+          disable-sudo: true
+          # The agent may only stop reporting to StepSecurity in block mode.
+          disable-telemetry: ${{ ((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block') == 'block' }}
+
+      - name: Egress canary (EX-0001)
+        if: ${{ runner.os == 'Linux' && (((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block') == 'block') }}
+        timeout-minutes: 2
+        shell: bash
+        # The workspace root exists before checkout; a job default working-directory may not.
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -u
+          NAMES="github.com api.github.com results-receiver.actions.githubusercontent.com"
+          PORT=443
+          canary_resolve() { timeout 5 getent ahostsv4 "$1" 2>/dev/null | awk '$2 == "STREAM" { print $1 }'; }
+          canary_probe() { timeout 3 bash -c "exec 3<>\"/dev/tcp/\$0/\$1\"" "$1" "$PORT" 2>/dev/null; }
+          canary_reach() {
+            local i
+            for i in 1 2 3 4; do
+              canary_probe "$1" && return 0
+              [ "$i" -lt 4 ] && sleep 1
+            done
+            return 1
+          }
+          canary_show() { local n=$1; shift; echo "+ $*"; { timeout 10 "$@" 2>&1 || true; } | head -n "$n" || true; }
+          canary_diag() {
+            local name
+            echo "::group::egress canary diagnostics (EX-0001, for the GitHub Support ticket)"
+            canary_show 5 uname -srmo
+            canary_show 20 cat /etc/resolv.conf
+            canary_show 20 bash -c "resolvectl status 2>/dev/null | grep -E '^ *(Current DNS Server|DNS Servers?|DNS Domain):'"
+            canary_show 20 bash -c "ss -lun | grep ':53 '"
+            for name in $NAMES pipelines.actions.githubusercontent.com; do
+              canary_show 20 getent ahostsv4 "$name"
+              canary_show 5 curl -sS -o /dev/null -w '%{http_code} %{remote_ip} %{time_connect}\n' --max-time 8 "https://$name"
+            done
+            echo "::endgroup::"
+          }
+          canary_main() {
+            local tmp name addr n=0 bad
+            tmp=$(mktemp -d) || return 1
+            for _ in 1 2 3; do
+              for name in $NAMES; do canary_resolve "$name" >>"$tmp/res.$name" & done
+              wait
+              sleep 1
+            done
+            for name in $NAMES; do
+              if [ -s "$tmp/res.$name" ]; then sort -u "$tmp/res.$name"; else echo "-"; fi | sed "s|^|$name |" >>"$tmp/pairs"
+            done
+            while read -r name addr; do
+              n=$((n + 1))
+              ( { [ "$addr" != "-" ] && canary_reach "$addr"; } || echo "$name $addr" >"$tmp/bad.$n" ) </dev/null &
+            done <"$tmp/pairs"
+            wait
+            bad=$(cat "$tmp"/bad.* 2>/dev/null | sort || true)
+            rm -rf "$tmp"
+            if [ -z "$bad" ]; then
+              echo "egress canary: all $n addresses of $NAMES accept TCP $PORT"
+              return 0
+            fi
+            echo "::error title=egress canary::egress broken on this runner (known westus2 DNS issue, EX-0001): rerun the job"
+            echo "unreachable addresses (name address; '-' means the name did not resolve):"
+            printf '%s\n' "$bad"
+            canary_diag
+            echo "EX-0001 egress canary failed, unreachable: $(printf '%s' "$bad" | tr '\n' ';')" >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
+            return 1
+          }
+          set -m
+          canary_main &
+          main=$!
+          (sleep 90; kill -TERM -- "-$main"; sleep 2; kill -KILL -- "-$main") >/dev/null 2>&1 &
+          dog=$!
+          wait "$main" && rc=0 || rc=$?
+          kill -TERM -- "-$dog" >/dev/null 2>&1 || true
+          if kill -0 -- "-$main" >/dev/null 2>&1; then
+            kill -TERM -- "-$main" >/dev/null 2>&1 || true
+            sleep 1
+            kill -KILL -- "-$main" >/dev/null 2>&1 || true
+          fi
+          if [ "$rc" -eq 143 ] || [ "$rc" -eq 137 ]; then
+            echo "::error title=egress canary::the canary hit its 90 s deadline (EX-0001): rerun the job"
+            rc=124
+          fi
+          exit "$rc"
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ inputs.sarif-category }}-skill
+          path: agent-scan-report
+
+      - uses: github/codeql-action/upload-sarif@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
+        with:
+          sarif_file: agent-scan-report/skill-scanner.sarif
+          category: ${{ inputs.sarif-category }}-skill
+
+  mcp-scan:
+    name: MCP tool scan
+    if: inputs.mcp-tool-files != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read  # this job reads the repository's content and holds nothing else
+    outputs:
+      findings: ${{ steps.scan.outputs.findings }}
+      max-severity: ${{ steps.scan.outputs.max-severity }}
+      sarif: ${{ steps.scan.outputs.sarif }}
+    steps:
+      - name: Validate the egress policy inputs (EX-0001)
+        timeout-minutes: 1
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        env:
+          POLICY_EGRESS_POLICY: ${{ inputs.egress-policy }}
+          POLICY_EGRESS_POLICY_SECRETLESS: ${{ inputs.egress-policy-secretless }}
+        run: |
+          set -u
+          bad=0
+          check() {
+            if [ "$2" = set ] && [ "$3" != audit ] && [ "$3" != block ]; then
+              echo "::error title=egress policy::the $1 input must be exactly 'audit' or 'block' (its value is ${#3} characters long)"
+              bad=1
+            fi
+          }
+          check egress-policy "${POLICY_EGRESS_POLICY+set}" "${POLICY_EGRESS_POLICY-}"
+          check egress-policy-secretless "${POLICY_EGRESS_POLICY_SECRETLESS+set}" "${POLICY_EGRESS_POLICY_SECRETLESS-}"
+          check distro-egress-policy "${POLICY_DISTRO_EGRESS_POLICY+set}" "${POLICY_DISTRO_EGRESS_POLICY-}"
+          check semgrep-egress-policy "${POLICY_SEMGREP_EGRESS_POLICY+set}" "${POLICY_SEMGREP_EGRESS_POLICY-}"
+          exit "$bad"
+
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: ${{ inputs.egress-policy == 'audit' && 'audit' || 'block' }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
+          disable-sudo: true
+          # The agent may only stop reporting to StepSecurity in block mode.
+          disable-telemetry: ${{ (inputs.egress-policy == 'audit' && 'audit' || 'block') == 'block' }}
+
+      - name: Egress canary (EX-0001)
+        if: ${{ runner.os == 'Linux' && ((inputs.egress-policy == 'audit' && 'audit' || 'block') == 'block') }}
+        timeout-minutes: 2
+        shell: bash
+        # The workspace root exists before checkout; a job default working-directory may not.
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -u
+          NAMES="github.com api.github.com results-receiver.actions.githubusercontent.com"
+          PORT=443
+          canary_resolve() { timeout 5 getent ahostsv4 "$1" 2>/dev/null | awk '$2 == "STREAM" { print $1 }'; }
+          canary_probe() { timeout 3 bash -c "exec 3<>\"/dev/tcp/\$0/\$1\"" "$1" "$PORT" 2>/dev/null; }
+          canary_reach() {
+            local i
+            for i in 1 2 3 4; do
+              canary_probe "$1" && return 0
+              [ "$i" -lt 4 ] && sleep 1
+            done
+            return 1
+          }
+          canary_show() { local n=$1; shift; echo "+ $*"; { timeout 10 "$@" 2>&1 || true; } | head -n "$n" || true; }
+          canary_diag() {
+            local name
+            echo "::group::egress canary diagnostics (EX-0001, for the GitHub Support ticket)"
+            canary_show 5 uname -srmo
+            canary_show 20 cat /etc/resolv.conf
+            canary_show 20 bash -c "resolvectl status 2>/dev/null | grep -E '^ *(Current DNS Server|DNS Servers?|DNS Domain):'"
+            canary_show 20 bash -c "ss -lun | grep ':53 '"
+            for name in $NAMES pipelines.actions.githubusercontent.com; do
+              canary_show 20 getent ahostsv4 "$name"
+              canary_show 5 curl -sS -o /dev/null -w '%{http_code} %{remote_ip} %{time_connect}\n' --max-time 8 "https://$name"
+            done
+            echo "::endgroup::"
+          }
+          canary_main() {
+            local tmp name addr n=0 bad
+            tmp=$(mktemp -d) || return 1
+            for _ in 1 2 3; do
+              for name in $NAMES; do canary_resolve "$name" >>"$tmp/res.$name" & done
+              wait
+              sleep 1
+            done
+            for name in $NAMES; do
+              if [ -s "$tmp/res.$name" ]; then sort -u "$tmp/res.$name"; else echo "-"; fi | sed "s|^|$name |" >>"$tmp/pairs"
+            done
+            while read -r name addr; do
+              n=$((n + 1))
+              ( { [ "$addr" != "-" ] && canary_reach "$addr"; } || echo "$name $addr" >"$tmp/bad.$n" ) </dev/null &
+            done <"$tmp/pairs"
+            wait
+            bad=$(cat "$tmp"/bad.* 2>/dev/null | sort || true)
+            rm -rf "$tmp"
+            if [ -z "$bad" ]; then
+              echo "egress canary: all $n addresses of $NAMES accept TCP $PORT"
+              return 0
+            fi
+            echo "::error title=egress canary::egress broken on this runner (known westus2 DNS issue, EX-0001): rerun the job"
+            echo "unreachable addresses (name address; '-' means the name did not resolve):"
+            printf '%s\n' "$bad"
+            canary_diag
+            echo "EX-0001 egress canary failed, unreachable: $(printf '%s' "$bad" | tr '\n' ';')" >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
+            return 1
+          }
+          set -m
+          canary_main &
+          main=$!
+          (sleep 90; kill -TERM -- "-$main"; sleep 2; kill -KILL -- "-$main") >/dev/null 2>&1 &
+          dog=$!
+          wait "$main" && rc=0 || rc=$?
+          kill -TERM -- "-$dog" >/dev/null 2>&1 || true
+          if kill -0 -- "-$main" >/dev/null 2>&1; then
+            kill -TERM -- "-$main" >/dev/null 2>&1 || true
+            sleep 1
+            kill -KILL -- "-$main" >/dev/null 2>&1 || true
+          fi
+          if [ "$rc" -eq 143 ] || [ "$rc" -eq 137 ]; then
+            echo "::error title=egress canary::the canary hit its 90 s deadline (EX-0001): rerun the job"
+            rc=124
+          fi
+          exit "$rc"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      # The lock is .github/requirements/cisco-ai-mcp-scanner.txt, copied here by scripts/tool_locks.py.
+      - name: Install mcp-scanner
+        env:
+          REQUIREMENTS: |
+            # cisco-ai-mcp-scanner: generated by scripts/tool_locks.py from cisco-ai-mcp-scanner.in; do not edit.
+            # Wheels for x86_64 and aarch64 Linux and CPython 3.12-3.14 only (see that script).
+            aiohappyeyeballs==2.7.1 \
+                --hash=sha256:9243213661e29250eb41368e5daa826fc017156c3b8a11440826b2e3ed376472
+            aiohttp==3.14.5 \
+                --hash=sha256:1eb8167961ec4dfcc8cb9dd50bd0ee72519f7ef496be95203e49e27b01618382 \
+                --hash=sha256:1ffa3a523a36d8628f98c06492ae16a31a23d14c0b4ec721757b477319f656d6 \
+                --hash=sha256:20f085697d7e911f1f73c43ed03fafbed1e7121797e2eb5428efa80398060584 \
+                --hash=sha256:74efb69332b85675b1eabd760a8cfc2e2cf42c60607c66f88014c1bdfb40942d \
+                --hash=sha256:94684b879ac1d71e4238850c99b62dc1b28d9086b156a2555f082010b85a865c \
+                --hash=sha256:abfda5cb094a829f7bc25216a32f7db2e85cc65bd59910f8e7b40b3d9b224764 \
+                --hash=sha256:efc21a454892828368b11c2c780de0ff8bc991f73f6b99c6b66e56205470929b
+            aiosignal==1.4.0 \
+                --hash=sha256:053243f8b92b990551949e63930a839ff0cf0b0ebbe0597b0f3fb19e1a0fe82e
+            annotated-doc==0.0.5 \
+                --hash=sha256:117bac03a25ede5df5440e855b32d556049ca169ead221505badf432fed4b101
+            annotated-types==0.8.0 \
+                --hash=sha256:f072f4d804ea359e4eaf198b1af7a8b0943881a87f31bb764f8bf219bb9419e0
+            anyio==4.15.1 \
+                --hash=sha256:6152fdbbf9a77fdec97731721bebf7c4c44f7c29b424b0065826173efc7ed101
+            attrs==26.1.0 \
+                --hash=sha256:c647aa4a12dfbad9333ca4e71fe62ddc36f4e63b2d260a37a8b83d2f043ac309
+            boolean-py==5.0 \
+                --hash=sha256:ef28a70bd43115208441b53a045d1549e2f0ec6e3d08a9d142cbc41c1938e8d9
+            cachecontrol==0.14.4 \
+                --hash=sha256:b7ac014ff72ee199b5f8af1de29d60239954f223e948196fa3d84adaffc71d2b
+            certifi==2026.10.23 \
+                --hash=sha256:e9b54de76e530bb6cf0ccd036787103acb58fd42ba930ea8bf948ddbaa2f61d1
+            cffi==2.1.1 ; platform_python_implementation != 'PyPy' \
+                --hash=sha256:58acb8ab8e295e6c5ea12f888cbb13cf21511ef2a3303a23f4325c29d17fe5c1 \
+                --hash=sha256:68e62fe11f30d5ca8289242866f0a5291402d8529ca2178ab8afc5c9694ae890 \
+                --hash=sha256:a931079504ecc49efed7744c476a5c343a92fabf66dec2db95edb1b2fdc770e2 \
+                --hash=sha256:b0431303acaea1089ad4b3e9ce4e6518193def1118d4073ca848635ee4ea2e96 \
+                --hash=sha256:c1453022f490d2459a11819d83ad1d586e9ff65a12ac3e705ffebd46d3685dcf \
+                --hash=sha256:f16c709686a78c727bbbf059f92b0bf41c6fc60deec706d2dc19f529175a6125
+            charset-normalizer==3.5.2 \
+                --hash=sha256:1c50fe28bbc2ced33386f298650d91218076c05420e6cbd790b913adc41659e7 \
+                --hash=sha256:34276fd796040bf0993ab33a369aa572e6979c7aab225a88893667ad8eac8f7a \
+                --hash=sha256:3d31298449090ab8d47b7b1b2a555ff73cac7ed438a08b7ac160980c7ebed649 \
+                --hash=sha256:7218e8f32b0956cfcd048fd42d9d5779809745ca1d86113ca56f66e7ae1549c4 \
+                --hash=sha256:849df64e889b2e17230d58410a03dba311a65b163508fd33679b2b737d4b7858 \
+                --hash=sha256:8d86d6fc60743dc916eb79e2eb1ec4818e21e427731543af40a3021851174a13 \
+                --hash=sha256:b6b751274acb69d77b3323d6b7dbaa3c7fdfc1eb829b7eb61d262f32e1af9685 \
+                --hash=sha256:b91363207bd9dc966a691e959bb47f64b30f7ac4b072be9968b366982f7db77c \
+                --hash=sha256:d19fbd981a488e22cd04883659ca6b08f50b5974f9fd7c95655ef6a043e5893f
+            cisco-ai-mcp-scanner==4.8.7 \
+                --hash=sha256:55142609f3519b8fd80ec491c1c3bb9e17c2370fb65d6052a07022d4a8906350
+            click==8.5.0 \
+                --hash=sha256:255bc9599cf7748b4b1a446ccc735421bd08a2ae529a8b88597d3de5664ee360
+            cryptography==50.0.2 \
+                --hash=sha256:0ddc924c04591c2811ca024d62ecad4f7f6f08af8939c211438f48a16bd23602 \
+                --hash=sha256:1981f1db4630889b9ef7803fadef12b056f428cb6b85c27ba57b774793b6093c \
+                --hash=sha256:4061c0079120205fb760c58acab6443e217307dcf05e3702cf970e0689972856 \
+                --hash=sha256:630ebfea3bf689d075f82316324ff7433dc447fe6bc1bfc76524b74b4a9567d2 \
+                --hash=sha256:79def8d059362e7831389ed3be0ecdf58a89386e1271e35dd9f5af84e81bffd0 \
+                --hash=sha256:87e9ce85beb6b328ba370cc6e6aea483c92617b4c95b1d33a49297eb662bfb04 \
+                --hash=sha256:9dab55f57c74c3cad24c323bacbbd04be4705ba6eb0d92e920b1fc4837ed5079 \
+                --hash=sha256:c5e67125c7dca78d199ec4e116aa93dbb83494808ecbb8211a2cb09b1bf41dbd \
+                --hash=sha256:dfe9763530994147d9af1def057a5b9658b00e8f8fe8743d144d1e0911c2e454 \
+                --hash=sha256:ee247f5c245c9a2fe7c8e2214e295918838e44e00a45a6718451e4004219e767 \
+                --hash=sha256:f21e8a22c8605750c7af886bab299a363721264061b4ac0a30efb73cfd58efc5 \
+                --hash=sha256:f9f6143a8c75945eb960d9eb98905a441394abfa24afaae239d514ffb2586480
+            cyclonedx-python-lib==11.12.0 \
+                --hash=sha256:0e807521a921a5c3cb8ce1153f8a61d29eedfe76a46aac2796b7c6b573391a54
+            defusedxml==0.7.1 \
+                --hash=sha256:a352e7e428770286cc899e2542b6cdaedb2b4953ff269a210103ec58f6198a61
+            distro==1.9.0 \
+                --hash=sha256:7bffd925d65168f85027d8da9af6bddab658135b840670a223589bc0c8ef02b2
+            expandvars==1.1.2 \
+                --hash=sha256:d1652fe4e61914f5b88ada93aaedb396446f55ae4621de45c8cb9f66e5712526
+            fastapi==0.162.0 \
+                --hash=sha256:3785963de305dd09912426cb81f2d230fce98ab3521cdfe97265c8d14983128c
+            fastuuid==0.14.0 \
+                --hash=sha256:0c9ec605ace243b6dbe3bd27ebdd5d33b00d8d1d3f580b39fdd15cd96fd71796 \
+                --hash=sha256:33e678459cf4addaedd9936bbb038e35b3f6b2061330fd8f2f6a1d80414c0f87 \
+                --hash=sha256:808527f2407f58a76c916d6aa15d58692a4a019fdf8d4c32ac7ff303b7d7af09 \
+                --hash=sha256:a8a0dfea3972200f72d4c7df02c8ac70bad1bb4c58d7e0ec1e6f341679073a7f \
+                --hash=sha256:aa75b6657ec129d0abded3bec745e6f7ab642e6dba3a5272a68247e85f5f316f \
+                --hash=sha256:ab32f74bd56565b186f036e33129da77db8be09178cd2f5206a5d4035fb2a23f
+            filelock==4.2.4 \
+                --hash=sha256:301241438c57936ef93f4243a94f2559022268bfcf9b375a9a72eb0f8db8358e
+            frozenlist==1.8.0 \
+                --hash=sha256:0c18a16eab41e82c295618a77502e17b195883241c563b00f0aa5106fc4eaa0d \
+                --hash=sha256:494a5952b1c597ba44e0e78113a7266e656b9794eec897b19ead706bd7074383 \
+                --hash=sha256:778a11b15673f6f1df23d9586f83c4846c471a8af693a22e066508b77d201ec8 \
+                --hash=sha256:96f423a119f4777a4a056b66ce11527366a8bb92f54e541ade21f2374433f6d4 \
+                --hash=sha256:cba69cb73723c3f329622e34bdbf5ce1f80c21c290ff04256cff1cd3c2036ed2 \
+                --hash=sha256:eaa352d7047a31d87dafcacbabe89df0aa506abb5b1b85a2fb91bc3faa02d822 \
+                --hash=sha256:fb30f9626572a76dfe4293c7194a09fb1fe93ba94c7d4f720dfae3b646b45027
+            fsspec==2026.9.0 \
+                --hash=sha256:8dd6e646e99ea382bd85f97a45e6b526a442d79423a7dc673f1e2756d05fcb5f
+            h11==0.16.0 \
+                --hash=sha256:63cf8bbe7522de3bf65932fda1d9c2772064ffb3dae62d55932da54b31cb6c86
+            hf-xet==1.7.1 ; platform_machine == 'AMD64' or platform_machine == 'ARM64' or platform_machine == 'aarch64' or platform_machine == 'amd64' or platform_machine == 'arm64' or platform_machine == 'x86_64' \
+                --hash=sha256:b7fe4b5c4cc912a2c7b36538c6696d3312bd1471835ee814c3dd3dfc5509c3b9 \
+                --hash=sha256:f26bfd4a6e31b4e37e749a07e8642589406e8537be05eccfd633a92b95e2fb51
+            httpcore==1.0.9 \
+                --hash=sha256:2d400746a40668fc9dec9810239072b40b4484b640a8c38fd654a024c7a1bf55
+            httpcore2==2.16.0 ; sys_platform != 'emscripten' \
+                --hash=sha256:5c4358319f2602d984ad93182c9fee5160f22e9da7babdda870a5e7c4e2dc34f
+            httpx==0.28.1 \
+                --hash=sha256:d909fcccc110f8c7faf814ca82a9a4d816bc5a6dbfea25d6591d6985b8ba59ad
+            httpx2==2.16.0 \
+                --hash=sha256:fd2c5d7909e8d86fe92d53020c310ca0e4e431b838c207c5754b9bbf0308d49a
+            httpx2-jsfetch==1.0 ; sys_platform == 'emscripten' \
+                --hash=sha256:cb916b707601e69a07721aabc8f3f6659be3a6893bc1ff5c6f9e02241df2da32
+            huggingface-hub==2.4.0 \
+                --hash=sha256:42ecfd93ede47bdd333daebbf66a32d7bfe2e18752754fe4d2d4f98a0179d801
+            idna==3.20 \
+                --hash=sha256:ab7ae7122974553370f0bdb919e1a960b2cd1bc1ef0276416d896db81c14582c
+            importlib-metadata==8.9.0 \
+                --hash=sha256:e0f761b6ea91ced3b0844c14c9d955224d538105921f8e6754c00f6ca79fba7f
+            jinja2==3.1.6 \
+                --hash=sha256:85ece4451f492d0c13c5dd7c13a64681a86afae63a5f347908daf103ce6d2f67
+            jiter==0.18.0 \
+                --hash=sha256:6e3350b7431f7b8315b925d9ca0f29a44e8fb6ed45c1fe552392cb6297966bb9 \
+                --hash=sha256:9623fc90f1a4754452a525383ce70476476c16556098944709b8cdbd9ad905f0 \
+                --hash=sha256:a01642d403b8925f2b1e1bb51b4ba49ece8a2bdc9b9560fc8ed0b1f2b35b567a \
+                --hash=sha256:b3c741e6b778c951a6861964ee475118812a33208426c54fb92bf4e318bda834 \
+                --hash=sha256:d7424194e68ef44e94290961f59319850d7ce11a329a3957f91709c15ded6618 \
+                --hash=sha256:d8013186f2b9a8c27ededa601050392527aa9d27ffd35d49aae424fbd2062f38
+            jsonschema==4.26.0 \
+                --hash=sha256:d489f15263b8d200f8387e64b4c3a75f06629559fb73deb8fdfb525f2dab50ce
+            jsonschema-specifications==2025.9.1 \
+                --hash=sha256:98802fee3a11ee76ecaca44429fda8a41bff98b00a0f2838151b113f210cc6fe
+            license-expression==30.4.4 \
+                --hash=sha256:421788fdcadb41f049d2dc934ce666626265aeccefddd25e162a26f23bcbf8a4
+            litellm==1.93.2 \
+                --hash=sha256:1c84f7c4acb4e926a79b93145ab23231b300fc687bde7172ef884fc52d6011e0 \
+                --hash=sha256:294ad19f356f821ce97a5428d09439be5f38d22b218c73008d8a49e3e42eb145 \
+                --hash=sha256:6f6a5e3907f0a1c9d8ff8d71a6cbac8a592e47a40da3f97167074947b5ba7d11 \
+                --hash=sha256:a81ceff44c58ef504ab8bd787d03b82618765b9cfd530942386ae6d23c58be94 \
+                --hash=sha256:cacf35cf703b12c54516fc6464a3e08c6dbb1dcfb97239e1f629294fe36a1cba \
+                --hash=sha256:dee1b02b7f52a5a408bf7c8d499f0834e49194651743758a511dcdd926c0b692
+            markdown-it-py==4.2.0 \
+                --hash=sha256:9f7ebbcd14fe59494226453aed97c1070d83f8d24b6fc3a3bcf9a38092641c4a
+            markupsafe==3.0.4 \
+                --hash=sha256:1caa2fa5a6184fb233153b35f654e6687bd555476f6170f29d8ee9be1a8b0af9 \
+                --hash=sha256:434139499bb20b502ed3baa1f169e618f924a97e7a777fea1a49446d80106cf6 \
+                --hash=sha256:6a45c3d514f2436064db00d7fc8778d888f0236ebfed649b53d13a59e69ad51b \
+                --hash=sha256:7018d4af1cd272e847aa5917983ab5e83e4f6579f9dbfecd4a79c0ca80b144c2 \
+                --hash=sha256:8e124f974786f831d6043728e38296969d3579db8896fe004682f5758e613581 \
+                --hash=sha256:a8e9f292fcda89b324f2f5c91d13f1424a153e40fc2756f38ee23b15835ff300
+            mcp==2.3.0 \
+                --hash=sha256:dd0c44c089d16453e8ae31a3877a0054d7a2314caaa81f5e0541b9b1734b2377
+            mcp-types==2.3.0 \
+                --hash=sha256:968efdbdaedfab06adae40d378a34395f1090c5921d4be3c9cde283aaf76d91d
+            mdurl==0.1.2 \
+                --hash=sha256:84008a41e51615a49fc9966191ff91509e3c40b939176e643fd50a5c2196b8f8
+            msgpack==1.2.4 \
+                --hash=sha256:2444a4e04f924630d059ae6eae8f91fdfcd28ed9fd17b21bacf4e74550a091f7 \
+                --hash=sha256:5d65b791ce4283e02b6267742ad540899155e1b32887b9cbdda47f38f5a076b5 \
+                --hash=sha256:7fabd415c41e62006c6641fcdf5b3e866f581c4e11c58328c0d0f69584b9577d \
+                --hash=sha256:9ca1e78106675f2aed07dc37b842ce19be70010ab22c5c5c04688f0840d48539 \
+                --hash=sha256:c4d5bbdbea8f5669b3a734d6c226772804fb120848f99cbe63a0ddee63b049c9 \
+                --hash=sha256:e9c5ba0f053a7e98f013f083c9d1b2dffb26cad8c897c533d8286e44ed24c669
+            multidict==7.2.1 \
+                --hash=sha256:08ea94663d9e7c25d14d78222f7aee906c472d4837766bec62477c38f6e419dc \
+                --hash=sha256:1fb8c1a3480c130c3a6422d5f16f3cad6552bf08c2089dd288ba7134649183b5 \
+                --hash=sha256:335f715f8c111654f29e4bf19086bdf0245579d2b4f4f59ca8dd9b3003b859c1 \
+                --hash=sha256:6efdeed2723431999cf3bcbc84c72dbe0f65d16bb1f84e15a657f5b60ff18ca6 \
+                --hash=sha256:822a7fcd33f6922b650e1b26594f09d53c5d011fe655fea7ded27b2728ce2a1b \
+                --hash=sha256:cd69c99affd1b4debc1f9a53058ea6e3a9b34f2e733840bb45891666cd8ede0a \
+                --hash=sha256:fa0ecd064b0ae18d235283abb5adbc4e07304dba8f2aa7c0d61f28bebcc70d4c
+            openai==2.54.0 \
+                --hash=sha256:89089789197ccdb87f173a03145ed1598d00795220c93e96cf712b1cbf5e5f2b
+            opentelemetry-api==1.45.2 \
+                --hash=sha256:2cbd737377e710ee740d261c94e93fa0f08e6d037c18f17513cc0a2d94479a34
+            packageurl-python==0.17.6 \
+                --hash=sha256:31a85c2717bc41dd818f3c62908685ff9eebcb68588213745b14a6ee9e7df7c9
+            packaging==26.3 \
+                --hash=sha256:d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c
+            pip==26.2.2 \
+                --hash=sha256:fd7f4dfa8190e014013b9f08f3e973f4e4c26ffd179a204895533a7254813a70
+            pip-api==0.0.35 \
+                --hash=sha256:66990d0da25378555cbb538db79384bab92d4617c6350dfd7a2126ba2a3a9894
+            pip-audit==2.10.1 \
+                --hash=sha256:99ef3f600a317c1945f1e89e227ef26e1c2d618429b8bd3fa6f4f7c440c4611a
+            pip-requirements-parser==32.0.1 \
+                --hash=sha256:4659bc2a667783e7a15d190f6fccf8b2486685b6dba4c19c3876314769c57526
+            platformdirs==4.14.0 \
+                --hash=sha256:1dadfc59a8a5d7565b3d9270ae8fa71c065595352c4277b41c11ee6c222c4b91
+            propcache==0.5.4 \
+                --hash=sha256:251c63dd46a0659bb875cb254dc4c1e79ee91a847c737cd62373295afc2235dc \
+                --hash=sha256:2814ecd8e818f487bee4b0f921bc4d1c176cc5fc71ac0f072d0fa67eda4ac14b \
+                --hash=sha256:60a64cbccaa11b7760ce705a14ada17ba459e7ca9f23ba587eb013821032d7ef \
+                --hash=sha256:62c60aec739ed00124573cce1178138fd690c7676352d67a37328c1cf51d7468 \
+                --hash=sha256:cc07876cfb079b6f6f36d21ce75784ad6c2c6b563eeac0ed26c2fa2669b85df9 \
+                --hash=sha256:dbab5f5ff6897c81f355d079010cdae85b02e5a0b518b5251523b8ad8ae9ac3c \
+                --hash=sha256:f85915e00dcb1cd9f2f890ead064ed40a27df06f0db65be427b29482ae357572
+            puremagic==2.2.0 \
+                --hash=sha256:c4f7ed7307f056c787199acfda839555921be1df13abba61e8e6db0c787ae1d0
+            py-serializable==2.1.0 \
+                --hash=sha256:b56d5d686b5a03ba4f4db5e769dc32336e142fc3bd4d68a8c25579ebb0a67304
+            pycparser==3.12 ; implementation_name != 'PyPy' and platform_python_implementation != 'PyPy' \
+                --hash=sha256:a076f3f489b39b43ed13563a1dafe42447445bec2e294154ec5c57fcdda4c85e
+            pydantic==2.14.2 \
+                --hash=sha256:7efbf7507b937931cd32a5755acb00ea1cf5ccb1d4e8067a5850d5069e382118
+            pydantic-core==2.50.2 \
+                --hash=sha256:1db9cab6197e797824f0479dd2ae5fd2e272aa61c61b7faa5a6e450ca7a0d3b7 \
+                --hash=sha256:31a1fb3ffbd1195b24490f671d12623dd4c9bfa56d6af0a299fa43b516134f5b \
+                --hash=sha256:43a8fd56f3c681f3cda2d5c842ad28e88241df742dfcbe8fd1dd437a3056e1f6 \
+                --hash=sha256:9667637665acba166a7dbbc786f14c50512d3a01f7199e0e1a13b929e92d7c7a \
+                --hash=sha256:b29b7c5adf4b2be7c941f7f76432aa3269cd5052ff8610376b8ece24d7b02c51 \
+                --hash=sha256:f142cd663d1148ed32993ed9a58e5c67ea312f446a01a6c13a956945aafc9f23
+            pygments==2.21.0 \
+                --hash=sha256:2363c69b61c4a97c838da3b130dcd6468f4848992b21a82f2a63ec34377137d9
+            pyjwt==2.15.1 \
+                --hash=sha256:42d59d631f7768a1028a64c7ff581a9bf7519804daf91fc5b6c56e30eec5e193
+            pyparsing==3.3.3 \
+                --hash=sha256:ece8c00a69cf01b45d0b1dedabb469c90d8caf996d4fda40f147627a122849a4
+            python-dotenv==1.2.4 \
+                --hash=sha256:42269a8a5b3fd54ffa6f3d84b18abed50064717576b4ecf03dc4a55d8aa04fdc
+            python-multipart==0.0.32 \
+                --hash=sha256:ff6d3f776f16878c894e52e107296ffc890e913c611b1a4ec6c44e2821fe2e23
+            pyyaml==6.0.3 \
+                --hash=sha256:0f29edc409a6392443abf94b9cf89ce99889a1dd5376d94316ae5145dfedd5d6 \
+                --hash=sha256:501a031947e3a9025ed4405a168e6ef5ae3126c59f90ce0cd6f2bfc477be31b7 \
+                --hash=sha256:9149cad251584d5fb4981be1ecde53a1ca46c891a79788c0df828d2f166bda28 \
+                --hash=sha256:ba1cc08a7ccde2d2ec775841541641e4548226580ab850948cbfda66a1befcdc \
+                --hash=sha256:c458b6d084f9b935061bc36216e8a69a7e293a2f1e68bf956dcd9e6cbcd143f5 \
+                --hash=sha256:ee2922902c45ae8ccada2c5b501ab86c36525b883eff4255313a253a3160861c
+            referencing==0.37.0 \
+                --hash=sha256:381329a9f99628c9069361716891d34ad94af76e461dcb0335825aecc7692231
+            regex==2026.9.29 \
+                --hash=sha256:2f7f7aa47b229f2b39a2ae2596d2ad5625d77b5eb9856fac2dab3eb506cdd0a0 \
+                --hash=sha256:39ab5894d971f9ac68baa6eca5c50387db579cfcacf36ae8df3feceb1815e6d0 \
+                --hash=sha256:b97a38fb4c732b6832db6bf108963adbcd82ef1268ba2025dce390f45af75efa \
+                --hash=sha256:d49c18f1ea294cf4adde2e5ac256e98c82ea9d708462ce4bf799dffa7cfe8a2c \
+                --hash=sha256:e11edba5bc344a32b029a7af9d4b3173982dd79eeafa0b9dbd787364414b0509 \
+                --hash=sha256:f93bc1c3486ef3747e07c9d7c1d0a147b8fbaab975f80e348aed6f71309dfaca
+            requests==2.34.2 \
+                --hash=sha256:2a0d60c172f83ac6ab31e4554906c0f3b3588d37b5cb939b1c061f4907e278e0
+            rich==15.0.0 \
+                --hash=sha256:33bd4ef74232fb73fe9279a257718407f169c09b78a87ad3d296f548e27de0bb
+            rpds-py==2026.9.1 \
+                --hash=sha256:07deecbfce94c78473018bc7d10b337cc651d12df87a1eb2cb3e4024bc9c33d0 \
+                --hash=sha256:2693b2728bbcc48d09a981a356954b0c47c53ff25b545856f28a889ea619f69a \
+                --hash=sha256:457866b85daf5034296666168b84a69e0b2e89dc4f1af102b46f6448a60b9063 \
+                --hash=sha256:7868b85224291c6cb6759f9b5adb9745f486d226f62b16a614dd5a2a5ab2b35b \
+                --hash=sha256:addeda51556dac7c1a2f14cda62db8b621cd12afba3091d03a96c72932387eab \
+                --hash=sha256:eac2f5dbafd585dfe31f86a23ebf0d3ba480a9d49ebc87947267b5608d4ea0cd
+            shellingham==1.5.4 \
+                --hash=sha256:7ecfff8f2fd72616f7481040475a65b2bf8af90a56c89140852d1120324e8686
+            sniffio==1.3.1 \
+                --hash=sha256:2f6da418d1f1e0fddd844478f41680e794e6051915791a034ff65e5f100525a2
+            sortedcontainers==2.4.0 \
+                --hash=sha256:a163dcaede0f1c021485e957a39245190e74249897e2ae4b2aa38595db237ee0
+            sse-starlette==3.6.0 \
+                --hash=sha256:e4dfa4d237d2712cb2b4d4918eda9b457cd6b44bbecdc838af75de836565bafd
+            starlette==1.10.0 \
+                --hash=sha256:478c0ab3b4ced6e82719849c118fa406f0278a3499c1a898cd15cd31bdc38ce4
+            tiktoken==0.14.0 \
+                --hash=sha256:2157f52e4b4d7ac5ecc7457b3716834706e7ef9a46f5144029bfeb7cf71f4e06 \
+                --hash=sha256:26e60f6a956ee171ab728b37b8439905d7ea1db435c30f9822f291e9861c861d \
+                --hash=sha256:7896eea257fe497a2b7134474d909156c6744ce8da35bce88011a960e008aa0d \
+                --hash=sha256:7db45b98e94adf4173a5cd7422b150999a7ee11ff847783a14f6e1b80cc38cb6 \
+                --hash=sha256:e3442bbb2f0c588cec876061e37ae67b455b9df9978b003c8fe30e45f2ef5b42 \
+                --hash=sha256:f702e0aeeb6506e57687e881c59e844ebe8f0a6a097ddafe20e3ab25f387be4e
+            tokenizers==0.23.3 \
+                --hash=sha256:376851d22bcf9d650a5c3090bb83e6cf9e895fbf0595369fa4cd43c1f69b5f87 \
+                --hash=sha256:ec82e80e65a862275b97c3d90b7a523df8d9519ee48aeb4e9625b2cc909274e0
+            tomli==2.5.0 \
+                --hash=sha256:1245a6638fc4bb0a60af38a7d45413db34a13842027c77597c712c998c62fdf0 \
+                --hash=sha256:32a7b79ac57a2e83670ce329ccf675798bc5a2094783a63676866b70503f2e2b \
+                --hash=sha256:5d8bac3d603c97e6854424e5b2b5b741bdbde387e09f162fb0446812b4a8362b \
+                --hash=sha256:6cf74416bdc94ae458b14e37286c1073081850ac8459a00d0c5efef5d44294c6 \
+                --hash=sha256:6e95c7614e705bfe2b04b27aa124adec59752d15813df37e2156747cab3a006b \
+                --hash=sha256:7ac2027d37c3afbdf4bdd377f2676f6f1d2122a5be1f1137b49dced590b37e75 \
+                --hash=sha256:bf0b5e8e0f68ebb494356e577c06c139161efd8d3b9050f93b39b7c26cc54ff0
+            tomli-w==1.2.0 \
+                --hash=sha256:188306098d013b691fcadc011abd66727d3c414c571bb01b1a174ba8c983cf90
+            tqdm==4.70.1 \
+                --hash=sha256:c293e525e6fef9c20e8728fd4612df02a0aa31bb5fe91ecd93e123b1b7bffa73
+            tree-sitter==0.25.2 \
+                --hash=sha256:260586381b23be33b6191a07cea3d44ecbd6c01aa4c6b027a0439145fcbc3358 \
+                --hash=sha256:b43a9e4c89d4d0839de27cd4d6902d33396de700e9ff4c5ab7631f277a85ead9 \
+                --hash=sha256:b878e296e63661c8e124177cc3084b041ba3f5936b43076d57c487822426f614 \
+                --hash=sha256:bd88fbb0f6c3a0f28f0a68d72df88e9755cf5215bae146f5a1bdc8362b772053 \
+                --hash=sha256:dd12d80d91d4114ca097626eb82714618dcdfacd6a5e0955216c6485c350ef99 \
+                --hash=sha256:eac4e8e4c7060c75f395feec46421eb61212cb73998dbe004b7384724f3682ab
+            tree-sitter-c-sharp==0.23.5 \
+                --hash=sha256:3ea38fb095d85d360dc5a0bec2fa605e496228876f798c9e089d5f0e72bcef46 \
+                --hash=sha256:aa88a780204cd153c4c1ae2d59c654cee1402212fa0d069823d6d34301587438
+            tree-sitter-go==0.25.0 \
+                --hash=sha256:04b3b3cb4aff18e74e28d49b716c6f24cb71ddfdd66768987e26e4d0fa812f74 \
+                --hash=sha256:148255aca2f54b90d48c48a9dbb4c7faad6cad310a980b2c5a5a9822057ed145
+            tree-sitter-java==0.23.5 \
+                --hash=sha256:370b204b9500b847f6d0c5ad584045831cee69e9a3e4d878535d39e4a7e4c4f1 \
+                --hash=sha256:9401e7271f0b333df39fc8a8336a0caf1b891d9a2b89ddee99fae66b794fc5b7
+            tree-sitter-javascript==0.25.0 \
+                --hash=sha256:199d09985190852e0912da2b8d26c932159be314bc04952cf917ed0e4c633e6b \
+                --hash=sha256:9dc04ba91fc8583344e57c1f1ed5b2c97ecaaf47480011b92fbeab8dda96db75
+            tree-sitter-kotlin==1.1.0 \
+                --hash=sha256:906e5444ebb01db439cb3ad65913598a4ea957b0e068aa973265926a17eb00e0 \
+                --hash=sha256:9a92afe24b634cf914c5812af0f5c53184b1c18bdf6ee5505c83afac81f6bf6c
+            tree-sitter-php==0.25.1 \
+                --hash=sha256:3d59f27bc88351f744815e5ff69a40b04b720a94c984fcc804979c71a19afc3e \
+                --hash=sha256:93d0088bed22facceda229850e2443932ce10206e46aa6296df8065ecea1d68e
+            tree-sitter-python==0.25.0 \
+                --hash=sha256:86f118e5eecad616ecdb81d171a36dde9bef5a0b21ed71ea9c3e390813c3baf5 \
+                --hash=sha256:be71650ca2b93b6e9649e5d65c6811aad87a7614c8c1003246b303f6b150f61b
+            tree-sitter-ruby==0.23.1 \
+                --hash=sha256:62b36813a56006b7569db7868f6b762caa3f4e419bd0f8cf9ccbb4abb1b6254c \
+                --hash=sha256:f7bcd93972b4ca2803856d4fe0fbd04123ff29c4592bbb9f12a27528bd252341
+            tree-sitter-rust==0.24.2 \
+                --hash=sha256:9d76d1208c3638b871236090759dfc13d478921320653a6c9da5336e7c58f65a \
+                --hash=sha256:e033c5a93b57c88e0a835880de39fc802909ff69f57aaff6000211c196ea5190
+            tree-sitter-typescript==0.23.2 \
+                --hash=sha256:4b1eed5b0b3a8134e86126b00b743d667ec27c63fc9de1b7bb23168803879e31 \
+                --hash=sha256:e96d36b85bcacdeb8ff5c2618d75593ef12ebaf1b4eace3477e2bdb2abb1752c
+            truststore==0.10.5 ; sys_platform != 'emscripten' \
+                --hash=sha256:9aaaedaefaf06d8b206278cf8b5012bc897f485a874503501e12d776df78951c
+            typer==0.27.3 \
+                --hash=sha256:e50022f28b82a86313e54501317a1db64bf8f8d036ff8cfe5ca7e47675454aff
+            typing-extensions==4.16.0 \
+                --hash=sha256:481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8
+            typing-inspection==0.4.4 \
+                --hash=sha256:65b8397ba37ccbce054456aaccddfc91e6e3083c92824df348d96ca832f3f147
+            urllib3==2.8.0 \
+                --hash=sha256:0cf3cae568d36aa9576b28dfb35f11328f1cb974ca7647d9475ebb86c75ac6e3
+            uvicorn==0.54.0 \
+                --hash=sha256:505bdb0f318731d45f1f712071fc781a8981f6847a31c902c9f5e652d4f67faf
+            yara-python==4.5.4 \
+                --hash=sha256:93f5f5aba88e2ed2aaebfbb697433a0c8020c6a6c6a711e900a29e9b512d5c3a \
+                --hash=sha256:9d9a58b7dc87411a2443d2e0382a111bd892aef9f6db2a1ebb4a9215eef0db71 \
+                --hash=sha256:d29d0e137e0d77dd110186369276e88381f784bdc45b5932a2fb3463e2a1b1c7 \
+                --hash=sha256:e5eae935b05a9f8dc71df55a79c38f52abd93f8840310fe4e0d75fbd78284f24
+            yarl==1.25.1 \
+                --hash=sha256:14b79a30a93a3ce2e8832603fd0ab780ada281b0ba5110b519a634f2d7d7d1fc \
+                --hash=sha256:30eec96e8a91bd588ce897c9543f6d5d8d34b28fbcba28a4dedf20ebeae9fe57 \
+                --hash=sha256:4d781294bb815ecb5ea57ff6bbf8038e0a31a95fdf3e1788f66e0dc100d64b58 \
+                --hash=sha256:681c758b0490f9e96b78e5fa8e8dc6e648e9185bb6eaebe73183c33ea0c445f3 \
+                --hash=sha256:77e5099b99b37f3cf79c246998ca9f7313a78054cd1809ec46bc1afad47e1c4c \
+                --hash=sha256:be80550d9bfe83d9b62398a37081a90434e6df2d978ec345c3d2820de6beddab \
+                --hash=sha256:c6f117789d22dce188e5754e8bc65b7e6ebf8cb73963b9fa761f672a5883769d
+            zipp==4.1.2 \
+                --hash=sha256:b30cb6cd253122169c47de245ca24a86bac2a5d3802ba15bf7ba6414eb9e144d
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$REQUIREMENTS" > "$RUNNER_TEMP/cisco-ai-mcp-scanner-requirements.txt"
+          python -m pip install --require-hashes --no-deps --only-binary=:all: -r "$RUNNER_TEMP/cisco-ai-mcp-scanner-requirements.txt"
+
+      # The script below is the same text in both scan jobs (tests/test_agent_scan.py holds them equal and runs it).
+      # It reads its inputs from the environment only, runs the scanner from an empty directory with an environment
+      # of its own making (no token, no repository .env), and writes the report only when every target was scanned.
+      - name: MCP tool scan (static engines only)
+        id: scan
+        env:
+          KIND: mcp
+          TARGETS: ${{ inputs.mcp-tool-files }}
+          FAIL_ON: ${{ inputs.fail-on-severity }}
+          WORKSPACE: ${{ github.workspace }}
+          SARIF_OUT: ${{ runner.temp }}/mcp-scanner.sarif
+        run: |
+          python -I - <<'PY'
+          import glob
+          import hashlib
+          import json
+          import os
+          import re
+          import subprocess
+          import sys
+          import tempfile
+          from pathlib import Path
+
+          KIND = os.environ["KIND"]
+          RANKS = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
+          NAMES = {v: k for k, v in RANKS.items()}
+          WORKSPACE = Path(os.environ["WORKSPACE"]).resolve()
+          SARIF_OUT = Path(os.environ["SARIF_OUT"])
+          MAX_TARGETS = 200
+          MAX_BYTES = 5 * 1024 * 1024
+          TIMEOUT = 300
+          errors = []
+
+
+          def clean(value, limit=120):
+              """Text from the scanner or the repository, reduced to characters that cannot start a command, a link or a mention."""
+              return re.sub(r"[^A-Za-z0-9_./ :+,*-]", "?", str(value))[:limit]
+
+
+          def error(message):
+              errors.append(message)
+              print(f"::error title=Agent scan::{clean(message, 300)}")
+
+
+          fail_on = os.environ.get("FAIL_ON", "").strip().lower()
+          if fail_on and fail_on not in RANKS:
+              error(f"fail-on-severity must be empty or one of {', '.join(RANKS)}")
+              fail_on = ""
+          threshold = RANKS[fail_on] if fail_on else None
+          if KIND not in ("skill", "mcp"):
+              sys.exit("KIND must be skill or mcp")
+
+
+          def find_targets():
+              """The files or directories the caller named: relative to the workspace, inside it, never through `..`."""
+              found = []
+              for token in os.environ.get("TARGETS", "").split():
+                  parts = Path(token).parts
+                  if token.startswith(("/", "-", "~")) or ".." in parts or ".git" in parts:
+                      error(f"{clean(token)} is not a path inside the repository")
+                      continue
+                  matches = sorted(glob.glob(token, root_dir=WORKSPACE, recursive=True))
+                  if not matches:
+                      error(f"{clean(token)} matches nothing")
+                  for match in matches:
+                      real = (WORKSPACE / match).resolve()
+                      if WORKSPACE not in real.parents:
+                          error(f"{clean(match)} leads outside the repository")
+                      elif ".git" in Path(match).parts:
+                          error(f"{clean(match)} is inside .git")
+                      elif real not in found:
+                          found.append(real)
+              if not found and not errors:
+                  error("no paths to scan")
+              if len(found) > MAX_TARGETS:
+                  error(f"{len(found)} targets; the limit is {MAX_TARGETS}")
+                  found = []
+              return found
+
+
+          def relative(path):
+              return Path(path).relative_to(WORKSPACE).as_posix()
+
+
+          def run(command, home):
+              env = {
+                  "PATH": os.environ["PATH"],
+                  "HOME": home,
+                  "LITELLM_LOCAL_MODEL_COST_MAP": "True",
+                  "NO_COLOR": "1",
+                  "PYTHONNOUSERSITE": "1",
+              }
+              try:
+                  return subprocess.run(command, cwd=home, env=env, capture_output=True, text=True, timeout=TIMEOUT, check=False)
+              except (OSError, subprocess.TimeoutExpired) as exc:
+                  error(f"{command[0]} did not finish: {clean(type(exc).__name__)}")
+                  return None
+
+
+          def level_rank(result):
+              severity = str((result.get("properties") or {}).get("severity", "")).lower()
+              if severity in RANKS:
+                  return RANKS[severity]
+              return {"error": 3, "warning": 2}.get(result.get("level"), 0)
+
+
+          def links_stay_inside(directory):
+              """True when no symlink under `directory` leads outside the repository (the scanner would read what it points at)."""
+              seen = 0
+              for root, names, files in os.walk(directory):
+                  for name in names + files:
+                      seen += 1
+                      path = Path(root, name)
+                      if seen > 20000 or (path.is_symlink() and WORKSPACE not in path.resolve().parents):
+                          error(f"{clean(relative(directory))}: too many files, or a symlink that leaves the repository")
+                          return False
+              return True
+
+
+          def scan_skill(target, home, index):
+              directory, name = (target, None) if target.is_dir() else (target.parent, target.name)
+              if not links_stay_inside(directory):
+                  return [], [], False
+              out = Path(home) / f"skill-{index}.sarif"
+              command = ["skill-scanner", "scan", str(directory), "--format", "sarif", "--output-sarif", str(out)]
+              if name and name != "SKILL.md":
+                  command.append(f"--skill-file={name}")
+              if fail_on:
+                  command += ["--fail-on-severity", fail_on]
+              done = run(command, home)
+              if done is None:
+                  return [], [], False
+              try:
+                  run_ = json.loads(out.read_text())["runs"][0]
+                  results, rules = list(run_["results"]), list(run_["tool"]["driver"].get("rules") or [])
+              except (OSError, ValueError, KeyError, IndexError, TypeError):
+                  error(f"{clean(relative(target))}: the scanner wrote no report (exit {done.returncode})")
+                  return [], [], False
+              prefix = str(WORKSPACE).lstrip("/") + "/"
+              for result in results:
+                  for location in result.get("locations") or []:
+                      artifact = (location.get("physicalLocation") or {}).get("artifactLocation") or {}
+                      uri = str(artifact.get("uri", ""))
+                      artifact["uri"] = uri[len(prefix) :] if uri.startswith(prefix) else relative(target)
+                      artifact["uriBaseId"] = "%SRCROOT%"
+              worst = max((level_rank(r) for r in results), default=-1)
+              tripped = threshold is not None and (done.returncode != 0 or worst >= threshold)
+              if done.returncode != 0 and not tripped:
+                  error(f"{clean(relative(target))}: the scanner exited {done.returncode} without a finding to explain it")
+              return results, rules, tripped
+
+
+          MCP_SEVERITY = {"LOW": "low", "MEDIUM": "medium", "HIGH": "high"}
+          MCP_SCORE = {"low": "3.0", "medium": "5.5", "high": "8.0"}
+          MCP_LEVEL = {"low": "note", "medium": "warning", "high": "error"}
+
+
+          def scan_mcp(target, home, index):
+              label = clean(relative(target))
+              try:
+                  if not target.is_file() or target.stat().st_size > MAX_BYTES:
+                      raise ValueError("not a file, or over 5 MiB")
+                  tools = json.loads(target.read_text(encoding="utf-8"))["tools"]
+                  if not isinstance(tools, list) or not tools or not all(isinstance(t, dict) for t in tools):
+                      raise ValueError("tools must be a non-empty list of objects")
+              except (OSError, ValueError, KeyError, TypeError, RecursionError) as exc:
+                  error(f"{label}: not an MCP tools list ({clean(exc)})")
+                  return [], [], False
+              done = run(["mcp-scanner", "--analyzers", "yara", "--raw", "static", "--tools", str(target)], home)
+              if done is None:
+                  return [], [], False
+              try:
+                  scanned = json.loads(done.stdout)
+                  if done.returncode != 0 or not isinstance(scanned, list) or len(scanned) != len(tools):
+                      raise ValueError("exit status or tool count")
+              except ValueError:
+                  error(f"{label}: the scanner did not report on all {len(tools)} tools (exit {done.returncode})")
+                  return [], [], False
+              results, rules, tripped = [], {}, False
+              for entry in scanned:
+                  tool = clean(entry.get("tool_name", "?"), 60)
+                  if entry.get("status") != "completed" or not isinstance(entry.get("is_safe"), bool):
+                      error(f"{label}: tool {tool} was not scanned")
+                      continue
+                  found = False
+                  for analyzer, finding in (entry.get("findings") or {}).items():
+                      if not isinstance(finding, dict):
+                          error(f"{label}: tool {tool}: unreadable finding from {clean(analyzer, 40)}")
+                          continue
+                      raw = str(finding.get("severity", "")).upper()
+                      if raw == "SAFE":
+                          continue
+                      severity = MCP_SEVERITY.get(raw)
+                      if severity is None:
+                          error(f"{label}: tool {tool}: unknown severity {clean(raw, 20)} from {clean(analyzer, 40)}")
+                          continue
+                      for threat in finding.get("threat_names") or ["UNSPECIFIED"]:
+                          found = True
+                          rule = "mcp-scanner/" + re.sub(r"[^a-z0-9]+", "-", str(threat).lower()).strip("-")[:60]
+                          rules.setdefault(
+                              rule,
+                              {
+                                  "id": rule,
+                                  "shortDescription": {"text": clean(threat, 80)},
+                                  "properties": {"security-severity": MCP_SCORE[severity], "tags": ["security", "mcp"]},
+                              },
+                          )
+                          digest = hashlib.sha256(f"{label}|{tool}|{rule}|{analyzer}".encode()).hexdigest()[:32]
+                          results.append(
+                              {
+                                  "ruleId": rule,
+                                  "level": MCP_LEVEL[severity],
+                                  "message": {"text": f"Tool {tool}: {clean(finding.get('threat_summary', threat), 200)}"},
+                                  "properties": {"severity": severity.upper()},
+                                  "locations": [
+                                      {
+                                          "physicalLocation": {
+                                              "artifactLocation": {"uri": relative(target), "uriBaseId": "%SRCROOT%"}
+                                          }
+                                      }
+                                  ],
+                                  "partialFingerprints": {"agentScan/v1": digest},
+                              }
+                          )
+                          tripped = tripped or (threshold is not None and RANKS[severity] >= threshold)
+                  if not entry["is_safe"] and not found:
+                      error(f"{label}: tool {tool} is reported unsafe with no finding to show")
+              return results, list(rules.values()), tripped
+
+
+          def main():
+              targets = find_targets()
+              results, rules, tripped, scanned, seen = [], {}, False, 0, set()
+              with tempfile.TemporaryDirectory() as home:
+                  for index, target in enumerate(targets):
+                      if KIND == "skill":
+                          found, found_rules, trip = scan_skill(target, home, index)
+                      else:
+                          found, found_rules, trip = scan_mcp(target, home, index)
+                      scanned += 1
+                      for result in found:
+                          place = ((result.get("locations") or [{}])[0].get("physicalLocation") or {})
+                          key = (
+                              result.get("ruleId"),
+                              (place.get("artifactLocation") or {}).get("uri"),
+                              (place.get("region") or {}).get("startLine"),
+                              (result.get("message") or {}).get("text"),
+                          )
+                          # Scanning one file of a directory scans its siblings too; a finding is reported once.
+                          if key not in seen:
+                              seen.add(key)
+                              results.append(result)
+                      for rule in found_rules:
+                          rules.setdefault(rule.get("id"), rule)
+                      tripped = tripped or trip
+                      top = max((level_rank(r) for r in found), default=-1)
+                      print(f"scanned {clean(relative(target))}: {len(found)} finding(s), highest {NAMES.get(top, 'none')}")
+              counts = {name: 0 for name in RANKS}
+              for result in results:
+                  counts[NAMES[level_rank(result)]] += 1
+              highest = max((level_rank(r) for r in results), default=-1)
+              highest_name = NAMES.get(highest, "none")
+              if not errors:
+                  driver = {
+                      "skill": {"name": "skill-scanner", "informationUri": "https://github.com/cisco-ai-defense/skill-scanner"},
+                      "mcp": {"name": "mcp-scanner", "informationUri": "https://github.com/cisco-ai-defense/mcp-scanner"},
+                  }[KIND]
+                  sarif = {
+                      "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+                      "version": "2.1.0",
+                      "runs": [{"tool": {"driver": {**driver, "rules": list(rules.values())}}, "results": results}],
+                  }
+                  SARIF_OUT.write_text(json.dumps(sarif))
+              summary = [
+                  f"### {'Skill' if KIND == 'skill' else 'MCP tool'} scan (static engines only, advisory unless a threshold is set)",
+                  "",
+                  f"Scanned {scanned} target(s); {len(results)} finding(s); highest severity {highest_name}.",
+                  "",
+                  "| Severity | Findings |",
+                  "| --- | --- |",
+                  *[f"| {name} | {counts[name]} |" for name in reversed(list(RANKS))],
+              ]
+              shown = sorted(results, key=lambda r: -level_rank(r))[:50]
+              if shown:
+                  summary += ["", "| Severity | Rule | File |", "| --- | --- | --- |"]
+                  for result in shown:
+                      location = ((result.get("locations") or [{}])[0].get("physicalLocation") or {}).get("artifactLocation") or {}
+                      name = NAMES[level_rank(result)]
+                      summary.append(f"| {name} | `{clean(result.get('ruleId', ''), 60)}` | `{clean(location.get('uri', ''), 100)}` |")
+                  if len(results) > len(shown):
+                      summary.append(f"\n{len(results) - len(shown)} more in the SARIF report.")
+              if errors:
+                  summary += ["", f"The scan did not complete: {len(errors)} error(s). No report was uploaded."]
+              if tripped:
+                  summary += ["", f"A finding is at or above `{fail_on}`, so this job fails."]
+              if os.environ.get("GITHUB_STEP_SUMMARY"):
+                  with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as handle:
+                      handle.write("\n".join(summary) + "\n")
+              if os.environ.get("GITHUB_OUTPUT"):
+                  with open(os.environ["GITHUB_OUTPUT"], "a") as handle:
+                      handle.write(f"findings={len(results)}\nmax-severity={highest_name}\nscanned={scanned}\n")
+                      handle.write(f"sarif={'false' if errors else 'true'}\n")
+              if tripped:
+                  print(f"::error title=Agent scan::a finding is at or above {fail_on}")
+              sys.exit(1 if errors or tripped else 0)
+
+
+          main()
+          PY
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always() && steps.scan.outputs.sarif == 'true'
+        with:
+          name: ${{ inputs.sarif-category }}-mcp
+          path: ${{ runner.temp }}/mcp-scanner.sarif
+          if-no-files-found: error
+          retention-days: 14
+
+  mcp-upload:
+    name: Upload mcp-scan SARIF
+    needs: mcp-scan
+    if: >-
+      always() && inputs.upload-sarif && needs.mcp-scan.outputs.sarif == 'true' &&
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      security-events: write  # the SARIF upload
+    steps:
+      - name: Validate the egress policy inputs (EX-0001)
+        timeout-minutes: 1
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        env:
+          POLICY_EGRESS_POLICY: ${{ inputs.egress-policy }}
+          POLICY_EGRESS_POLICY_SECRETLESS: ${{ inputs.egress-policy-secretless }}
+        run: |
+          set -u
+          bad=0
+          check() {
+            if [ "$2" = set ] && [ "$3" != audit ] && [ "$3" != block ]; then
+              echo "::error title=egress policy::the $1 input must be exactly 'audit' or 'block' (its value is ${#3} characters long)"
+              bad=1
+            fi
+          }
+          check egress-policy "${POLICY_EGRESS_POLICY+set}" "${POLICY_EGRESS_POLICY-}"
+          check egress-policy-secretless "${POLICY_EGRESS_POLICY_SECRETLESS+set}" "${POLICY_EGRESS_POLICY_SECRETLESS-}"
+          check distro-egress-policy "${POLICY_DISTRO_EGRESS_POLICY+set}" "${POLICY_DISTRO_EGRESS_POLICY-}"
+          check semgrep-egress-policy "${POLICY_SEMGREP_EGRESS_POLICY+set}" "${POLICY_SEMGREP_EGRESS_POLICY-}"
+          exit "$bad"
+
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: ${{ (inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block' }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
+          disable-sudo: true
+          # The agent may only stop reporting to StepSecurity in block mode.
+          disable-telemetry: ${{ ((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block') == 'block' }}
+
+      - name: Egress canary (EX-0001)
+        if: ${{ runner.os == 'Linux' && (((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block') == 'block') }}
+        timeout-minutes: 2
+        shell: bash
+        # The workspace root exists before checkout; a job default working-directory may not.
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -u
+          NAMES="github.com api.github.com results-receiver.actions.githubusercontent.com"
+          PORT=443
+          canary_resolve() { timeout 5 getent ahostsv4 "$1" 2>/dev/null | awk '$2 == "STREAM" { print $1 }'; }
+          canary_probe() { timeout 3 bash -c "exec 3<>\"/dev/tcp/\$0/\$1\"" "$1" "$PORT" 2>/dev/null; }
+          canary_reach() {
+            local i
+            for i in 1 2 3 4; do
+              canary_probe "$1" && return 0
+              [ "$i" -lt 4 ] && sleep 1
+            done
+            return 1
+          }
+          canary_show() { local n=$1; shift; echo "+ $*"; { timeout 10 "$@" 2>&1 || true; } | head -n "$n" || true; }
+          canary_diag() {
+            local name
+            echo "::group::egress canary diagnostics (EX-0001, for the GitHub Support ticket)"
+            canary_show 5 uname -srmo
+            canary_show 20 cat /etc/resolv.conf
+            canary_show 20 bash -c "resolvectl status 2>/dev/null | grep -E '^ *(Current DNS Server|DNS Servers?|DNS Domain):'"
+            canary_show 20 bash -c "ss -lun | grep ':53 '"
+            for name in $NAMES pipelines.actions.githubusercontent.com; do
+              canary_show 20 getent ahostsv4 "$name"
+              canary_show 5 curl -sS -o /dev/null -w '%{http_code} %{remote_ip} %{time_connect}\n' --max-time 8 "https://$name"
+            done
+            echo "::endgroup::"
+          }
+          canary_main() {
+            local tmp name addr n=0 bad
+            tmp=$(mktemp -d) || return 1
+            for _ in 1 2 3; do
+              for name in $NAMES; do canary_resolve "$name" >>"$tmp/res.$name" & done
+              wait
+              sleep 1
+            done
+            for name in $NAMES; do
+              if [ -s "$tmp/res.$name" ]; then sort -u "$tmp/res.$name"; else echo "-"; fi | sed "s|^|$name |" >>"$tmp/pairs"
+            done
+            while read -r name addr; do
+              n=$((n + 1))
+              ( { [ "$addr" != "-" ] && canary_reach "$addr"; } || echo "$name $addr" >"$tmp/bad.$n" ) </dev/null &
+            done <"$tmp/pairs"
+            wait
+            bad=$(cat "$tmp"/bad.* 2>/dev/null | sort || true)
+            rm -rf "$tmp"
+            if [ -z "$bad" ]; then
+              echo "egress canary: all $n addresses of $NAMES accept TCP $PORT"
+              return 0
+            fi
+            echo "::error title=egress canary::egress broken on this runner (known westus2 DNS issue, EX-0001): rerun the job"
+            echo "unreachable addresses (name address; '-' means the name did not resolve):"
+            printf '%s\n' "$bad"
+            canary_diag
+            echo "EX-0001 egress canary failed, unreachable: $(printf '%s' "$bad" | tr '\n' ';')" >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
+            return 1
+          }
+          set -m
+          canary_main &
+          main=$!
+          (sleep 90; kill -TERM -- "-$main"; sleep 2; kill -KILL -- "-$main") >/dev/null 2>&1 &
+          dog=$!
+          wait "$main" && rc=0 || rc=$?
+          kill -TERM -- "-$dog" >/dev/null 2>&1 || true
+          if kill -0 -- "-$main" >/dev/null 2>&1; then
+            kill -TERM -- "-$main" >/dev/null 2>&1 || true
+            sleep 1
+            kill -KILL -- "-$main" >/dev/null 2>&1 || true
+          fi
+          if [ "$rc" -eq 143 ] || [ "$rc" -eq 137 ]; then
+            echo "::error title=egress canary::the canary hit its 90 s deadline (EX-0001): rerun the job"
+            rc=124
+          fi
+          exit "$rc"
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ inputs.sarif-category }}-mcp
+          path: agent-scan-report
+
+      - uses: github/codeql-action/upload-sarif@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
+        with:
+          sarif_file: agent-scan-report/mcp-scanner.sarif
+          category: ${{ inputs.sarif-category }}-mcp

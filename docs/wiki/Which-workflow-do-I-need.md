@@ -25,6 +25,7 @@ the workflow's YAML so it cannot drift; the README is the authority.
 | A wiki generated from docs | `wiki-publish.yml` | [wiki-publish](Workflow-wiki-publish.md) |
 | An AI component whose threat model must stay current | `threat-model.yml` | [threat-model](Workflow-threat-model.md) |
 | A scheduled or on-demand deep-dive audit by Lory (not a per-PR gate) | `lory-audit.yml` | [lory-audit](Workflow-lory-audit.md) |
+| Agent skills or MCP tool definitions (optional, advisory static scan) | `agent-scan.yml` | [agent-scan](Workflow-agent-scan.md) |
 
 Not a workflow, but a tool: to wait for a commit's CI and merge exactly that commit, use the `wait-ci` action or script ([wait-ci](Action-wait-ci.md)).
 
@@ -53,6 +54,7 @@ from its own caller job, and requires every gate. See
 | `wiki-publish.yml` | `contents: write` on the publish job only | No | Generates only | The wiki |
 | `threat-model.yml` | No (`contents: read`) | No | Yes | No |
 | `lory-audit.yml` | No (`contents: read`; one vendor token in one step) | No (`LORY_PIPELINE_TOKEN` is a repository secret) | No (monthly and on demand) | No |
+| `agent-scan.yml` | `security-events` on the two upload jobs only; the scan jobs hold `contents: read` | No | Yes (not the upload, from a fork) | SARIF to the Security tab |
 
 (The README's input tables are authoritative for defaults; this table is the
 shape, not the contract.)

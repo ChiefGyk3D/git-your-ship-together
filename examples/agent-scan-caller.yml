@@ -1,0 +1,46 @@
+# Caller template for agent-scan.yml: optional, advisory scans of agent skills and MCP tool definitions.
+# Copy it to .github/workflows/agent-scan.yml in the repository whose agent content you want scanned.
+#
+# Off until you name paths, and advisory until you name a threshold: findings go to the job summary and to code
+# scanning (the Security tab), and the job stays green. Static engines only: no LLM engine, no cloud engine, no API
+# key, no secret.
+#
+# Before the first run:
+#   1. Replace <sha> and the version comment with the agent-scan.yml release you pin (every GYST caller pins by
+#      commit).
+#   2. List your skill directories or entry files, and your MCP `tools/list` JSON files. Globs work. A pattern
+#      that matches nothing fails the job, so a moved directory is noticed.
+#   3. Keep `security-events: write` even with `upload-sarif: false`: permissions are checked when the workflow is
+#      parsed, and the upload jobs declare it. Without it every run ends in `startup_failure`.
+#
+# To make a finding fail the job, set `fail-on-severity` (critical, high, medium, low or info). To keep the check out
+# of branch protection, leave this job's check out of the required list. Do not add `continue-on-error`: a scan that
+# could not run (a bad path, a crashed scanner) should be red, and only findings are advisory.
+
+name: Agent scan
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "41 6 * * 1" # Monday, 06:41 UTC: new scanner rules reach an unchanged repository
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  agent-scan:
+    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/agent-scan.yml@<sha> # vX.Y.Z
+    permissions:
+      contents: read
+      security-events: write  # the SARIF upload
+    with:
+      skill-paths: |
+        .claude/skills/*
+        roles/*.md
+      mcp-tool-files: |
+        mcp/tools-list.json
+      # fail-on-severity: high
+      # upload-sarif: false  # a private repository without GitHub Advanced Security

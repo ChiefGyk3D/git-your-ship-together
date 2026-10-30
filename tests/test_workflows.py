@@ -50,6 +50,7 @@ REUSABLE = [
         "dast.yml",
         "threat-model.yml",
         "lory-audit.yml",
+        "agent-scan.yml",
     )
 ]
 # The subset that fetches CI secrets. The Doppler rules are about those steps,
@@ -74,6 +75,7 @@ DOPPLER = [
         "dast.yml",
         "threat-model.yml",
         "lory-audit.yml",
+        "agent-scan.yml",
     )
 ]
 # The language CI workflows: each ends in the `CI green` gate branch protection requires.
@@ -131,7 +133,7 @@ def all_steps(path: Path):
 
 
 def test_there_is_something_to_check():
-    assert len(REUSABLE) == 18, "expected the eighteen callable workflows"
+    assert len(REUSABLE) == 19, "expected the nineteen callable workflows"
     assert len(DOPPLER) == 5, "expected five of them to fetch CI secrets"
     assert [p.name for p in LANGUAGE_CI] == ["arduino-ci.yml", "bash-ci.yml", "python-ci.yml", "tofu-ci.yml"]
     assert ACTION_FILES, "no composite actions found"
@@ -244,6 +246,10 @@ ALLOWED_WRITES = {
     ("security.yml", "semgrep", "security-events"),
     ("security.yml", "snyk", "security-events"),
     ("security.yml", "scorecard", "security-events"),
+    # agent-scan.yml's SARIF uploads, from jobs that check nothing out and run none of the repository's content;
+    # the scan jobs, which read it, hold contents: read only.
+    ("agent-scan.yml", "skill-upload", "security-events"),
+    ("agent-scan.yml", "mcp-upload", "security-events"),
     # dependency-review's summary comment on the pull request.
     ("security.yml", "dependency-review", "pull-requests"),
     # Auto-merge: enabling it on a Dependabot pull request is a write to the
@@ -293,6 +299,9 @@ ALLOWED_WRITES = {
     ("wiki.yml", "wiki", "contents"),
     # And both on the fixture, whose callers pass deploy/publish: false.
     ("ci.yml", "fixture-dast", "security-events"),  # dast.yml's SARIF upload, which does run on the fixture
+    # agent-scan.yml's upload jobs, which upload-sarif: false skips on the fixture; a caller still grants the scope
+    ("ci.yml", "fixture-agent-scan", "security-events"),
+    ("ci.yml", "fixture-agent-scan-planted", "security-events"),
     ("ci.yml", "fixture-pages", "pages"),
     ("ci.yml", "fixture-pages", "id-token"),
     ("ci.yml", "fixture-project-sync", "id-token"),

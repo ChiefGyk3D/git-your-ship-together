@@ -75,6 +75,7 @@ publish).
 | `wiki-publish.yml` | [Automation](Which-workflow-do-I-need.md) | Replace a repository's wiki from a generated tree |
 | `threat-model.yml` | [threat-model](Workflow-threat-model.md) | Validate an OWASP Threat Dragon model; on a pull request, require it to move with the AI surface |
 | `lory-audit.yml` | [lory-audit](Workflow-lory-audit.md) | Scheduled or on-demand Lory deep-dive audit through its pipeline scan API; advisory by default, fails closed on a bad call |
+| `agent-scan.yml` | [agent-scan](Workflow-agent-scan.md) | Optional, advisory static scans of agent skills and MCP tool definitions (Cisco AI Defense scanners); SARIF under `agent-scan-skill` and `agent-scan-mcp` |
 
 ### This repository's own pipeline (not reusable)
 

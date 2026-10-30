@@ -508,10 +508,74 @@ jobs:
       required-topics: prompt injection
       egress-policy: block
 
+  # agent-scan.yml at this ref over fixture/agent-scan, in block mode: the clean files must pass the strictest
+  # threshold (zero findings of any severity), so a scanner that fails closed on its own install or its inputs shows
+  # here. The planted files run advisory, so the job is green by design, and `agent-scan-control` then fails unless
+  # the scanners fired on them: a green scan of a fixture that cannot go red proves nothing. Neither call uploads a
+  # report (no alert is opened on this repository), but the caller still grants what the called workflow declares.
+  fixture-agent-scan:
+    name: fixture agent scan
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    uses: ./.github/workflows/agent-scan.yml # zizmor: ignore[self-repository]
+    permissions:
+      contents: read
+      security-events: write  # declared by the upload jobs, which upload-sarif: false skips
+    with:
+      skill-paths: fixture/agent-scan/clean-skill
+      mcp-tool-files: fixture/agent-scan/mcp/clean-tools.json
+      fail-on-severity: info
+      upload-sarif: false
+      egress-policy: block
+      egress-policy-secretless: block
+
+  fixture-agent-scan-planted:
+    name: fixture agent scan (planted)
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    uses: ./.github/workflows/agent-scan.yml # zizmor: ignore[self-repository]
+    permissions:
+      contents: read
+      security-events: write  # declared by the upload jobs, which upload-sarif: false skips
+    with:
+      skill-paths: fixture/agent-scan/planted-skill
+      mcp-tool-files: fixture/agent-scan/mcp/planted-tools.json
+      upload-sarif: false
+      egress-policy: block
+      egress-policy-secretless: block
+
+  agent-scan-control:
+    name: agent scan control
+    needs: fixture-agent-scan-planted
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+      - name: The scanners fired on the planted files
+        env:
+          SKILL_MAX: ${{ needs.fixture-agent-scan-planted.outputs.skill-max-severity }}
+          SKILL_N: ${{ needs.fixture-agent-scan-planted.outputs.skill-findings }}
+          MCP_MAX: ${{ needs.fixture-agent-scan-planted.outputs.mcp-max-severity }}
+          MCP_N: ${{ needs.fixture-agent-scan-planted.outputs.mcp-findings }}
+        run: |
+          set -euo pipefail
+          echo "skill: $SKILL_N finding(s), highest ${SKILL_MAX:-unset}; mcp: $MCP_N finding(s), highest ${MCP_MAX:-unset}"
+          bad=0
+          if [ "$SKILL_MAX" != critical ]; then
+            echo "::error title=agent scan control::the planted skill must produce a critical finding"
+            bad=1
+          fi
+          if [ "$MCP_MAX" != high ]; then
+            echo "::error title=agent scan control::the planted tool list must produce a high finding"
+            bad=1
+          fi
+          exit "$bad"
+
   ci-green:
     name: CI green
     if: always()
-    needs: [actionlint, zizmor, test, fixture-ci, fixture-bash, fixture-fuzz, fixture-tofu, fixture-arduino, fixture-package, fixture-sbom, fixture-artifact, fixture-pages, fixture-wiki, fixture-release, fixture-verify, fixture-rescan, rescan-live, fixture-project-sync, fixture-dast, dast-live, fixture-threat-model]
+    needs: [actionlint, zizmor, test, fixture-ci, fixture-bash, fixture-fuzz, fixture-tofu, fixture-arduino, fixture-package, fixture-sbom, fixture-artifact, fixture-pages, fixture-wiki, fixture-release, fixture-verify, fixture-rescan, rescan-live, fixture-project-sync, fixture-dast, dast-live, fixture-threat-model, fixture-agent-scan, fixture-agent-scan-planted, agent-scan-control]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}
