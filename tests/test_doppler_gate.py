@@ -415,7 +415,9 @@ def git(cwd: Path, *args: str) -> str:
         "GIT_COMMITTER_NAME": "t",
         "GIT_COMMITTER_EMAIL": "t@example.invalid",
     }
-    return subprocess.run(["git", "-C", str(cwd), *args], env=env, check=True, capture_output=True, text=True).stdout.strip()
+    return subprocess.run(
+        ["git", "-C", str(cwd), *args], env=env, check=True, capture_output=True, text=True
+    ).stdout.strip()
 
 
 @pytest.fixture
@@ -461,7 +463,9 @@ def test_the_ancestry_check_does_not_touch_the_gate_off_path(tmp_path, repo):
 
 def test_a_tag_that_cannot_be_checked_keeps_the_name_rule_and_says_so(tmp_path):
     """RESIDUAL (README): with no checkout or no history the job cannot show where the tag points."""
-    code, written, out = decide_outputs(tmp_path, GITHUB_WORKSPACE=str(tmp_path / "nothing"), GITHUB_SHA="a" * 40, **TAG)
+    code, written, out = decide_outputs(
+        tmp_path, GITHUB_WORKSPACE=str(tmp_path / "nothing"), GITHUB_SHA="a" * 40, **TAG
+    )
     assert code == 0 and written["mode"] == "oidc" and "::notice" in out and "not verified" in out, out
 
 
@@ -504,7 +508,9 @@ def test_only_a_clean_exit_one_refuses(tmp_path, repo):
     shim = tmp_path / "shim"
     shim.mkdir()
     real = subprocess.run(["which", "git"], capture_output=True, text=True, check=True).stdout.strip()
-    (shim / "git").write_text(f'#!/bin/bash\nfor a in "$@"; do [ "$a" = merge-base ] && exit 1; done\nexec {real} "$@"\n')
+    (shim / "git").write_text(
+        f'#!/bin/bash\nfor a in "$@"; do [ "$a" = merge-base ] && exit 1; done\nexec {real} "$@"\n'
+    )
     (shim / "git").chmod(0o755)
     code, written, out = decide_outputs(
         tmp_path, GITHUB_WORKSPACE=str(work), GITHUB_SHA=side_sha, PATH=f"{shim}:{os.environ['PATH']}", **TAG
