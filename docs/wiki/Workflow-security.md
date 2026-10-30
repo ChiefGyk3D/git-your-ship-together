@@ -83,6 +83,14 @@ jobs:
   an unhashed `pip install` (issue #87). The Semgrep version is therefore the lock's. `semgrep-version` is **deprecated and
   will be removed**: empty or equal to the locked version is accepted, anything else fails the install step naming the locked
   version. A Snyk `pip-audit-requirements` file with no hashes now fails rather than installing unchecked.
+- **Private repositories without Advanced Security: set `advanced-security: false` (issue #248).** Without it the run fails, even on a clean scan.
+  Observed on 2026-10-30 on a private repository without Advanced Security: dependency review fails with "Dependency review is not supported on this repository. Please ensure that Dependency graph is enabled along with GitHub Advanced Security";
+  CodeQL, Semgrep and the gitleaks SARIF upload each fail with "Resource not accessible by integration" (the failing call is the SARIF upload; the same text also
+  shows as a telemetry warning). Put `advanced-security: false` once under `with:` in the caller. Then dependency
+  review and CodeQL are skipped (shown as skipped, not failed), the Semgrep and gitleaks SARIF uploads are skipped, and both jobs
+  write a job-summary note. Semgrep and gitleaks still run and still fail the job on a finding. The default is `true`, so every
+  existing caller is unchanged. The value must be exactly `true` or `false`: a new always-running job, `advanced-security-check`,
+  fails the call, loudly, on anything else (`False`, empty, a typo). It is not a gate: the scans do not wait for it and run as before, so a check that fails for another reason (a flaky canary) never switches a scan off. Only the literal `false` (any casing) skips CodeQL and dependency review; any other bad value runs them and still fails the check. Do not mask that red run: `continue-on-error` on the calling job, or a downstream aggregator that treats a skipped or failed called workflow as success, hides it.
 - **Semgrep suppression** is partly unsettled (issue #83); see the scanning page.
 - **The Actions allow-list** needs subdirectory forms for `github/codeql-action/init` and `snyk/actions/setup`; see
   [The baseline and the weekly audit](Baseline-and-the-weekly-audit.md).
