@@ -5,6 +5,13 @@ name what a caller sees after that.
 
 ## Unreleased
 
+### Fix: trusted-ref gate hardening (issue #238)
+
+- **Changed.** With `doppler-trusted-refs-only` on, only `push`, `workflow_dispatch` and `schedule` can fetch; every other
+  event (`issues`, `issue_comment`, `workflow_run`, `repository_dispatch`) is refused even on the default branch. The input
+  accepts `true` or `false` in any casing; any other value fails the job instead of switching the gate off. A `vN.N.N` tag
+  is also refused when the checkout shows its commit is not in the default branch's history (best effort; see the README).
+
 ### New: `agent-scan.yml`, optional advisory scans of agent skills and MCP tool definitions (issue #234)
 
 - **Added.** A reusable workflow that runs two static scanners from Cisco AI Defense: `cisco-ai-skill-scanner` over the skill

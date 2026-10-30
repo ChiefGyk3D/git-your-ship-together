@@ -3,7 +3,7 @@
 The YAML tests prove the script is the same in seven places and is fed the
 right inputs. This one runs the script for push, schedule, dispatch, pull request
 and other non-PR events across the ref shapes below, and pins what it does:
-a secret is fetched on a trusted ref, with the event residual documented below. Every case here was
+a secret is fetched on a trusted ref, on an allow-listed event. Every case here was
 run against the old script first, where the untrusted ones came back `oidc`.
 """
 
@@ -341,19 +341,24 @@ def test_pull_request_target_with_the_gate_on_fetches_nothing(tmp_path):
     assert code == 0 and mode == "none", out
 
 
-# --- events other than push/schedule/dispatch: a documented residual, not an endorsement -----------
+# --- events: an explicit allow-list (#238, trusted-ref gate hardening) ------------------------------
 
 NON_PR_EVENTS = ["issues", "issue_comment", "repository_dispatch", "workflow_run", "workflow_call"]
+EXTRA_EVENTS = ["release", "merge_group", "discussion", "check_run", "made_up_event", ""]
+
+
+@pytest.mark.parametrize("event", NON_PR_EVENTS + EXTRA_EVENTS)
+@pytest.mark.parametrize("ref", ["refs/heads/main", "refs/tags/v1.2.3"])
+def test_an_event_off_the_allow_list_is_refused_even_on_a_trusted_ref(tmp_path, event, ref):
+    """CHANGED in #238: this used to pin `oidc` (the old rule was a ref rule, not an event allow-list)."""
+    code, mode, out = decide(tmp_path, EVENT=event, REF=ref)
+    assert code == 0 and mode == "none", out
+    assert "trusted-refs-only" in out and "no secrets are fetched" in out
 
 
 @pytest.mark.parametrize("event", NON_PR_EVENTS)
-@pytest.mark.parametrize("ref", ["refs/heads/main", "refs/tags/v1.2.3"])
-def test_residual_any_non_pull_request_event_fetches_on_a_trusted_ref(tmp_path, event, ref):
-    """PINS CURRENT BEHAVIOR (a documented residual, #219), NOT an endorsement. The rule is a ref rule, not an
-    event allow-list, so these events fetch on the default branch or a release tag even though they can carry
-    attacker-controlled data. The docs (Secrets-Doppler-and-OIDC.md, "Which events") say so; the narrower
-    contract "push, schedule, dispatch only" is NOT enforced."""
-    code, mode, out = decide(tmp_path, EVENT=event, REF=ref)
+def test_an_event_off_the_allow_list_fetches_with_the_gate_off(tmp_path, event):
+    code, mode, out = decide(tmp_path, TRUSTED_ONLY="false", EVENT=event, REF="refs/heads/main")
     assert code == 0 and mode == "oidc", out
 
 
@@ -361,3 +366,108 @@ def test_residual_any_non_pull_request_event_fetches_on_a_trusted_ref(tmp_path, 
 def test_those_events_still_get_nothing_off_a_trusted_ref(tmp_path, event):
     code, mode, out = decide(tmp_path, EVENT=event, REF="refs/heads/feature")
     assert code == 0 and mode == "none", out
+
+
+@pytest.mark.parametrize("event", ["PUSH", "Push", "push ", "push\n", "Schedule"])
+def test_event_names_match_exactly(tmp_path, event):
+    code, mode, out = decide(tmp_path, EVENT=event, REF="refs/heads/main")
+    assert code == 0 and mode == "none", out
+
+
+# --- trusted-refs-only is parsed strictly -----------------------------------------------------------
+
+
+@pytest.mark.parametrize("value", ["true", "TRUE", "True", "tRuE"])
+def test_the_gate_is_on_for_any_casing_of_true(tmp_path, value):
+    code, mode, out = decide(tmp_path, TRUSTED_ONLY=value, EVENT="push", REF="refs/heads/feature")
+    assert code == 0 and mode == "none", out
+
+
+@pytest.mark.parametrize("value", ["false", "FALSE", "False"])
+def test_the_gate_is_off_for_any_casing_of_false(tmp_path, value):
+    code, mode, out = decide(tmp_path, TRUSTED_ONLY=value, EVENT="push", REF="refs/heads/feature")
+    assert code == 0 and mode == "oidc", out
+
+
+@pytest.mark.parametrize("value", ["", "ture", "yes", "1", "0", "on", "off", " true", "true ", "true\n", "no", "null"])
+@pytest.mark.parametrize("event", ["push", "pull_request"])
+def test_any_other_gate_value_stops_the_job_and_never_means_off(tmp_path, value, event):
+    code, written, out = decide_outputs(tmp_path, TRUSTED_ONLY=value, EVENT=event, REF="refs/heads/feature")
+    assert code == 1 and "mode" not in written, out
+    assert "::error" in out and "trusted-refs-only" in out
+
+
+def test_a_bad_gate_value_stops_a_fork_pull_request_too(tmp_path):
+    code, _, out = decide(tmp_path, TRUSTED_ONLY="TRU", IS_FORK="true", EVENT="pull_request", REF="refs/pull/7/merge")
+    assert code == 1, out
+
+
+# --- a release tag must be on the default branch's history, when the job can show it -----------------
+
+
+def git(cwd: Path, *args: str) -> str:
+    env = {
+        "PATH": os.environ["PATH"],
+        "HOME": str(cwd),
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@example.invalid",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@example.invalid",
+    }
+    return subprocess.run(["git", "-C", str(cwd), *args], env=env, check=True, capture_output=True, text=True).stdout.strip()
+
+
+@pytest.fixture
+def repo(tmp_path):
+    """A workspace with origin/main at `main_sha`, and one commit `side_sha` that is not on main."""
+    work = tmp_path / "ws"
+    work.mkdir()
+    git(work, "init", "-q", "-b", "main")
+    git(work, "commit", "-q", "--allow-empty", "-m", "one")
+    git(work, "commit", "-q", "--allow-empty", "-m", "two")
+    main_sha = git(work, "rev-parse", "HEAD")
+    git(work, "update-ref", "refs/remotes/origin/main", main_sha)
+    git(work, "checkout", "-q", "-b", "side", "HEAD~1")
+    git(work, "commit", "-q", "--allow-empty", "-m", "side")
+    side_sha = git(work, "rev-parse", "HEAD")
+    return work, main_sha, git(work, "rev-parse", "HEAD~1"), side_sha
+
+
+TAG = {"EVENT": "push", "REF": "refs/tags/v1.2.3", "DEFAULT_BRANCH": "main"}
+
+
+def test_a_tag_on_the_default_branch_history_is_trusted(tmp_path, repo):
+    work, main_sha, parent_sha, _ = repo
+    for sha in (main_sha, parent_sha):
+        code, written, out = decide_outputs(tmp_path, GITHUB_WORKSPACE=str(work), GITHUB_SHA=sha, **TAG)
+        assert code == 0 and written["mode"] == "oidc" and written["untrusted-tag"] == "false", out
+
+
+def test_a_tag_off_the_default_branch_history_is_refused_and_flagged(tmp_path, repo):
+    work, _, _, side_sha = repo
+    code, written, out = decide_outputs(tmp_path, GITHUB_WORKSPACE=str(work), GITHUB_SHA=side_sha, **TAG)
+    assert code == 0 and written["mode"] == "none" and written["untrusted-tag"] == "true", out
+    assert "trusted-refs-only" in out and "default branch" in out
+
+
+def test_the_ancestry_check_does_not_touch_the_gate_off_path(tmp_path, repo):
+    work, _, _, side_sha = repo
+    code, written, out = decide_outputs(
+        tmp_path, GITHUB_WORKSPACE=str(work), GITHUB_SHA=side_sha, TRUSTED_ONLY="false", **TAG
+    )
+    assert code == 0 and written["mode"] == "oidc", out
+
+
+def test_a_tag_that_cannot_be_checked_keeps_the_name_rule_and_says_so(tmp_path):
+    """RESIDUAL (README): with no checkout or no history the job cannot show where the tag points."""
+    code, written, out = decide_outputs(tmp_path, GITHUB_WORKSPACE=str(tmp_path / "nothing"), GITHUB_SHA="a" * 40, **TAG)
+    assert code == 0 and written["mode"] == "oidc" and "::notice" in out and "not verified" in out, out
+
+
+def test_an_unknown_tag_shape_is_still_refused_before_any_ancestry_check(tmp_path, repo):
+    work, main_sha, _, _ = repo
+    code, written, _ = decide_outputs(
+        tmp_path, GITHUB_WORKSPACE=str(work), GITHUB_SHA=main_sha, **{**TAG, "REF": "refs/tags/v1.2.3-rc.1"}
+    )
+    assert code == 0 and written["mode"] == "none" and written["untrusted-tag"] == "true"
