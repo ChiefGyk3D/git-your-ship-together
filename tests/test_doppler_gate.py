@@ -471,3 +471,42 @@ def test_an_unknown_tag_shape_is_still_refused_before_any_ancestry_check(tmp_pat
         tmp_path, GITHUB_WORKSPACE=str(work), GITHUB_SHA=main_sha, **{**TAG, "REF": "refs/tags/v1.2.3-rc.1"}
     )
     assert code == 0 and written["mode"] == "none" and written["untrusted-tag"] == "true"
+
+
+def test_a_shallow_workspace_cannot_verify_and_never_refuses(tmp_path, repo):
+    """Round 2: a shallow history can answer "not an ancestor" when ancestry is only unknown."""
+    work, main_sha, _, side_sha = repo
+    (work / ".git" / "shallow").write_text(main_sha + "\n")
+    code, written, out = decide_outputs(tmp_path, GITHUB_WORKSPACE=str(work), GITHUB_SHA=side_sha, **TAG)
+    assert code == 0 and written["mode"] == "oidc" and written["untrusted-tag"] == "false", out
+    assert "not verified" in out
+
+
+@pytest.mark.parametrize("status", [2, 3, 128, 255])
+def test_a_git_error_from_the_ancestry_check_is_not_verified_and_never_refuses(tmp_path, repo, status):
+    work, _, _, side_sha = repo
+    shim = tmp_path / "shim"
+    shim.mkdir()
+    real = subprocess.run(["which", "git"], capture_output=True, text=True, check=True).stdout.strip()
+    (shim / "git").write_text(
+        f'#!/bin/bash\nfor a in "$@"; do [ "$a" = merge-base ] && exit {status}; done\nexec {real} "$@"\n'
+    )
+    (shim / "git").chmod(0o755)
+    code, written, out = decide_outputs(
+        tmp_path, GITHUB_WORKSPACE=str(work), GITHUB_SHA=side_sha, PATH=f"{shim}:{os.environ['PATH']}", **TAG
+    )
+    assert code == 0 and written["mode"] == "oidc" and "not verified" in out, out
+
+
+def test_only_a_clean_exit_one_refuses(tmp_path, repo):
+    """The negative case for the two tests above: the same shim returning 1 does refuse."""
+    work, _, _, side_sha = repo
+    shim = tmp_path / "shim"
+    shim.mkdir()
+    real = subprocess.run(["which", "git"], capture_output=True, text=True, check=True).stdout.strip()
+    (shim / "git").write_text(f'#!/bin/bash\nfor a in "$@"; do [ "$a" = merge-base ] && exit 1; done\nexec {real} "$@"\n')
+    (shim / "git").chmod(0o755)
+    code, written, out = decide_outputs(
+        tmp_path, GITHUB_WORKSPACE=str(work), GITHUB_SHA=side_sha, PATH=f"{shim}:{os.environ['PATH']}", **TAG
+    )
+    assert code == 0 and written["mode"] == "none" and written["untrusted-tag"] == "true", out

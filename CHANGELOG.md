@@ -7,10 +7,9 @@ name what a caller sees after that.
 
 ### Fix: trusted-ref gate hardening (issue #238)
 
-- **Changed.** With `doppler-trusted-refs-only` on, only `push`, `workflow_dispatch` and `schedule` can fetch; every other
-  event (`issues`, `issue_comment`, `workflow_run`, `repository_dispatch`) is refused even on the default branch. The input
+- **Changed.** With `doppler-trusted-refs-only` on, only listed events can be trusted. The input
   accepts `true` or `false` in any casing; any other value fails the job instead of switching the gate off. A `vN.N.N` tag
-  is also refused when the checkout shows its commit is not in the default branch's history (best effort; see the README).
+  is also refused when a complete checkout shows its commit is not in the default branch's history (best effort; see the README).
 
 ### New: `agent-scan.yml`, optional advisory scans of agent skills and MCP tool definitions (issue #234)
 

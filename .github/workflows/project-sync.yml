@@ -317,19 +317,27 @@ jobs:
                 trusted=true
               elif [[ "$REF" =~ ^refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
                 trusted=true
-                # Best effort: refuse a tag only when the workspace positively shows its
-                # commit is not in the default branch's history. No checkout, a shallow
-                # clone or a missing remote ref cannot show it, so the name rule stands.
-                if [ "$TRUSTED_ONLY" = "true" ] && [ -n "$DEFAULT_BRANCH" ] && [ -n "${GITHUB_WORKSPACE:-}" ] && [ -n "${GITHUB_SHA:-}" ] \
-                  && git -C "$GITHUB_WORKSPACE" rev-parse --verify --quiet "refs/remotes/origin/$DEFAULT_BRANCH^{commit}" >/dev/null 2>&1 \
-                  && git -C "$GITHUB_WORKSPACE" rev-parse --verify --quiet "$GITHUB_SHA^{commit}" >/dev/null 2>&1; then
-                  if git -C "$GITHUB_WORKSPACE" merge-base --is-ancestor "$GITHUB_SHA" "refs/remotes/origin/$DEFAULT_BRANCH" >/dev/null 2>&1; then
-                    :
-                  elif [ "$(git -C "$GITHUB_WORKSPACE" merge-base --is-ancestor "$GITHUB_SHA" "refs/remotes/origin/$DEFAULT_BRANCH" >/dev/null 2>&1; echo $?)" = "1" ]; then
-                    trusted=false
+                # Best effort: refuse a tag only on a clean "not an ancestor" answer from a
+                # complete history. No checkout, a shallow clone, a missing remote ref or any
+                # git error cannot show where the tag points, so the name rule stands and a
+                # notice says the tag was not verified.
+                if [ "$TRUSTED_ONLY" = "true" ]; then
+                  verdict=unknown
+                  if [ -n "$DEFAULT_BRANCH" ] && [ -n "${GITHUB_WORKSPACE:-}" ] && [ -n "${GITHUB_SHA:-}" ] \
+                    && git -C "$GITHUB_WORKSPACE" rev-parse --verify --quiet "refs/remotes/origin/$DEFAULT_BRANCH^{commit}" >/dev/null 2>&1 \
+                    && git -C "$GITHUB_WORKSPACE" rev-parse --verify --quiet "$GITHUB_SHA^{commit}" >/dev/null 2>&1 \
+                    && [ "$(git -C "$GITHUB_WORKSPACE" rev-parse --is-shallow-repository 2>/dev/null)" = "false" ]; then
+                    rc=0
+                    git -C "$GITHUB_WORKSPACE" merge-base --is-ancestor "$GITHUB_SHA" "refs/remotes/origin/$DEFAULT_BRANCH" >/dev/null 2>&1 || rc=$?
+                    case "$rc" in
+                      0) verdict=in ;;
+                      1) verdict=out ;;
+                    esac
                   fi
-                else
-                  echo "::notice title=Doppler::tag $REF not verified against the default branch history (no checkout or history); only its name was checked"
+                  case "$verdict" in
+                    out) trusted=false ;;
+                    unknown) echo "::notice title=Doppler::tag $REF not verified against the default branch history (no checkout, incomplete history or git error); only its name was checked" ;;
+                  esac
                 fi
               fi ;;
             *) trusted=false ;;

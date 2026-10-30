@@ -64,16 +64,15 @@ and nothing else. That is `doppler-trusted-refs-only`, on by default in every
 workflow. A `pull_request` from a fork never fetches whichever way the input is set,
 because GitHub mints no OIDC token for it and the step refuses it.
 
-**Which events.** the event must be on an allow-list, `push`,
-`workflow_dispatch` or `schedule`; any other event (`issues`, `issue_comment`, `workflow_run`,
-`repository_dispatch`, one GitHub adds later) is refused while the gate is on, whatever the ref. A `schedule`
+**Which events.** the event must be on a short list, `push`, `workflow_dispatch` or `schedule`; only listed events can be trusted when the gate is
+on, whatever the ref. A `schedule`
 run fetches; a `push` or `workflow_dispatch` fetches on the default branch or a release-shaped tag. The
 `doppler-trusted-refs-only` value is `true` or `false` in any casing; anything else (empty, a typo) stops the
 job and never means off.
 
 **Tags, and the residual risk.** The step trusts a tag by its name (`vN.N.N`), and when the job has a checkout
-with the default branch's remote ref and enough history, it also requires the tagged commit to be in that
-history; a tag that is shown not to be is refused and flagged `untrusted-tag`. A job with no checkout, a
+with the default branch's remote ref and a complete (not shallow) history, it also requires the tagged commit to be in that
+history; a tag that a clean ancestry check shows not to be is refused and flagged `untrusted-tag`. A job with no checkout, a
 shallow clone (for example the default `actions/checkout` depth) or no `origin/<default branch>` ref cannot show
 it, and then only the name is checked (a notice says so). The action holds no credential to ask GitHub whether a
 tag is protected, so anyone who can push a `vN.N.N` tag can still reach a fetch from a job that cannot verify
