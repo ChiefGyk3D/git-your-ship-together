@@ -1,17 +1,14 @@
 """security.yml `advanced-security`: a private repository without GitHub Advanced Security (issue #248).
 
-The decision is one GitHub expression, used verbatim in job- and step-level `if`s, so these tests evaluate that
-expression for every combination rather than trusting its text. Dependency review and CodeQL are skipped when it is
-off; Semgrep and gitleaks still run and still fail on a finding but do not upload SARIF. Anything unrecognized runs
-everything and fails the job: a typo must never read as "off".
+The input is explicit: `true` (the default, today's behavior) or `false`. One always-running job,
+`advanced-security-check`, fails the whole call unless the value is exactly one of the two, and every job that reads the
+input `needs` it, so no case variant, empty or unknown value can reach a skip condition (GitHub compares strings
+case-insensitively, so `False` would otherwise skip a job before any case-sensitive check ran).
 """
 
 from __future__ import annotations
 
-import ast
-import itertools
 import os
-import re
 import subprocess
 
 import pytest
@@ -20,52 +17,41 @@ from test_workflows import WORKFLOWS, jobs, load, steps_of, triggers
 DOC = load(WORKFLOWS / "security.yml")
 INPUTS = triggers(DOC)["workflow_call"]["inputs"]
 JOBS = jobs(DOC)
-ON = (
-    "inputs.advanced-security != 'false' && "
-    "(inputs.advanced-security != 'auto' || github.event.repository.private != true)"
-)
+CHECK = "advanced-security-check"
 VALIDATE = "Validate the advanced-security input"
 NOTE = "Note the skipped Advanced Security features"
-
-
-class Text(str):
-    """GitHub compares strings case-insensitively."""
-
-    def __eq__(self, other):
-        return isinstance(other, str) and self.lower() == other.lower()
-
-    def __ne__(self, other):
-        return not self == other
-
-    __hash__ = str.__hash__
-
-
-def evaluate(expression: str, mode: str, private, **extra) -> bool:
-    """The forms the expression uses: inputs.X, the repository flag, ==, !=, &&, ||, parentheses, true/false."""
-    py = expression.replace("&&", " and ").replace("||", " or ")
-    py = py.replace("inputs.advanced-security", "ADV").replace("github.event.repository.private", "PRIVATE")
-    py = re.sub(r"\binputs\.([\w-]+)", lambda m: "IN_" + m.group(1).replace("-", "_"), py)
-    py = re.sub(r"\btrue\b", "True", py)
-    names = {"ADV": Text(mode), "PRIVATE": private, "__builtins__": {}}
-    names.update({"IN_" + k.replace("-", "_"): v for k, v in extra.items()})
-    tree = ast.parse(py.strip(), mode="eval")
-    for node in ast.walk(tree):
-        assert isinstance(
-            node,
-            (
-                ast.Expression,
-                ast.BoolOp,
-                ast.Compare,
-                ast.Name,
-                ast.Constant,
-                ast.And,
-                ast.Or,
-                ast.Eq,
-                ast.NotEq,
-                ast.Load,
-            ),
-        ), f"unsupported expression form: {ast.dump(node)}"
-    return bool(eval(compile(tree, "<expr>", "eval"), names))  # the AST above admits only the whitelisted node types
+READERS = ["codeql", "dependency-review", "gitleaks", "semgrep"]
+ON = "inputs.advanced-security == 'true'"
+OFF = "inputs.advanced-security == 'false'"
+INVALID = [
+    "",
+    " ",
+    "\n",
+    "True",
+    "TRUE",
+    "tRuE",
+    "False",
+    "FALSE",
+    "fAlSe",
+    "true ",
+    " false",
+    "true\n",
+    "false\nfalse",
+    "auto",
+    "yes",
+    "0",
+    "1",
+    "null",
+    "true;false",
+    "true​",  # zero-width space
+    "truе",  # Cyrillic e
+    "falsе",
+    "ｔrue",  # full-width t
+    "$(id)",
+    "`id`",
+    "${{ inputs.codeql }}",
+    "${ADVANCED_SECURITY}",
+]
 
 
 def step(job: str, name: str) -> dict:
@@ -76,154 +62,150 @@ def uploads(job: str) -> list[dict]:
     return [s for s in steps_of(JOBS[job]) if "upload-sarif" in str(s.get("uses", ""))]
 
 
-def test_the_input_is_documented_with_a_neutral_default():
+def test_the_input_is_explicit_and_defaults_to_todays_behavior():
     spec = INPUTS["advanced-security"]
-    assert spec["type"] == "string" and spec["default"] == "auto"
-    for word in ("auto", "true", "false"):
-        assert word in spec["description"]
+    assert spec["type"] == "string" and spec["default"] == "true"
+    assert "auto" not in spec["description"]
 
 
-MODES = ["auto", "true", "false"]
-PRIVACY = [True, False, None]
+def test_nothing_reads_the_private_flag_or_an_auto_mode():
+    text = (WORKFLOWS / "security.yml").read_text()
+    assert "repository.private" not in text and "'auto'" not in text
 
 
-@pytest.mark.parametrize(("mode", "private"), list(itertools.product(MODES, PRIVACY)))
-def test_the_decision_for_each_mode_and_visibility(mode, private):
-    expected = {"true": True, "false": False, "auto": private is not True}[mode]
-    assert evaluate(ON, mode, private) is expected
+def test_the_check_job_always_runs_and_does_no_checkout():
+    job = JOBS[CHECK]
+    assert "if" not in job and "needs" not in job
+    assert job["permissions"] == {"contents": "read"}
+    assert job["steps"][0]["name"] == "Validate the egress policy inputs (EX-0001)"
+    names = [s.get("name") for s in steps_of(job)]
+    assert str(steps_of(job)[0].get("uses", "")).startswith("step-security/harden-runner@")
+    assert "Egress canary (EX-0001)" in names
+    assert names[-1] == VALIDATE
+    assert not any("checkout" in str(s.get("uses", "")) for s in steps_of(job))
 
 
-def test_the_four_headline_cases():
-    assert evaluate(ON, "auto", False) is True  # public, auto: as today
-    assert evaluate(ON, "auto", True) is False  # private, auto: off
-    assert evaluate(ON, "true", True) is True  # private, caller says true: as today
-    assert evaluate(ON, "false", False) is False  # public, caller says false: off
+def test_the_check_job_passes_the_value_by_env_and_never_evaluates_it():
+    s = step(CHECK, VALIDATE)
+    assert "if" not in s and s["env"]["ADVANCED_SECURITY"] == "${{ inputs.advanced-security }}"
+    assert "inputs." not in s["run"] and "eval" not in s["run"]
 
 
-@pytest.mark.parametrize("bad", ["", "yes", "no", "0", "off", "autom", "true ", " false", "false;true", "null"])
-@pytest.mark.parametrize("private", PRIVACY)
-def test_an_invalid_value_never_reads_as_off(bad, private):
-    assert evaluate(ON, bad, private) is True, "the expression must keep every scan running on a value it does not know"
-
-
-@pytest.mark.parametrize("job", ["codeql", "dependency-review", "gitleaks", "semgrep"])
-def test_the_validate_step_comes_after_harden_runner_and_fails_closed(job):
-    names = [s.get("name") for s in steps_of(JOBS[job])]
-    assert VALIDATE in names
-    first = steps_of(JOBS[job])[0]
-    assert str(first.get("uses", "")).startswith("step-security/harden-runner@") or first["name"].startswith(
-        "Validate the egress"
-    )
-    assert names.index(VALIDATE) < next(
-        i for i, s in enumerate(steps_of(JOBS[job])) if "checkout" in str(s.get("uses", ""))
-    )
-    s = step(job, VALIDATE)
-    assert "if" not in s, "the validation runs whenever the job does"
-    assert "inputs." not in s["run"], "inputs reach the script through env, never interpolated"
-    assert s["env"]["ADVANCED_SECURITY"] == "${{ inputs.advanced-security }}"
+def test_no_other_job_has_a_validate_step():
+    for name, job in JOBS.items():
+        if name != CHECK:
+            assert VALIDATE not in [s.get("name") for s in steps_of(job)]
 
 
 def run_validate(value: str | None):
     env = {k: v for k, v in os.environ.items() if not k.startswith("ADVANCED_")}
     if value is not None:
         env["ADVANCED_SECURITY"] = value
-    script = step("gitleaks", VALIDATE)["run"]
+    script = step(CHECK, VALIDATE)["run"]
     return subprocess.run(
         ["bash", "-eo", "pipefail", "-c", script], capture_output=True, text=True, env=env, timeout=20
     )
 
 
-@pytest.mark.parametrize("good", MODES)
-def test_the_validate_script_accepts_the_three_values(good):
+@pytest.mark.parametrize("good", ["true", "false"])
+def test_the_validator_accepts_exactly_true_and_false(good):
     done = run_validate(good)
     assert done.returncode == 0, done.stdout + done.stderr
 
 
-@pytest.mark.parametrize("bad", ["", "True", "FALSE", "yes", "off", "autom", "true ", "false;true", "$(id)", None])
-def test_the_validate_script_rejects_anything_else_with_a_clear_error(bad):
+@pytest.mark.parametrize("bad", [*INVALID, None])
+def test_every_invalid_value_fails_the_check_job_with_a_clear_error(bad):
     done = run_validate(bad)
-    assert done.returncode == 1, "an invalid value must fail the job, not pass it"
+    assert done.returncode == 1, "an invalid value must fail the call, not pass it"
     assert "::error" in done.stdout and "advanced-security" in done.stdout
-    assert "auto" in done.stdout and "true" in done.stdout and "false" in done.stdout
+    assert "'true'" in done.stdout and "'false'" in done.stdout
     assert "uid=" not in done.stdout + done.stderr, "the value is data, never executed"
 
 
-def test_the_validate_scripts_are_identical_in_every_job():
-    scripts = {step(j, VALIDATE)["run"] for j in ("codeql", "dependency-review", "gitleaks", "semgrep")}
-    assert len(scripts) == 1
+def reads_input(job: dict) -> bool:
+    import json
+
+    return "advanced-security" in json.dumps(job)
 
 
-def test_codeql_and_dependency_review_are_skipped_not_failed():
-    assert JOBS["codeql"]["if"] == f"inputs.codeql && ({ON})"
-    assert (
-        JOBS["dependency-review"]["if"] == f"inputs.dependency-review && github.event_name == 'pull_request' && ({ON})"
-    )
-    for mode, private in itertools.product(MODES, PRIVACY):
-        on = evaluate(ON, mode, private)
-        assert evaluate(JOBS["codeql"]["if"], mode, private, codeql=True) is on
-        assert evaluate(JOBS["codeql"]["if"], mode, private, codeql=False) is False
+def test_every_job_that_reads_the_input_needs_the_check_job():
+    readers = sorted(n for n, j in JOBS.items() if n != CHECK and reads_input(j))
+    assert readers == sorted(READERS), "a new reader of the input must be listed here and need the check"
+    for name in READERS:
+        needs = JOBS[name].get("needs")
+        needs = [needs] if isinstance(needs, str) else needs
+        assert CHECK in needs, f"{name} could evaluate the input before it is validated"
+
+
+def test_the_check_job_is_the_only_one_and_the_job_count_grows_by_exactly_one():
+    assert [n for n in JOBS if "advanced-security" in n] == [CHECK]
+    assert len(JOBS) == 8  # codeql gitleaks dependency-audit dependency-review semgrep snyk scorecard + the check
+
+
+def test_no_conditional_sees_a_value_that_failed_validation():
+    """The chain per value: the validator runs first; a failed `needs` skips the dependents without evaluating `if`."""
+    for value in INVALID:
+        assert run_validate(value).returncode == 1
+    for name in READERS:
+        assert CHECK in JOBS[name]["needs"]
+        assert not any(w in str(JOBS[name]["if"]) for w in ("success()", "always()", "failure()", "cancelled()")), (
+            "a status function would run the job (and its conditions) after the check failed"
+        )
+
+
+def test_the_job_conditions_are_exact_on_true_and_keep_their_other_clauses():
+    assert JOBS["codeql"]["if"] == f"inputs.codeql && {ON}"
+    assert JOBS["dependency-review"]["if"] == f"inputs.dependency-review && github.event_name == 'pull_request' && {ON}"
+    assert JOBS["gitleaks"]["if"] == "inputs.gitleaks" and JOBS["semgrep"]["if"] == "inputs.semgrep"
 
 
 def test_semgrep_and_gitleaks_still_run_and_still_fail_on_a_finding():
-    assert JOBS["semgrep"]["if"] == "inputs.semgrep" and JOBS["gitleaks"]["if"] == "inputs.gitleaks"
     scan = step("gitleaks", "Scan the full history (gitleaks)")
     assert "if" not in scan and "--exit-code 1" in scan["run"]
     semgrep = step("semgrep", "Scan (Semgrep)")
     assert "if" not in semgrep and "--error" in semgrep["run"]
 
 
-def test_the_sarif_uploads_follow_the_decision_and_keep_their_other_conditions():
+def test_the_sarif_uploads_follow_the_input_and_keep_their_other_conditions():
     (gitleaks,) = uploads("gitleaks")
     (semgrep,) = uploads("semgrep")
     assert ON in gitleaks["if"] and "inputs.gitleaks-upload-sarif" in gitleaks["if"]
     assert "always()" in gitleaks["if"] and "hashFiles('gitleaks.sarif')" in gitleaks["if"]
     assert ON in semgrep["if"] and "always()" in semgrep["if"] and "hashFiles('semgrep.sarif')" in semgrep["if"]
-    for mode, private in itertools.product(MODES, PRIVACY):
-        on = evaluate(ON, mode, private)
-        assert (
-            evaluate(
-                gitleaks["if"].replace("always() &&", "True &&").replace("hashFiles('gitleaks.sarif') != ''", "true"),
-                mode,
-                private,
-                **{"gitleaks-upload-sarif": True},
-            )
-            is on
-        )
 
 
-def test_snyk_and_scorecard_uploads_are_unchanged():
-    # Both are opt-in and a caller who turns them on has Advanced Security; the decision does not reach them.
+def test_snyk_and_scorecard_are_unchanged():
     for job in ("snyk", "scorecard"):
-        assert not any(ON in str(s.get("if", "")) for s in steps_of(JOBS[job]))
+        assert "advanced-security" not in str(JOBS[job])
 
 
-def run_note(mode: str, private: str, tmp_path):
+def run_note(tmp_path):
     summary = tmp_path / "summary.md"
     summary.unlink(missing_ok=True)
-    env = {**os.environ, "ADVANCED_SECURITY": mode, "REPOSITORY_PRIVATE": private, "GITHUB_STEP_SUMMARY": str(summary)}
-    script = step("semgrep", NOTE)["run"]
+    env = {**os.environ, "GITHUB_STEP_SUMMARY": str(summary)}
     done = subprocess.run(
-        ["bash", "-eo", "pipefail", "-c", script], capture_output=True, text=True, env=env, timeout=20
+        ["bash", "-eo", "pipefail", "-c", step("semgrep", NOTE)["run"]],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=20,
     )
     assert done.returncode == 0, done.stdout + done.stderr
     return summary.read_text()
 
 
 @pytest.mark.parametrize("job", ["gitleaks", "semgrep"])
-def test_the_note_step_runs_only_when_the_features_are_off(job):
+def test_the_note_step_runs_only_when_the_input_is_false(job):
     s = step(job, NOTE)
-    assert s["if"] == "${{ !(" + ON + ") }}"
+    assert s["if"] == OFF
     assert "inputs." not in s["run"]
 
 
 def test_the_summary_says_what_was_skipped_why_and_how_to_turn_it_on(tmp_path):
-    auto = run_note("auto", "true", tmp_path)
-    assert "private repository" in auto
-    for word in ("dependency review", "CodeQL", "SARIF", "advanced-security: true"):
-        assert word.lower() in auto.lower()
-    assert "Semgrep" in auto and "gitleaks" in auto and "still" in auto
-    forced = run_note("false", "false", tmp_path)
-    assert "advanced-security: false" in forced and "private repository" not in forced
+    text = run_note(tmp_path)
+    for word in ("dependency review", "CodeQL", "SARIF", "advanced-security: false", "advanced-security: true"):
+        assert word.lower() in text.lower()
+    assert "Semgrep" in text and "gitleaks" in text and "still" in text
 
 
 def test_the_two_note_scripts_are_identical():

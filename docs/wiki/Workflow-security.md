@@ -83,13 +83,13 @@ jobs:
   an unhashed `pip install` (issue #87). The Semgrep version is therefore the lock's. `semgrep-version` is **deprecated and
   will be removed**: empty or equal to the locked version is accepted, anything else fails the install step naming the locked
   version. A Snyk `pip-audit-requirements` file with no hashes now fails rather than installing unchecked.
-- **Private repositories without Advanced Security (`advanced-security`, issue #248).** Dependency review and code-scanning
-  uploads need GitHub Advanced Security, which a private repository does not have unless it pays for it. With the default
-  `auto`, the workflow reads the repository's private flag and, for a private repository, skips dependency review and CodeQL
-  (shown as skipped, not failed) and skips the SARIF uploads of Semgrep and gitleaks. Semgrep and gitleaks still run and still
-  fail the job on a finding, and both write a job-summary note saying what was skipped, why, and that `advanced-security: true`
-  turns it back on. A public repository, or a caller that sets `true`, behaves as before. An invalid value fails the job and
-  keeps every scan on.
+- **Private repositories without Advanced Security: set `advanced-security: false` (issue #248).** Without it the run fails:
+  dependency review reports that it is not supported on the repository, and the SARIF uploads fail with "Advanced Security must
+  be enabled" even when the scan found nothing. Put `advanced-security: false` once under `with:` in the caller. Then dependency
+  review and CodeQL are skipped (shown as skipped, not failed), the Semgrep and gitleaks SARIF uploads are skipped, and both jobs
+  write a job-summary note. Semgrep and gitleaks still run and still fail the job on a finding. The default is `true`, so every
+  existing caller is unchanged. The value must be exactly `true` or `false`: a new always-running job, `advanced-security-check`,
+  fails the whole call on anything else (`False`, empty, a typo) before any scan, and the jobs that read the input wait for it.
 - **Semgrep suppression** is partly unsettled (issue #83); see the scanning page.
 - **The Actions allow-list** needs subdirectory forms for `github/codeql-action/init` and `snyk/actions/setup`; see
   [The baseline and the weekly audit](Baseline-and-the-weekly-audit.md).

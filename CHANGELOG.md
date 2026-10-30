@@ -5,21 +5,22 @@ name what a caller sees after that.
 
 ## Unreleased
 
-### New: `security.yml` works on a private repository without Advanced Security (issue #248)
+### New: `advanced-security` input in `security.yml` for a private repository without Advanced Security (issue #248)
 
-- **New input `advanced-security`** (`auto`, `true` or `false`; default `auto`). `auto` reads the repository's private flag
-  (`github.event.repository.private`) and treats a private repository as having no GitHub Advanced Security unless the caller
-  sets `true`. A public repository, or a caller that sets `true`, behaves exactly as before.
-- **With it off:** dependency review and CodeQL are skipped by a job-level `if` (they show as skipped, never failed); Semgrep and
-  gitleaks run as before and still fail the job on a finding, but their SARIF uploads are skipped; both jobs write a job-summary
-  note naming what was skipped, why, and how to turn it on.
-- **Fails closed.** Any value other than the three fails the Validate step of CodeQL, dependency review, gitleaks and Semgrep
-  and keeps every scan on; the skip expression only matches `false`, or `auto` on a private repository.
-- **Existing callers.** A public repository is unchanged. A private repository that already passed
-  `gitleaks-upload-sarif: false` now also skips dependency review, CodeQL and the Semgrep upload; one that has Advanced Security
-  must set `advanced-security: true` on its next re-pin. No job is added or removed; the new steps are in existing jobs.
-- **Tests.** `tests/test_advanced_security.py` evaluates the decision for every mode and visibility and for invalid values, and
-  runs the validate and summary steps under bash.
+- **New input `advanced-security`**, exactly `true` (the default, behavior unchanged for every caller) or `false`. A private
+  repository without GitHub Advanced Security sets `advanced-security: false` once in its caller; without it dependency review and
+  the SARIF uploads fail the run.
+- **With `false`:** dependency review and CodeQL are skipped by a job-level `if` (skipped, never failed); Semgrep and gitleaks run
+  as before and still fail the job on a finding, but their SARIF uploads are skipped; both jobs write a job-summary note naming
+  what was skipped and why.
+- **Validated before use.** One new always-running job, `advanced-security-check` ("Advanced Security setting": harden-runner, the
+  egress canary, no checkout), fails the whole call unless the value is exactly `true` or `false`. CodeQL, dependency review,
+  gitleaks and Semgrep `needs` it, so no case variant (`False`), empty or unknown value reaches a skip condition.
+- **Job count: +1** (`advanced-security-check`). A caller that requires jobs by name is unaffected; the new job reports success when
+  the value is valid.
+- **Existing callers.** Nothing changes unless a caller sets the input.
+- **Tests.** `tests/test_advanced_security.py` runs the validator against 26 invalid values, pins the `needs` wiring and the job
+  conditions, and runs the summary step under bash.
 
 ### New: Python 3.14 and 3.15 in the `python-ci.yml` matrix, and one list of supported Pythons (issue #242)
 

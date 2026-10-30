@@ -37,9 +37,9 @@ on:
   workflow_call:
     inputs:
       advanced-security:
-        description: Whether the repository has GitHub Advanced Security - `auto`, `true` or `false`. `auto` (default) treats a private repository as having none and a public one as having it. Without it dependency review and CodeQL are skipped, and Semgrep and gitleaks still run and still fail on a finding but do not upload SARIF; the job summary says so. Any other value fails the job and runs every scan.
+        description: Whether the repository has GitHub Advanced Security - exactly `true` (default, unchanged behavior) or `false`. A private repository without Advanced Security sets `false`; dependency review and CodeQL are then skipped, and Semgrep and gitleaks still run and still fail on a finding but do not upload SARIF, and the job summary says so. Any other value (including `False` or an empty string) fails the whole call in the `advanced-security-check` job before any scan.
         type: string
-        default: auto
+        default: "true"
       codeql:
         description: Run CodeQL.
         type: boolean
@@ -205,14 +205,12 @@ permissions:
   contents: read
 
 jobs:
-  codeql:
-    name: CodeQL
-    if: inputs.codeql && (inputs.advanced-security != 'false' && (inputs.advanced-security != 'auto' || github.event.repository.private != true))
+  advanced-security-check:
+    name: Advanced Security setting
     runs-on: ubuntu-latest
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read
-      security-events: write  # CodeQL SARIF upload
     steps:
       - name: Validate the egress policy inputs (EX-0001)
         timeout-minutes: 1
@@ -335,12 +333,133 @@ jobs:
           set -u
           value=${ADVANCED_SECURITY-}
           case "$value" in
-            auto | true | false) ;;
+            true | false) ;;
             *)
-              echo "::error title=advanced-security::the advanced-security input must be exactly 'auto', 'true' or 'false' (its value is ${#value} characters long); every scan stays on until it is fixed"
+              echo "::error title=advanced-security::the advanced-security input must be exactly 'true' or 'false' (its value is ${#value} characters long); no scan runs until it is fixed"
               exit 1
               ;;
           esac
+
+  codeql:
+    name: CodeQL
+    needs: advanced-security-check
+    if: inputs.codeql && inputs.advanced-security == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+      security-events: write  # CodeQL SARIF upload
+    steps:
+      - name: Validate the egress policy inputs (EX-0001)
+        timeout-minutes: 1
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        env:
+          POLICY_EGRESS_POLICY: ${{ inputs.egress-policy }}
+          POLICY_EGRESS_POLICY_SECRETLESS: ${{ inputs.egress-policy-secretless }}
+          POLICY_SEMGREP_EGRESS_POLICY: ${{ inputs.semgrep-egress-policy }}
+        run: |
+          set -u
+          bad=0
+          check() {
+            if [ "$2" = set ] && [ "$3" != audit ] && [ "$3" != block ]; then
+              echo "::error title=egress policy::the $1 input must be exactly 'audit' or 'block' (its value is ${#3} characters long)"
+              bad=1
+            fi
+          }
+          check egress-policy "${POLICY_EGRESS_POLICY+set}" "${POLICY_EGRESS_POLICY-}"
+          check egress-policy-secretless "${POLICY_EGRESS_POLICY_SECRETLESS+set}" "${POLICY_EGRESS_POLICY_SECRETLESS-}"
+          check distro-egress-policy "${POLICY_DISTRO_EGRESS_POLICY+set}" "${POLICY_DISTRO_EGRESS_POLICY-}"
+          check semgrep-egress-policy "${POLICY_SEMGREP_EGRESS_POLICY+set}" "${POLICY_SEMGREP_EGRESS_POLICY-}"
+          exit "$bad"
+
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: ${{ (inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block' }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
+          # The agent may only stop reporting to StepSecurity in block mode.
+          disable-telemetry: ${{ ((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block') == 'block' }}
+
+      - name: Egress canary (EX-0001)
+        if: ${{ runner.os == 'Linux' && (((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block') == 'block') }}
+        timeout-minutes: 2
+        shell: bash
+        # The workspace root exists before checkout; a job default working-directory may not.
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -u
+          NAMES="github.com api.github.com results-receiver.actions.githubusercontent.com"
+          PORT=443
+          canary_resolve() { timeout 5 getent ahostsv4 "$1" 2>/dev/null | awk '$2 == "STREAM" { print $1 }'; }
+          canary_probe() { timeout 3 bash -c "exec 3<>\"/dev/tcp/\$0/\$1\"" "$1" "$PORT" 2>/dev/null; }
+          canary_reach() {
+            local i
+            for i in 1 2 3 4; do
+              canary_probe "$1" && return 0
+              [ "$i" -lt 4 ] && sleep 1
+            done
+            return 1
+          }
+          canary_show() { local n=$1; shift; echo "+ $*"; { timeout 10 "$@" 2>&1 || true; } | head -n "$n" || true; }
+          canary_diag() {
+            local name
+            echo "::group::egress canary diagnostics (EX-0001, for the GitHub Support ticket)"
+            canary_show 5 uname -srmo
+            canary_show 20 cat /etc/resolv.conf
+            canary_show 20 bash -c "resolvectl status 2>/dev/null | grep -E '^ *(Current DNS Server|DNS Servers?|DNS Domain):'"
+            canary_show 20 bash -c "ss -lun | grep ':53 '"
+            for name in $NAMES pipelines.actions.githubusercontent.com; do
+              canary_show 20 getent ahostsv4 "$name"
+              canary_show 5 curl -sS -o /dev/null -w '%{http_code} %{remote_ip} %{time_connect}\n' --max-time 8 "https://$name"
+            done
+            echo "::endgroup::"
+          }
+          canary_main() {
+            local tmp name addr n=0 bad
+            tmp=$(mktemp -d) || return 1
+            for _ in 1 2 3; do
+              for name in $NAMES; do canary_resolve "$name" >>"$tmp/res.$name" & done
+              wait
+              sleep 1
+            done
+            for name in $NAMES; do
+              if [ -s "$tmp/res.$name" ]; then sort -u "$tmp/res.$name"; else echo "-"; fi | sed "s|^|$name |" >>"$tmp/pairs"
+            done
+            while read -r name addr; do
+              n=$((n + 1))
+              ( { [ "$addr" != "-" ] && canary_reach "$addr"; } || echo "$name $addr" >"$tmp/bad.$n" ) </dev/null &
+            done <"$tmp/pairs"
+            wait
+            bad=$(cat "$tmp"/bad.* 2>/dev/null | sort || true)
+            rm -rf "$tmp"
+            if [ -z "$bad" ]; then
+              echo "egress canary: all $n addresses of $NAMES accept TCP $PORT"
+              return 0
+            fi
+            echo "::error title=egress canary::egress broken on this runner (known westus2 DNS issue, EX-0001): rerun the job"
+            echo "unreachable addresses (name address; '-' means the name did not resolve):"
+            printf '%s\n' "$bad"
+            canary_diag
+            echo "EX-0001 egress canary failed, unreachable: $(printf '%s' "$bad" | tr '\n' ';')" >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
+            return 1
+          }
+          set -m
+          canary_main &
+          main=$!
+          (sleep 90; kill -TERM -- "-$main"; sleep 2; kill -KILL -- "-$main") >/dev/null 2>&1 &
+          dog=$!
+          wait "$main" && rc=0 || rc=$?
+          kill -TERM -- "-$dog" >/dev/null 2>&1 || true
+          if kill -0 -- "-$main" >/dev/null 2>&1; then
+            kill -TERM -- "-$main" >/dev/null 2>&1 || true
+            sleep 1
+            kill -KILL -- "-$main" >/dev/null 2>&1 || true
+          fi
+          if [ "$rc" -eq 143 ] || [ "$rc" -eq 137 ]; then
+            echo "::error title=egress canary::the canary hit its 90 s deadline (EX-0001): rerun the job"
+            rc=124
+          fi
+          exit "$rc"
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -356,6 +475,7 @@ jobs:
 
   gitleaks:
     name: Secret scan (gitleaks)
+    needs: advanced-security-check
     if: inputs.gitleaks
     runs-on: ubuntu-latest
     timeout-minutes: ${{ inputs.timeout-minutes }}
@@ -474,23 +594,6 @@ jobs:
           fi
           exit "$rc"
 
-      - name: Validate the advanced-security input
-        timeout-minutes: 1
-        shell: bash
-        working-directory: ${{ github.workspace }}
-        env:
-          ADVANCED_SECURITY: ${{ inputs.advanced-security }}
-        run: |
-          set -u
-          value=${ADVANCED_SECURITY-}
-          case "$value" in
-            auto | true | false) ;;
-            *)
-              echo "::error title=advanced-security::the advanced-security input must be exactly 'auto', 'true' or 'false' (its value is ${#value} characters long); every scan stays on until it is fixed"
-              exit 1
-              ;;
-          esac
-
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -544,30 +647,21 @@ jobs:
         run: gitleaks git --redact --no-banner --exit-code 1 --report-format sarif --report-path gitleaks.sarif --log-opts="--all" .
 
       - name: Note the skipped Advanced Security features
-        if: ${{ !(inputs.advanced-security != 'false' && (inputs.advanced-security != 'auto' || github.event.repository.private != true)) }}
+        if: inputs.advanced-security == 'false'
         timeout-minutes: 1
         shell: bash
         working-directory: ${{ github.workspace }}
-        env:
-          ADVANCED_SECURITY: ${{ inputs.advanced-security }}
-          REPOSITORY_PRIVATE: ${{ github.event.repository.private }}
         run: |
-          set -u
-          if [ "$ADVANCED_SECURITY" = false ]; then
-            why="the caller set \`advanced-security: false\`"
-          else
-            why="this is a private repository and \`advanced-security\` is \`auto\` (private flag: $REPOSITORY_PRIVATE)"
-          fi
           {
             echo "### GitHub Advanced Security features skipped"
             echo
-            echo "Skipped because $why: dependency review, CodeQL, and the SARIF uploads of Semgrep and gitleaks (code scanning is not available without Advanced Security)."
+            echo "Skipped because the caller set \`advanced-security: false\`: dependency review, CodeQL, and the SARIF uploads of Semgrep and gitleaks (code scanning is not available without Advanced Security)."
             echo "Semgrep and gitleaks still run and still fail the job on a finding."
-            echo "If this repository has Advanced Security, set \`advanced-security: true\` on the caller to turn all of it on."
+            echo "If this repository has Advanced Security, remove the line or set \`advanced-security: true\` on the caller to turn all of it on."
           } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
 
       - name: Upload gitleaks results
-        if: always() && inputs.gitleaks-upload-sarif && (inputs.advanced-security != 'false' && (inputs.advanced-security != 'auto' || github.event.repository.private != true)) && hashFiles('gitleaks.sarif') != ''
+        if: always() && inputs.gitleaks-upload-sarif && inputs.advanced-security == 'true' && hashFiles('gitleaks.sarif') != ''
         uses: github/codeql-action/upload-sarif@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
         with:
           sarif_file: gitleaks.sarif
@@ -840,7 +934,8 @@ jobs:
 
   dependency-review:
     name: Dependency review
-    if: inputs.dependency-review && github.event_name == 'pull_request' && (inputs.advanced-security != 'false' && (inputs.advanced-security != 'auto' || github.event.repository.private != true))
+    needs: advanced-security-check
+    if: inputs.dependency-review && github.event_name == 'pull_request' && inputs.advanced-security == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
@@ -958,23 +1053,6 @@ jobs:
           fi
           exit "$rc"
 
-      - name: Validate the advanced-security input
-        timeout-minutes: 1
-        shell: bash
-        working-directory: ${{ github.workspace }}
-        env:
-          ADVANCED_SECURITY: ${{ inputs.advanced-security }}
-        run: |
-          set -u
-          value=${ADVANCED_SECURITY-}
-          case "$value" in
-            auto | true | false) ;;
-            *)
-              echo "::error title=advanced-security::the advanced-security input must be exactly 'auto', 'true' or 'false' (its value is ${#value} characters long); every scan stays on until it is fixed"
-              exit 1
-              ;;
-          esac
-
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -989,6 +1067,7 @@ jobs:
 
   semgrep:
     name: Semgrep
+    needs: advanced-security-check
     if: inputs.semgrep
     runs-on: ubuntu-latest
     timeout-minutes: ${{ inputs.timeout-minutes }}
@@ -1108,23 +1187,6 @@ jobs:
             rc=124
           fi
           exit "$rc"
-
-      - name: Validate the advanced-security input
-        timeout-minutes: 1
-        shell: bash
-        working-directory: ${{ github.workspace }}
-        env:
-          ADVANCED_SECURITY: ${{ inputs.advanced-security }}
-        run: |
-          set -u
-          value=${ADVANCED_SECURITY-}
-          case "$value" in
-            auto | true | false) ;;
-            *)
-              echo "::error title=advanced-security::the advanced-security input must be exactly 'auto', 'true' or 'false' (its value is ${#value} characters long); every scan stays on until it is fixed"
-              exit 1
-              ;;
-          esac
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1399,30 +1461,21 @@ jobs:
           semgrep scan --metrics=off --sarif --output semgrep.sarif "${args[@]}" .
 
       - name: Note the skipped Advanced Security features
-        if: ${{ !(inputs.advanced-security != 'false' && (inputs.advanced-security != 'auto' || github.event.repository.private != true)) }}
+        if: inputs.advanced-security == 'false'
         timeout-minutes: 1
         shell: bash
         working-directory: ${{ github.workspace }}
-        env:
-          ADVANCED_SECURITY: ${{ inputs.advanced-security }}
-          REPOSITORY_PRIVATE: ${{ github.event.repository.private }}
         run: |
-          set -u
-          if [ "$ADVANCED_SECURITY" = false ]; then
-            why="the caller set \`advanced-security: false\`"
-          else
-            why="this is a private repository and \`advanced-security\` is \`auto\` (private flag: $REPOSITORY_PRIVATE)"
-          fi
           {
             echo "### GitHub Advanced Security features skipped"
             echo
-            echo "Skipped because $why: dependency review, CodeQL, and the SARIF uploads of Semgrep and gitleaks (code scanning is not available without Advanced Security)."
+            echo "Skipped because the caller set \`advanced-security: false\`: dependency review, CodeQL, and the SARIF uploads of Semgrep and gitleaks (code scanning is not available without Advanced Security)."
             echo "Semgrep and gitleaks still run and still fail the job on a finding."
-            echo "If this repository has Advanced Security, set \`advanced-security: true\` on the caller to turn all of it on."
+            echo "If this repository has Advanced Security, remove the line or set \`advanced-security: true\` on the caller to turn all of it on."
           } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
 
       - name: Upload Semgrep results
-        if: always() && (inputs.advanced-security != 'false' && (inputs.advanced-security != 'auto' || github.event.repository.private != true)) && hashFiles('semgrep.sarif') != ''
+        if: always() && inputs.advanced-security == 'true' && hashFiles('semgrep.sarif') != ''
         uses: github/codeql-action/upload-sarif@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
         with:
           sarif_file: semgrep.sarif
