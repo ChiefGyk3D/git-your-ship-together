@@ -22,8 +22,25 @@ from test_workflows import ACTION_FILES, REPO, WORKFLOW_FILES, WORKFLOWS, jobs, 
 
 SCRIPT = REPO / "scripts" / "tool_locks.py"
 REQS = REPO / ".github" / "requirements"
-TOOLS = {"pip-audit": "Install pip-audit", "semgrep": "Install Semgrep"}
-JOBS = {"pip-audit": "dependency-audit", "semgrep": "semgrep"}
+TOOLS = {
+    "pip-audit": "Install pip-audit",
+    "semgrep": "Install Semgrep",
+    "cisco-ai-skill-scanner": "Install skill-scanner",
+    "cisco-ai-mcp-scanner": "Install mcp-scanner",
+}
+JOBS = {
+    "pip-audit": "dependency-audit",
+    "semgrep": "semgrep",
+    "cisco-ai-skill-scanner": "skill-scan",
+    "cisco-ai-mcp-scanner": "mcp-scan",
+}
+# The workflow file that carries each tool's lock.
+FILES = {
+    "pip-audit": "security.yml",
+    "semgrep": "security.yml",
+    "cisco-ai-skill-scanner": "agent-scan.yml",
+    "cisco-ai-mcp-scanner": "agent-scan.yml",
+}
 # An install at the start of a command, not the words "pip install" inside a docstring or an echo.
 PIP_INSTALL = re.compile(r"(?:^|[;&|(!]|\b(?:then|do|else|sudo))\s*(?:python3?\s+-m\s+)?pip3?\s+install\b")
 
@@ -53,6 +70,8 @@ def test_the_scan_finds_the_installs_this_test_governs():
     for expected in (
         ("security.yml", "Install pip-audit"),
         ("security.yml", "Install Semgrep"),
+        ("agent-scan.yml", "Install skill-scanner"),
+        ("agent-scan.yml", "Install mcp-scanner"),
         ("security.yml", "Install dependencies for Snyk Open Source"),
         ("python-fuzz.yml", "Install Atheris"),
         ("ci.yml", "Install test dependencies"),
@@ -72,7 +91,7 @@ def test_no_workflow_runs_an_unhashed_pip_install():
 
 @pytest.mark.parametrize("tool", TOOLS)
 def test_the_workflow_carries_the_lock_file_verbatim(tool):
-    step = next(s for s in steps_of(jobs(load(WORKFLOWS / "security.yml"))[JOBS[tool]]) if s.get("name") == TOOLS[tool])
+    step = next(s for s in steps_of(jobs(load(WORKFLOWS / FILES[tool]))[JOBS[tool]]) if s.get("name") == TOOLS[tool])
     assert step["env"]["REQUIREMENTS"] == (REQS / f"{tool}.txt").read_text(), (
         f"security.yml's {TOOLS[tool]!r} lock differs from .github/requirements/{tool}.txt; run scripts/tool_locks.py"
     )
@@ -86,7 +105,7 @@ def test_the_inline_script_check_agrees():
 @pytest.mark.parametrize("tool", TOOLS)
 def test_the_install_is_hash_checked_binary_only_and_resolves_nothing(tool):
     job = JOBS[tool]
-    step = next(s for s in steps_of(jobs(load(WORKFLOWS / "security.yml"))[job]) if s.get("name") == TOOLS[tool])
+    step = next(s for s in steps_of(jobs(load(WORKFLOWS / FILES[tool]))[job]) if s.get("name") == TOOLS[tool])
     run = step["run"]
     assert "--require-hashes" in run and "--no-deps" in run and "--only-binary=:all:" in run
     assert "inputs." not in run, "inputs reach the shell through env, never by expansion"

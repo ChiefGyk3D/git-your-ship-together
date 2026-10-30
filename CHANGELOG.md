@@ -5,6 +5,38 @@ name what a caller sees after that.
 
 ## Unreleased
 
+### New: `agent-scan.yml`, optional advisory scans of agent skills and MCP tool definitions (issue #234)
+
+- **Added.** A reusable workflow that runs two static scanners from Cisco AI Defense: `cisco-ai-skill-scanner` over the skill
+  directories or entry files a caller names (`skill-paths`) and `cisco-ai-mcp-scanner` in `static` mode over MCP `tools/list`
+  JSON files (`mcp-tool-files`). Each scan is off until its paths are given. Findings are advisory (job summary and SARIF in code
+  scanning, the job stays green) until the caller sets `fail-on-severity`, which the workflow applies to the severities in the
+  parsed reports (both scanners exit 0 on a critical finding, and no exit code is read as a finding; the skill scanner must
+  exit 0, so a crash that left a partial report uploads nothing). The MCP scanner reports at most HIGH. Outputs: `skill-findings`, `skill-max-severity`,
+  `mcp-findings`, `mcp-max-severity`.
+- **Static engines only.** No LLM engine, no cloud engine, no VirusTotal, no AI Defense API, no API key, no secret. The scanners
+  run from an empty directory with an environment the script builds (no token, no repository `.env`); the MCP scanner is told
+  not to fetch its price list, so under `egress-policy: block` they reach nothing. The default allow-list is the checkout and the
+  pip install (`api.github.com`, `files.pythonhosted.org`, `github.com`, `pypi.org`).
+- **Supply chain.** Both scanners are installed from hash locks inside the workflow, `--require-hashes --no-deps
+  --only-binary=:all:`: `.github/requirements/cisco-ai-skill-scanner.{in,txt}` and `cisco-ai-mcp-scanner.{in,txt}`, written by
+  `scripts/tool_locks.py`, which now carries a workflow and an oldest Python per tool. Dependabot bumps them with the other locks.
+- **Fails closed on what it could not scan.** A path outside the repository, a pattern that matches nothing, a file that is not a
+  non-empty `{"tools": [...]}` list, two tools with the same name, a scanner that crashed, an MCP result set that is not exactly
+  one result per requested tool, or a severity the script does not know fails the job and uploads no report, so a partial scan never closes the alerts of the last good run.
+- **Egress and patterns.** The scan jobs run third-party code beside the checkout, so `egress-policy` defaults to `block`
+  (checkout and PyPI hosts); `audit` opts out. Patterns are expanded by a bounded walk (entries, depth, matched bytes) that never
+  enters a symlinked directory.
+- **Jobs.** `skill-scan` and `mcp-scan` hold `contents: read` and follow `egress-policy` (their SARIF is uploaded verbatim by
+  another job); `skill-upload` and `mcp-upload` hold `security-events: write`, check nothing out and follow
+  `egress-policy-secretless`. A caller grants `security-events: write` even with `upload-sarif: false`.
+- **Nothing changes for an existing caller.** No existing workflow changed; a caller opts in by pinning a commit that has the new file.
+  Docs: [agent-scan](docs/wiki/Workflow-agent-scan.md), `examples/agent-scan-caller.yml`. Tests: `tests/test_agent_scan.py`,
+  `tests/test_tool_locks.py`; CI runs the workflow on `fixture/agent-scan`, a planted skill and tool list included, and fails
+  unless the scanners fire on them.
+- **Licence.** Both are Apache-2.0 on PyPI. The skill scanner's `LICENSE` file is the licence header only (653 bytes) and its
+  metadata says Apache-2.0, which is why GitHub shows NOASSERTION; the MCP scanner ships the full text.
+
 ### Distro legs: a Kali mirror caught mid-sync no longer reddens the gate (issue #228)
 
 - **Fixed.** The default `distro-setup-command` of `bash-ci.yml` and `python-ci.yml` retried `apt-get update` three times, 15 s apart,

@@ -76,6 +76,7 @@ Eighteen reusable workflows and one composite action:
 | `.github/workflows/artifact-release.yml` | For a file rather than an image (a `.deb`, a firmware binary, a bundle): build it with a command, then publish it to the GitHub release with SHA256SUMS, a keyless cosign signature bundle per file and build provenance. No secret anywhere |
 | `.github/workflows/docs-pages.yml` | Build a static documentation site with a command you supply (MkDocs strict by default) on every pull request; upload it and deploy it to GitHub Pages from the default branch only. The two Pages writes sit on the deploy job alone |
 | `.github/workflows/threat-model.yml` | Validate an OWASP Threat Dragon v2 model (shape, ids, flows, trust boundary, a status, severity and mitigation on every threat, required AI topics, an optional bar on Open threats), and on a pull request fail when the AI surface changes with no model change and no recorded `threat-model: n/a - <reason>`. Reads only; holds `contents: read` |
+| `.github/workflows/agent-scan.yml` | Optional, advisory scans of agent content with two Cisco AI Defense scanners, static engines only: `cisco-ai-skill-scanner` over the skill directories or entry files you name, `cisco-ai-mcp-scanner` (`static` mode) over MCP `tools/list` JSON files. Off unless you pass paths, advisory unless you pass `fail-on-severity`; SARIF to code scanning and a job summary. No LLM engine, no cloud engine, no key. The scan jobs hold `contents: read`; two upload jobs hold the one write |
 | `.github/workflows/lory-audit.yml` | A scheduled or on-demand deep-dive audit by Lory (Lorikeet Security's AI pentester) through its pipeline scan API. Advisory by default, `fail-on-findings` to block; a failed, oversize or malformed call always fails the job. Findings are not copied into GitHub. Not a per-pull-request gate. Holds `contents: read` and one secret, `LORY_PIPELINE_TOKEN`, in one step. See [Lory audit](#lory-audit) |
 | `.github/workflows/wiki-publish.yml` | Run a command that generates a wiki tree, then replace the repository's GitHub wiki with it, as `github-actions[bot]`, only when something changed, from the default branch only. The write token sits on a job that runs none of your code |
 | `.github/workflows/project-sync.yml` | Keeps a GitHub Projects v2 board current: adds an issue or pull request when it opens, moves it to Done with a date when it closes or merges, and a weekly reconcile repairs what an event missed. The token comes from Doppler over OIDC; nothing from a pull request is checked out. See [Keeping a project current](#keeping-a-project-current) |
@@ -92,7 +93,7 @@ project before any caller pins them:
 
 | File | What it does |
 |---|---|
-| `.github/workflows/ci.yml` | actionlint, zizmor, the pytest contract, then `python-ci.yml`, `bash-ci.yml`, `tofu-ci.yml`, `arduino-ci.yml`, `python-package-release.yml`, `artifact-release.yml`, `docs-pages.yml`, `wiki-publish.yml`, `threat-model.yml` and `python-docker-release.yml` called at the pull request's own ref against `fixture/` (bash-ci over the whole repository; bash-ci and the package build in block mode), and a `CI green` gate that needs all of it |
+| `.github/workflows/ci.yml` | actionlint, zizmor, the pytest contract, then `python-ci.yml`, `bash-ci.yml`, `tofu-ci.yml`, `arduino-ci.yml`, `python-package-release.yml`, `artifact-release.yml`, `docs-pages.yml`, `wiki-publish.yml`, `threat-model.yml`, `agent-scan.yml` and `python-docker-release.yml` called at the pull request's own ref against `fixture/` (bash-ci over the whole repository; bash-ci and the package build in block mode), and a `CI green` gate that needs all of it |
 | `.github/workflows/security-self.yml` | `security.yml` called the same way, on push, pull request and a Monday schedule |
 | `.github/workflows/dependabot-auto-merge-self.yml` | `dependabot-auto-merge.yml` called the same way, so this repository's own bumps exercise it |
 | `.github/workflows/wiki.yml` | `wiki-publish.yml` called the same way for this repository's own wiki: `docs/wiki/` is the source and `scripts/gen_wiki.py` the generator, which renders every reusable workflow's inputs table from its YAML. Publishes from `main` only. See [`docs/wiki/Maintaining-this-wiki.md`](docs/wiki/Maintaining-this-wiki.md) |
@@ -1592,6 +1593,101 @@ jobs:
 
 The reference model's shape comes from Clouds Against Humanity's
 `docs/threat-model/`, which is a teaching exercise; yours records your own system.
+
+### Agent scan
+
+`agent-scan.yml` runs two scanners from Cisco AI Defense over agent content: `cisco-ai-skill-scanner` over skills (a directory
+with a `SKILL.md`, or an entry file such as `roles/implementer.md`) and `cisco-ai-mcp-scanner` in `static` mode over MCP tool
+definitions (`tools/list` JSON files). It is optional and advisory. Nothing runs until you name paths, and a finding is a lead,
+not a verdict: the job stays green and the findings go to the job summary and to code scanning. The template is
+[`examples/agent-scan-caller.yml`](examples/agent-scan-caller.yml).
+
+```yaml
+name: Agent scan
+on:
+  push: { branches: [main] }
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  agent-scan:
+    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/agent-scan.yml@<sha> # vX.Y.Z
+    permissions:
+      contents: read
+      security-events: write  # the SARIF upload; granted even with upload-sarif: false
+    with:
+      skill-paths: |
+        .claude/skills/*
+        roles/*.md
+      mcp-tool-files: mcp/tools-list.json
+      # fail-on-severity: high   # optional; without it the scans only report
+```
+
+- **Static engines only.** The skill scanner runs its pattern, YARA and structure checks; the MCP scanner runs only its `yara`
+  analyzer. There is no LLM engine, no cloud engine, no VirusTotal, no AI Defense API, no `--use-behavioral` and no API key,
+  and the workflow takes no secret. `tests/test_agent_scan.py` holds that no such flag appears in the file. The scanners
+  run from an empty directory with an environment the script builds itself (no token, no repository `.env`), and the MCP
+  scanner is told not to fetch its price list from the internet, so with `egress-policy: block` they reach nothing.
+- **Advisory by default.** Both scanners exit 0 on a critical finding unless told otherwise. With `fail-on-severity` empty the
+  scans report and the job passes. Set it (`critical`, `high`, `medium`, `low` or `info`) and the job fails when a finding is
+  at or above that severity. The workflow applies the threshold to the severities in the parsed reports; it does not use
+  either scanner's exit code as a finding. The skill scanner must exit 0 (a nonzero exit is an error, and a report it left
+  behind is discarded). The MCP scanner reports at most `HIGH`: `critical` never fails an MCP scan, and `info` counts any finding.
+- **Findings are not the only way to go red.** A scan that could not cover every target fails the job and uploads no report:
+  a path outside the repository (`..`, an absolute path, a symlink that leaves it, `.git`), a pattern that matches nothing,
+  a file that is not a non-empty `{"tools": [...]}` list, two tools with the same name, a scanner that crashed, or an MCP
+  result set that is not exactly one result per requested tool (a duplicate, a missing or an unrequested result), a severity
+  the script does not know. A report from a partial scan would close the alerts of the last good run. If a check must
+  never turn the gate red, leave its check out of branch protection; do not add `continue-on-error`.
+- **Skill targets.** A directory is scanned as a skill. A file is scanned as the entry file of its directory
+  (`--skill-file`), one scanner run per file. A run covers the whole directory, so a finding in a sibling file can appear
+  under another file's run; the report holds each finding once. Globs work; paths with spaces do not. Up to 200 targets.
+  Patterns are expanded by walking the checkout without entering symlinked directories, and the walk is bounded (entries,
+  depth and bytes of matched files).
+- **Where the reports go.** Each scan uploads one SARIF file with the category `agent-scan-skill` or `agent-scan-mcp`
+  (`sarif-category` changes the prefix) and writes a job summary with the counts and up to 50 findings. Text from the
+  repository and from the scanners is reduced to a safe character set before it reaches the summary or the log. The MCP
+  scanner writes no SARIF; the workflow builds it from the scanner's JSON, one result per threat name and tool.
+  Pull requests from forks never upload. Turn `upload-sarif` off on a private repository without GitHub Advanced Security.
+- **Jobs and tokens.** `skill-scan` and `mcp-scan` read the repository and hold `contents: read`. `skill-upload` and
+  `mcp-upload` hold `security-events: write`, check nothing out and run nothing of the repository's. A caller grants
+  `security-events: write` even with `upload-sarif: false`, because permissions are checked when the workflow is parsed.
+  The scan jobs follow `egress-policy`, the upload jobs `egress-policy-secretless`.
+- **Supply chain.** Each scanner is installed from a hash lock that travels inside the workflow
+  (`.github/requirements/cisco-ai-skill-scanner.txt` and `cisco-ai-mcp-scanner.txt`, generated by `scripts/tool_locks.py` from
+  the `.in` files, which name the exact versions), with `--require-hashes --no-deps --only-binary=:all:`. The lock lists the
+  whole dependency tree, MCP scanner's included (it pulls in `litellm` and `fastapi` as dependencies, none of which run in
+  `static` mode). Dependabot bumps the `.in` and `.txt` files with the other tool locks. Both scanners are Apache-2.0 on PyPI.
+  The skill scanner's `LICENSE` file is the licence header only, 653 bytes; its package metadata says Apache-2.0, which is
+  why GitHub shows the licence as unrecognized. The MCP scanner ships the full text.
+- **What a clean result means.** The scanners look for known-bad patterns: injection phrases, `curl | bash`, credential
+  reads, hidden instructions in a tool description. They cannot judge instruction text that is harmful in meaning alone,
+  so a clean result is not a safety result. Their first trial on a repository of mostly instruction text found nothing
+  above INFO.
+- This repository runs the workflow on `fixture/agent-scan`: the clean files with `fail-on-severity: info` (zero findings),
+  and a planted skill and a planted tool list in advisory mode, followed by a job that fails unless the scanners fired on them
+  (critical for the skill, high for the tool list).
+
+| Input | Default | Meaning |
+|---|---|---|
+| `skill-paths` | empty | Skill directories or entry files, whitespace- or newline-separated, globs allowed. Empty skips the skill scan |
+| `mcp-tool-files` | empty | MCP `tools/list` JSON files, same format. Empty skips the MCP scan |
+| `fail-on-severity` | empty | `critical`, `high`, `medium`, `low` or `info`. Empty is advisory |
+| `upload-sarif` | `true` | Upload the SARIF reports to code scanning |
+| `sarif-category` | `agent-scan` | Category and artifact name prefix; `-skill` and `-mcp` are appended |
+| `python-version` | `3.13` | Python for the scanners, 3.12 to 3.14 |
+| `egress-policy` | `block` | harden-runner on the scan jobs, which run third-party scanner code beside your checkout. `block` allows only `allowed-endpoints`; `audit` opts out |
+| `egress-policy-secretless` | `audit` | harden-runner policy for the upload jobs; exactly `audit` or `block`. Governed by security exception EX-0001, see [Known CI platform issue: westus2 (EX-0001)](#known-ci-platform-issue-westus2-ex-0001) |
+| `allowed-endpoints` | `api.github.com`, `files.pythonhosted.org`, `github.com`, `pypi.org` | The allow-list for `block`: the checkout and the pip install |
+| `extra-allowed-endpoints` | empty | Appended to the list |
+| `timeout-minutes` | `15` | Timeout of the scan jobs |
+
+| Output | Meaning |
+|---|---|
+| `skill-findings`, `skill-max-severity` | Count after de-duplication and the highest severity (`critical` to `info`, or `none`); empty when the scan did not run |
+| `mcp-findings`, `mcp-max-severity` | The same for the MCP scan (`high`, `medium`, `low` or `none`) |
 
 ### Lory audit
 

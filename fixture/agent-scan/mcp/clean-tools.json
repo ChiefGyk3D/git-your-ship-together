@@ -1,0 +1,13 @@
+{
+  "tools": [
+    {
+      "name": "get_weather",
+      "description": "Return the current temperature for a city name.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {"city": {"type": "string"}},
+        "required": ["city"]
+      }
+    }
+  ]
+}

@@ -318,10 +318,11 @@ def test_a_normal_finish_leaves_no_stray_process(tmp_path):
 
 def test_a_normal_finish_does_not_wait_for_the_watchdog(tmp_path):
     start = time.monotonic()
-    done = run_full(tmp_path, full_script(RESOLVE + "canary_probe() { return 0; }"))
+    # A deadline no other process on the machine uses, so a `sleep 90` from an unrelated job cannot match.
+    done = run_full(tmp_path, full_script(RESOLVE + "canary_probe() { return 0; }", deadline=9097))
     assert done.returncode == 0, done.stdout + done.stderr
-    assert time.monotonic() - start < 20, "the watchdog's 90 s sleep must be cancelled when the canary is done"
-    assert wait_gone("90"), "the watchdog's sleep outlived the step"
+    assert time.monotonic() - start < 20, "the watchdog's sleep must be cancelled when the canary is done"
+    assert wait_gone("9097"), "the watchdog's sleep outlived the step"
 
 
 def run_check(env: dict[str, str]):
@@ -664,6 +665,11 @@ def test_the_canary_is_never_called_by_path_from_a_workflow():
 
 # Kept in block on purpose (docs/security/exceptions/EX-0001-harden-runner-block-westus2.md, "Scope").
 KEPT_BLOCK = {
+    (
+        "agent-scan.yml",
+        "skill-scan",
+    ),  # its SARIF artifact is uploaded verbatim by the job that holds security-events: write
+    ("agent-scan.yml", "mcp-scan"),  # likewise
     ("artifact-release.yml", "build"),  # builds the file that is signed and published
     ("artifact-release.yml", "publish"),  # contents: write, id-token, attestations
     ("container-release.yml", "plan"),  # its outputs choose the runners and the image name of the privileged build

@@ -55,6 +55,7 @@
 - [project-sync](Workflow-project-sync.md)
 - [threat-model](Workflow-threat-model.md)
 - [lory-audit](Workflow-lory-audit.md)
+- [agent-scan](Workflow-agent-scan.md)
 
 **Tools**
 

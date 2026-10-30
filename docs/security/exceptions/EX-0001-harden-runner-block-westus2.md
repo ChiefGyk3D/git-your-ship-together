@@ -136,6 +136,7 @@ Relaxed (policy follows `egress-policy-secretless`, default `audit`): the jobs b
 | `arduino-ci.yml` | `compile`, `test`, `workflow-lint`, `ci-green` |
 | `security.yml` | `codeql`, `gitleaks`, `dependency-audit`, `semgrep` (SARIF upload with the default token only), `dependency-review` (added 2026-10-26, #225; holds `pull-requests: write`, see "Widening of 2026-10-26") |
 | `dast.yml` | `upload` (SARIF upload only) |
+| `agent-scan.yml` | `skill-upload`, `mcp-upload` (SARIF upload only) |
 | `python-fuzz.yml` | `fuzz` |
 | `threat-model.yml` | `check` |
 | `container-release.yml` | `dockerfile-lint` |
@@ -162,6 +163,7 @@ expression; exactly, by the policy check that runs first).
 | `wiki-publish.yml` | `generate` | runs caller code; its artifact is pushed verbatim by `publish` |
 | `python-ci.yml` | `coverage` | `id-token`, Doppler, the Codecov upload |
 | `dast.yml` | `scan` | its SARIF artifact is uploaded verbatim by `upload` (`security-events: write`) |
+| `agent-scan.yml` | `skill-scan`, `mcp-scan` | their SARIF artifacts are uploaded verbatim by `skill-upload` and `mcp-upload` (`security-events: write`); they run third-party scanner code beside the checkout, so their `egress-policy` input defaults to `block` here |
 | `security.yml` | `snyk`, `scorecard` | `id-token`, Doppler (`SNYK_TOKEN`) |
 | `tofu-ci.yml` | `plan` | `id-token`, Doppler |
 | `verify-published.yml` | `verify` | passes the job token to `gh attestation verify`; `packages: read` |
@@ -315,7 +317,7 @@ Every cache and artifact that can cross a trust class, with the decision:
 | `ci.yml` (this repository's own CI, always audit) | setup-python `cache: pip` in four jobs | removed: `audit.yml` (block, Doppler) restores the same key |
 | `audit.yml` | setup-python `cache: pip` | kept: both jobs are hardcoded `block` |
 | `python-package-release` `build`, `artifact-release` `build` | none (a publishing build never reads a cache; a test holds this) | no change |
-| artifacts: `python-ci` `test` to `coverage`, `dast` `scan` to `upload`, `docs-pages` `build` to `deploy`, `wiki-publish` `generate` to `publish`, `verify-published` `verify-release` to `rescan` | job to job within one run | the producer of each that feeds a privileged consumer is kept under `egress-policy` (see the table above), except `python-ci` `test`, whose artifact is a coverage report ("Widening of 2026-10-26"); `rescan` is secretless and only reads what block-class jobs wrote |
+| artifacts: `python-ci` `test` to `coverage`, `dast` `scan` to `upload`, `agent-scan` `skill-scan` to `skill-upload` and `mcp-scan` to `mcp-upload`, `docs-pages` `build` to `deploy`, `wiki-publish` `generate` to `publish`, `verify-published` `verify-release` to `rescan` | job to job within one run | the producer of each that feeds a privileged consumer is kept under `egress-policy` (see the table above), except `python-ci` `test`, whose artifact is a coverage report ("Widening of 2026-10-26"); `rescan` is secretless and only reads what block-class jobs wrote |
 
 `tests/test_egress_canary.py` collects every cache site in every workflow and requires each one to be either a
 hash-verified tool cache or gated on its own job's effective policy, then evaluates the gate for audit, block,

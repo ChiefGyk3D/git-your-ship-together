@@ -45,6 +45,14 @@ yourself. It is off by default and is only a rescan when the caller schedules it
 advisories it skips are the ones in the [risk register](Baseline-and-the-weekly-audit.md), and
 the weekly audit fails on one that is not there.
 
+## The scan that reads agent content: agent-scan
+
+The checks above look at code and dependencies. A skill, a role file or an MCP tool description is neither: it is text an agent
+obeys. [agent-scan](Workflow-agent-scan.md) is an optional, advisory pass over that text with two static scanners from Cisco AI
+Defense. It catches the blunt cases (a planted injection phrase, `curl | bash`, a credential read, a hidden instruction in a tool
+description) and is blind to text that is harmful only in meaning. Off until you name paths; reports to code scanning under the
+categories `agent-scan-skill` and `agent-scan-mcp`.
+
 ## The scan that runs the service: DAST
 
 Everything in the table reads code or metadata. [dast](Workflow-dast.md) is the
