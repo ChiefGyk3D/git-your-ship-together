@@ -11,6 +11,16 @@ name what a caller sees after that.
   accepts `true` or `false` in any casing; any other value fails the job instead of switching the gate off. A `vN.N.N` tag
   is also refused when a complete checkout shows its commit is not in the default branch's history (best effort; see the README).
 
+### Changed (breaking default for cross-repo callers): `verify-published.yml` pins the signing certificate to a source repository (issue #186)
+
+- **Changed.** `identity-regexp` can only name the reusable workflow, so any repository calling the same reusable workflow
+  produced a certificate that matched. New optional input `source-repository` is passed to both `cosign verify` and
+  `cosign verify-attestation` as `--certificate-github-workflow-repository`. It is shape-checked (`owner/name`) and passed
+  through the environment, never interpolated.
+- **Default.** The calling repository (`github.repository`). A caller verifying its own image changes nothing.
+- **Breaking for cross-repo callers.** A caller that verifies an image built by another repository must set `source-repository`
+  to that repository when it re-pins to this version, or verification fails. This repository's own fixture jobs already set it.
+
 ### New: `agent-scan.yml`, optional advisory scans of agent skills and MCP tool definitions (issue #234)
 
 - **Added.** A reusable workflow that runs two static scanners from Cisco AI Defense: `cisco-ai-skill-scanner` over the skill
@@ -51,6 +61,12 @@ name what a caller sees after that.
   the sixth failure exits non-zero with apt's error and an `apt-get still failing after 6 attempts` line. A healthy mirror takes the
   same single pass as before. The leg is not advisory and no egress endpoint was added. A caller with its own `distro-setup-command`
   is unchanged. Tests: `tests/test_distro_apt_retry.py`.
+
+### CI tooling requirements updated (issue #230)
+
+- **Changed.** The Semgrep lock in `security.yml` now resolves with `.github/requirements/semgrep.overrides`, which
+  replaces dependency versions the tool itself pins. `scripts/tool_locks.py --relock` reads the file and
+  `tests/test_tool_locks.py` checks the lock holds each pin. Details are tracked privately.
 
 ### EX-0001 widened: `dependency-review` and `python-ci` `test` follow `egress-policy-secretless` (issue #225)
 

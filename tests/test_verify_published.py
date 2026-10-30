@@ -670,3 +670,102 @@ def test_live_an_accepted_advisory_is_honoured_and_the_others_still_fail(tmp_pat
 @live
 def test_live_an_sbom_with_nothing_in_it_passes(tmp_path):
     assert live_rescan(tmp_path, CLEAN_SBOM).returncode == 0
+
+
+# --- the source repository -------------------------------------------------
+#
+# The certificate identity of an image signed through a reusable workflow is
+# that workflow's ref, the same for every repository calling it. The repository
+# claim is what tells callers apart.
+
+
+def test_source_repository_input_defaults_to_empty_and_is_documented():
+    spec = CALL["inputs"]["source-repository"]
+    assert spec["type"] == "string" and spec["default"] == ""
+    assert spec["description"].strip()
+
+
+def test_both_cosign_commands_pin_the_certificate_repository_from_the_checked_output():
+    """Measured with cosign v3.1.4 against ghcr.io/chiefgyk3d/star-daemon (signed through container-release.yml):
+    the certificate's GithubWorkflowRepository is the *calling* repository, the flag compares it exactly
+    (case-sensitive), and a wrong value fails both `verify` and `verify-attestation`.
+    """
+    source = step_named("source repository")
+    assert source["id"] == "source"
+    assert source["env"] == {
+        "REQUESTED": "${{ inputs.source-repository }}",
+        "DEFAULT_REPOSITORY": "${{ github.repository }}",
+    }
+    assert "${{" not in source["run"]
+    for fragment in ("signature", "SBOM"):
+        step = step_named(fragment)
+        assert step["env"]["SOURCE_REPOSITORY"] == "${{ steps.source.outputs.repository }}"
+        assert '--certificate-github-workflow-repository "$SOURCE_REPOSITORY"' in step["run"]
+        assert "${{" not in step["run"]
+    names = [x.get("name", "") for x in steps("verify")]
+    assert names.index(source["name"]) < min(i for i, n in enumerate(names) if "signature" in n)
+    others = [x for x in steps("verify") if x is not source]
+    assert "inputs.source-repository" not in str(others), "the input is read in one place, the validating step"
+
+
+def run_source_step(requested: str, default: str = "Owner/Default-Repo"):
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "out"
+        out.touch()
+        env = {**os.environ, "REQUESTED": requested, "DEFAULT_REPOSITORY": default, "GITHUB_OUTPUT": str(out)}
+        result = subprocess.run(
+            ["bash", "-eo", "pipefail", "-c", step_named("source repository")["run"]],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        return result, out.read_text()
+
+
+def test_an_empty_source_repository_means_the_calling_repository():
+    result, out = run_source_step("")
+    assert result.returncode == 0, result.stderr
+    assert out == "repository=Owner/Default-Repo\n"
+
+
+def test_a_well_formed_source_repository_is_used_as_given():
+    result, out = run_source_step("ChiefGyk3D/Star-Daemon")
+    assert result.returncode == 0, result.stderr
+    assert out == "repository=ChiefGyk3D/Star-Daemon\n"
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "noslash",
+        "a/b/c",
+        "/name",
+        "owner/",
+        "owner/na me",
+        "owner/name\n--extra",
+        "owner/name --certificate-identity x",
+        "owner/$(id)",
+        "owner/na;me",
+        "https://github.com/owner/name",
+        " owner/name",
+    ],
+)
+def test_a_malformed_source_repository_is_refused_and_writes_no_output(bad):
+    result, out = run_source_step(bad)
+    assert result.returncode != 0
+    assert "source-repository" in result.stdout
+    assert out == ""
+
+
+def test_a_malformed_calling_repository_is_refused_too():
+    result, out = run_source_step("", default="not a repo")
+    assert result.returncode != 0 and out == ""
+
+
+def test_the_fixture_that_verifies_another_repositorys_image_names_its_source():
+    """star-daemon's image is built by star-daemon, not by this repository, so the default would refuse it."""
+    ci = yaml.safe_load(CI.read_text())["jobs"]
+    for name in ("fixture-verify", "fixture-rescan"):
+        assert ci[name]["with"]["source-repository"] == "ChiefGyk3D/Star-Daemon"

@@ -349,6 +349,7 @@ jobs:
       packages: read  # pull the public image from GHCR
     with:
       image: ghcr.io/chiefgyk3d/star-daemon:latest
+      source-repository: ChiefGyk3D/Star-Daemon  # the repository that built it, not this one
       test-command: docker run --rm "$IMAGE" sh -c "python -m py_compile /app/star-daemon.py /app/star_daemon.py /app/star_announcer.py /app/github_stars.py /app/config.py /app/platforms.py"
 
   # verify-published.yml's rescan over the same published image: Trivy,
@@ -365,6 +366,7 @@ jobs:
       packages: read  # the verify job pulls the public image from GHCR
     with:
       image: ghcr.io/chiefgyk3d/star-daemon:latest
+      source-repository: ChiefGyk3D/Star-Daemon  # the repository that built it, not this one
       platforms: linux/amd64
       rescan: true
       rescan-severity: CRITICAL
