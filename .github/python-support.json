@@ -1,0 +1,18 @@
+{
+  "_comment": "The one list of CPython versions this repository supports. Read by scripts/python_support.py, scripts/tool_locks.py and tests/test_python_support.py; the workflow defaults and the README repeat it and the tests hold them equal. security_end is the end of CPython security support (the devguide's end-of-life month, taken as the last day of that month); bugfix_end is the end of bugfix releases (null when it ended before this list began). Source: https://devguide.python.org/versions/ and PEP 664, 693, 719, 745, 790. Drop a version here, and from every default the tests name, once its security_end has passed.",
+  "versions": [
+    {"version": "3.11", "bugfix_end": null, "security_end": "2027-10-31"},
+    {"version": "3.12", "bugfix_end": null, "security_end": "2028-10-31"},
+    {"version": "3.13", "bugfix_end": "2026-10-01", "security_end": "2029-10-31"},
+    {"version": "3.14", "bugfix_end": "2027-10-01", "security_end": "2030-10-31"},
+    {"version": "3.15", "bugfix_end": "2028-10-09", "security_end": "2031-10-31"}
+  ],
+  "coverage_version": "3.13",
+  "tool_locks": {
+    "newest": "3.14",
+    "newest_reason": "scripts/tool_locks.py prunes the hash locks to wheels for CPython up to this minor; PyPI has no cp315 wheel yet for some locked packages (see the wheel report in CHANGELOG.md), so security.yml and agent-scan.yml support up to 3.14."
+  },
+  "grace": [
+    {"version": "3.10", "until": "2026-11-30", "reason": "The hash locks for pip-audit and Semgrep still resolve from 3.10; 3.10 reached end of life on 2026-10-01. Relock from 3.11 with scripts/tool_locks.py and delete this entry."}
+  ]
+}

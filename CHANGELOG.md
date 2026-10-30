@@ -5,6 +5,26 @@ name what a caller sees after that.
 
 ## Unreleased
 
+### New: Python 3.14 and 3.15 in the `python-ci.yml` matrix, and one list of supported Pythons (issue #242)
+
+- **Changed default.** `python-versions` now defaults to `["3.11", "3.12", "3.13", "3.14", "3.15"]`. A caller that leaves it
+  unset gains two `Test` jobs per runner on its next re-pin; a caller that sets it is unchanged. `actions/setup-python` v7.0.0
+  (the pin used here) installs both: its manifest carries stable 3.14.10 and 3.15.2 for Linux x64 and arm64 on ubuntu 22.04,
+  24.04 and 26.04 (read 2026-10-30).
+- **One list.** `.github/python-support.json` holds the supported CPython versions with their bugfix and security end dates
+  (3.11 to 2027-10-31, 3.12 to 2028-10-31, 3.13 to 2029-10-31, 3.14 to 2030-10-31, 3.15 to 2031-10-31; checked against
+  devguide.python.org/versions, page dated 2026-05-27, which gives the month). `scripts/python_support.py` reads it
+  (`--today` replaces the clock); `scripts/tool_locks.py` takes its newest minor from it; the workflow defaults, the README
+  and `scripts/new-repo.sh` repeat it and `tests/test_python_support.py` holds them equal.
+- **Expiry test.** The same test fails once a listed version is past its security end date (the clock is injected, so the
+  cases are deterministic), so the matrix shrinks on schedule.
+- **`new-repo.sh`.** The generated caller now lists versions up to 3.15 (and falls back to the five supported ones).
+- **Not changed: the tool locks stop at 3.14.** Several locked packages have no 3.15 wheel yet (pyyaml 6.0.3, tree-sitter,
+  fastuuid, onnxruntime, ruamel.yaml.clib and others), so `security.yml` and `agent-scan.yml` still support Python up to 3.14.
+  A caller's own tests are unaffected: the fixture's hash-locked requirements all resolve on 3.14 and 3.15. Python 3.10, end of
+  life since 2026-10-01, is still the floor of the pip-audit and Semgrep locks; it has a grace entry in the JSON that expires
+  2026-11-30 and fails the test then, so the relock from 3.11 cannot be forgotten.
+
 ### Fix: trusted-ref gate hardening (issue #238)
 
 - **Changed.** With `doppler-trusted-refs-only` on, only listed events can be trusted. The input

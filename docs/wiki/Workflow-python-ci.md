@@ -36,10 +36,19 @@ jobs:
       contents: read
       id-token: write   # the coverage job declares it; without this the run is a startup_failure with no check
     with:
-      python-versions: '["3.12", "3.13"]'
+      python-versions: '["3.12", "3.13"]'   # omit it to test every supported CPython (see below)
       test-command: pytest --cov=src --cov-report=xml
       egress-policy: block
 ```
+
+**Which Pythons the default tests.** The default `python-versions` is every CPython still in security support: 3.11 to 3.15
+as of 2026-10-30, each with its end date in `.github/python-support.json` (3.11 to 2027-10-31, 3.12 to 2028-10-31, 3.13 to
+2029-10-31, 3.14 to 2030-10-31, 3.15 to 2031-10-31, from the [devguide](https://devguide.python.org/versions/)). Each
+version is one `Test` job per runner, so the default is five jobs on one runner and ten on two. A caller that must keep
+supporting an older Python lists it in `python-versions`; nothing here stops it. `tests/test_python_support.py` fails when a
+listed version is past its end date, so the default shrinks on schedule, and it holds every workflow default and the README
+equal to the file. The tool locks behind `security.yml` and `agent-scan.yml` stop at 3.14: some locked packages publish
+no 3.15 wheel yet.
 
 Point branch protection at `ci / CI green`. A repository with more than one language calls one CI workflow per language
 from one job each and requires each gate (`ci / CI green` and `shell / CI green`, say).

@@ -265,12 +265,12 @@ versions = sorted({m.group(1) for c in project.get("classifiers", []) for m in [
 if not versions:
     m = re.search(r">=\s*3\.(\d+)", project.get("requires-python", ""))
     low = int(m.group(1)) if m else 11
-    versions = [f"3.{n}" for n in range(max(low, 9), 14)]
+    versions = [f"3.{n}" for n in range(max(low, 9), 16)]
 print(", ".join(f'"{v}"' for v in versions))
 PY
     )
   fi
-  [ -n "$py_versions" ] || py_versions='"3.11", "3.12", "3.13"'
+  [ -n "$py_versions" ] || py_versions='"3.11", "3.12", "3.13", "3.14", "3.15"'
 
   # Install: a hash-pinned dev lock, a dev extra, or the project itself.
   if [ -f "$path/requirements-dev.txt" ]; then

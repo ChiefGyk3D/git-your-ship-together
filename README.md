@@ -239,7 +239,7 @@ jobs:
     secrets:
       DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}   # optional fallback, unset means OIDC only
     with:
-      python-versions: '["3.10", "3.11", "3.12", "3.13"]'
+      python-versions: '["3.11", "3.12", "3.13", "3.14", "3.15"]'
       install-command: |
         python -m pip install --upgrade pip
         pip install --require-hashes -r requirements-dev.txt
@@ -274,7 +274,7 @@ Inputs of `python-ci.yml`:
 
 | Input | Default | Meaning |
 |---|---|---|
-| `python-versions` | `'["3.11", "3.12", "3.13"]'` | JSON array for the test matrix |
+| `python-versions` | `'["3.11", "3.12", "3.13", "3.14", "3.15"]'` | JSON array for the test matrix. The default is every CPython still in security support, held in `.github/python-support.json` with each version's end date; `tests/test_python_support.py` fails when a listed version is past its end date, so the default shrinks on schedule |
 | `runners` | `'["ubuntu-24.04"]'` | JSON array of runner labels for the `test` matrix; the first entry also uploads coverage; `ubuntu-24.04-arm` is native arm64, `macos-15` and `windows-2025` also work (commands run under bash) |
 | `distros` | `'[]'` (skips the job) | JSON array of container images to run the tests in as well, e.g. `'["debian:13", "kalilinux/kali-rolling"]'`; see [Operating systems](#operating-systems) |
 | `distro-runners` | `'["ubuntu-24.04"]'` | Runner labels the `distros` run on; add `ubuntu-24.04-arm` for native arm64 |
@@ -2793,6 +2793,7 @@ The tests are the contract, one file per thing they hold still:
 | `tests/test_risk_register.py` | The register's shape, its dates, no duplicate advisory, every repository named is in the baseline list, and no entry has expired |
 | `tests/test_dast.py` | `dast.yml`'s contract, its steps run under bash (refusals, a service that blocks, detaches, dies or never answers; the `fail-on` threshold and the SARIF against canned ZAP reports; the scan step against a fake `docker`, so each `scan-type` is shown to run its ZAP script with its flags), and, in the `dast-live` CI job, the real ZAP image against `fixture/dast/server.py`: the baseline with and without its headers, the full scan against a page that reflects its query and one that escapes it, the api scan against its OpenAPI definition, the anonymous and the signed-in full scan against the login fixture |
 | `tests/test_fuzz.py` | `python-fuzz.yml`'s inputs and pin, and its run step executed under bash against tiny targets: a missing directory, no match, a passing target, a crashing one and a hanging one (which must fail the step and leave its `timeout-*` input) |
+| `tests/test_python_support.py` | `.github/python-support.json` is the one list of supported CPython versions with their security-support end dates; `python-ci.yml`'s default matrix, `scripts/new-repo.sh`'s fallback and the README row equal it; every `python-version` input default is a listed version; no listed version is past its end date (the clock is a parameter, so the tests name the date); the tool-lock newest minor and oldest floors come from it, with a dated grace entry for 3.10 |
 | `tests/test_tool_locks.py` | No `run:` step of any workflow or composite action runs a `pip install` without `--require-hashes`; `security.yml` carries `.github/requirements/*.txt` verbatim; every lock line has a hash; the Snyk install step, run under bash with a recording `pip`, installs a hashed lock under `--require-hashes` and refuses an unhashed one without calling pip |
 | `tests/test_security_jobs.py` | The Semgrep job's defaults and its content-driven config; the gitleaks job as a pinned binary: no licence, no Doppler, no `id-token`, the sha256 checked before extraction, full history, SARIF under category `gitleaks`, and a canary step that plants an AWS-shaped key in a scratch repository and requires exit 1 before the real scan runs (the test also fetches the pinned release, checks the hash, and runs that canary for real; it skips only when offline) |
 | `tests/test_pre_commit_hook.py` | `.githooks/pre-commit` pins the same gitleaks version and sha256 as `security.yml`; run in a scratch repository it refuses a planted AWS-shaped key naming the rule and file but not the secret, passes a clean commit, honours `.gitleaks.toml`, refuses on a broken config or a download that is not the pinned release, and warns and allows offline (the cases that need the binary download it through the hook and skip when offline); `new-repo.sh` writes it byte for byte, executable, and adds the `core.hooksPath` line to a README's Developing section once |
