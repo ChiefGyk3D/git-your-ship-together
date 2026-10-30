@@ -36,6 +36,10 @@ name: Security (reusable)
 on:
   workflow_call:
     inputs:
+      advanced-security:
+        description: Whether the repository has GitHub Advanced Security - `auto`, `true` or `false`. `auto` (default) treats a private repository as having none and a public one as having it. Without it dependency review and CodeQL are skipped, and Semgrep and gitleaks still run and still fail on a finding but do not upload SARIF; the job summary says so. Any other value fails the job and runs every scan.
+        type: string
+        default: auto
       codeql:
         description: Run CodeQL.
         type: boolean
@@ -203,7 +207,7 @@ permissions:
 jobs:
   codeql:
     name: CodeQL
-    if: inputs.codeql
+    if: inputs.codeql && (inputs.advanced-security != 'false' && (inputs.advanced-security != 'auto' || github.event.repository.private != true))
     runs-on: ubuntu-latest
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
@@ -320,6 +324,23 @@ jobs:
             rc=124
           fi
           exit "$rc"
+
+      - name: Validate the advanced-security input
+        timeout-minutes: 1
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        env:
+          ADVANCED_SECURITY: ${{ inputs.advanced-security }}
+        run: |
+          set -u
+          value=${ADVANCED_SECURITY-}
+          case "$value" in
+            auto | true | false) ;;
+            *)
+              echo "::error title=advanced-security::the advanced-security input must be exactly 'auto', 'true' or 'false' (its value is ${#value} characters long); every scan stays on until it is fixed"
+              exit 1
+              ;;
+          esac
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -453,6 +474,23 @@ jobs:
           fi
           exit "$rc"
 
+      - name: Validate the advanced-security input
+        timeout-minutes: 1
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        env:
+          ADVANCED_SECURITY: ${{ inputs.advanced-security }}
+        run: |
+          set -u
+          value=${ADVANCED_SECURITY-}
+          case "$value" in
+            auto | true | false) ;;
+            *)
+              echo "::error title=advanced-security::the advanced-security input must be exactly 'auto', 'true' or 'false' (its value is ${#value} characters long); every scan stays on until it is fixed"
+              exit 1
+              ;;
+          esac
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -505,8 +543,31 @@ jobs:
       - name: Scan the full history (gitleaks)
         run: gitleaks git --redact --no-banner --exit-code 1 --report-format sarif --report-path gitleaks.sarif --log-opts="--all" .
 
+      - name: Note the skipped Advanced Security features
+        if: ${{ !(inputs.advanced-security != 'false' && (inputs.advanced-security != 'auto' || github.event.repository.private != true)) }}
+        timeout-minutes: 1
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        env:
+          ADVANCED_SECURITY: ${{ inputs.advanced-security }}
+          REPOSITORY_PRIVATE: ${{ github.event.repository.private }}
+        run: |
+          set -u
+          if [ "$ADVANCED_SECURITY" = false ]; then
+            why="the caller set \`advanced-security: false\`"
+          else
+            why="this is a private repository and \`advanced-security\` is \`auto\` (private flag: $REPOSITORY_PRIVATE)"
+          fi
+          {
+            echo "### GitHub Advanced Security features skipped"
+            echo
+            echo "Skipped because $why: dependency review, CodeQL, and the SARIF uploads of Semgrep and gitleaks (code scanning is not available without Advanced Security)."
+            echo "Semgrep and gitleaks still run and still fail the job on a finding."
+            echo "If this repository has Advanced Security, set \`advanced-security: true\` on the caller to turn all of it on."
+          } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+
       - name: Upload gitleaks results
-        if: always() && inputs.gitleaks-upload-sarif && hashFiles('gitleaks.sarif') != ''
+        if: always() && inputs.gitleaks-upload-sarif && (inputs.advanced-security != 'false' && (inputs.advanced-security != 'auto' || github.event.repository.private != true)) && hashFiles('gitleaks.sarif') != ''
         uses: github/codeql-action/upload-sarif@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
         with:
           sarif_file: gitleaks.sarif
@@ -779,7 +840,7 @@ jobs:
 
   dependency-review:
     name: Dependency review
-    if: inputs.dependency-review && github.event_name == 'pull_request'
+    if: inputs.dependency-review && github.event_name == 'pull_request' && (inputs.advanced-security != 'false' && (inputs.advanced-security != 'auto' || github.event.repository.private != true))
     runs-on: ubuntu-latest
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
@@ -896,6 +957,23 @@ jobs:
             rc=124
           fi
           exit "$rc"
+
+      - name: Validate the advanced-security input
+        timeout-minutes: 1
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        env:
+          ADVANCED_SECURITY: ${{ inputs.advanced-security }}
+        run: |
+          set -u
+          value=${ADVANCED_SECURITY-}
+          case "$value" in
+            auto | true | false) ;;
+            *)
+              echo "::error title=advanced-security::the advanced-security input must be exactly 'auto', 'true' or 'false' (its value is ${#value} characters long); every scan stays on until it is fixed"
+              exit 1
+              ;;
+          esac
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1030,6 +1108,23 @@ jobs:
             rc=124
           fi
           exit "$rc"
+
+      - name: Validate the advanced-security input
+        timeout-minutes: 1
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        env:
+          ADVANCED_SECURITY: ${{ inputs.advanced-security }}
+        run: |
+          set -u
+          value=${ADVANCED_SECURITY-}
+          case "$value" in
+            auto | true | false) ;;
+            *)
+              echo "::error title=advanced-security::the advanced-security input must be exactly 'auto', 'true' or 'false' (its value is ${#value} characters long); every scan stays on until it is fixed"
+              exit 1
+              ;;
+          esac
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1303,8 +1398,31 @@ jobs:
           if [ "$CONTINUE" != "true" ]; then args+=(--error); fi
           semgrep scan --metrics=off --sarif --output semgrep.sarif "${args[@]}" .
 
+      - name: Note the skipped Advanced Security features
+        if: ${{ !(inputs.advanced-security != 'false' && (inputs.advanced-security != 'auto' || github.event.repository.private != true)) }}
+        timeout-minutes: 1
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        env:
+          ADVANCED_SECURITY: ${{ inputs.advanced-security }}
+          REPOSITORY_PRIVATE: ${{ github.event.repository.private }}
+        run: |
+          set -u
+          if [ "$ADVANCED_SECURITY" = false ]; then
+            why="the caller set \`advanced-security: false\`"
+          else
+            why="this is a private repository and \`advanced-security\` is \`auto\` (private flag: $REPOSITORY_PRIVATE)"
+          fi
+          {
+            echo "### GitHub Advanced Security features skipped"
+            echo
+            echo "Skipped because $why: dependency review, CodeQL, and the SARIF uploads of Semgrep and gitleaks (code scanning is not available without Advanced Security)."
+            echo "Semgrep and gitleaks still run and still fail the job on a finding."
+            echo "If this repository has Advanced Security, set \`advanced-security: true\` on the caller to turn all of it on."
+          } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+
       - name: Upload Semgrep results
-        if: always() && hashFiles('semgrep.sarif') != ''
+        if: always() && (inputs.advanced-security != 'false' && (inputs.advanced-security != 'auto' || github.event.repository.private != true)) && hashFiles('semgrep.sarif') != ''
         uses: github/codeql-action/upload-sarif@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
         with:
           sarif_file: semgrep.sarif

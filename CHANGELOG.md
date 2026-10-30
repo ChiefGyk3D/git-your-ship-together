@@ -5,6 +5,22 @@ name what a caller sees after that.
 
 ## Unreleased
 
+### New: `security.yml` works on a private repository without Advanced Security (issue #248)
+
+- **New input `advanced-security`** (`auto`, `true` or `false`; default `auto`). `auto` reads the repository's private flag
+  (`github.event.repository.private`) and treats a private repository as having no GitHub Advanced Security unless the caller
+  sets `true`. A public repository, or a caller that sets `true`, behaves exactly as before.
+- **With it off:** dependency review and CodeQL are skipped by a job-level `if` (they show as skipped, never failed); Semgrep and
+  gitleaks run as before and still fail the job on a finding, but their SARIF uploads are skipped; both jobs write a job-summary
+  note naming what was skipped, why, and how to turn it on.
+- **Fails closed.** Any value other than the three fails the Validate step of CodeQL, dependency review, gitleaks and Semgrep
+  and keeps every scan on; the skip expression only matches `false`, or `auto` on a private repository.
+- **Existing callers.** A public repository is unchanged. A private repository that already passed
+  `gitleaks-upload-sarif: false` now also skips dependency review, CodeQL and the Semgrep upload; one that has Advanced Security
+  must set `advanced-security: true` on its next re-pin. No job is added or removed; the new steps are in existing jobs.
+- **Tests.** `tests/test_advanced_security.py` evaluates the decision for every mode and visibility and for invalid values, and
+  runs the validate and summary steps under bash.
+
 ### New: Python 3.14 and 3.15 in the `python-ci.yml` matrix, and one list of supported Pythons (issue #242)
 
 - **Changed default.** `python-versions` now defaults to `["3.11", "3.12", "3.13", "3.14", "3.15"]`. A caller that leaves it
