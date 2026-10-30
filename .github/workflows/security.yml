@@ -209,8 +209,7 @@ jobs:
     name: Advanced Security setting
     runs-on: ubuntu-latest
     timeout-minutes: ${{ inputs.timeout-minutes }}
-    permissions:
-      contents: read
+    permissions: {}  # no repository operation; the job only checks an input
     steps:
       - name: Validate the egress policy inputs (EX-0001)
         timeout-minutes: 1
@@ -342,7 +341,7 @@ jobs:
 
   codeql:
     name: CodeQL
-    if: inputs.codeql && inputs.advanced-security == 'true'
+    if: inputs.codeql && inputs.advanced-security != 'false'
     runs-on: ubuntu-latest
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
@@ -659,7 +658,7 @@ jobs:
           } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
 
       - name: Upload gitleaks results
-        if: always() && inputs.gitleaks-upload-sarif && inputs.advanced-security == 'true' && hashFiles('gitleaks.sarif') != ''
+        if: always() && inputs.gitleaks-upload-sarif && inputs.advanced-security != 'false' && hashFiles('gitleaks.sarif') != ''
         uses: github/codeql-action/upload-sarif@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
         with:
           sarif_file: gitleaks.sarif
@@ -932,7 +931,7 @@ jobs:
 
   dependency-review:
     name: Dependency review
-    if: inputs.dependency-review && github.event_name == 'pull_request' && inputs.advanced-security == 'true'
+    if: inputs.dependency-review && github.event_name == 'pull_request' && inputs.advanced-security != 'false'
     runs-on: ubuntu-latest
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
@@ -1471,7 +1470,7 @@ jobs:
           } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
 
       - name: Upload Semgrep results
-        if: always() && inputs.advanced-security == 'true' && hashFiles('semgrep.sarif') != ''
+        if: always() && inputs.advanced-security != 'false' && hashFiles('semgrep.sarif') != ''
         uses: github/codeql-action/upload-sarif@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
         with:
           sarif_file: semgrep.sarif

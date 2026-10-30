@@ -8,15 +8,18 @@ name what a caller sees after that.
 ### New: `advanced-security` input in `security.yml` for a private repository without Advanced Security (issue #248)
 
 - **New input `advanced-security`**, exactly `true` (the default, behavior unchanged for every caller) or `false`. A private
-  repository without GitHub Advanced Security sets `advanced-security: false` once in its caller; without it dependency review and
-  the SARIF uploads fail the run.
-- **With `false`:** dependency review and CodeQL are skipped by a job-level `if` (skipped, never failed); Semgrep and gitleaks run
+  repository without GitHub Advanced Security sets `advanced-security: false` once in its caller; without it the run fails.
+  Observed on 2026-10-30 on such a repository: dependency review fails with "Dependency review is not supported on this repository. Please ensure that Dependency graph is enabled along with GitHub Advanced Security"; CodeQL, Semgrep and the gitleaks
+  SARIF upload each fail with "Resource not accessible by integration".
+- **With `false`:** dependency review and CodeQL are skipped by a job-level `if` (skipped, never failed; only the literal `false` skips); Semgrep and gitleaks run
   as before and still fail the job on a finding, but their SARIF uploads are skipped; both jobs write a job-summary note naming
   what was skipped and why.
 - **Loud failure on a bad value.** One new always-running job, `advanced-security-check` ("Advanced Security setting":
   harden-runner, the egress canary, no checkout), fails the called workflow unless the value is exactly `true` or `false`. It is
   not a gate: no job has `needs`, so every scan runs exactly as before, even when the check job fails. A case variant such as
-  `False` skips CodeQL and dependency review (GitHub compares strings case-insensitively), and the run is still red.
+  `False` skips CodeQL and dependency review (GitHub compares strings case-insensitively), and the run is still red; any other bad value runs the scans and fails the check. The check job holds `permissions: {}`.
+  Do not mask that red run: `continue-on-error` on the calling job, or an aggregator that treats a skipped or failed called
+  workflow as success, hides it.
 - **Job count: +1** (`advanced-security-check`). A caller that requires jobs by name is unaffected; the new job reports success when
   the value is valid.
 - **Existing callers.** Nothing changes unless a caller sets the input.

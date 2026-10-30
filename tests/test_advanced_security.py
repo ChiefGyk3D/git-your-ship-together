@@ -23,7 +23,7 @@ CHECK = "advanced-security-check"
 VALIDATE = "Validate the advanced-security input"
 NOTE = "Note the skipped Advanced Security features"
 READERS = ["codeql", "dependency-review", "gitleaks", "semgrep"]
-ON = "inputs.advanced-security == 'true'"
+ON = "inputs.advanced-security != 'false'"
 OFF = "inputs.advanced-security == 'false'"
 INVALID = [
     "",
@@ -78,7 +78,7 @@ def test_nothing_reads_the_private_flag_or_an_auto_mode():
 def test_the_check_job_always_runs_and_does_no_checkout():
     job = JOBS[CHECK]
     assert "if" not in job and "needs" not in job
-    assert job["permissions"] == {"contents": "read"}
+    assert job["permissions"] == {}, "the job performs no repository operation"
     assert job["steps"][0]["name"] == "Validate the egress policy inputs (EX-0001)"
     names = [s.get("name") for s in steps_of(job)]
     assert str(steps_of(job)[0].get("uses", "")).startswith("step-security/harden-runner@")
@@ -138,16 +138,21 @@ def test_the_check_job_is_the_only_one_added_and_the_job_count_grows_by_exactly_
     assert len(JOBS) == 8  # codeql gitleaks dependency-audit dependency-review semgrep snyk scorecard + the check
 
 
-def case_variant_skips(value: str) -> bool:
-    """GitHub's `==` is case-insensitive, so only the exact-case-insensitive `true` keeps CodeQL on."""
-    return value.lower() != "true"
+def gated_job_runs(value: str) -> bool:
+    """Evaluate the real clause: GitHub's `!=` on strings is case-insensitive."""
+    assert ON in JOBS["codeql"]["if"]
+    return not (value.lower() == "false")
 
 
-@pytest.mark.parametrize("value", ["False", "FALSE", "fAlSe", "TRUE", "True", "tRuE"])
-def test_a_case_variant_fails_the_check_job_so_the_run_is_never_green(value):
-    assert run_validate(value).returncode == 1
-    if value.lower() == "false":
-        assert case_variant_skips(value), "the variant skips CodeQL and dependency review; the check job still fails"
+@pytest.mark.parametrize("value", [*INVALID, "true", "false"])
+def test_only_the_literal_false_skips_and_every_other_value_runs_the_scans(value):
+    skips = value.lower() == "false"
+    assert gated_job_runs(value) is (not skips)
+    if skips and value != "false":
+        assert run_validate(value).returncode == 1, "a case variant of false skips, and the check job turns the run red"
+    if value in INVALID:
+        assert run_validate(value).returncode == 1, "an invalid value runs the scans AND fails the check job"
+        assert gated_job_runs(value) is (not skips)
 
 
 def test_scan_jobs_do_not_depend_on_a_status_function():
@@ -155,7 +160,7 @@ def test_scan_jobs_do_not_depend_on_a_status_function():
         assert not any(w in str(JOBS[name]["if"]) for w in ("success()", "failure()", "cancelled()"))
 
 
-def test_the_job_conditions_are_exact_on_true_and_keep_their_other_clauses():
+def test_the_job_conditions_skip_only_on_false_and_keep_their_other_clauses():
     assert JOBS["codeql"]["if"] == f"inputs.codeql && {ON}"
     assert JOBS["dependency-review"]["if"] == f"inputs.dependency-review && github.event_name == 'pull_request' && {ON}"
     assert JOBS["gitleaks"]["if"] == "inputs.gitleaks" and JOBS["semgrep"]["if"] == "inputs.semgrep"
