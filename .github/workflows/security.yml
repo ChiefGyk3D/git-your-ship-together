@@ -37,7 +37,7 @@ on:
   workflow_call:
     inputs:
       advanced-security:
-        description: Whether the repository has GitHub Advanced Security - exactly `true` (default, unchanged behavior) or `false`. A private repository without Advanced Security sets `false`; dependency review and CodeQL are then skipped, and Semgrep and gitleaks still run and still fail on a finding but do not upload SARIF, and the job summary says so. Any other value (including `False` or an empty string) fails the whole call in the `advanced-security-check` job before any scan.
+        description: Whether the repository has GitHub Advanced Security - exactly `true` (default, unchanged behavior) or `false`. A private repository without Advanced Security sets `false`; dependency review and CodeQL are then skipped, and Semgrep and gitleaks still run and still fail on a finding but do not upload SARIF, and the job summary says so. Any other value (including `False` or an empty string) fails the `advanced-security-check` job, and so the whole call, though the scans still run.
         type: string
         default: "true"
       codeql:
@@ -335,14 +335,13 @@ jobs:
           case "$value" in
             true | false) ;;
             *)
-              echo "::error title=advanced-security::the advanced-security input must be exactly 'true' or 'false' (its value is ${#value} characters long); no scan runs until it is fixed"
+              echo "::error title=advanced-security::the advanced-security input must be exactly 'true' or 'false' (its value is ${#value} characters long); the call fails until it is fixed"
               exit 1
               ;;
           esac
 
   codeql:
     name: CodeQL
-    needs: advanced-security-check
     if: inputs.codeql && inputs.advanced-security == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: ${{ inputs.timeout-minutes }}
@@ -475,7 +474,6 @@ jobs:
 
   gitleaks:
     name: Secret scan (gitleaks)
-    needs: advanced-security-check
     if: inputs.gitleaks
     runs-on: ubuntu-latest
     timeout-minutes: ${{ inputs.timeout-minutes }}
@@ -934,7 +932,6 @@ jobs:
 
   dependency-review:
     name: Dependency review
-    needs: advanced-security-check
     if: inputs.dependency-review && github.event_name == 'pull_request' && inputs.advanced-security == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: ${{ inputs.timeout-minutes }}
@@ -1067,7 +1064,6 @@ jobs:
 
   semgrep:
     name: Semgrep
-    needs: advanced-security-check
     if: inputs.semgrep
     runs-on: ubuntu-latest
     timeout-minutes: ${{ inputs.timeout-minutes }}

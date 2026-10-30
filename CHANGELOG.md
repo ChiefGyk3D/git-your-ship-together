@@ -13,14 +13,15 @@ name what a caller sees after that.
 - **With `false`:** dependency review and CodeQL are skipped by a job-level `if` (skipped, never failed); Semgrep and gitleaks run
   as before and still fail the job on a finding, but their SARIF uploads are skipped; both jobs write a job-summary note naming
   what was skipped and why.
-- **Validated before use.** One new always-running job, `advanced-security-check` ("Advanced Security setting": harden-runner, the
-  egress canary, no checkout), fails the whole call unless the value is exactly `true` or `false`. CodeQL, dependency review,
-  gitleaks and Semgrep `needs` it, so no case variant (`False`), empty or unknown value reaches a skip condition.
+- **Loud failure on a bad value.** One new always-running job, `advanced-security-check` ("Advanced Security setting":
+  harden-runner, the egress canary, no checkout), fails the called workflow unless the value is exactly `true` or `false`. It is
+  not a gate: no job has `needs`, so every scan runs exactly as before, even when the check job fails. A case variant such as
+  `False` skips CodeQL and dependency review (GitHub compares strings case-insensitively), and the run is still red.
 - **Job count: +1** (`advanced-security-check`). A caller that requires jobs by name is unaffected; the new job reports success when
   the value is valid.
 - **Existing callers.** Nothing changes unless a caller sets the input.
-- **Tests.** `tests/test_advanced_security.py` runs the validator against 26 invalid values, pins the `needs` wiring and the job
-  conditions, and runs the summary step under bash.
+- **Tests.** `tests/test_advanced_security.py` runs the validator against 26 invalid values, pins that no job has `needs`, the job
+  conditions, pins that no job has `needs`, and runs the summary step under bash.
 
 ### New: Python 3.14 and 3.15 in the `python-ci.yml` matrix, and one list of supported Pythons (issue #242)
 

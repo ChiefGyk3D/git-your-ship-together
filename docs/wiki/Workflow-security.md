@@ -89,7 +89,7 @@ jobs:
   review and CodeQL are skipped (shown as skipped, not failed), the Semgrep and gitleaks SARIF uploads are skipped, and both jobs
   write a job-summary note. Semgrep and gitleaks still run and still fail the job on a finding. The default is `true`, so every
   existing caller is unchanged. The value must be exactly `true` or `false`: a new always-running job, `advanced-security-check`,
-  fails the whole call on anything else (`False`, empty, a typo) before any scan, and the jobs that read the input wait for it.
+  fails the call, loudly, on anything else (`False`, empty, a typo). It is not a gate: the scans do not wait for it and run as before, so a check that fails for another reason (a flaky canary) never switches a scan off.
 - **Semgrep suppression** is partly unsettled (issue #83); see the scanning page.
 - **The Actions allow-list** needs subdirectory forms for `github/codeql-action/init` and `snyk/actions/setup`; see
   [The baseline and the weekly audit](Baseline-and-the-weekly-audit.md).

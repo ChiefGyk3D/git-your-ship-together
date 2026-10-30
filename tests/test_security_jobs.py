@@ -157,13 +157,8 @@ def test_semgrep_uploads_sarif_with_its_category_even_after_a_finding():
 
 
 def test_there_is_no_gate_job_for_semgrep_to_join():
-    """security.yml has no summary job; callers require the called jobs' own checks. Revisit if one is added.
-
-    The one dependency is the input check (`advanced-security-check`), which gates the jobs that read that input.
-    """
-    waiting = {n: j["needs"] for n, j in jobs(DOC).items() if "needs" in j}
-    assert waiting and all(needs == "advanced-security-check" for needs in waiting.values())
-    assert "advanced-security-check" not in waiting
+    """security.yml has no summary job; callers require the called jobs' own checks. Revisit if one is added."""
+    assert not [n for n, j in jobs(DOC).items() if "needs" in j]
 
 
 def test_dependency_review_carries_the_licence_denylist():

@@ -1,13 +1,15 @@
 """security.yml `advanced-security`: a private repository without GitHub Advanced Security (issue #248).
 
 The input is explicit: `true` (the default, today's behavior) or `false`. One always-running job,
-`advanced-security-check`, fails the whole call unless the value is exactly one of the two, and every job that reads the
-input `needs` it, so no case variant, empty or unknown value can reach a skip condition (GitHub compares strings
-case-insensitively, so `False` would otherwise skip a job before any case-sensitive check ran).
+`advanced-security-check`, fails the called workflow loudly unless the value is exactly one of the two. It is a loud
+failure, not a gate: no job has `needs`, so the scans run exactly as before even when the check fails (a flaky canary
+there must not switch the scans off). GitHub compares strings case-insensitively, so `False` skips CodeQL and
+dependency review, and the check job is what keeps that run from ever being green.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 
@@ -122,35 +124,35 @@ def test_every_invalid_value_fails_the_check_job_with_a_clear_error(bad):
     assert "uid=" not in done.stdout + done.stderr, "the value is data, never executed"
 
 
-def reads_input(job: dict) -> bool:
-    import json
-
-    return "advanced-security" in json.dumps(job)
+def test_no_job_has_needs_so_the_scans_always_run():
+    assert not [n for n, j in JOBS.items() if "needs" in j], "a failed check job must not skip a scan"
 
 
-def test_every_job_that_reads_the_input_needs_the_check_job():
-    readers = sorted(n for n, j in JOBS.items() if n != CHECK and reads_input(j))
-    assert readers == sorted(READERS), "a new reader of the input must be listed here and need the check"
-    for name in READERS:
-        needs = JOBS[name].get("needs")
-        needs = [needs] if isinstance(needs, str) else needs
-        assert CHECK in needs, f"{name} could evaluate the input before it is validated"
+def test_only_the_expected_jobs_read_the_input():
+    readers = sorted(n for n, j in JOBS.items() if n != CHECK and "advanced-security" in json.dumps(j))
+    assert readers == sorted(READERS), "a new reader of the input must be listed here and reviewed"
 
 
-def test_the_check_job_is_the_only_one_and_the_job_count_grows_by_exactly_one():
+def test_the_check_job_is_the_only_one_added_and_the_job_count_grows_by_exactly_one():
     assert [n for n in JOBS if "advanced-security" in n] == [CHECK]
     assert len(JOBS) == 8  # codeql gitleaks dependency-audit dependency-review semgrep snyk scorecard + the check
 
 
-def test_no_conditional_sees_a_value_that_failed_validation():
-    """The chain per value: the validator runs first; a failed `needs` skips the dependents without evaluating `if`."""
-    for value in INVALID:
-        assert run_validate(value).returncode == 1
+def case_variant_skips(value: str) -> bool:
+    """GitHub's `==` is case-insensitive, so only the exact-case-insensitive `true` keeps CodeQL on."""
+    return value.lower() != "true"
+
+
+@pytest.mark.parametrize("value", ["False", "FALSE", "fAlSe", "TRUE", "True", "tRuE"])
+def test_a_case_variant_fails_the_check_job_so_the_run_is_never_green(value):
+    assert run_validate(value).returncode == 1
+    if value.lower() == "false":
+        assert case_variant_skips(value), "the variant skips CodeQL and dependency review; the check job still fails"
+
+
+def test_scan_jobs_do_not_depend_on_a_status_function():
     for name in READERS:
-        assert CHECK in JOBS[name]["needs"]
-        assert not any(w in str(JOBS[name]["if"]) for w in ("success()", "always()", "failure()", "cancelled()")), (
-            "a status function would run the job (and its conditions) after the check failed"
-        )
+        assert not any(w in str(JOBS[name]["if"]) for w in ("success()", "failure()", "cancelled()"))
 
 
 def test_the_job_conditions_are_exact_on_true_and_keep_their_other_clauses():
