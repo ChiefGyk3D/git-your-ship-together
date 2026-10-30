@@ -789,6 +789,27 @@ def test_every_mask_command_goes_through_one_function():
     assert shipped("select").count("emit_mask") >= 4
 
 
+RULE = "yaml.github-actions.security.audit.unsafe-add-mask-workflow-command.unsafe-add-mask-workflow-command"
+IGNORE = "# no" + "semgrep: " + RULE  # built in two pieces so this file is not itself an ignore
+
+
+def test_the_one_mask_line_carries_a_narrow_justified_semgrep_ignore():
+    """Semgrep's audit rule matches any literal mask command and masking has no other API, so the one line is ignored
+    by exact rule id, with the reason on the line before. No other line of the action may carry an ignore."""
+    lines = ACTION.read_text().splitlines()
+    idx = [i for i, ln in enumerate(lines) if "::add-mask::" in ln and not ln.lstrip().startswith("#")]
+    assert len(idx) == 1, idx
+    i = idx[0]
+    on_line = IGNORE in lines[i]
+    above = lines[i - 1].lstrip()
+    assert on_line or (above.startswith(IGNORE) and len(above) > len(IGNORE) + 20), (above, lines[i])
+    ignores = [ln for ln in lines if "no" + "semgrep" in ln]
+    assert len(ignores) == 1, ignores
+    assert RULE in ignores[0]
+    # the reason must say why the line is safe, not just name the rule
+    assert "escap" in lines[i - 1].lower() + lines[i].lower()
+
+
 def test_the_mask_function_escapes_a_hostile_value(tmp_path):
     """The escaping that makes the single flagged line safe: remove it and a value starts its own command."""
     hostile = "prefix%0A::error::x\n::stop-commands::x\r::warning::y tail1234"

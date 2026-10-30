@@ -135,6 +135,9 @@ name what a caller sees after that.
   copies stay byte-identical. Callers that want `outputs` (the `no-php-no-cry` and `Reach-Around` deploy workflows) re-pin
   to the release that carries this.
 - **Tests.** `tests/test_doppler_outputs.py` runs the new steps as shipped against a stub `curl`.
+- **Static analysis.** Semgrep's `unsafe-add-mask-workflow-command` audit rule matches any literal mask command, and `add-mask` is the
+  only way to mask. The action prints it from one function, escaped first, and that one line carries a rule-scoped ignore with
+  its reason; a test fails if a second mask line or a second ignore appears.
 
 ### New workflow: `lory-audit.yml` (issue #202)
 
