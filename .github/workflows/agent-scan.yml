@@ -49,9 +49,15 @@
 # target, so findings in a sibling file can show up under a run of another; the report holds each one once.
 #
 # MCP targets. A JSON file of the form {"tools": [...]}, the output of a `tools/list` call. Prompts and
-# resources are not scanned. The MCP scanner has no exit-code flag, so `fail-on-severity` is applied by this
-# workflow to the severity the scanner reports, and the scanner reports at most HIGH: `critical` never fails
-# there, and `info` counts any finding.
+# resources are not scanned. Each tool must have a unique name, and the scanner must return exactly one result per
+# tool; a duplicate, a missing or an unexpected result fails the job.
+#
+# Threshold. Neither scanner's exit code is used as a finding: the skill scanner must exit 0, and `fail-on-severity`
+# is applied by this workflow to the severities in the parsed reports. The MCP scanner reports at most HIGH, so
+# `critical` never fails there and `info` counts any finding.
+#
+# Egress. The scan jobs run third-party code beside your checkout, so they default to harden-runner `block` with an
+# allow-list of the checkout and PyPI hosts (`egress-policy: audit` opts out). The scanners themselves reach nothing.
 
 name: Agent scan (reusable)
 
@@ -67,7 +73,7 @@ on:
         type: string
         default: ""
       fail-on-severity:
-        description: "Fail the job when a finding is at or above this severity - `critical`, `high`, `medium`, `low` or `info`. Empty (the default) is advisory: findings are reported and the job stays green. The skill scan passes it to the scanner's own `--fail-on-severity`; the MCP scanner has no such flag, so the workflow applies it to the severity the scanner reports (at most HIGH)."
+        description: "Fail the job when a finding is at or above this severity - `critical`, `high`, `medium`, `low` or `info`. Empty (the default) is advisory: findings are reported and the job stays green. The workflow applies it to the severities in the scanners' reports (the MCP scanner reports at most HIGH); a scanner that exits nonzero is an error, never a finding."
         type: string
         default: ""
       upload-sarif:
@@ -83,9 +89,9 @@ on:
         type: string
         default: "3.13"
       egress-policy:
-        description: harden-runner egress policy for the scan jobs - `audit` logs outbound connections, `block` allows only `allowed-endpoints`. The upload jobs hold no secret and follow `egress-policy-secretless` instead (EX-0001).
+        description: harden-runner egress policy for the scan jobs, which run third-party scanner code beside your checkout - `block` (the default) allows only `allowed-endpoints` and `extra-allowed-endpoints`, `audit` only logs outbound connections. The upload jobs hold no secret and follow `egress-policy-secretless` instead (EX-0001).
         type: string
-        default: audit
+        default: block
       egress-policy-secretless:
         description: harden-runner egress policy for the jobs that hold no stored secret, no OIDC token and no write-scoped or publish-capable token (read-only contents, a SARIF upload at most), and whose output no privileged job consumes - exactly `audit` or `block`. Defaults to `audit` while security exception EX-0001 is active (GitHub-hosted runners in westus2 break harden-runner `block`; expires 2026-11-07 or when step-security/harden-runner#708 is fixed; see docs/security/exceptions/). Every job still has the default read-only job token. Set `block` to opt back in. Any other job follows `egress-policy`. Any other value fails the job.
         type: string
@@ -651,11 +657,12 @@ jobs:
           SARIF_OUT: ${{ runner.temp }}/skill-scanner.sarif
         run: |
           python -I - <<'PY'
-          import glob
+          import fnmatch
           import hashlib
           import json
           import os
           import re
+          import stat
           import subprocess
           import sys
           import tempfile
@@ -667,6 +674,9 @@ jobs:
           WORKSPACE = Path(os.environ["WORKSPACE"]).resolve()
           SARIF_OUT = Path(os.environ["SARIF_OUT"])
           MAX_TARGETS = 200
+          MAX_ENTRIES = 100000
+          MAX_DEPTH = 30
+          MAX_MATCHED_BYTES = 256 * 1024 * 1024
           MAX_BYTES = 5 * 1024 * 1024
           TIMEOUT = 300
           errors = []
@@ -691,6 +701,80 @@ jobs:
               sys.exit("KIND must be skill or mcp")
 
 
+          class Limit(Exception):
+              pass
+
+
+          def expand(pattern):
+              """Paths under the workspace that match `pattern`, found by walking real directories only.
+
+              A directory symlink is never entered, `.git` and dot-directories are skipped unless the pattern names them, and
+              the walk stops at MAX_ENTRIES directory entries, MAX_DEPTH levels or MAX_MATCHED_BYTES of matched files.
+              """
+              parts = [part for part in pattern.split("/") if part not in ("", ".")]
+              found, seen = [], {"entries": 0, "bytes": 0}
+
+              def listing(directory):
+                  try:
+                      names = sorted(os.listdir(directory))
+                  except OSError:
+                      return []
+                  seen["entries"] += len(names)
+                  if seen["entries"] > MAX_ENTRIES:
+                      raise Limit("too many entries")
+                  return names
+
+              def visible(name, part):
+                  return name != ".git" and (not name.startswith(".") or part.startswith("."))
+
+              def is_real_dir(path):
+                  try:
+                      return stat.S_ISDIR(os.lstat(path).st_mode)
+                  except OSError:
+                      return False
+
+              def add(path):
+                  info = os.lstat(path)
+                  if stat.S_ISREG(info.st_mode):
+                      seen["bytes"] += info.st_size
+                      if seen["bytes"] > MAX_MATCHED_BYTES:
+                          raise Limit("matched files are too large")
+                  found.append(path)
+
+              def walk(directory, rest, depth):
+                  if depth > MAX_DEPTH:
+                      raise Limit("too deep")
+                  part, rest = rest[0], rest[1:]
+                  if part == "**" and not rest:
+                      part = "*"
+                  if part == "**":
+                      walk(directory, rest, depth)
+                      for name in listing(directory):
+                          child = os.path.join(directory, name)
+                          if visible(name, "") and is_real_dir(child):
+                              walk(child, [part, *rest], depth + 1)
+                  elif not re.search(r"[*?\[]", part):
+                      child = os.path.join(directory, part)
+                      seen["entries"] += 1
+                      if part != ".git" and os.path.lexists(child):
+                          if not rest:
+                              add(child)
+                          elif is_real_dir(child):
+                              walk(child, rest, depth + 1)
+                  else:
+                      for name in listing(directory):
+                          child = os.path.join(directory, name)
+                          if visible(name, part) and fnmatch.fnmatchcase(name, part):
+                              if not rest:
+                                  add(child)
+                              elif is_real_dir(child):
+                                  walk(child, rest, depth + 1)
+
+              if parts:
+                  walk(str(WORKSPACE), parts, 0)
+              return [Path(path).relative_to(WORKSPACE).as_posix() for path in found]
+
+
           def find_targets():
               """The files or directories the caller named: relative to the workspace, inside it, never through `..`."""
               found = []
@@ -699,15 +783,17 @@ jobs:
                   if token.startswith(("/", "-", "~")) or ".." in parts or ".git" in parts:
                       error(f"{clean(token)} is not a path inside the repository")
                       continue
-                  matches = sorted(glob.glob(token, root_dir=WORKSPACE, recursive=True))
+                  try:
+                      matches = sorted(expand(token))
+                  except Limit as exc:
+                      error(f"{clean(token)}: {exc}")
+                      continue
                   if not matches:
                       error(f"{clean(token)} matches nothing")
                   for match in matches:
                       real = (WORKSPACE / match).resolve()
                       if WORKSPACE not in real.parents:
                           error(f"{clean(match)} leads outside the repository")
-                      elif ".git" in Path(match).parts:
-                          error(f"{clean(match)} is inside .git")
                       elif real not in found:
                           found.append(real)
               if not found and not errors:
@@ -765,10 +851,13 @@ jobs:
               command = ["skill-scanner", "scan", str(directory), "--format", "sarif", "--output-sarif", str(out)]
               if name and name != "SKILL.md":
                   command.append(f"--skill-file={name}")
-              if fail_on:
-                  command += ["--fail-on-severity", fail_on]
               done = run(command, home)
               if done is None:
+                  return [], [], False
+              if done.returncode != 0:
+                  # The threshold is applied to the report below, never to an exit code, so a crash cannot pass for a finding
+                  # and a partial report is never kept.
+                  error(f"{clean(relative(target))}: the scanner exited {done.returncode}")
                   return [], [], False
               try:
                   run_ = json.loads(out.read_text())["runs"][0]
@@ -784,9 +873,7 @@ jobs:
                       artifact["uri"] = uri[len(prefix) :] if uri.startswith(prefix) else relative(target)
                       artifact["uriBaseId"] = "%SRCROOT%"
               worst = max((level_rank(r) for r in results), default=-1)
-              tripped = threshold is not None and (done.returncode != 0 or worst >= threshold)
-              if done.returncode != 0 and not tripped:
-                  error(f"{clean(relative(target))}: the scanner exited {done.returncode} without a finding to explain it")
+              tripped = threshold is not None and worst >= threshold
               return results, rules, tripped
 
 
@@ -803,18 +890,46 @@ jobs:
                   tools = json.loads(target.read_text(encoding="utf-8"))["tools"]
                   if not isinstance(tools, list) or not tools or not all(isinstance(t, dict) for t in tools):
                       raise ValueError("tools must be a non-empty list of objects")
+                  names = [t.get("name") for t in tools]
+                  if not all(isinstance(n, str) and n for n in names):
+                      raise ValueError("every tool needs a name")
               except (OSError, ValueError, KeyError, TypeError, RecursionError) as exc:
                   error(f"{label}: not an MCP tools list ({clean(exc)})")
+                  return [], [], False
+              for name in sorted({n for n in names if names.count(n) > 1}):
+                  error(f"{label}: more than one tool named {clean(name, 60)}; results could not be matched to tools")
+              if len(set(names)) != len(names):
                   return [], [], False
               done = run(["mcp-scanner", "--analyzers", "yara", "--raw", "static", "--tools", str(target)], home)
               if done is None:
                   return [], [], False
               try:
                   scanned = json.loads(done.stdout)
-                  if done.returncode != 0 or not isinstance(scanned, list) or len(scanned) != len(tools):
-                      raise ValueError("exit status or tool count")
+                  if done.returncode != 0 or not isinstance(scanned, list) or not all(isinstance(e, dict) for e in scanned):
+                      raise ValueError("exit status or shape")
               except ValueError:
                   error(f"{label}: the scanner did not report on all {len(tools)} tools (exit {done.returncode})")
+                  return [], [], False
+              # One result per requested tool, matched by name (names are unique, checked above): no duplicate, no result for
+              # a tool nobody asked about, none missing, and the description the scanner saw is the one in the file.
+              wanted = {t["name"]: t for t in tools}
+              matched = {}
+              for entry in scanned:
+                  name = entry.get("tool_name")
+                  if not isinstance(name, str) or name not in wanted:
+                      error(f"{label}: result for a tool that was not requested: {clean(name, 60)}")
+                  elif name in matched:
+                      error(f"{label}: two results for tool {clean(name, 60)}")
+                  else:
+                      matched[name] = entry
+                      seen_description, own = entry.get("tool_description"), wanted[name].get("description")
+                      if isinstance(seen_description, str) and isinstance(own, str) and seen_description != own:
+                          error(f"{label}: tool {clean(name, 60)}: the scanner saw a different description")
+              for name in wanted:
+                  if name not in matched:
+                      error(f"{label}: no result for tool {clean(name, 60)}")
+              if len(matched) != len(wanted) or len(scanned) != len(wanted):
+                  error(f"{label}: {len(scanned)} results for {len(wanted)} tools")
                   return [], [], False
               results, rules, tripped = [], {}, False
               for entry in scanned:
@@ -1580,11 +1695,12 @@ jobs:
           SARIF_OUT: ${{ runner.temp }}/mcp-scanner.sarif
         run: |
           python -I - <<'PY'
-          import glob
+          import fnmatch
           import hashlib
           import json
           import os
           import re
+          import stat
           import subprocess
           import sys
           import tempfile
@@ -1596,6 +1712,9 @@ jobs:
           WORKSPACE = Path(os.environ["WORKSPACE"]).resolve()
           SARIF_OUT = Path(os.environ["SARIF_OUT"])
           MAX_TARGETS = 200
+          MAX_ENTRIES = 100000
+          MAX_DEPTH = 30
+          MAX_MATCHED_BYTES = 256 * 1024 * 1024
           MAX_BYTES = 5 * 1024 * 1024
           TIMEOUT = 300
           errors = []
@@ -1620,6 +1739,80 @@ jobs:
               sys.exit("KIND must be skill or mcp")
 
 
+          class Limit(Exception):
+              pass
+
+
+          def expand(pattern):
+              """Paths under the workspace that match `pattern`, found by walking real directories only.
+
+              A directory symlink is never entered, `.git` and dot-directories are skipped unless the pattern names them, and
+              the walk stops at MAX_ENTRIES directory entries, MAX_DEPTH levels or MAX_MATCHED_BYTES of matched files.
+              """
+              parts = [part for part in pattern.split("/") if part not in ("", ".")]
+              found, seen = [], {"entries": 0, "bytes": 0}
+
+              def listing(directory):
+                  try:
+                      names = sorted(os.listdir(directory))
+                  except OSError:
+                      return []
+                  seen["entries"] += len(names)
+                  if seen["entries"] > MAX_ENTRIES:
+                      raise Limit("too many entries")
+                  return names
+
+              def visible(name, part):
+                  return name != ".git" and (not name.startswith(".") or part.startswith("."))
+
+              def is_real_dir(path):
+                  try:
+                      return stat.S_ISDIR(os.lstat(path).st_mode)
+                  except OSError:
+                      return False
+
+              def add(path):
+                  info = os.lstat(path)
+                  if stat.S_ISREG(info.st_mode):
+                      seen["bytes"] += info.st_size
+                      if seen["bytes"] > MAX_MATCHED_BYTES:
+                          raise Limit("matched files are too large")
+                  found.append(path)
+
+              def walk(directory, rest, depth):
+                  if depth > MAX_DEPTH:
+                      raise Limit("too deep")
+                  part, rest = rest[0], rest[1:]
+                  if part == "**" and not rest:
+                      part = "*"
+                  if part == "**":
+                      walk(directory, rest, depth)
+                      for name in listing(directory):
+                          child = os.path.join(directory, name)
+                          if visible(name, "") and is_real_dir(child):
+                              walk(child, [part, *rest], depth + 1)
+                  elif not re.search(r"[*?\[]", part):
+                      child = os.path.join(directory, part)
+                      seen["entries"] += 1
+                      if part != ".git" and os.path.lexists(child):
+                          if not rest:
+                              add(child)
+                          elif is_real_dir(child):
+                              walk(child, rest, depth + 1)
+                  else:
+                      for name in listing(directory):
+                          child = os.path.join(directory, name)
+                          if visible(name, part) and fnmatch.fnmatchcase(name, part):
+                              if not rest:
+                                  add(child)
+                              elif is_real_dir(child):
+                                  walk(child, rest, depth + 1)
+
+              if parts:
+                  walk(str(WORKSPACE), parts, 0)
+              return [Path(path).relative_to(WORKSPACE).as_posix() for path in found]
+
+
           def find_targets():
               """The files or directories the caller named: relative to the workspace, inside it, never through `..`."""
               found = []
@@ -1628,15 +1821,17 @@ jobs:
                   if token.startswith(("/", "-", "~")) or ".." in parts or ".git" in parts:
                       error(f"{clean(token)} is not a path inside the repository")
                       continue
-                  matches = sorted(glob.glob(token, root_dir=WORKSPACE, recursive=True))
+                  try:
+                      matches = sorted(expand(token))
+                  except Limit as exc:
+                      error(f"{clean(token)}: {exc}")
+                      continue
                   if not matches:
                       error(f"{clean(token)} matches nothing")
                   for match in matches:
                       real = (WORKSPACE / match).resolve()
                       if WORKSPACE not in real.parents:
                           error(f"{clean(match)} leads outside the repository")
-                      elif ".git" in Path(match).parts:
-                          error(f"{clean(match)} is inside .git")
                       elif real not in found:
                           found.append(real)
               if not found and not errors:
@@ -1694,10 +1889,13 @@ jobs:
               command = ["skill-scanner", "scan", str(directory), "--format", "sarif", "--output-sarif", str(out)]
               if name and name != "SKILL.md":
                   command.append(f"--skill-file={name}")
-              if fail_on:
-                  command += ["--fail-on-severity", fail_on]
               done = run(command, home)
               if done is None:
+                  return [], [], False
+              if done.returncode != 0:
+                  # The threshold is applied to the report below, never to an exit code, so a crash cannot pass for a finding
+                  # and a partial report is never kept.
+                  error(f"{clean(relative(target))}: the scanner exited {done.returncode}")
                   return [], [], False
               try:
                   run_ = json.loads(out.read_text())["runs"][0]
@@ -1713,9 +1911,7 @@ jobs:
                       artifact["uri"] = uri[len(prefix) :] if uri.startswith(prefix) else relative(target)
                       artifact["uriBaseId"] = "%SRCROOT%"
               worst = max((level_rank(r) for r in results), default=-1)
-              tripped = threshold is not None and (done.returncode != 0 or worst >= threshold)
-              if done.returncode != 0 and not tripped:
-                  error(f"{clean(relative(target))}: the scanner exited {done.returncode} without a finding to explain it")
+              tripped = threshold is not None and worst >= threshold
               return results, rules, tripped
 
 
@@ -1732,18 +1928,46 @@ jobs:
                   tools = json.loads(target.read_text(encoding="utf-8"))["tools"]
                   if not isinstance(tools, list) or not tools or not all(isinstance(t, dict) for t in tools):
                       raise ValueError("tools must be a non-empty list of objects")
+                  names = [t.get("name") for t in tools]
+                  if not all(isinstance(n, str) and n for n in names):
+                      raise ValueError("every tool needs a name")
               except (OSError, ValueError, KeyError, TypeError, RecursionError) as exc:
                   error(f"{label}: not an MCP tools list ({clean(exc)})")
+                  return [], [], False
+              for name in sorted({n for n in names if names.count(n) > 1}):
+                  error(f"{label}: more than one tool named {clean(name, 60)}; results could not be matched to tools")
+              if len(set(names)) != len(names):
                   return [], [], False
               done = run(["mcp-scanner", "--analyzers", "yara", "--raw", "static", "--tools", str(target)], home)
               if done is None:
                   return [], [], False
               try:
                   scanned = json.loads(done.stdout)
-                  if done.returncode != 0 or not isinstance(scanned, list) or len(scanned) != len(tools):
-                      raise ValueError("exit status or tool count")
+                  if done.returncode != 0 or not isinstance(scanned, list) or not all(isinstance(e, dict) for e in scanned):
+                      raise ValueError("exit status or shape")
               except ValueError:
                   error(f"{label}: the scanner did not report on all {len(tools)} tools (exit {done.returncode})")
+                  return [], [], False
+              # One result per requested tool, matched by name (names are unique, checked above): no duplicate, no result for
+              # a tool nobody asked about, none missing, and the description the scanner saw is the one in the file.
+              wanted = {t["name"]: t for t in tools}
+              matched = {}
+              for entry in scanned:
+                  name = entry.get("tool_name")
+                  if not isinstance(name, str) or name not in wanted:
+                      error(f"{label}: result for a tool that was not requested: {clean(name, 60)}")
+                  elif name in matched:
+                      error(f"{label}: two results for tool {clean(name, 60)}")
+                  else:
+                      matched[name] = entry
+                      seen_description, own = entry.get("tool_description"), wanted[name].get("description")
+                      if isinstance(seen_description, str) and isinstance(own, str) and seen_description != own:
+                          error(f"{label}: tool {clean(name, 60)}: the scanner saw a different description")
+              for name in wanted:
+                  if name not in matched:
+                      error(f"{label}: no result for tool {clean(name, 60)}")
+              if len(matched) != len(wanted) or len(scanned) != len(wanted):
+                  error(f"{label}: {len(scanned)} results for {len(wanted)} tools")
                   return [], [], False
               results, rules, tripped = [], {}, False
               for entry in scanned:

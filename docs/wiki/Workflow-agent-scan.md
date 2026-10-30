@@ -16,7 +16,9 @@ scanner sees. These scanners look for exactly those patterns.
 | `mcp-scan` | Your repository | `contents: read` | `mcp-scanner --analyzers yara static --tools FILE` once per file, SARIF built from its JSON |
 | `skill-upload`, `mcp-upload` | One SARIF artifact | `security-events: write` | Upload to code scanning; check nothing out, run nothing of yours |
 
-Static engines only: pattern, YARA and structure checks on files already on the runner. No LLM engine, no cloud engine, no
+Static engines only: pattern, YARA and structure checks on files already on the runner. The scan jobs run third-party code beside
+your checkout, so `egress-policy` defaults to `block` with an allow-list of the checkout and PyPI hosts; `audit` opts out.
+Patterns in `skill-paths` and `mcp-tool-files` are expanded by a bounded walk that never enters a symlinked directory. No LLM engine, no cloud engine, no
 VirusTotal, no AI Defense API, no API key, no secret. The scanners run from an empty directory with an environment the script builds,
 so a token or a `.env` in your repository never reaches them.
 
@@ -49,13 +51,13 @@ A template is in the repository: [`examples/agent-scan-caller.yml`](../../exampl
 With `fail-on-severity` empty, a finding never fails the job. It lands in the job summary and in code scanning. Set it to `critical`,
 `high`, `medium`, `low` or `info` and the job fails on a finding at or above that level:
 
-- The skill scan passes the value to the scanner's own `--fail-on-severity`, so the scanner's exit code is the gate. Both scanners
-  exit 0 on a critical finding if you do not ask.
-- The MCP scanner has no such flag. The workflow applies the threshold to the severity the scanner reports, and the scanner reports
-  at most `HIGH`. `critical` therefore never fails an MCP scan.
+- The workflow applies the threshold to the severities in the parsed reports. Neither scanner's exit code stands for a finding: the
+  skill scanner must exit 0, and a nonzero exit is an error whose partial report is discarded.
+- The MCP scanner reports at most `HIGH`, so `critical` never fails an MCP scan.
 
 A scan that could not look at everything is not advisory. A path outside the repository, a pattern that matches nothing, a file that
-is not a `{"tools": [...]}` list, a scanner that crashed: each fails the job and uploads no report, so a half-finished scan cannot
+is not a `{"tools": [...]}` list, two tools with the same name, a scanner that crashed, an MCP result set that is not exactly one
+result per tool: each fails the job and uploads no report, so a half-finished scan cannot
 close the alerts of the last good one. To keep the check from blocking merges, leave its check out of branch protection.
 
 ## Skills, entry files and directories

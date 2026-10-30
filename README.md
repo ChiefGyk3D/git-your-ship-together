@@ -1632,17 +1632,20 @@ jobs:
   scanner is told not to fetch its price list from the internet, so with `egress-policy: block` they reach nothing.
 - **Advisory by default.** Both scanners exit 0 on a critical finding unless told otherwise. With `fail-on-severity` empty the
   scans report and the job passes. Set it (`critical`, `high`, `medium`, `low` or `info`) and the job fails when a finding is
-  at or above that severity. The skill scan passes the value to the scanner's own `--fail-on-severity`, so its exit code is
-  real. The MCP scanner has no such flag; the workflow applies the threshold to the severity it reports, which is at most
-  `HIGH`: `critical` never fails an MCP scan, and `info` counts any finding.
+  at or above that severity. The workflow applies the threshold to the severities in the parsed reports; it does not use
+  either scanner's exit code as a finding. The skill scanner must exit 0 (a nonzero exit is an error, and a report it left
+  behind is discarded). The MCP scanner reports at most `HIGH`: `critical` never fails an MCP scan, and `info` counts any finding.
 - **Findings are not the only way to go red.** A scan that could not cover every target fails the job and uploads no report:
   a path outside the repository (`..`, an absolute path, a symlink that leaves it, `.git`), a pattern that matches nothing,
-  a file that is not a non-empty `{"tools": [...]}` list, a scanner that crashed or did not report on every tool, a severity
+  a file that is not a non-empty `{"tools": [...]}` list, two tools with the same name, a scanner that crashed, or an MCP
+  result set that is not exactly one result per requested tool (a duplicate, a missing or an unrequested result), a severity
   the script does not know. A report from a partial scan would close the alerts of the last good run. If a check must
   never turn the gate red, leave its check out of branch protection; do not add `continue-on-error`.
 - **Skill targets.** A directory is scanned as a skill. A file is scanned as the entry file of its directory
   (`--skill-file`), one scanner run per file. A run covers the whole directory, so a finding in a sibling file can appear
   under another file's run; the report holds each finding once. Globs work; paths with spaces do not. Up to 200 targets.
+  Patterns are expanded by walking the checkout without entering symlinked directories, and the walk is bounded (entries,
+  depth and bytes of matched files).
 - **Where the reports go.** Each scan uploads one SARIF file with the category `agent-scan-skill` or `agent-scan-mcp`
   (`sarif-category` changes the prefix) and writes a job summary with the counts and up to 50 findings. Text from the
   repository and from the scanners is reduced to a safe character set before it reaches the summary or the log. The MCP
@@ -1675,7 +1678,7 @@ jobs:
 | `upload-sarif` | `true` | Upload the SARIF reports to code scanning |
 | `sarif-category` | `agent-scan` | Category and artifact name prefix; `-skill` and `-mcp` are appended |
 | `python-version` | `3.13` | Python for the scanners, 3.12 to 3.14 |
-| `egress-policy` | `audit` | harden-runner on the scan jobs |
+| `egress-policy` | `block` | harden-runner on the scan jobs, which run third-party scanner code beside your checkout. `block` allows only `allowed-endpoints`; `audit` opts out |
 | `egress-policy-secretless` | `audit` | harden-runner policy for the upload jobs; exactly `audit` or `block`. Governed by security exception EX-0001, see [Known CI platform issue: westus2 (EX-0001)](#known-ci-platform-issue-westus2-ex-0001) |
 | `allowed-endpoints` | `api.github.com`, `files.pythonhosted.org`, `github.com`, `pypi.org` | The allow-list for `block`: the checkout and the pip install |
 | `extra-allowed-endpoints` | empty | Appended to the list |

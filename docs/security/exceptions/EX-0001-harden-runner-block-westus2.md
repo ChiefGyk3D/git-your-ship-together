@@ -163,7 +163,7 @@ expression; exactly, by the policy check that runs first).
 | `wiki-publish.yml` | `generate` | runs caller code; its artifact is pushed verbatim by `publish` |
 | `python-ci.yml` | `coverage` | `id-token`, Doppler, the Codecov upload |
 | `dast.yml` | `scan` | its SARIF artifact is uploaded verbatim by `upload` (`security-events: write`) |
-| `agent-scan.yml` | `skill-scan`, `mcp-scan` | their SARIF artifacts are uploaded verbatim by `skill-upload` and `mcp-upload` (`security-events: write`) |
+| `agent-scan.yml` | `skill-scan`, `mcp-scan` | their SARIF artifacts are uploaded verbatim by `skill-upload` and `mcp-upload` (`security-events: write`); they run third-party scanner code beside the checkout, so their `egress-policy` input defaults to `block` here |
 | `security.yml` | `snyk`, `scorecard` | `id-token`, Doppler (`SNYK_TOKEN`) |
 | `tofu-ci.yml` | `plan` | `id-token`, Doppler |
 | `verify-published.yml` | `verify` | passes the job token to `gh attestation verify`; `packages: read` |

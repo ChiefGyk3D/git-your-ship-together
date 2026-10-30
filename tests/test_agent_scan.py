@@ -218,8 +218,8 @@ prefix = directory.lstrip("/")
 if mode == "crash":
     sys.exit(2)
 results = []
-if mode in ("critical", "info"):
-    sev = "CRITICAL" if mode == "critical" else "INFO"
+if mode in ("critical", "info", "partial"):
+    sev = {"critical": "CRITICAL", "info": "INFO", "partial": "LOW"}[mode]
     results.append({
         "ruleId": "YARA_prompt_injection_generic", "level": "error", "message": {"text": "x"},
         "properties": {"severity": sev},
@@ -229,6 +229,8 @@ if mode in ("critical", "info"):
 with open(out, "w") as f:
     tool = {"driver": {"name": "skill-scanner", "rules": []}}
     json.dump({"version": "2.1.0", "runs": [{"tool": tool, "results": results}]}, f)
+if mode == "partial":
+    sys.exit(2)
 if "--fail-on-severity" in args:
     order = ["info", "low", "medium", "high", "critical"]
     want = order.index(args[args.index("--fail-on-severity") + 1])
@@ -254,6 +256,12 @@ for t in tools:
                 "findings": {"yara_analyzer": finding}, "tool_name": t["name"], "item_type": "tool"})
 if mode == "short":
     out = out[:-1]
+if mode == "duplicate":
+    out = [out[0]] * len(out)
+if mode == "extra":
+    out = out + [dict(out[0])]
+if mode == "wrong":
+    out[-1]["tool_name"] = "not-requested"
 print(json.dumps(out))
 """
 
@@ -321,14 +329,22 @@ def test_a_skill_finding_is_reported_and_the_job_stays_green_without_a_threshold
     assert "critical" in (bench / "summary.md").read_text()
 
 
-def test_a_threshold_passes_the_scanners_own_flag_and_the_exit_code_is_real(bench):
+def test_the_threshold_is_applied_to_the_report_and_the_scanner_must_exit_zero(bench):
     make_skill(bench / "work", "skills/one")
     result, out, sarif, log = run_script(bench, "skill-scan", "skills/one", fail_on="high")
     assert result.returncode == 1
-    i = log[0]["argv"].index("--fail-on-severity")
-    assert log[0]["argv"][i + 1] == "high"
+    assert "--fail-on-severity" not in log[0]["argv"], "a scanner exit code never stands for a finding"
     assert out["sarif"] == "true", "a finding still produces its report; only a failed scan withholds it"
     assert "at or above high" in result.stdout
+
+
+def test_a_scanner_that_exits_nonzero_with_a_partial_report_is_an_error_not_a_threshold_trip(bench):
+    make_skill(bench / "work", "skills/one")
+    result, out, sarif, _ = run_script(bench, "skill-scan", "skills/one", fail_on="high", mode="partial")
+    assert result.returncode == 1
+    assert out["sarif"] == "false" and sarif is None, "a partial report must never be uploaded"
+    assert "at or above" not in result.stdout, "a crash is not a finding"
+    assert "exited 2" in result.stdout
 
 
 def test_a_threshold_above_every_finding_stays_green(bench):
@@ -398,6 +414,50 @@ def test_a_symlink_inside_a_skill_that_leaves_the_repository_is_refused_and_one_
     (bench / "work" / "skills" / "one" / "notes").unlink()
     (bench / "work" / "skills" / "one" / "notes").symlink_to(bench / "work" / "skills" / "one" / "SKILL.md")
     assert run_script(bench, "skill-scan", "skills/one")[0].returncode == 0
+
+
+def test_a_symlinked_directory_is_never_traversed_when_patterns_are_expanded(bench):
+    make_skill(bench, "elsewhere/deep")
+    make_skill(bench / "work", "skills/real")
+    (bench / "work" / "skills" / "link").symlink_to(bench / "elsewhere", target_is_directory=True)
+    (bench / "work" / "inside").symlink_to(bench / "work" / "skills", target_is_directory=True)
+    found = run_script(bench, "skill-scan", "**/SKILL.md")
+    assert found[0].returncode == 0 and found[1]["scanned"] == "1", found[0].stdout
+    assert [e["argv"][1] for e in found[3]] == [str(bench / "work" / "skills" / "real")]
+    for pattern in ("skills/link/*", "inside/real", "skills/link/deep"):
+        refused = run_script(bench, "skill-scan", pattern)
+        assert refused[0].returncode == 1 and "matches nothing" in refused[0].stdout, pattern
+
+
+def test_expanding_a_pattern_stops_at_the_entry_limit_and_the_depth_limit(bench):
+    for n in range(5):
+        make_skill(bench / "work", f"many/s{n}")
+    limited = script_of("skill-scan").replace("MAX_ENTRIES = 100000", "MAX_ENTRIES = 3")
+    assert limited != script_of("skill-scan")
+    deep = bench / "work" / "d"
+    deep.mkdir()
+    for _ in range(40):
+        deep = deep / "d"
+        deep.mkdir()
+    make_skill(deep, "x")
+    for text, target, wanted in (
+        (limited, "many/*", "too many entries"),
+        (script_of("skill-scan"), "**/SKILL.md", "too deep"),
+    ):
+        env = {"PATH": f"{bench / 'bin'}:{os.environ['PATH']}", "KIND": "skill", "FAIL_ON": "", "TARGETS": target}
+        env.update(WORKSPACE=str(bench / "work"), SARIF_OUT=str(bench / "o.sarif"))
+        done = subprocess.run(
+            [sys.executable, "-I", "-c", text], cwd=bench / "work", env=env, capture_output=True, text=True, check=False
+        )
+        assert done.returncode == 1 and wanted in done.stdout, (target, done.stdout)
+
+
+def test_the_scan_jobs_block_egress_unless_the_caller_chooses_audit():
+    assert call()["inputs"]["egress-policy"]["default"] == "block"
+    assert call()["inputs"]["egress-policy-secretless"]["default"] == "audit", "the upload jobs follow EX-0001"
+    for job in SCAN_JOBS:
+        policy = doc()["jobs"][job]["steps"][1]["with"]["egress-policy"]
+        assert "inputs.egress-policy ==" in policy
 
 
 def test_whitespace_only_paths_and_a_bad_threshold_fail(bench):
@@ -483,12 +543,26 @@ def test_the_threshold_is_applied_to_the_mcp_severity_because_the_scanner_has_no
     assert result.returncode == code, result.stdout
 
 
-@pytest.mark.parametrize("mode", ["crash", "error", "short", "weird"])
+@pytest.mark.parametrize("mode", ["crash", "error", "short", "weird", "duplicate", "wrong", "extra"])
 def test_an_mcp_scan_that_did_not_cover_every_tool_fails_closed(bench, mode):
     tools_file(bench / "work")
     result, out, sarif, _ = run_script(bench, "mcp-scan", "mcp/tools.json", mode=mode)
     assert result.returncode == 1, result.stdout
     assert out["sarif"] == "false" and sarif is None
+
+
+def test_tools_that_share_a_name_cannot_be_matched_to_results_and_are_refused(bench):
+    tools_file(bench / "work", tools=[{"name": "a"}, {"name": "a"}])
+    result, out, sarif, log = run_script(bench, "mcp-scan", "mcp/tools.json")
+    assert result.returncode == 1 and log == [] and sarif is None
+    assert "more than one tool named" in result.stdout
+
+
+def test_a_result_for_a_tool_that_was_not_asked_about_is_named_in_the_error(bench):
+    tools_file(bench / "work")
+    result, _, _, _ = run_script(bench, "mcp-scan", "mcp/tools.json", mode="wrong")
+    assert result.returncode == 1
+    assert "not-requested" in result.stdout and "no result for" in result.stdout
 
 
 @pytest.mark.parametrize(
