@@ -101,6 +101,44 @@ name what a caller sees after that.
 - **Docs.** The fork claim is now exact: a `pull_request` from a fork never fetches; `pull_request_target` with
   `doppler-trusted-refs-only: false` does, and the test now pins that.
 
+### doppler-secrets: `export: outputs` and a `names` allow-list (issue #207)
+
+- **Added.** The composite action `.github/actions/doppler-secrets` takes `export` (`env`, the default, or `outputs`) and
+  `names` (a comma or whitespace separated allow-list). `env` is unchanged: every secret goes to `GITHUB_ENV`, so each
+  later step and every action post-run hook inherits it. `outputs` writes nothing to `GITHUB_ENV`; every value is masked
+  (each line, the whole value, its JSON-escaped form) before it is written, and one masked JSON output, `secrets`, is
+  returned (`{}` when nothing was fetched) for the caller to read with `fromJSON(steps.<id>.outputs.secrets).NAME` and
+  hand to single steps through `env:`. `names` narrows either mode and is **required** with `export: outputs` (an empty
+  list would return the whole config). In `outputs` mode every non-empty value is masked whatever Doppler's visibility
+  says, Doppler's own `DOPPLER_PROJECT`/`CONFIG`/`ENVIRONMENT` labels are never returned, an empty selected value fails
+  the job, as does a value under 8 characters (masking a short or common-word value redacts that text from later logs)
+  or one containing a NUL. A missing name, an invalid `export`, a malformed
+  or empty-after-parsing `names`, and a result over 500,000 UTF-16 code units (GitHub's 1 MB output limit is counted in
+  UTF-16) each fail the job without echoing a value. Caller rules: never pass the whole `secrets` output as an env value
+  or put it in `GITHUB_ENV`, `GITHUB_STEP_SUMMARY`, artifacts, caches, debug output or job outputs; `add-mask` protects
+  logs only and is not an authorization boundary; any step that receives an extracted value can steal it.
+  Both authentication paths and the trusted-refs-only guard are kept; the `mode` output is unchanged.
+- **Reply handling.** The Doppler reply is read into a private file capped at 4,000,000 bytes (`--max-filesize` plus
+  `head -c`) and must be valid UTF-8 (`iconv -f UTF-8 -t UTF-8`) before jq parses it; the UTF-16 size is computed on
+  parsed JSON because jq 1.7 raw input miscounts multibyte characters across read chunks. In `export: env` mode values
+  Doppler marks unmasked stay unmasked (compatibility); `outputs` is the form for production credentials.
+- **Mask function and request checks.** Every mask command is printed by one function, `emit_mask`, which escapes `%`,
+  CR and LF (one line carries the Semgrep rule `unsafe-add-mask-workflow-command`, which flags any mask command; the
+  escaping is proved by `test_the_mask_function_escapes_a_hostile_value`). The OIDC request URL (https, a GitHub Actions
+  host) and request token (character class, length) are checked and the token masked before the first request. Every
+  pipeline stage of the reply read is checked (request builder, curl, head); only the oversize path tolerates curl's
+  write error. A selected value holding U+FFFD, which is what jq 1.7 makes of an escaped lone low surrogate, fails the
+  job in both modes. The reply and mask list live in a private (700/600) temp directory removed on every exit.
+- **Caller impact.** None unless a caller sets the new inputs. The default path still runs the pinned
+  `dopplerhq/secrets-fetch-action`. The new paths call the Doppler API with curl and jq (that action can only export
+  everything it reads), with credentials on standard input. The inlined decide step is untouched, so the five workflow
+  copies stay byte-identical. Callers that want `outputs` (the `no-php-no-cry` and `Reach-Around` deploy workflows) re-pin
+  to the release that carries this.
+- **Tests.** `tests/test_doppler_outputs.py` runs the new steps as shipped against a stub `curl`.
+- **Static analysis.** Semgrep's `unsafe-add-mask-workflow-command` audit rule matches any literal mask command, and `add-mask` is the
+  only way to mask. The action prints it from one function, escaped first, and that one line carries a rule-scoped ignore with
+  its reason; a test fails if a second mask line or a second ignore appears.
+
 ### New workflow: `lory-audit.yml` (issue #202)
 
 - **Added.** An optional reusable workflow that asks Lory (Lorikeet Security's AI pentester) for a deep-dive audit

@@ -127,6 +127,37 @@ from; a test holds the copies byte-identical to
 [`.github/actions/doppler-secrets`](../../.github/actions/doppler-secrets/action.yml),
 which is the source.
 
+## Keeping a production credential away from the rest of the job
+
+The composite action [`.github/actions/doppler-secrets`](../../.github/actions/doppler-secrets/action.yml)
+has two inputs the inlined workflow copies do not need:
+
+- **`export`**: `env` (the default, today's behavior) or `outputs`. Any other value fails the job.
+- **`names`**: an optional comma or whitespace separated allow-list of secret names. It narrows both modes; a name
+  missing from the config fails the job, naming the secret and never a value. **Required with `export: outputs`** (an empty list would return the whole config); with `export: env`, empty means every secret.
+
+**The trade-off.** `env` writes the whole config into the job's environment, so every later step and every action's
+post-run hook can read all of it. A compromised dependency or hook in a deploy job is then a way to a production
+credential. `outputs` writes nothing to the environment: the values are masked, returned as one JSON output
+(`{}` when nothing was fetched), and the caller passes each one to the step that needs it through `env:`, reading it
+with `fromJSON(steps.<id>.outputs.secrets).NAME`. **`export: outputs` with `names` is the safe form for a job that
+holds a production credential.** The README shows a worked step ("Handing a secret to one step"). The first callers
+are the `no-php-no-cry` and `Reach-Around` deploy workflows.
+
+In `outputs` mode every non-empty value is masked whatever Doppler's visibility says, Doppler's own
+`DOPPLER_PROJECT`/`CONFIG`/`ENVIRONMENT` labels are never returned, a selected value that is empty fails the job (a
+missing credential must not come back as an empty string), a value shorter than 8 characters fails the job (masking a
+short or common-word value such as `true` or `prod` would redact that text from every later log line), and a value
+holding a NUL or a U+FFFD replacement character (which is what an escaped lone surrogate would silently become) fails the job. The Doppler reply must be valid UTF-8 and at most 4,000,000 bytes, and every stage of reading it (request builder, curl, head) must succeed. In OIDC mode the job's request URL and token are shape-checked and the token masked before any request is made. In `export: env` mode,
+values Doppler marked unmasked stay unmasked (compatibility with the pinned action), and `outputs` mode is the form to
+use for production credentials. GitHub caps a step output at about 1 MB, counted in
+UTF-16; the action refuses more than 500,000 UTF-16 code units, so list fewer names.
+
+**Caller rules.** Pass one extracted value to one step through its `env:`. Never pass `steps.<id>.outputs.secrets` whole
+as an env value. Never put it, or a value from it, in `GITHUB_ENV`, `GITHUB_STEP_SUMMARY`, artifacts, caches, debug
+output or job outputs. `add-mask` protects logs only; it is not an authorization boundary. Any step that receives an
+extracted value, including a compromised dependency inside that step, can steal it.
+
 ## What lives in the `ci` config
 
 One Doppler project `ci` with environment `ci` and config `ci`, separate from every

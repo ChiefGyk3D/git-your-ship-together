@@ -83,7 +83,7 @@ Eighteen reusable workflows and one composite action:
 | `.github/workflows/dast.yml` | OWASP ZAP against a loopback service the caller starts: the `baseline` scan (spider and passive rules, no attack traffic), the `full` scan (the active rules too: injection, cross-site scripting, traversal) or the `api` scan (the active rules over an OpenAPI, SOAP or GraphQL definition), optionally signed in through a ZAP context file and user, with a `fail-on` threshold; reports kept as an artifact, findings uploaded as SARIF under category `zap`. The caller's service runs in a job that holds only `contents: read`; the upload is a second job that runs none of it. See [DAST](#dast-owasp-zap) |
 | `.github/workflows/security.yml` | CodeQL (the `actions` language included by default), gitleaks, a dependency audit (pip-audit, and any other tool by command), Semgrep, dependency review on pull requests (with a licence denylist), optional Snyk, optional OpenSSF Scorecard |
 | `.github/workflows/dependabot-auto-merge.yml` | Queues a Dependabot bump to merge itself once the required checks pass, up to a size you choose |
-| `.github/actions/doppler-secrets` | Fetches a Doppler config as masked environment variables, over OIDC or a Service Token. The workflows inline a copy of it (see the design rules); this is the source |
+| `.github/actions/doppler-secrets` | Fetches a Doppler config as masked environment variables (default), or with `export: outputs` as one masked JSON output only the steps you hand it to can read; `names` narrows either to an allow-list. Over OIDC or a Service Token. The workflows inline a copy of its decide step (see the design rules); this is the source |
 | `.github/actions/egress-canary` | Fails a job fast when any address of `github.com`, `api.github.com` or the Actions results receiver is unreachable under harden-runner `block` (security exception EX-0001). The workflows inline a copy of it; this is the source |
 | `.github/actions/wait-ci` | Pins a commit and waits for its required check (`CI green` by default, exact name) to pass, then optionally squash-merges exactly that commit with `--match-head-commit`. Exit codes: 0 green, 1 red, 2 timeout, 3 hung, 4 head moved. Wraps `scripts/wait-ci.sh`; a monitor's tool, not a step of the run it waits on. See [wait-ci](docs/wiki/Action-wait-ci.md) |
 | `.github/actions/egress-policy-check` | Fails a job unless every egress policy input is exactly `audit` or `block`. The workflows inline a copy of it; this is the source |
@@ -2221,6 +2221,72 @@ is the same thing as a composite action) try, in order:
 3. **Nothing**, with a notice, so a pipeline runs before Doppler is wired up.
    Steps that need a secret then skip (Docker Hub publish) or fail with a
    message naming the missing name (Snyk).
+
+#### Handing a secret to one step: `export: outputs` and `names`
+
+The composite action `.github/actions/doppler-secrets` (not the inlined copies in
+the workflows above, which keep the environment behavior) has two more inputs:
+
+| Input | Values | Effect |
+|---|---|---|
+| `export` | `env` (default), `outputs` | `env` writes every secret to `GITHUB_ENV`. `outputs` writes nothing to the environment and returns the masked values as one JSON output, `secrets`. Any other value fails the job |
+| `names` | comma or whitespace separated secret names, each `^[A-Z_][A-Z0-9_]*$` | In both modes only these are exported. A name missing from the config fails the job (the message names the secret, never a value). **Required with `export: outputs`** (an empty list would return the whole config, so it fails); with `export: env`, empty means every secret |
+
+The trade-off. With `export: env`, **every later step in the job and every
+action's post-run hook inherits the whole config**: a compromised dependency or
+post-run hook can read it. That is fine for the low-value CI names in a `ci` config
+and wrong for a deploy job that holds a production credential. With
+`export: outputs` plus `names`, the job fetches exactly what it asked for and the
+caller passes it to the one step that needs it:
+
+```yaml
+- id: doppler
+  uses: ChiefGyk3D/git-your-ship-together/.github/actions/doppler-secrets@<commit> # vX.Y.Z
+  with:
+    project: ci
+    config: deploy
+    identity-id: ${{ vars.DOPPLER_IDENTITY_ID }}
+    export: outputs
+    names: DEPLOY_KEY
+- name: Deploy
+  env:
+    DEPLOY_KEY: ${{ fromJSON(steps.doppler.outputs.secrets).DEPLOY_KEY }}
+  run: ./deploy.sh
+```
+
+In `outputs` mode every non-empty value is masked (each line, the whole multi-line
+value, and its JSON-escaped form) before it is written, whatever Doppler's
+visibility says, and the JSON goes through a random-delimiter `GITHUB_OUTPUT`
+write. Doppler's own `DOPPLER_PROJECT`, `DOPPLER_CONFIG` and `DOPPLER_ENVIRONMENT`
+labels are never returned (naming one fails). A selected value that is empty fails
+the job (a missing credential must not come back as `""`, where a later step could
+fall back to anonymous authentication). A value shorter than 8 characters fails the
+job, because masking a short or common-word value (`true`, `prod`, `2026`) would
+redact that text from every later log line. A value containing a NUL character
+fails the job. The Doppler reply must be valid UTF-8 and at most 4,000,000 bytes, or
+the job fails before anything is parsed. No failure message holds a value.
+GitHub caps one step output at about 1 MB, counted in UTF-16; the action refuses a
+result over 500,000 UTF-16 code units (1,000,000 bytes in UTF-16) and asks for a
+shorter `names`. With nothing fetched (an untrusted ref, or
+Doppler not configured) the output is `{}`. The callers waiting on this are the
+deploy workflows of `ChiefGyk3D/no-php-no-cry` and `ChiefGyk3D/Reach-Around`.
+
+In `export: env` mode, values Doppler marked unmasked stay unmasked (the
+documented compatibility behavior of the pinned action), and the whole config or
+`names` selection reaches every later step. `outputs` mode is the form to use for
+production credentials.
+
+Rules for the caller. Pass one extracted value to the one step that needs it,
+through that step's `env:`. **Never** pass `steps.<id>.outputs.secrets` whole as an
+env value, and never put it, or a value from it, in `GITHUB_ENV`,
+`GITHUB_STEP_SUMMARY`, an artifact, a cache, debug output or a job output.
+`add-mask` protects logs only; it is not an authorization boundary. Any step that
+receives an extracted value, including a compromised dependency inside that
+step, can steal it.
+
+The default (`export: env`, no `names`) is unchanged and still runs the pinned
+`dopplerhq/secrets-fetch-action`; the other paths call the Doppler API with curl
+and jq because that action can only export everything it reads.
 
 A fetch happens only on a **trusted ref**: the default branch, a version tag
 (vN.N.N), or a schedule. A pull request from anywhere and a push to any other branch

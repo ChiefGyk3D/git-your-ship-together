@@ -91,7 +91,7 @@ publish).
 
 | Path | What it is |
 |---|---|
-| `.github/actions/doppler-secrets/` | Composite action: fetch a Doppler config as masked env vars. The source of the inlined copies |
+| `.github/actions/doppler-secrets/` | Composite action: fetch a Doppler config as masked env vars, or (`export: outputs`) as one masked JSON output, optionally narrowed by `names`. The source of the inlined copies of its decide step |
 | `.github/actions/egress-canary/` | Composite action: fail fast when an address of the GitHub hosts is unreachable under harden-runner `block` (EX-0001). The source of the inlined copies |
 | `.github/actions/wait-ci/` | Composite action: pin a commit, wait for its required check, optionally squash-merge exactly that commit ([wait-ci](Action-wait-ci.md)). Wraps `scripts/wait-ci.sh` |
 | `.github/actions/egress-policy-check/` | Composite action: fail unless every egress policy input is exactly `audit` or `block`. The source of the inlined copies that precede each canary |
