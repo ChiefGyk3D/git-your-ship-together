@@ -27,6 +27,27 @@ typed, so it cannot go stale; at a release it moves, by hand, into a dated block
 
 ## Released
 
+### v1.26.0 (2026-10-30)
+
+- `security.yml` input `advanced-security` (`true` by default): a private repository without GitHub Advanced Security sets
+  `false` once in its caller, and dependency review and CodeQL are skipped, not failed; Semgrep and gitleaks still run and
+  still fail on a finding, only their SARIF uploads are skipped. A new job, `advanced-security-check`, fails the run on any
+  other value. Nothing changes for a caller that does not set it (#248, #249).
+- Python 3.14 and 3.15 in the `python-ci.yml` matrix: the `python-versions` default is now 3.11 to 3.15, so a caller on the
+  default gains two `Test` jobs per runner on its next re-pin. `.github/python-support.json` is the one list of supported
+  versions and end dates, and a test fails when a listed version passes its end date (#242, #243).
+- Trusted-ref gate hardening in `doppler-secrets`: `doppler-trusted-refs-only` takes `true` or `false` in any casing and
+  fails on any other value instead of switching the gate off, and a `vN.N.N` tag whose commit is not in the default branch's
+  history is refused, best effort (#238, #239, #209, #218).
+- `verify-published.yml` pins the signing certificate to a source repository with the new optional `source-repository`
+  input (default: the calling repository). Breaking for a caller that verifies an image another repository built: it must
+  set `source-repository` when it re-pins (#186, #188).
+- New: the `wait-ci` watcher, which pins the head SHA (#223, #224); `agent-scan.yml`, optional advisory scans of agent
+  skills and MCP tool definitions (#234, #235); `lory-audit.yml` (#202, #204); `doppler-secrets` `export: outputs` mode and
+  a `names` allow-list (#207, #208).
+- Semgrep 1.181.0 (#240, #241); distro legs retry `apt-get update` with backoff (#228, #229); EX-0001 widened to
+  `dependency-review` and the `python-ci` test job (#225, #226).
+
 ### v1.21.0 (2026-10-09)
 
 - `python-ci.yml` pins ruff in its default lint install (`ruff==0.16.9`). The default was an unpinned `pip install ruff`,
