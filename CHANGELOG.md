@@ -5,6 +5,10 @@ name what a caller sees after that.
 
 ## Unreleased
 
+Nothing yet.
+
+## v1.26.0 (2026-10-30)
+
 ### New: `advanced-security` input in `security.yml` for a private repository without Advanced Security (issue #248)
 
 - **New input `advanced-security`**, exactly `true` (the default, behavior unchanged for every caller) or `false`. A private
@@ -227,13 +231,17 @@ name what a caller sees after that.
   dogfooded by `ci.yml` (it needs a vendor token and calls a third party); `test_workflows.py` records that in
   `NOT_DOGFOODED`.
 
-### v1.25.1: the egress canary runs only on Linux (issue #196)
+## v1.25.1 (2026-10-25)
+
+### The egress canary runs only on Linux (issue #196)
 
 - **Fix.** The EX-0001 egress canary used `timeout` and `getent`, which macOS lacks (and `getent` is missing
   in Git Bash on Windows), so a macOS matrix leg failed with the misleading "known westus2 DNS issue"
   message. Every inlined copy now has `runner.os == 'Linux' &&` in its `if`, so the step is skipped on macOS
   and Windows runners. The canary is a diagnostic for harden-runner `block` on Linux, so no control is
   weakened. Callers re-pin to pick it up. `tests/test_egress_canary.py` fails if a canary lacks the condition.
+
+## v1.25.0 (2026-10-25)
 
 ### Security exception EX-0001: harden-runner `block` on westus2 runners
 
