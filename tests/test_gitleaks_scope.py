@@ -625,3 +625,107 @@ def test_a_config_that_hides_the_planted_key_fails_the_canary(gitleaks, tmp_path
         ["bash", "-eo", "pipefail", "-c", step(CANARY)["run"]], env=env, capture_output=True, text=True, timeout=120
     )
     assert done.returncode == 1 and "was not caught" in done.stdout, done.stdout + done.stderr
+
+
+# --- the root .gitleaksignore of the scanned tree (measured with the pinned binary) ------------------------------
+
+
+def ignore_for(gitleaks: str, r) -> str:
+    """The fingerprints that would hide leak.txt in `r` (commit-qualified for git, bare for dir), from the scanner."""
+    import json
+
+    report = r / "fp.json"
+    subprocess.run(
+        [gitleaks, "git", "--no-banner", "--redact", "-f", "json", "-r", str(report), "."],
+        cwd=r,
+        capture_output=True,
+        text=True,
+    )
+    found = [f["Fingerprint"] for f in json.loads(report.read_text())]
+    report.unlink()
+    return "".join(f"{fp}\n{fp.split(':', 1)[1]}\n" for fp in found)
+
+
+def test_premise_a_root_ignore_file_in_the_scanned_tree_hides_a_finding_even_with_an_explicit_ignore_path(
+    gitleaks, tmp_path
+):
+    r = tmp_path / "repo"
+    r.mkdir()
+    sh("git", "init", "-q", "-b", "main", cwd=r)
+    commit(r, "leak.txt", planted(), "key")
+    ignore = ignore_for(gitleaks, r)
+    (r / ".gitleaksignore").write_text(ignore)
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    for cmd in (["git"], ["dir"]):
+        done = subprocess.run(
+            [gitleaks, *cmd, "--no-banner", "--redact", "--exit-code", "1", f"--gitleaks-ignore-path={empty}", "."],
+            cwd=r,
+            capture_output=True,
+            text=True,
+        )
+        assert done.returncode == 0, ("the premise: the root file still applies", cmd, done.stdout + done.stderr)
+
+
+@pytest.mark.parametrize("scope", ["all-refs", "pr-commits"])
+def test_a_head_ignore_file_cannot_hide_the_heads_key_from_either_scan(scope, gitleaks, tmp_path):
+    """The planted-key canary the review asked for, with the real binary: the head carries a fingerprint-allowlisting
+    ignore file and a config that allowlists its key; the resolve step's output must still make both scans exit 1."""
+    info = cfg_repo(tmp_path, {".gitleaks.toml": "[extend]\nuseDefault = true\n"}, {"leak.txt": planted()})
+    r = info[0]
+    ignore = ignore_for(gitleaks, r)
+    (r / ".gitleaksignore").write_text(ignore)
+    (r / ".gitleaks.toml").write_text(ALLOW_ALL)
+    sh("git", "add", ".gitleaksignore", ".gitleaks.toml", cwd=r)
+    sh("git", "-c", "user.email=ci@example.invalid", "-c", "user.name=ci", "commit", "-q", "-m", "hide it", cwd=r)
+    head = sh("git", "rev-parse", "HEAD", cwd=r)
+    info = (r, info[1], head)
+    # What the head's own files do, with the scanner defaults and no resolve step: both scans pass.
+    for cmd in (["dir"], ["git", "--log-opts=--all"]):
+        plain = subprocess.run(
+            [gitleaks, *cmd, "--no-banner", "--redact", "--exit-code", "1", "."], cwd=r, capture_output=True, text=True
+        )
+        assert plain.returncode == 0, ("premise", cmd)
+    done, out = resolve(info, scope, "pull_request", tmp_path)
+    assert done.returncode == 0, done.stderr + done.stdout
+    for cmd in (["dir"], ["git", f"--log-opts={out['log_opts']}"]):
+        fixed = subprocess.run(
+            [gitleaks, cmd[0], *out["scan_args"].split(), *cmd[1:], "."], cwd=r, capture_output=True, text=True
+        )
+        assert fixed.returncode == 1, (scope, cmd, fixed.stdout + fixed.stderr)
+
+
+def test_the_root_ignore_file_of_the_checkout_becomes_the_bases_copy(tmp_path):
+    info = cfg_repo(tmp_path, {".gitleaksignore": "base-line\n"}, {".gitleaksignore": "head-line\n"})
+    done, out = resolve(info, "all-refs", "pull_request", tmp_path)
+    assert done.returncode == 0, done.stderr + done.stdout
+    assert (info[0] / ".gitleaksignore").read_text() == "base-line\n"
+    assert "::warning" in done.stdout and ".gitleaksignore" in done.stdout, "the change is made visible"
+
+
+def test_a_head_ignore_file_is_removed_when_the_base_has_none(tmp_path):
+    info = cfg_repo(tmp_path, {}, {".gitleaksignore": "head-line\n"})
+    done, _ = resolve(info, "pr-commits", "pull_request", tmp_path)
+    assert done.returncode == 0, done.stderr + done.stdout
+    assert not (info[0] / ".gitleaksignore").exists() and not (info[0] / ".gitleaksignore").is_symlink()
+
+
+def test_a_symlinked_head_ignore_file_is_replaced_not_written_through(tmp_path):
+    info = cfg_repo(tmp_path, {".gitleaksignore": "base-line\n"}, {})
+    outside = tmp_path / "outside.txt"
+    outside.write_text("untouched\n")
+    (info[0] / ".gitleaksignore").unlink()
+    (info[0] / ".gitleaksignore").symlink_to(outside)
+    done, _ = resolve(info, "all-refs", "pull_request", tmp_path)
+    assert done.returncode == 0, done.stderr + done.stdout
+    assert outside.read_text() == "untouched\n"
+    assert not (info[0] / ".gitleaksignore").is_symlink()
+    assert (info[0] / ".gitleaksignore").read_text() == "base-line\n"
+
+
+@pytest.mark.parametrize("event", [e for e in EVENTS if e != "pull_request"])
+def test_other_events_leave_the_checkouts_ignore_file_alone(event, tmp_path):
+    info = cfg_repo(tmp_path, {".gitleaksignore": "base-line\n"}, {".gitleaksignore": "head-line\n"})
+    done, _ = resolve(info, "all-refs", event, tmp_path)
+    assert done.returncode == 0
+    assert (info[0] / ".gitleaksignore").read_text() == "head-line\n"

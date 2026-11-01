@@ -677,10 +677,27 @@ jobs:
             else
               printf 'title = "gitleaks defaults"\n\n[extend]\nuseDefault = true\n' > "$cfg_dir/gitleaks.toml"
             fi
+            has_base_ignore=false
             if [ "$(git cat-file -t "${BASE_SHA}:.gitleaksignore" 2>/dev/null || true)" = blob ]; then
               git show "${BASE_SHA}:.gitleaksignore" > "$cfg_dir/ignore/.gitleaksignore"
+              has_base_ignore=true
             else
               : > "$cfg_dir/ignore/.gitleaksignore"
+            fi
+            # gitleaks also reads a .gitleaksignore at the root of the scanned
+            # tree, whatever --gitleaks-ignore-path says (measured with the pinned
+            # binary, for both the git and the dir scan). The checkout is
+            # throwaway, so replace the pull request's copy with the base's (or
+            # remove it): the pull request cannot hide its own findings with it.
+            workspace="${GITHUB_WORKSPACE:-$PWD}"
+            git diff --quiet "$BASE_SHA" "$HEAD_SHA" -- .gitleaks.toml .gitleaksignore || echo "::warning title=gitleaks::this pull request changes .gitleaks.toml or .gitleaksignore; the scan used the base commit's version of each, so the change applies after the merge"
+            rm -f "$workspace/.gitleaksignore"
+            if [ "$has_base_ignore" = true ]; then
+              cp "$cfg_dir/ignore/.gitleaksignore" "$workspace/.gitleaksignore"
+              cmp -s "$cfg_dir/ignore/.gitleaksignore" "$workspace/.gitleaksignore" || fail "the base .gitleaksignore could not be put in place"
+            fi
+            if [ "$has_base_ignore" = false ] && { [ -e "$workspace/.gitleaksignore" ] || [ -L "$workspace/.gitleaksignore" ]; }; then
+              fail "the pull request's .gitleaksignore could not be removed"
             fi
             scan_args="$scan_args --config=$cfg_dir/gitleaks.toml --gitleaks-ignore-path=$cfg_dir/ignore"
             config_source=base
