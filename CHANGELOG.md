@@ -5,6 +5,24 @@ name what a caller sees after that.
 
 ## Unreleased
 
+### New: `gitleaks-scope` input in `security.yml` (issue #260)
+
+- **New input `gitleaks-scope`**, exactly `all-refs` (the default; behavior unchanged for every caller) or `pr-commits`.
+  Before, the secret scan read every ref in the clone, so one key-shaped fixture on an unmerged branch turned the scan red on
+  every other pull request in the repository.
+- **With `pr-commits`**, a `pull_request` run scans the commits of the pull request (`base..head`) plus the checked-out tree.
+  A push (the default branch included), a schedule, a `workflow_dispatch` and any other event scan every ref whatever the
+  input says. The clone stays at full depth so both ends of the range are present.
+- **Fails closed.** Any other value fails the gitleaks job, and so does a pull request whose base or head is not a full
+  commit id present in the clone; the scan never quietly covers less.
+- **Canary.** The planted-key check runs in both modes with the same command shape and argument list as the real scan (one list, built once by the resolve step), and, with `pr-commits`, also exercises the range form (real commit ids) and the tree scan the job will run.
+- **Configuration comes from the base on a pull request (both scopes).** On a `pull_request` event the scan reads `.gitleaks.toml` and `.gitleaksignore` from the base commit, copied outside the workspace and passed explicitly, never from the pull request's own tree; a base with no `.gitleaks.toml` gets the scanner defaults; the canary uses the same configuration, so a config that hides the planted key fails it. **Compatibility:** a caller whose pull request changes either file sees the old version until it merges, and a base config that extends another file by relative path is not supported on a pull request. Push, schedule, `workflow_dispatch` and other events keep the checked-out file. This also applies to callers that leave `gitleaks-scope` at `all-refs`. Measured with the pinned binary: a `.gitleaksignore` at the root of the scanned tree applies even with an explicit ignore path (for both the `git` and the `dir` scan), so on a pull request that file in the throwaway checkout is replaced by the base's copy, or removed when the base has none; a change to either file also produces a warning.
+- **Residual.** `pr-commits` does not cover a key already in the base history, a key on another unmerged branch, or a key that
+  a merge-conflict resolution adds and a later commit removes; an empty range (only the tree scan then); tags and notes outside `base..head`; a workflow re-run (original payload); an inline `gitleaks:allow` comment in the pull request's own files (honored; not disabled, since that would fail legitimate allow comments); the generated SARIF file in the workspace during the tree scan; the merge-preview tree instead of the literal head tree. The README row and the wiki page state each case; protect `.gitleaks.toml` and `.gitleaksignore` with CODEOWNERS. The tree
+  scan reports in the job log, with no SARIF upload.
+- **Step names changed.** "Scan the full history (gitleaks)" is now "Scan the commits (gitleaks)". A caller that matches the
+  step name should update it; job names are unchanged. Existing callers: nothing else changes unless they set the input.
+
 ### Changed: `wait-ci` rechecks the check runs right before the merge (issue #263)
 
 - `scripts/wait-ci.sh --merge` re-reads the check runs on the pinned head immediately before the merge call and applies the same

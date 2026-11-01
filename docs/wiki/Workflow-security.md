@@ -26,7 +26,9 @@ it with `codeql-languages: actions` and `pip-audit-requirements: ""` and changes
 Snyk and Scorecard are the only jobs with an OIDC grant, and neither runs on a pull request. gitleaks lost its `id-token`
 and its Doppler fetch in issue #90: the licence-gated action was replaced with the MIT binary, pinned by sha256 and checked
 with `sha256sum -c` before extraction, and a canary step plants an AWS-shaped key in a scratch repository and fails the job
-unless the same invocation exits 1 on it. A `.gitleaks.toml` at the repository root is honoured.
+unless the same invocation exits 1 on it. A `.gitleaks.toml` at the repository root is honoured. `gitleaks-scope` (`all-refs` by default) can scope a pull request's
+scan to its own commits plus the tree; pushes and schedules always scan every ref. See
+[Security scanning explained](Security-scanning-explained.md) for the table and what it does not cover.
 
 ## The same scan before a commit
 

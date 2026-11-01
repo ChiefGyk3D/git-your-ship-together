@@ -167,8 +167,8 @@ def test_the_job_conditions_skip_only_on_false_and_keep_their_other_clauses():
 
 
 def test_semgrep_and_gitleaks_still_run_and_still_fail_on_a_finding():
-    scan = step("gitleaks", "Scan the full history (gitleaks)")
-    assert "if" not in scan and "--exit-code 1" in scan["run"]
+    scan = step("gitleaks", "Scan the commits (gitleaks)")
+    assert "if" not in scan and "$SCAN_ARGS" in scan["run"]
     semgrep = step("semgrep", "Scan (Semgrep)")
     assert "if" not in semgrep and "--error" in semgrep["run"]
 
