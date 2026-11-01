@@ -5,7 +5,23 @@ name what a caller sees after that.
 
 ## Unreleased
 
-Nothing yet.
+### New: `gitleaks-scope` input in `security.yml` (issue #260)
+
+- **New input `gitleaks-scope`**, exactly `all-refs` (the default; behavior unchanged for every caller) or `pr-commits`.
+  Before, the secret scan read every ref in the clone, so one key-shaped fixture on an unmerged branch turned the scan red on
+  every other pull request in the repository.
+- **With `pr-commits`**, a `pull_request` run scans the commits of the pull request (`base..head`) plus the checked-out tree.
+  A push (the default branch included), a schedule, a `workflow_dispatch` and any other event scan every ref whatever the
+  input says. The clone stays at full depth so both ends of the range are present.
+- **Fails closed.** Any other value fails the gitleaks job, and so does a pull request whose base or head is not a full
+  commit id present in the clone; the scan never quietly covers less.
+- **Canary.** The planted-key check runs in both modes and, with `pr-commits`, also exercises the range form and the tree
+  scan the job will run.
+- **Residual.** `pr-commits` does not cover a key already in the base history, a key on another unmerged branch, or a key that
+  a merge-conflict resolution adds and a later commit removes; the README row and the wiki page state each case. The tree
+  scan reports in the job log, with no SARIF upload.
+- **Step names changed.** "Scan the full history (gitleaks)" is now "Scan the commits (gitleaks)". A caller that matches the
+  step name should update it; job names are unchanged. Existing callers: nothing else changes unless they set the input.
 
 ## v1.26.0 (2026-10-30)
 

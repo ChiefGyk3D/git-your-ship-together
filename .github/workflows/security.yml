@@ -1,8 +1,10 @@
 # Reusable security checks for a Python repository.
 #
 #   codeql             SAST; findings land in the Security tab.
-#   gitleaks           Secret scan over the full history, on top of what Doppler
-#                      already prevents by keeping secrets out of the tree.
+#   gitleaks           Secret scan over the full history (or, on a pull request
+#                      with gitleaks-scope: pr-commits, the pull request's own
+#                      commits plus the tree), on top of what Doppler already
+#                      prevents by keeping secrets out of the tree.
 #   pip-audit          Known vulnerabilities in the pinned dependencies.
 #   dependency-review  On pull requests: what a dependency change brings in,
 #                      and any dependency under a denied licence.
@@ -60,6 +62,10 @@ on:
         description: Run gitleaks over the full history.
         type: boolean
         default: true
+      gitleaks-scope:
+        description: What the gitleaks history scan covers - exactly `all-refs` (default, unchanged behavior - every ref in the clone) or `pr-commits`. `pr-commits` narrows only a `pull_request` run, to the commits of the pull request (base..head) plus a scan of the checked-out tree; a push, a schedule, a workflow_dispatch and any other event scan the full history whatever this is set to. Any other value fails the gitleaks job.
+        type: string
+        default: all-refs
       gitleaks-version:
         description: gitleaks release to download (gitleaks/gitleaks), without the `v`. Changing it means changing `gitleaks-sha256`.
         type: string
@@ -591,10 +597,69 @@ jobs:
           fi
           exit "$rc"
 
+      - name: Validate the gitleaks-scope input
+        timeout-minutes: 1
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        env:
+          GITLEAKS_SCOPE: ${{ inputs.gitleaks-scope }}
+        run: |
+          set -u
+          value=${GITLEAKS_SCOPE-}
+          case "$value" in
+            pr-commits | all-refs) ;;
+            *)
+              echo "::error title=gitleaks-scope::the gitleaks-scope input must be exactly 'pr-commits' or 'all-refs' (its value is ${#value} characters long); the job fails until it is fixed"
+              exit 1
+              ;;
+          esac
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           fetch-depth: 0
+
+      # Decide what the history scan covers. Only a `pull_request` run with
+      # `pr-commits` narrows, to the commits reachable from the head and not
+      # from the base (git's base..head), plus a scan of the checked-out tree.
+      # Every other event, and `all-refs`, scans every ref. The SHAs come from
+      # the event payload through env (never inline in this script) and must
+      # be full lowercase hex ids present in the clone, or the job fails.
+      - name: Resolve the gitleaks scan scope
+        id: scope
+        timeout-minutes: 1
+        env:
+          GITLEAKS_SCOPE: ${{ inputs.gitleaks-scope }}
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          fail() {
+            echo "::error title=gitleaks-scope::$1"
+            exit 1
+          }
+          scope=${GITLEAKS_SCOPE-}
+          case "$scope" in
+            pr-commits | all-refs) ;;
+            *) fail "the gitleaks-scope input must be exactly 'pr-commits' or 'all-refs' (its value is ${#scope} characters long)" ;;
+          esac
+          log_opts="--all"
+          tree=false
+          if [ "$scope" = pr-commits ] && [ "${EVENT_NAME-}" = pull_request ]; then
+            sha_re='^([0-9a-f]{40}|[0-9a-f]{64})$'
+            for sha in "${BASE_SHA-}" "${HEAD_SHA-}"; do
+              [[ "$sha" =~ $sha_re ]] || fail "gitleaks-scope pr-commits needs the pull request base and head as full commit ids, and got something else; refusing to guess a narrower scope"
+              git cat-file -e "${sha}^{commit}" 2>/dev/null || fail "gitleaks-scope pr-commits: ${sha:0:12} is not in the clone, so the pull request range cannot be scanned; refusing to guess a narrower scope"
+            done
+            log_opts="${BASE_SHA}..${HEAD_SHA}"
+            tree=true
+          fi
+          echo "scope=$scope event=${EVENT_NAME-} log-opts=$log_opts tree-scan=$tree"
+          {
+            echo "log_opts=$log_opts"
+            echo "tree=$tree"
+          } >> "$GITHUB_OUTPUT"
 
       # The gitleaks binary is MIT and needs no licence; gitleaks-action
       # demands one under an organisation (#90). The release and its hash are
@@ -621,27 +686,56 @@ jobs:
 
       # The scan must be able to fail. This plants an AWS-shaped key (built at
       # run time, so no credential-shaped literal sits in this file) in a
-      # scratch repository and requires the same invocation to exit 1 on it.
+      # scratch repository, on top of a clean commit, and requires the same
+      # invocations to exit 1 on it. The all-refs scan is always checked; when
+      # the scope narrows (TREE_SCAN is true) the base..head form and the tree
+      # scan the job will run are checked as well.
       - name: Check that the scan catches a planted key
+        timeout-minutes: 2
+        env:
+          TREE_SCAN: ${{ steps.scope.outputs.tree }}
         run: |
           set -euo pipefail
           canary="$(mktemp -d)"
           git init -q "$canary"
+          printf 'nothing to see here\n' > "$canary/clean.txt"
+          git -C "$canary" add clean.txt
+          git -C "$canary" -c user.email=ci@example.invalid -c user.name=ci commit -q -m clean
           printf 'aws_access_key_id = %s%s\naws_secret_access_key = %s\n' AKIA IOSFODNN7EXAMPLE 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYzq3x9KpZmQ' > "$canary/planted.txt"
           git -C "$canary" add planted.txt
           git -C "$canary" -c user.email=ci@example.invalid -c user.name=ci commit -q -m planted
-          status=0
-          gitleaks git --redact --no-banner --exit-code 1 --log-opts="--all" "$canary" > /dev/null 2>&1 || status=$?
-          if [ "$status" -ne 1 ]; then
-            echo "::error title=gitleaks::the planted key was not caught (exit $status); the secret scan cannot be trusted"
-            exit 1
+          must_catch() {
+            local what=$1
+            shift
+            local status=0
+            "$@" > /dev/null 2>&1 || status=$?
+            if [ "$status" -ne 1 ]; then
+              echo "::error title=gitleaks::the planted key was not caught by the $what scan (exit $status); the secret scan cannot be trusted"
+              exit 1
+            fi
+          }
+          must_catch "all-refs" gitleaks git --redact --no-banner --exit-code 1 --log-opts="--all" "$canary"
+          if [ "${TREE_SCAN-}" = true ]; then
+            must_catch "pull-request range" gitleaks git --redact --no-banner --exit-code 1 --log-opts="HEAD~1..HEAD" "$canary"
+            must_catch "working-tree" gitleaks dir --redact --no-banner --exit-code 1 "$canary"
           fi
 
       # A `.gitleaks.toml` at the repository root is read automatically (the
       # target path's config, gitleaks' own order of precedence), so a caller
-      # allowlists documented placeholders there. Full history, as before.
-      - name: Scan the full history (gitleaks)
-        run: gitleaks git --redact --no-banner --exit-code 1 --report-format sarif --report-path gitleaks.sarif --log-opts="--all" .
+      # allowlists documented placeholders there. The range is `--all` (every
+      # ref, as before) or, for a narrowed pull request, base..head.
+      - name: Scan the commits (gitleaks)
+        env:
+          LOG_OPTS: ${{ steps.scope.outputs.log_opts }}
+        run: gitleaks git --redact --no-banner --exit-code 1 --report-format sarif --report-path gitleaks.sarif --log-opts="$LOG_OPTS" .
+
+      # Only for a narrowed pull request: the history scan no longer sees every
+      # ref, so the checked-out tree is scanned as well. It runs even when the
+      # commits scan failed, so one run reports both. No SARIF: a second report
+      # under the same category would replace the first.
+      - name: Scan the working tree (gitleaks)
+        if: always() && steps.scope.outputs.tree == 'true'
+        run: gitleaks dir --redact --no-banner --exit-code 1 .
 
       - name: Note the skipped Advanced Security features
         if: inputs.advanced-security == 'false'

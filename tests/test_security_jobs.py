@@ -212,11 +212,12 @@ def test_gitleaks_is_a_pinned_binary_not_a_licensed_action():
     assert install["run"].index("sha256sum -c") < install["run"].index("tar ")
 
 
-def test_gitleaks_scans_full_history_and_uploads_sarif():
+def test_gitleaks_scans_every_ref_by_default_and_uploads_sarif():
     checkout = next(s for s in steps_of(GITLEAKS) if str(s.get("uses", "")).startswith("actions/checkout@"))
     assert checkout["with"]["fetch-depth"] == 0
-    scan = next(s for s in steps_of(GITLEAKS) if s.get("name", "").startswith("Scan the full history"))
-    assert "--exit-code 1" in scan["run"] and '--log-opts="--all"' in scan["run"]
+    scan = next(s for s in steps_of(GITLEAKS) if s.get("name", "").startswith("Scan the commits"))
+    assert "--exit-code 1" in scan["run"] and '--log-opts="$LOG_OPTS"' in scan["run"]
+    assert INPUTS["gitleaks-scope"]["default"] == "all-refs"  # --all unless a caller narrows a pull request
     assert "--report-format sarif --report-path gitleaks.sarif" in scan["run"]
     upload = next(s for s in steps_of(GITLEAKS) if "upload-sarif" in str(s.get("uses", "")))
     assert upload["with"] == {"sarif_file": "gitleaks.sarif", "category": "gitleaks"}
@@ -230,14 +231,14 @@ def test_gitleaks_upload_is_skippable_but_the_scan_is_not():
     upload = next(s for s in steps_of(GITLEAKS) if "upload-sarif" in str(s.get("uses", "")))
     assert "inputs.gitleaks-upload-sarif" in upload["if"]
     assert "hashFiles('gitleaks.sarif')" in upload["if"]
-    scan = next(s for s in steps_of(GITLEAKS) if s.get("name", "").startswith("Scan the full history"))
+    scan = next(s for s in steps_of(GITLEAKS) if s.get("name", "").startswith("Scan the commits"))
     assert "if" not in scan and "--exit-code 1" in scan["run"]
 
 
 def test_gitleaks_canary_is_wired_before_the_scan():
     names = [s.get("name", "") for s in steps_of(GITLEAKS)]
     canary = next(i for i, n in enumerate(names) if "planted key" in n)
-    assert canary < next(i for i, n in enumerate(names) if n.startswith("Scan the full history"))
+    assert canary < next(i for i, n in enumerate(names) if n.startswith("Scan the commits"))
     run = steps_of(GITLEAKS)[canary]["run"]
     assert '"$status" -ne 1' in run
 
