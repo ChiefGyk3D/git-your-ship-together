@@ -911,7 +911,7 @@ read_protection() {
     n="$(enc "$ctx")"
     # A requirement counts when it names the app whose check run this script evaluates (--app-id), or names no app
     # at all (GitHub then accepts the name from any app, which includes that one), or --any-app was given.
-    if [[ -z "${have["$n any"]:-}" && -z "${have["$n ${app_id}"]:-}" && ( $any_app -eq 0 || -z "${anyapp[$n]:-}" ) ]]; then
+    if [[ -z "${have["$n any"]:-}" && -z "${have["$n ${app_id}"]:-}" && ($any_app -eq 0 || -z "${anyapp[$n]:-}") ]]; then
       PROT=partial
       PROT_MISSING="${PROT_MISSING}'${ctx}' "
     fi

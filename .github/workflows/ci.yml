@@ -61,7 +61,10 @@ jobs:
   test:
     name: Test the workflows
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # tests/test_wait_ci.py alone is about 540 process-bound scenarios; main took six minutes of the old ten and
+    # the wait-ci pull request (#262) was cancelled at ten. A hung scenario still fails on its own: every run of the
+    # script under test has a 60 second subprocess timeout.
+    timeout-minutes: 20
     permissions:
       contents: read
     steps:
