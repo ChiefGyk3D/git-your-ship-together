@@ -9,6 +9,11 @@ name what a caller sees after that.
 
 - `scripts/wait-ci.sh --merge` re-reads the check runs on the pinned head immediately before the merge call and applies the same
   all-green rule again. A new or open check, or a red one, stops the merge (exit 6, or exit 1 for a red gate).
+- The recheck now runs before every merge attempt, retries included, and also compares the check suite counts.
+- **New option `--require-protection`.** Before merging, the script reads the base branch's required status checks (branch
+  protection and rulesets) and a merge queue. Without the option it warns loudly when none cover the required contexts; with it,
+  that is exit 1. The script is a second line only: the atomic guarantee is GitHub-enforced required checks or a merge queue.
+- Bidirectional control characters in a check name are refused like other control characters and never printed.
 
 ### Changed: `wait-ci` requires every check run on the pinned commit, not only the gate (issue #259)
 

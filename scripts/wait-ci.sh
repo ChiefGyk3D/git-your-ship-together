@@ -52,6 +52,13 @@
 #     a merge fails, so a push between the check and the merge is exit 4, never a merge of unverified
 #     code. A merge gh accepts but that leaves the pull request open (a merge queue, auto-merge) is
 #     exit 5, never reported as merged.
+#   * What this script cannot do (issue #263): the check state is not atomic with the merge call. Between the last
+#     read and the moment GitHub processes `gh pr merge`, a check can still turn red or appear. The script re-reads
+#     the check runs and suite counts before EVERY merge attempt, first and retries alike, and aborts with exit 6
+#     on any change; that narrows the window, it does not close it. The only atomic guarantee is GitHub-enforced
+#     required status checks (branch protection or a ruleset) or a merge queue. This script is the second line.
+#     Before merging it reads the base branch's rules and warns loudly when none cover the required contexts;
+#     --require-protection makes that an error (exit 1).
 #   * It prints the SHA it verified. It never prints a token (output from gh is redacted).
 #
 # Exit codes:
@@ -96,6 +103,9 @@
 #   --on-push abort|reset   what a moved head does [abort]; reset is ignored when --sha is given
 #   --merge                 squash-merge the verified SHA once green (needs --pr)
 #   --delete-branch         with --merge, delete the head branch
+#   --require-protection    with --merge, exit 1 unless the base branch has GitHub-enforced required status checks
+#                           (branch protection or a ruleset) covering every required context, or a merge queue;
+#                           without it a missing one is a loud warning
 #   --merge-retries N       retries after a policy-blocked merge attempt [5]
 #   --merge-retry-delay S   seconds between merge attempts [30]
 #
@@ -128,6 +138,7 @@ merge_retries=5
 merge_retry_delay=30
 app_id=15368
 any_app=0
+require_protection=0
 
 result="usage"
 verified=""
@@ -168,7 +179,18 @@ nap() { sleep "$1"; }
 
 # A control character (C0, DEL, NEL, line and paragraph separator) must never reach a log line.
 has_ctrl() {
-  [[ "$1" == *[[:cntrl:]]* || "$1" == *$'\xc2\x85'* || "$1" == *$'\xe2\x80\xa8'* || "$1" == *$'\xe2\x80\xa9'* ]]
+  [[ "$1" == *[[:cntrl:]]* || "$1" == *$'\xc2\x85'* || "$1" == *$'\xe2\x80\xa8'* || "$1" == *$'\xe2\x80\xa9'* ]] && return 0
+  has_bidi "$1"
+}
+# Bidirectional formatting characters (U+061C, U+200E, U+200F, U+202A-U+202E, U+2066-U+2069) can reorder what a
+# reader sees in a log line: refused like a control character.
+has_bidi() {
+  local c
+  for c in $'\xd8\x9c' $'\xe2\x80\x8e' $'\xe2\x80\x8f' $'\xe2\x80\xaa' $'\xe2\x80\xab' $'\xe2\x80\xac' \
+    $'\xe2\x80\xad' $'\xe2\x80\xae' $'\xe2\x81\xa6' $'\xe2\x81\xa7' $'\xe2\x81\xa8' $'\xe2\x81\xa9'; do
+    [[ "$1" == *"$c"* ]] && return 0
+  done
+  return 1
 }
 
 need_value() { [[ $# -ge 2 ]] || die_usage "$1 needs a value"; }
@@ -194,6 +216,11 @@ while [[ $# -gt 0 ]]; do
       ;;
     --any-app)
       any_app=1
+      shift
+      continue
+      ;;
+    --require-protection)
+      require_protection=1
       shift
       continue
       ;;
@@ -314,18 +341,21 @@ gh_try() {
 PR_MERGED=""
 PR_HEAD=""
 PR_MERGE_SHA=""
+PR_BASE=""
 pr_state() {
   local out
   out="$(gh_try api "repos/${repo}/pulls/${pr}" \
-    --jq '[(.merged | tostring), (.head.sha // "" | tostring), (.merge_commit_sha // "" | tostring)] | join("\u001f")')" || return 1
+    --jq '[(.merged | tostring), (.head.sha // "" | tostring), (.merge_commit_sha // "" | tostring), (.base.ref // "" | tostring)] | join("\u001f")')" || return 1
   PR_MERGED=""
+  PR_BASE=""
   PR_HEAD=""
   PR_MERGE_SHA=""
   if [[ "$out" == *$'\n'* ]]; then
     say "the API returned a malformed pull request state for ${repo}#${pr}" >&2
     return 1
   fi
-  IFS=$'\x1f' read -r PR_MERGED PR_HEAD PR_MERGE_SHA <<<"$out"
+  IFS=$'\x1f' read -r PR_MERGED PR_HEAD PR_MERGE_SHA PR_BASE <<<"$out"
+  [[ "$PR_BASE" =~ ^[A-Za-z0-9._/-]{1,200}$ ]] || PR_BASE=""
   if [[ "$PR_MERGED" != true && "$PR_MERGED" != false ]] || [[ ! "$PR_HEAD" =~ ^[0-9a-f]{40}$ ]] ||
     [[ -n "$PR_MERGE_SHA" && ! "$PR_MERGE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
     say "the API returned something that is not a pull request state with a full commit SHA for ${repo}#${pr}" >&2
@@ -347,7 +377,7 @@ pr_head() {
 # character, DEL, NEL or a Unicode line or paragraph separator (NUL included).
 check_page() {
   gh_try api "repos/${repo}/commits/${1}/check-runs?per_page=100&filter=latest&page=${2}" \
-    --jq '(["T", ((.total_count // -1) | tostring | @base64)] | join("\u001f")), (.check_runs[] | ["R", (.id | if type == "number" and . == floor and . >= 0 and . < 1000000000000000 then tostring else "bad" end), (.status // "" | tostring | @base64), (.conclusion // "" | tostring | @base64), ((.app.id // 0) | tostring | @base64), (.name // "" | tostring | if explode | any(. < 32 or . == 127 or . == 133 or . == 8232 or . == 8233) then "1" else "0" end), (.head_sha // "" | tostring | @base64), ((.app.slug // "") | tostring | @base64), (.name // "" | tostring | @base64)] | join("\u001f"))'
+    --jq '(["T", ((.total_count // -1) | tostring | @base64)] | join("\u001f")), (.check_runs[] | ["R", (.id | if type == "number" and . == floor and . >= 0 and . < 1000000000000000 then tostring else "bad" end), (.status // "" | tostring | @base64), (.conclusion // "" | tostring | @base64), ((.app.id // 0) | tostring | @base64), (.name // "" | tostring | if explode | any(. < 32 or . == 127 or . == 133 or . == 1564 or . == 8206 or . == 8207 or . == 8232 or . == 8233 or (. >= 8234 and . <= 8238) or (. >= 8294 and . <= 8297)) then "1" else "0" end), (.head_sha // "" | tostring | @base64), ((.app.slug // "") | tostring | @base64), (.name // "" | tostring | @base64)] | join("\u001f"))'
 }
 
 # The number of CHECK SUITES on a commit, from a call of its own (one per poll). GitHub's cap is on suites:
@@ -384,6 +414,7 @@ b64_strict() {
 dec_display() {
   local d
   d="$(printf '%s' "$1" | base64 -d 2>/dev/null | tr -d '\000-\037\177')" || d=""
+  if has_bidi "$d"; then d="<name with bidirectional control characters>"; fi
   printf '%s' "${d:-unnamed}"
 }
 
@@ -834,33 +865,100 @@ if [[ $merge -eq 0 ]]; then
   exit 0
 fi
 
-# Merge-time recheck: read the check runs on the pinned head once more, immediately before the merge call, and apply
-# the same all-green rule. A check that is new, open or red since the settled poll aborts; nothing is merged.
-rc=0
-read_world "$pin" || rc=$?
-if [[ $rc -ne 0 ]]; then
-  say "cannot re-read the check runs of ${pin} right before the merge; nothing merged"
-  result="error"
-  exit 1
-fi
-suites_a="$W_A"
-suites_b="$W_B"
-if [[ $W_SUITE_FAILED -eq 1 || "$W_A" != "$settled_a" || "$W_B" != "$settled_b" ]]; then
-  say "the check suites changed or could not be read right before the merge; nothing merged"
-  result="other-red"
-  exit 6
-fi
-evaluate "$W_LINES"
-if [[ "$verdict" == red ]]; then
-  say "red right before the merge: ${detail}"
-  result="red"
-  exit 1
-fi
-if [[ "$verdict" != green || "$(fingerprint "$W_LINES")" != "$settle_fp" ]]; then
-  say "the check runs changed right before the merge (${detail}); nothing merged"
-  result="other-red"
-  exit 6
-fi
+# What GitHub itself enforces on the base branch. The merge call is not atomic with the checks read above, so
+# GitHub-enforced required status checks (branch protection or a ruleset) or a merge queue are the real lock.
+# Sets PROT to covered, partial, none or unreadable. Context names cross as base64.
+PROT=unreadable
+PROT_MISSING=""
+read_protection() {
+  local base="$PR_BASE" rules classic line have_queue=0 got=0 n ctx
+  local -A have=()
+  PROT=unreadable
+  PROT_MISSING=""
+  [[ -n "$base" ]] || return 0
+  if rules="$("$gh_bin" api "repos/${repo}/rules/branches/${base}" --jq '.[] | select(.type == "merge_queue" or .type == "required_status_checks") | if .type == "merge_queue" then "Q" else ((.parameters.required_status_checks // [])[] | "C " + ((.context // "") | tostring | @base64)) end' 2>/dev/null)"; then
+    got=1
+  else
+    rules=""
+  fi
+  if classic="$("$gh_bin" api "repos/${repo}/branches/${base}/protection/required_status_checks" --jq '((.contexts // []) + [(.checks // [])[] | .context])[] | "C " + (tostring | @base64)' 2>/dev/null)"; then
+    got=1
+  else
+    classic=""
+  fi
+  [[ $got -eq 1 ]] || return 0
+  while IFS= read -r line; do
+    if [[ "$line" == Q ]]; then
+      have_queue=1
+    elif [[ "$line" == "C "* ]]; then
+      have["${line#C }"]=1
+    fi
+  done <<<"${rules}"$'\n'"${classic}"
+  if [[ $have_queue -eq 1 ]]; then
+    PROT=covered
+    return 0
+  fi
+  if [[ ${#have[@]} -eq 0 ]]; then
+    PROT=none
+    return 0
+  fi
+  PROT=covered
+  for ctx in "${contexts[@]}"; do
+    n="$(enc "$ctx")"
+    if [[ -z "${have[$n]:-}" ]]; then
+      PROT=partial
+      PROT_MISSING="${PROT_MISSING}'${ctx}' "
+    fi
+  done
+}
+check_protection() {
+  # pr_head runs in a subshell, so the base branch is read here (a failed read leaves it unknown: unreadable).
+  pr_state || PR_BASE=""
+  read_protection
+  case "$PROT" in
+    covered) say "base branch ${PR_BASE}: GitHub enforces the required checks (or a merge queue); this script is the second line" ;;
+    partial) say "WARNING: base branch ${PR_BASE} has required status checks, but none cover: ${PROT_MISSING}" ;;
+    none) say "WARNING: base branch ${PR_BASE} has no required status checks and no merge queue; nothing GitHub enforces stops a check that turns red at merge time" ;;
+    *) say "WARNING: could not read the required status checks of the base branch; assume GitHub enforces none" ;;
+  esac
+  if [[ "$PROT" != covered && $require_protection -eq 1 ]]; then
+    say "--require-protection: the base branch does not enforce the required checks; nothing merged"
+    result="error"
+    exit 1
+  fi
+}
+check_protection
+
+# Merge-time recheck, run before EVERY merge attempt (the first and each retry): read the check runs on the pinned
+# head again and apply the same all-green rule. A check that is new, open or red since the settled poll aborts;
+# nothing is merged.
+merge_recheck() {
+  local rc=0
+  read_world "$pin" || rc=$?
+  if [[ $rc -ne 0 ]]; then
+    say "cannot re-read the check runs of ${pin} right before the merge; nothing merged"
+    result="error"
+    exit 1
+  fi
+  suites_a="$W_A"
+  suites_b="$W_B"
+  if [[ $W_SUITE_FAILED -eq 1 || "$W_A" != "$settled_a" || "$W_B" != "$settled_b" ]]; then
+    say "the check suites changed or could not be read right before the merge; nothing merged"
+    result="other-red"
+    exit 6
+  fi
+  evaluate "$W_LINES"
+  if [[ "$verdict" == red ]]; then
+    say "red right before the merge: ${detail}"
+    result="red"
+    exit 1
+  fi
+  if [[ "$verdict" != green || "$(fingerprint "$W_LINES")" != "$settle_fp" ]]; then
+    say "the check runs changed right before the merge (${detail}); nothing merged"
+    result="other-red"
+    exit 6
+  fi
+}
 
 # What gh says when a branch policy, not the code, is what stands in the way. Everything else
 # (a conflict, a closed pull request, a 403) is not retried. Messages seen in the maintainer's merge
@@ -897,6 +995,7 @@ attempt=0
 last_err=""
 while :; do
   attempt=$((attempt + 1))
+  merge_recheck
   args=(pr merge "$pr" -R "$repo" --squash --match-head-commit "$verified")
   [[ $delete_branch -eq 1 ]] && args+=(--delete-branch)
   if "$gh_bin" "${args[@]}" >/dev/null 2>"$errfile"; then

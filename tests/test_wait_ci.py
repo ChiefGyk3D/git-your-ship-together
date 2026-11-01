@@ -183,7 +183,22 @@ def pulls_response(st):
     if st.get("head_read_fails"):
         return 502, None
     head = st.get("head_garbage") or current_head(st)
-    return 200, {"merged": st["merged"], "head": {"sha": head}, "merge_commit_sha": st.get("merge_commit_sha")}
+    return 200, {
+        "merged": st["merged"],
+        "head": {"sha": head},
+        "merge_commit_sha": st.get("merge_commit_sha"),
+        "base": {"ref": "main"},
+    }
+
+
+def protection_response(st, kind):
+    # GET rules/branches/main (kind "rules": the active rules) and branches/main/protection/required_status_checks
+    # (kind "classic"). None in the state is what GitHub sends when nothing is configured or readable: 404.
+    # The rules endpoint answers 200 with an empty list when no rule applies; the classic one answers 404.
+    body = st.get(kind, [] if kind == "rules" else None)
+    if body is None:
+        return 404, None
+    return 200, body
 
 
 FAKE_GH = r"""#!@PYTHON@
@@ -234,6 +249,13 @@ if argv[:1] == ["api"]:
             sys.exit(1)
         if st.get("head_warns"):
             sys.stderr.write("warning: a new gh is available\n")
+        emit(body)
+        sys.exit(0)
+    if "/rules/branches/" in path or "/protection/required_status_checks" in path:
+        code, body = protection_response(st, "rules" if "/rules/branches/" in path else "classic")
+        if code != 200:
+            sys.stderr.write("HTTP 404 Not Found\n")
+            sys.exit(1)
         emit(body)
         sys.exit(0)
     if "/check-runs" in path:
@@ -319,6 +341,7 @@ HELPER_SOURCE = "\n\n".join(
         runs_response,
         suites_response,
         pulls_response,
+        protection_response,
     )
 )
 
@@ -395,6 +418,12 @@ class World:
 
                 if re.fullmatch(r"/api/v3/repos/[^/]+/[^/]+/pulls/\d+", url.path):
                     return finish(*pulls_response(st))
+                if re.fullmatch(r"/api/v3/repos/[^/]+/[^/]+/rules/branches/[^/]+", url.path):
+                    return finish(*protection_response(st, "rules"))
+                if re.fullmatch(
+                    r"/api/v3/repos/[^/]+/[^/]+/branches/[^/]+/protection/required_status_checks", url.path
+                ):
+                    return finish(*protection_response(st, "classic"))
                 m = re.fullmatch(r"/api/v3/repos/[^/]+/[^/]+/commits/([0-9a-f]+)/check-suites", url.path)
                 if m:
                     return finish(*suites_response(st, m.group(1)))
@@ -826,6 +855,9 @@ HOSTILE_NAMES = {
     "paragraph separator U+2029": "a b",
     "trailing newline": "CI green\n",
     "escape": "a\x1b[31mb",
+    "bidi override U+202E": "Security ‮)sseccus( etag",
+    "bidi isolate U+2066": "a⁦b",
+    "left-to-right mark U+200E": "a‎b",
 }
 
 
@@ -2104,6 +2136,86 @@ def test_the_suite_counts_are_rechecked_just_before_the_merge(world, tail):
     w = world(checks={A: [GATE]}, suites_script=[3] * 8 + tail, suites_script_repeat=3, merge_results=[{"rc": 0}])
     p = w.run("--repo", SLUG, "--pr", "7", "--merge", *FAST)
     assert p.returncode == 6, shown(p)
+    assert w.merges() == []
+
+
+# --- review of PR 262, round 3 (issue #263): retries, protection, display ----------------------------------------
+
+
+def test_a_check_that_turns_red_between_merge_retries_aborts_with_exit_6(world):
+    late = GATE + [done("Security / late", "failure")]
+    w = world(checks={A: [GATE] * 5 + [late]}, merge_results=[POLICY, {"rc": 0}])
+    p = w.run("--repo", SLUG, "--pr", "7", "--merge", *FAST)
+    assert p.returncode == 6, shown(p)
+    assert len(w.merges()) == 1, "the retry must not reach gh pr merge"
+
+
+def test_a_check_that_is_pending_between_merge_retries_aborts_with_exit_6(world):
+    late = GATE + [running("Security / late")]
+    w = world(checks={A: [GATE] * 5 + [late]}, merge_results=[POLICY, {"rc": 0}])
+    p = w.run("--repo", SLUG, "--pr", "7", "--merge", *FAST)
+    assert p.returncode == 6, shown(p)
+    assert len(w.merges()) == 1
+
+
+def test_an_unchanged_check_list_between_merge_retries_still_merges(world):
+    w = world(checks={A: [GATE]}, merge_results=[POLICY, {"rc": 0}])
+    p = w.run("--repo", SLUG, "--pr", "7", "--merge", *FAST)
+    assert p.returncode == 0, shown(p)
+    assert len(w.merges()) == 2
+
+
+RULE_ALL = [{"type": "required_status_checks", "parameters": {"required_status_checks": [{"context": "CI green"}]}}]
+RULE_OTHER = [{"type": "required_status_checks", "parameters": {"required_status_checks": [{"context": "other"}]}}]
+
+
+def test_no_required_checks_on_the_base_branch_is_a_loud_warning_by_default(world):
+    w = world(checks={A: [GATE]})
+    p = w.run("--repo", SLUG, "--pr", "7", "--merge", *FAST)
+    assert p.returncode == 0, shown(p)
+    assert "WARNING" in p.stdout and "no required status checks" in p.stdout
+    assert len(w.merges()) == 1
+
+
+def test_no_required_checks_fails_under_require_protection(world):
+    w = world(checks={A: [GATE]})
+    p = w.run("--repo", SLUG, "--pr", "7", "--merge", "--require-protection", *FAST)
+    assert p.returncode == 1, shown(p)
+    assert w.merges() == []
+    assert w.outputs()["result"] == "error"
+
+
+def test_required_checks_that_miss_the_gate_do_not_count(world):
+    w = world(checks={A: [GATE]}, rules=RULE_OTHER)
+    p = w.run("--repo", SLUG, "--pr", "7", "--merge", "--require-protection", *FAST)
+    assert p.returncode == 1, shown(p)
+    assert "none cover" in p.stdout
+    assert w.merges() == []
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"rules": RULE_ALL},
+        {"classic": {"contexts": ["CI green"], "checks": []}},
+        {"classic": {"contexts": [], "checks": [{"context": "CI green", "app_id": 15368}]}},
+        {"rules": [{"type": "merge_queue", "parameters": {}}]},
+    ],
+    ids=["ruleset", "classic-contexts", "classic-checks", "merge-queue"],
+)
+def test_github_enforced_required_checks_satisfy_require_protection(world, extra):
+    w = world(checks={A: [GATE]}, merge_results=[{"rc": 0}], **extra)
+    p = w.run("--repo", SLUG, "--pr", "7", "--merge", "--require-protection", *FAST)
+    assert p.returncode == 0, shown(p)
+    assert "WARNING" not in p.stdout
+    assert len(w.merges()) == 1
+
+
+def test_a_bidirectional_control_character_in_a_name_never_reaches_a_log_line(world):
+    w = world(checks={A: [[ok("lint"), done("Security ‮)sseccus( etag", "failure", 57789)]]})
+    p = w.run("--repo", SLUG, "--pr", "7", "--merge", *FAST)
+    assert p.returncode == 1, shown(p)
+    assert not any(c in p.stdout + p.stderr for c in "‮⁦‎")
     assert w.merges() == []
 
 

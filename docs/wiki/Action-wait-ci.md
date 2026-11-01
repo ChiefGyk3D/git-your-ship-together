@@ -72,6 +72,12 @@ race seen on GYST #218), and a push that moved the head under the loop. This scr
   does not trip it; a run frozen on one job does, with exit 3. The default is 600 seconds; raise it for a gate whose slowest
   job runs longer. A failing GitHub API counts as no progress, and repeated errors back off (the wait between polls doubles,
   at most eight times `--interval`). `--interval` must be at least 1.
+- **The check state is not atomic with the merge.** Before every merge attempt (the first and each retry) the script reads the
+  check runs and suite counts again and stops with exit 6 on any change. That narrows the window; it cannot close it, because
+  a check can still change between that read and the moment GitHub processes the merge. The only atomic guarantee is
+  GitHub-enforced required status checks (branch protection or a ruleset) or a merge queue; this script is the second line.
+  Before merging it reads the base branch's rules and warns loudly when none cover the required contexts. The script option
+  `--require-protection` turns that warning into exit 1.
 - **The merge is pinned.** `--merge` runs `gh pr merge N --squash --match-head-commit <verified sha>`. If it fails, the head is
   read again: moved means exit 4 with nothing merged; already merged at the verified commit means success. Only a policy block
   (gh's "the base branch policy prohibits the merge", or a "Required status check ... is expected") is retried,
@@ -177,7 +183,7 @@ Run it from a checkout of this repository at a pinned commit, or fetch the file 
 `GH_BIN` names a different `gh` (the tests use a fake). When `GITHUB_OUTPUT` is set it appends `result`, `sha` and `merged`.
 
 Options: `--repo`, `--pr`, `--sha`, `--context` (repeatable; `--context ''` means no named gate), `--require-check`, `--app-id`, `--any-app`, `--min-checks`, `--timeout`,
-`--hung-after`, `--interval`, `--allow-red`, `--allow-red-reason`, `--on-push`, `--merge`, `--delete-branch`, `--merge-retries`, `--merge-retry-delay`. The header of
+`--hung-after`, `--interval`, `--allow-red`, `--allow-red-reason`, `--on-push`, `--merge`, `--delete-branch`, `--require-protection`, `--merge-retries`, `--merge-retry-delay`. The header of
 the script lists the defaults.
 
 ## Use as an action
