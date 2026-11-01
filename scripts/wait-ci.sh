@@ -624,12 +624,12 @@ evaluate() {
     detail="${seen_any}${complete}/${total} runs complete"
     return 0
   fi
-  if [[ $other_open -gt 0 ]]; then
-    detail="gate satisfied, waiting for ${other_open} other check run(s) to finish (first: ${other_openname}); ${complete}/${total} runs complete"
-    return 0
-  fi
   if [[ $complete -lt $min_checks ]]; then
     detail="${complete} of ${min_checks} required check runs complete"
+    return 0
+  fi
+  if [[ $other_open -gt 0 ]]; then
+    detail="gate satisfied, waiting for ${other_open} other check run(s) to finish (first: ${other_openname}); ${complete}/${total} runs complete"
     return 0
   fi
   verdict=green

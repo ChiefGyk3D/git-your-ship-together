@@ -1124,7 +1124,7 @@ def test_a_consistent_list_just_under_the_cap_is_green(world, engine):
 @ENGINES
 def test_a_failure_that_is_visible_is_still_red_when_the_list_may_be_truncated(world, engine):
     w = world(checks={A: [[ok("CI green"), done("lint", "failure")]]}, total_count_override=50)
-    assert w.run("--repo", SLUG, "--pr", "7", *FAST).returncode == 1
+    assert w.run("--repo", SLUG, "--pr", "7", *FAST).returncode == 6
 
 
 @ENGINES
@@ -1204,7 +1204,7 @@ def test_a_failing_suite_call_is_not_green_and_backs_off(world, engine):
 @ENGINES
 def test_a_visible_failure_is_still_red_when_the_suite_count_is_over_the_cap(world, engine):
     w = world(checks={A: [[ok("CI green"), done("lint", "failure")]]}, suites=1000)
-    assert w.run("--repo", SLUG, "--pr", "7", *FAST).returncode == 1
+    assert w.run("--repo", SLUG, "--pr", "7", *FAST).returncode == 6
 
 
 @ENGINES
