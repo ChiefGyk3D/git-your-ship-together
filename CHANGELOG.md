@@ -5,6 +5,11 @@ name what a caller sees after that.
 
 ## Unreleased
 
+### Changed: `wait-ci` rechecks the check runs right before the merge (issue #263)
+
+- `scripts/wait-ci.sh --merge` re-reads the check runs on the pinned head immediately before the merge call and applies the same
+  all-green rule again. A new or open check, or a red one, stops the merge (exit 6, or exit 1 for a red gate).
+
 ### Changed: `wait-ci` requires every check run on the pinned commit, not only the gate (issue #259)
 
 - **What changed.** After it pins the head SHA, `scripts/wait-ci.sh` (and the `wait-ci` action) now needs the named gate **and**

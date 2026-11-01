@@ -830,6 +830,27 @@ if [[ $merge -eq 0 ]]; then
   exit 0
 fi
 
+# Merge-time recheck: read the check runs on the pinned head once more, immediately before the merge call, and apply
+# the same all-green rule. A check that is new, open or red since the settled poll aborts; nothing is merged.
+rc=0
+read_world "$pin" || rc=$?
+if [[ $rc -ne 0 ]]; then
+  say "cannot re-read the check runs of ${pin} right before the merge; nothing merged"
+  result="error"
+  exit 1
+fi
+evaluate "$W_LINES"
+if [[ "$verdict" == red ]]; then
+  say "red right before the merge: ${detail}"
+  result="red"
+  exit 1
+fi
+if [[ "$verdict" != green || "$(fingerprint "$W_LINES")" != "$settle_fp" ]]; then
+  say "the check runs changed right before the merge (${detail}); nothing merged"
+  result="other-red"
+  exit 6
+fi
+
 # What gh says when a branch policy, not the code, is what stands in the way. Everything else
 # (a conflict, a closed pull request, a 403) is not retried. Messages seen in the maintainer's merge
 # logs (GYST #218 and another repository): "the base branch policy prohibits the merge"; GitHub's

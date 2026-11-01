@@ -2081,6 +2081,29 @@ def test_a_late_red_check_that_appears_after_the_first_good_read_is_exit_6(world
     assert w.merges() == []
 
 
+def test_a_check_that_turns_red_just_before_the_merge_aborts_with_exit_6(world):
+    late_red = GATE + [done("Security / late", "failure")]
+    w = world(checks={A: [GATE, GATE, GATE, GATE, late_red]}, merge_results=[{"rc": 0}])
+    p = w.run("--repo", SLUG, "--pr", "7", "--merge", *FAST)
+    assert p.returncode == 6, shown(p)
+    assert w.merges() == []
+
+
+def test_a_check_that_is_pending_just_before_the_merge_aborts_with_exit_6(world):
+    late_open = GATE + [running("Security / late")]
+    w = world(checks={A: [GATE, GATE, GATE, GATE, late_open]}, merge_results=[{"rc": 0}])
+    p = w.run("--repo", SLUG, "--pr", "7", "--merge", *FAST)
+    assert p.returncode == 6, shown(p)
+    assert w.merges() == []
+
+
+def test_an_unchanged_check_list_just_before_the_merge_still_merges(world):
+    w = world(checks={A: [GATE]}, merge_results=[{"rc": 0}])
+    p = w.run("--repo", SLUG, "--pr", "7", "--merge", *FAST)
+    assert p.returncode == 0, shown(p)
+    assert len(w.merges()) == 1
+
+
 def test_a_late_open_check_is_waited_for(world):
     w = world(
         checks={
