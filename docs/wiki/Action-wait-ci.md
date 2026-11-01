@@ -14,8 +14,22 @@ race seen on GYST #218), and a push that moved the head under the loop. This scr
 - **The head is pinned.** With `--pr` the head SHA is read once and every check query names that SHA, never the branch.
   With `--sha` and `--pr` together the SHA must equal the head, or the run exits 4 before it checks anything. With `--sha` alone
   (a commit on a default branch, say) there is no head to move.
-- **Green needs all three:** every required context (default `CI green`) reported on the pinned SHA and concluded `success`;
-  at least `--min-checks` check runs completed; and no check run failed, was cancelled, timed out, needed action or failed to start.
+- **Green needs all four:** every required context (default `CI green`) reported on the pinned SHA and concluded `success`;
+  at least `--min-checks` check runs completed; no check run failed, was cancelled, timed out, needed action or failed to start;
+  and every other check run on that commit is complete.
+- **The gate is not the only check.** A gate such as `CI green` covers its own workflow, not a separate one (a security scan, a
+  deploy preview). After the head is pinned, every other check run on that SHA must be completed with a conclusion of `success`,
+  `skipped` or `neutral`. One that is queued, waiting, pending or in progress (or completed with no conclusion) is waited for, with
+  the same `--interval`, `--timeout` and `--hung-after` as everything else; the output says `waiting for N other check run(s)`.
+  One that failed, was cancelled, timed out, needed action, failed to start or went stale ends the wait with exit 6 and result
+  `other-red`, and nothing is merged. A failed gate stays exit 1. A same-named run from another app that borrows a gate name is
+  still ignored (see the next rule); every other app's runs count as "other" checks.
+- **Allow-list, a recorded exception.** `--allow-red NAME` (repeatable; input `allow-red`, one name per line) lets a named
+  non-gate check be red. It is empty by default and is not a default: it needs `--allow-red-reason TEXT` (input
+  `allow-red-reason`, one line), which is printed in the log as a "recorded exception". Names match exactly; a required context
+  cannot be allowed (exit 64); a reason without a name, or a name without a reason, is exit 64. An allowed check that is still
+  open is waited for, and the result counts it as `allowed red` when it passes. Use it for a known failing check that has its own
+  written exception, and keep the reason pointing at that record.
 - **No check runs is not green.** `--min-checks` cannot be below 1, so an empty list never passes, even with no named context.
 - **A context that has not reported is not green.** Twenty passing jobs and no `CI green` yet means keep waiting.
 - **The reporting app matters.** A check run counts toward a required context only when it came from the expected GitHub
@@ -27,7 +41,8 @@ race seen on GYST #218), and a push that moved the head under the loop. This scr
   is decided by GitHub, not by this script.
 - **Names match exactly.** The comparison is a literal string compare: `CI green (old)`, `ci green`, `CI green ` with a trailing
   space, `xCI green` and a glob such as `CI *` do not satisfy `CI green`. Skipped and neutral are not `success`.
-- **Red is immediate.** A failed or cancelled check run ends the wait with exit 1 even while the gate is still running.
+- **Red is immediate.** A failed or cancelled check run ends the wait even while the gate is still running: exit 1 when the
+  failed run is the gate, exit 6 when it is any other check.
 - **A push aborts or resets.** `--on-push abort` (the default) exits 4 when the pull request head moves. `--on-push reset`
   pins the new head and starts over; the total `--timeout` keeps running, so a stream of pushes cannot extend the wait forever.
   Once the pinned commit has verified green, a push is always exit 4: the watcher never merges what it did not verify.
@@ -122,11 +137,12 @@ race seen on GYST #218), and a push that moved the head under the loop. This scr
 | Code | Meaning |
 |---|---|
 | `0` | Green. With `--merge`, merged (or already merged at the verified commit). |
-| `1` | Red: a check failed or was cancelled, or a check run name holds a control character. Also: `--merge` could not merge (the output says `merge blocked`: a non-policy failure, or a policy block that outlasted the retries), or the head could not be read or was not a full SHA, or the pull request could not be read after the merge call (`result` is `error`, `merged` stays `false`). |
+| `1` | Red: the gate (a required context) failed or was cancelled, or a check run name holds a control character. Also: `--merge` could not merge (the output says `merge blocked`: a non-policy failure, or a policy block that outlasted the retries), or the head could not be read or was not a full SHA, or the pull request could not be read after the merge call (`result` is `error`, `merged` stays `false`). |
 | `2` | Timeout: no verdict after `--timeout` seconds. |
 | `3` | Hung: no check changed for `--hung-after` seconds. |
 | `4` | Head moved: the pull request head is no longer the pinned SHA (at the start, while waiting, between the last check and the merge, or during the merge). |
 | `5` | Queued: the merge was accepted and the pull request, read back, is positively not merged yet at the verified head (a merge queue or auto-merge). Not reported as merged. A pull request that cannot be read back is exit `1`, never `5`. |
+| `6` | Other checks red: the gate did not fail, but another check run on the pinned commit failed, was cancelled, timed out, needed action, failed to start or went stale, and is not in `--allow-red`. `result` is `other-red`. Nothing is merged. |
 | `64` | Bad input; nothing was waited on and `gh` was not called. |
 
 The timeout is tested before hung, so a run that is past both reports `2`.
@@ -142,7 +158,7 @@ Run it from a checkout of this repository at a pinned commit, or fetch the file 
 `GH_BIN` names a different `gh` (the tests use a fake). When `GITHUB_OUTPUT` is set it appends `result`, `sha` and `merged`.
 
 Options: `--repo`, `--pr`, `--sha`, `--context` (repeatable; `--context ''` means no named gate), `--app-id`, `--any-app`, `--min-checks`, `--timeout`,
-`--hung-after`, `--interval`, `--on-push`, `--merge`, `--delete-branch`, `--merge-retries`, `--merge-retry-delay`. The header of
+`--hung-after`, `--interval`, `--allow-red`, `--allow-red-reason`, `--on-push`, `--merge`, `--delete-branch`, `--merge-retries`, `--merge-retry-delay`. The header of
 the script lists the defaults.
 
 ## Use as an action
@@ -177,6 +193,8 @@ branch is supposed to trigger a deploy; pass a different `token` when it does.
 | `pr` | Pull request number; needed for `merge`. Give this or `sha`. |
 | `sha` | Full 40-character SHA to verify; with `pr` it must equal the head. |
 | `context` | Required check run names, one per line, exact. Default `CI green`; empty means no named gate. |
+| `allow-red` | Non-gate check names that may be red, one per line, exact. Empty by default; a recorded exception that needs `allow-red-reason`. |
+| `allow-red-reason` | Why those checks may be red, on one line; printed in the log. |
 | `app-id` | GitHub App id whose check runs may satisfy a context; default 15368 (GitHub Actions). |
 | `any-app` | `true` accepts a same-named run from any app, with a warning. |
 | `min-checks` | Check runs that must be complete, at least 1. |
@@ -190,7 +208,7 @@ branch is supposed to trigger a deploy; pass a different `token` when it does.
 | `merge-retry-delay` | Seconds between merge attempts. |
 | `token` | Token for `gh`; default the workflow token. |
 
-Outputs: `result` (`green`, `red`, `timeout`, `hung`, `head-moved`, `merge-blocked`, `queued`, `error` or `usage`), `sha` (the verified commit: set
+Outputs: `result` (`green`, `red`, `other-red`, `timeout`, `hung`, `head-moved`, `merge-blocked`, `queued`, `error` or `usage`), `sha` (the verified commit: set
 whenever the commit verified green, so also for `merge-blocked` and `queued`; empty otherwise) and `merged` (`true` only when the pull request
 is merged at that commit). The outputs are written even when the step fails, so a later `if: always()` step can read them.
 
@@ -202,8 +220,8 @@ is merged at that commit). The outputs are written even when the step fails, so 
   (`--context 'ci / CI green'`, or one line of the `context` input). The gate in this repository is a direct job named exactly
   `CI green`. There is no prefix option, on purpose: a prefix is a looser match.
 - It does not rerun failed jobs and it does not read branch protection; name the contexts you require.
-- It does not wait for checks that are not part of the gate: with the gate green and an unrelated check still running, the
-  commit is green. Add the check to `context` to require it.
+- It only sees check runs that exist when it reads. A workflow that has not started yet (for example one triggered late) has no
+  check run, so it cannot be waited for; add its job name to `context` to make the commit not green until it reports.
 
 ## How it is tested
 

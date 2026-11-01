@@ -5,7 +5,22 @@ name what a caller sees after that.
 
 ## Unreleased
 
-Nothing yet.
+### Changed: `wait-ci` requires every check run on the pinned commit, not only the gate (issue #259)
+
+- **What changed.** After it pins the head SHA, `scripts/wait-ci.sh` (and the `wait-ci` action) now needs the named gate **and**
+  every other check run on that commit to be complete and not red. Success, skipped and neutral pass. A check that is queued or in
+  progress is waited for, within the existing `timeout` and `hung-after` and the existing `interval`; a completed run with no
+  conclusion is waited for too. Before this, a gate could pass while a separate workflow (a security scan, say) was still running
+  or had been missed.
+- **New exit code 6, result `other-red`.** The gate held but another check run failed, was cancelled, timed out, needed action,
+  failed to start or went stale. A failed gate is still exit 1. Callers that treat any non-zero exit as a refusal need no change;
+  one that matches exit 1 for a red non-gate check must also match 6.
+- **New optional inputs `allow-red` and `allow-red-reason`** (script: `--allow-red NAME`, repeatable, and `--allow-red-reason TEXT`).
+  Empty by default. A named non-gate check may then be red. It is a recorded exception: the reason is required and printed, a
+  required context cannot be listed, and an allowed check that is still open is still waited for.
+- **Tests.** `tests/test_wait_ci.py`: gate green with another check red (every failure conclusion), open (queued, in progress,
+  waiting, pending), skipped and neutral, the allow-list and its misuse, a moved head, more than one page of runs, and two runs
+  with the gate's name. Docs: [wait-ci](docs/wiki/Action-wait-ci.md).
 
 ## v1.26.0 (2026-10-30)
 

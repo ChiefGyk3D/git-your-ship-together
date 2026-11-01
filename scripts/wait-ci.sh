@@ -10,6 +10,12 @@
 #     pinned SHA and concluded success; at least --min-checks check runs completed; and no run
 #     failed, was cancelled, timed out or needs action. No check runs at all is NOT green, and a
 #     context that has not reported yet is NOT green (the aggregate-gate race seen on GYST #218).
+#   * The gate is not the only check (issue #259). Every OTHER check run on the pinned SHA must also be
+#     completed without failure, timeout, cancellation, action-required, startup failure or stale
+#     (success, skipped and neutral pass). One that is queued or in progress is waited for (bounded by
+#     --timeout and --hung-after); one that failed ends the wait with exit 6. A gate that failed is still
+#     exit 1. --allow-red NAME (repeatable, empty by default) lets a named non-gate check be red; it is a
+#     recorded exception and needs --allow-red-reason TEXT, which is printed. A gate name cannot be allowed.
 #   * The list of check runs must be whole. The endpoint shows at most the 1000 most recent check
 #     suites of a ref, so the script asks for the suite count (GET .../check-suites, once per poll) and
 #     is NOT green when it is 1000 or more or cannot be read as a plain integer. It also keeps the
@@ -51,6 +57,8 @@
 #   4   head moved: the pull request head is no longer the pinned SHA
 #   5   queued: the merge was accepted and the pull request, read back, is positively not merged yet at the
 #       verified head (merge queue or auto-merge); a pull request that cannot be read back is exit 1
+#   6   other checks red: the gate did not fail, but another check run on the pinned SHA failed, was
+#       cancelled, timed out, needed action, failed to start or went stale (and is not in --allow-red)
 #   64  usage error (bad flag or value); nothing was waited on
 #
 # Numbers are plain base-10 integers, no sign, space or leading zero (0 only where it is legal), and
@@ -66,6 +74,9 @@
 #   --pr N                  pull request to watch; its head is pinned and re-read, and --merge needs it
 #   --sha SHA               commit to verify; with --pr it must equal the head, else exit 4
 #   --context NAME          required check run name, exact match; repeatable ["CI green"]; '' for none
+#   --allow-red NAME        a non-gate check run that may be red, exact name; repeatable [none]. A recorded
+#                           exception, never a default; needs --allow-red-reason
+#   --allow-red-reason TEXT why those checks may be red (one line); printed with the exception
 #   --min-checks N          check runs that must be complete [1]
 #   --timeout S             total seconds to wait [1800]
 #   --hung-after S          seconds without any check changing before exit 3 [600]
@@ -91,6 +102,8 @@ pr=""
 want_sha=""
 contexts=()
 contexts_given=0
+allowed=()
+allow_reason=""
 min_checks=1
 timeout_s=1800
 hung_after=600
@@ -176,6 +189,11 @@ while [[ $# -gt 0 ]]; do
       contexts_given=1
       [[ -z "$2" ]] || contexts+=("$2")
       ;;
+    --allow-red)
+      [[ -n "$2" ]] || die_usage "--allow-red needs a check name"
+      allowed+=("$2")
+      ;;
+    --allow-red-reason) allow_reason="$2" ;;
     --min-checks) min_checks="$2" ;;
     --timeout) timeout_s="$2" ;;
     --hung-after) hung_after="$2" ;;
@@ -228,6 +246,23 @@ for c in "${contexts[@]}"; do
     *$'\n'*) die_usage "a --context must be one line" ;;
   esac
 done
+
+for c in "${allowed[@]}"; do
+  case "$c" in
+    *$'\n'*) die_usage "an --allow-red name must be one line" ;;
+  esac
+  for g in "${contexts[@]}"; do
+    [[ "$c" != "$g" ]] || die_usage "--allow-red '${c}' is a required context; the gate cannot be allowed to fail"
+  done
+done
+if [[ ${#allowed[@]} -gt 0 ]]; then
+  [[ -n "${allow_reason//[[:space:]]/}" ]] || die_usage "--allow-red is a recorded exception and needs --allow-red-reason TEXT"
+  case "$allow_reason" in
+    *$'\n'*) die_usage "--allow-red-reason must be one line" ;;
+  esac
+elif [[ -n "$allow_reason" ]]; then
+  die_usage "--allow-red-reason without --allow-red"
+fi
 
 errfile="$(mktemp)"
 
@@ -390,6 +425,9 @@ if [[ $any_app -eq 1 ]]; then
   say "warning: --any-app: a check run of any app with a required name counts; rely on branch protection pinning the app"
 fi
 say "pinned ${pin} (${repo}${pr:+#$pr}); gate: ${contexts[*]:-any checks}; min checks ${min_checks}"
+if [[ ${#allowed[@]} -gt 0 ]]; then
+  say "warning: recorded exception: these check runs may be red: $(printf "'%s' " "${allowed[@]}")(reason: ${allow_reason})"
+fi
 
 start="$(now)"
 last_change="$start"
@@ -405,14 +443,28 @@ declare -A BAD_CONCLUSION=()
 for c in failure cancelled timed_out action_required startup_failure stale; do
   BAD_CONCLUSION["$(enc "$c")"]="$c"
 done
+B_NEUTRAL="$(enc neutral)"
+B_SKIPPED="$(enc skipped)"
 context_enc=()
 for c in "${contexts[@]}"; do
   context_enc+=("$(enc "$c")")
+done
+allowed_enc=()
+for c in "${allowed[@]}"; do
+  allowed_enc+=("$(enc "$c")")
 done
 
 is_context_enc() {
   local e
   for e in "${context_enc[@]}"; do
+    [[ "$1" == "$e" ]] && return 0
+  done
+  return 1
+}
+
+is_allowed_enc() {
+  local e
+  for e in "${allowed_enc[@]}"; do
     [[ "$1" == "$e" ]] && return 0
   done
   return 1
@@ -431,6 +483,7 @@ evaluate() {
   hostile=0
   local runs_seen=0 count_lines=0 count_missing=0 count_mismatch=0 dups=0 total_count=0
   local total=0 complete=0 bad=0 badname="" seen_ok seen_any
+  local other_bad=0 other_badname="" other_open=0 other_openname="" allowed_bad=0 is_ctx
   local -A ctx_seen=() ctx_ok=() ctx_open=() seen_id=()
   b_pin="$(enc "$pin")"
   while IFS=$'\x1f' read -r kind f1 f2 f3 f4 f5 f6 f7; do
@@ -482,12 +535,28 @@ evaluate() {
       continue
     fi
     total=$((total + 1))
+    is_ctx=0
+    if is_context_enc "$f7"; then is_ctx=1; fi
     if [[ "$f2" == "$B_COMPLETED" ]]; then
       complete=$((complete + 1))
       if [[ -n "$f3" && -n "${BAD_CONCLUSION[$f3]:-}" ]]; then
-        bad=$((bad + 1))
-        badname="${badname:-$(dec_display "$f7") (${BAD_CONCLUSION[$f3]})}"
+        if [[ $is_ctx -eq 1 ]]; then
+          bad=$((bad + 1))
+          badname="${badname:-$(dec_display "$f7") (${BAD_CONCLUSION[$f3]})}"
+        elif is_allowed_enc "$f7"; then
+          allowed_bad=$((allowed_bad + 1))
+        else
+          other_bad=$((other_bad + 1))
+          other_badname="${other_badname:-$(dec_display "$f7") (${BAD_CONCLUSION[$f3]})}"
+        fi
+      elif [[ $is_ctx -eq 0 && "$f3" != "$B_SUCCESS" && "$f3" != "$B_NEUTRAL" && "$f3" != "$B_SKIPPED" ]]; then
+        # Completed but with no usable conclusion: not a pass, so it is waited for like an open run.
+        other_open=$((other_open + 1))
+        other_openname="${other_openname:-$(dec_display "$f7")}"
       fi
+    elif [[ $is_ctx -eq 0 ]]; then
+      other_open=$((other_open + 1))
+      other_openname="${other_openname:-$(dec_display "$f7")}"
     fi
     for i in "${!contexts[@]}"; do
       [[ "$f7" == "${context_enc[$i]}" ]] || continue
@@ -522,6 +591,11 @@ evaluate() {
     detail="${badname} on ${pin}"
     return 0
   fi
+  if [[ $other_bad -gt 0 ]]; then
+    verdict=other-red
+    detail="another check run is red, not only the gate: ${other_badname} on ${pin}"
+    return 0
+  fi
   if [[ -n "$suites_a" && -n "$suites_b" && "$suites_a" != "$suites_b" ]]; then
     detail="check-run list may be truncated (check suite count changed while reading (${suites_a} then ${suites_b})); not trusting it"
     return 0
@@ -550,12 +624,17 @@ evaluate() {
     detail="${seen_any}${complete}/${total} runs complete"
     return 0
   fi
+  if [[ $other_open -gt 0 ]]; then
+    detail="gate satisfied, waiting for ${other_open} other check run(s) to finish (first: ${other_openname}); ${complete}/${total} runs complete"
+    return 0
+  fi
   if [[ $complete -lt $min_checks ]]; then
     detail="${complete} of ${min_checks} required check runs complete"
     return 0
   fi
   verdict=green
-  detail="${complete}/${total} runs complete, gate satisfied"
+  detail="${complete}/${total} runs complete, gate satisfied, no other check red"
+  if [[ $allowed_bad -gt 0 ]]; then detail+=" (${allowed_bad} allowed red)"; fi
 }
 
 verdict=pending
@@ -639,6 +718,11 @@ while :; do
     say "red: ${detail}"
     result="red"
     exit 1
+  fi
+  if [[ "$verdict" == other-red ]]; then
+    say "other checks red: ${detail}"
+    result="other-red"
+    exit 6
   fi
   if [[ "$verdict" == green ]]; then
     break
