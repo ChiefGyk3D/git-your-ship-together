@@ -878,12 +878,12 @@ read_protection() {
   PROT=unreadable
   PROT_MISSING=""
   [[ -n "$base" ]] || return 0
-  if rules="$("$gh_bin" api "repos/${repo}/rules/branches/${base}" --jq '.[] | select(.type == "merge_queue" or .type == "required_status_checks") | if .type == "merge_queue" then "Q" else ((.parameters.required_status_checks // [])[] | "C " + ((.context // "") | tostring | @base64) + " " + ((.integration_id // "any") | tostring)) end' 2>/dev/null)"; then
+  if rules="$("$gh_bin" api "repos/${repo}/rules/branches/${base}" --jq '.[] | select(.type == "merge_queue" or .type == "required_status_checks") | if .type == "merge_queue" then "Q" else ((.parameters.required_status_checks // [])[] | "C " + ((.context // "") | tostring | @base64) + " " + (if .integration_id == null or .integration_id == -1 then "any" else (.integration_id | tostring) end)) end' 2>/dev/null)"; then
     got=1
   else
     rules=""
   fi
-  if classic="$("$gh_bin" api "repos/${repo}/branches/${base}/protection/required_status_checks" --jq '((.contexts // [] | map({context: ., app_id: null})) + (.checks // []))[] | "C " + ((.context // "" | tostring) | @base64) + " " + ((.app_id // "any") | tostring)' 2>/dev/null)"; then
+  if classic="$("$gh_bin" api "repos/${repo}/branches/${base}/protection/required_status_checks" --jq '(if ((.checks // []) | length) > 0 then .checks else (.contexts // [] | map({context: ., app_id: null})) end)[] | "C " + ((.context // "" | tostring) | @base64) + " " + (if .app_id == null or .app_id == -1 then "any" else (.app_id | tostring) end)' 2>/dev/null)"; then
     got=1
   else
     classic=""

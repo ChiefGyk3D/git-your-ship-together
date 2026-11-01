@@ -2237,6 +2237,22 @@ def test_protection_bound_to_a_different_app_does_not_cover_the_gate(world, extr
     assert "WARNING" in warn.stdout
 
 
+def test_a_legacy_contexts_entry_does_not_hide_an_app_bound_check_of_the_same_name(world):
+    extra = {"classic": {"contexts": ["CI green"], "checks": [{"context": "CI green", "app_id": 57789}]}}
+    w = world(checks={A: [GATE]}, **extra)
+    p = w.run("--repo", SLUG, "--pr", "7", "--merge", "--require-protection", *FAST)
+    assert p.returncode == 1, shown(p)
+    assert "none cover" in p.stdout
+    assert w.merges() == []
+
+
+def test_an_app_id_of_minus_one_means_any_app(world):
+    extra = {"classic": {"contexts": ["CI green"], "checks": [{"context": "CI green", "app_id": -1}]}}
+    w = world(checks={A: [GATE]}, **extra)
+    p = w.run("--repo", SLUG, "--pr", "7", "--merge", "--require-protection", *FAST)
+    assert p.returncode == 0, shown(p)
+
+
 def test_protection_bound_to_a_different_app_counts_with_any_app(world):
     extra = {"classic": {"contexts": [], "checks": [{"context": "CI green", "app_id": 57789}]}}
     w = world(checks={A: [GATE]}, **extra)
