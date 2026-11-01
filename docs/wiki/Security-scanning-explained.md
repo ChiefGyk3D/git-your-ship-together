@@ -183,6 +183,11 @@ pull request is in that range, so it stays caught. The narrowing never applies t
 branch is still scanned in full. If the base or head is not a full commit id present in the clone, the job fails rather
 than scanning less.
 
+| Event | Configuration and ignore file the scans use | Root `.gitleaksignore` of the checkout |
+|---|---|---|
+| `pull_request` (either scope) | the base commit's `.gitleaks.toml` (scanner defaults if none) and `.gitleaksignore`, copied outside the workspace | replaced by the base's copy, or removed |
+| any other event | the checked-out `.gitleaks.toml`, as before | left as checked out |
+
 Configuration source, in both scopes: on a `pull_request` event the scan reads `.gitleaks.toml` and `.gitleaksignore` from the base commit (copied outside the workspace and passed explicitly), never from the pull request's own tree, so a pull request cannot allowlist its own secret. With no config on the base, the scanner defaults apply. gitleaks also applies a `.gitleaksignore` at the root of the scanned tree whatever the ignore-path option says (measured with the pinned binary, for the `git` and the `dir` scan), so on a pull request that root file in the throwaway checkout is replaced by the base's copy, or removed when the base has none; both scans then use the base's. A pull request that changes either file gets a warning naming it. A pull request that edits those files is scanned with the old version until it merges; a base config that extends another file by relative path is not supported on a pull request. Other events use the checked-out file, as before. The canary runs the same command shape and the same configuration as the real scan, so a config that hides the planted key fails it.
 
 What `pr-commits` does not see, so that nobody assumes more: a key in a commit that is already in the base history
