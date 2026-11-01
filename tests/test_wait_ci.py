@@ -2097,6 +2097,16 @@ def test_a_check_that_is_pending_just_before_the_merge_aborts_with_exit_6(world)
     assert w.merges() == []
 
 
+@pytest.mark.parametrize("tail", [[5, 5], ["@fail", "@fail"]], ids=["count-changed", "call-failed"])
+def test_the_suite_counts_are_rechecked_just_before_the_merge(world, tail):
+    # Two polls read the suite count four times each (before and after, again for the confirming read);
+    # the ninth and tenth requests are the merge-time recheck.
+    w = world(checks={A: [GATE]}, suites_script=[3] * 8 + tail, suites_script_repeat=3, merge_results=[{"rc": 0}])
+    p = w.run("--repo", SLUG, "--pr", "7", "--merge", *FAST)
+    assert p.returncode == 6, shown(p)
+    assert w.merges() == []
+
+
 def test_an_unchanged_check_list_just_before_the_merge_still_merges(world):
     w = world(checks={A: [GATE]}, merge_results=[{"rc": 0}])
     p = w.run("--repo", SLUG, "--pr", "7", "--merge", *FAST)

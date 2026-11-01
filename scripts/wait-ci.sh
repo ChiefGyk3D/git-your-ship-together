@@ -677,6 +677,8 @@ evaluate() {
 verdict=pending
 detail=""
 settle_fp=""
+settled_a=""
+settled_b=""
 suites_a=""
 suites_b=""
 while :; do
@@ -740,6 +742,8 @@ while :; do
     # restarts the wait; it is then judged like every other check.
     if [[ "$verdict" == green ]]; then
       fp_now="$(fingerprint "$W_LINES")"
+      settled_a="$W_A"
+      settled_b="$W_B"
       if [[ -z "$settle_fp" || "$settle_fp" != "$fp_now" ]]; then
         settle_fp="$fp_now"
         verdict=pending
@@ -838,6 +842,13 @@ if [[ $rc -ne 0 ]]; then
   say "cannot re-read the check runs of ${pin} right before the merge; nothing merged"
   result="error"
   exit 1
+fi
+suites_a="$W_A"
+suites_b="$W_B"
+if [[ $W_SUITE_FAILED -eq 1 || "$W_A" != "$settled_a" || "$W_B" != "$settled_b" ]]; then
+  say "the check suites changed or could not be read right before the merge; nothing merged"
+  result="other-red"
+  exit 6
 fi
 evaluate "$W_LINES"
 if [[ "$verdict" == red ]]; then
