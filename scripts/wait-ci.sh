@@ -10,6 +10,19 @@
 #     pinned SHA and concluded success; at least --min-checks check runs completed; and no run
 #     failed, was cancelled, timed out or needs action. No check runs at all is NOT green, and a
 #     context that has not reported yet is NOT green (the aggregate-gate race seen on GYST #218).
+#   * The gate is not the only check (issue #259). Every OTHER check run on the pinned SHA must also be
+#     completed without failure, timeout, cancellation, action-required, startup failure or stale
+#     (success, skipped and neutral pass). One that is queued or in progress is waited for (bounded by
+#     --timeout and --hung-after); one that failed ends the wait with exit 6. A gate that failed is still
+#     exit 1. --allow-red NAME (repeatable, empty by default) lets a named non-gate check be red; it is a
+#     recorded exception and needs --allow-red-reason TEXT, which is printed. A gate name cannot be allowed.
+#   * A late check cannot be seen before it exists. Two answers: --require-check NAME (repeatable) names a check
+#     that must exist from the expected app and succeed, so a workflow that starts late is waited for (a
+#     missing one ends in exit 2, never green); and success is returned only after two consecutive polls, one
+#     --interval apart, read the identical set of check runs (id, status, conclusion, app, name). A name that
+#     appears between the polls restarts the wait. A run named like the gate from another app is not the gate;
+#     it is judged as an other check (unless --any-app). Without a required name nothing can prove that a
+#     check which never appears does not exist: branch protection is the real control for that.
 #   * The list of check runs must be whole. The endpoint shows at most the 1000 most recent check
 #     suites of a ref, so the script asks for the suite count (GET .../check-suites, once per poll) and
 #     is NOT green when it is 1000 or more or cannot be read as a plain integer. It also keeps the
@@ -39,6 +52,13 @@
 #     a merge fails, so a push between the check and the merge is exit 4, never a merge of unverified
 #     code. A merge gh accepts but that leaves the pull request open (a merge queue, auto-merge) is
 #     exit 5, never reported as merged.
+#   * What this script cannot do (issue #263): the check state is not atomic with the merge call. Between the last
+#     read and the moment GitHub processes `gh pr merge`, a check can still turn red or appear. The script re-reads
+#     the check runs and suite counts before EVERY merge attempt, first and retries alike, and aborts with exit 6
+#     on any change; that narrows the window, it does not close it. The only atomic guarantee is GitHub-enforced
+#     required status checks (branch protection or a ruleset) or a merge queue. This script is the second line.
+#     Before merging it reads the base branch's rules and warns loudly when none cover the required contexts;
+#     --require-protection makes that an error (exit 1).
 #   * It prints the SHA it verified. It never prints a token (output from gh is redacted).
 #
 # Exit codes:
@@ -51,6 +71,8 @@
 #   4   head moved: the pull request head is no longer the pinned SHA
 #   5   queued: the merge was accepted and the pull request, read back, is positively not merged yet at the
 #       verified head (merge queue or auto-merge); a pull request that cannot be read back is exit 1
+#   6   other checks red: the gate did not fail, but another check run on the pinned SHA failed, was
+#       cancelled, timed out, needed action, failed to start or went stale (and is not in --allow-red)
 #   64  usage error (bad flag or value); nothing was waited on
 #
 # Numbers are plain base-10 integers, no sign, space or leading zero (0 only where it is legal), and
@@ -66,6 +88,12 @@
 #   --pr N                  pull request to watch; its head is pinned and re-read, and --merge needs it
 #   --sha SHA               commit to verify; with --pr it must equal the head, else exit 4
 #   --context NAME          required check run name, exact match; repeatable ["CI green"]; '' for none
+#   --require-check NAME    a further required check run (exact name, expected app); repeatable [none]
+#   --allow-red NAME[@APP]  a non-gate check run that may be red, exact name; repeatable [none]. A recorded
+#                           exception, never a default; needs --allow-red-reason. @APP is the reporting app's
+#                           slug (lowercase letters, digits, hyphens) and then both must match; a bare NAME
+#                           matches that name from any app
+#   --allow-red-reason TEXT why those checks may be red (one line); printed with the exception
 #   --min-checks N          check runs that must be complete [1]
 #   --timeout S             total seconds to wait [1800]
 #   --hung-after S          seconds without any check changing before exit 3 [600]
@@ -75,6 +103,9 @@
 #   --on-push abort|reset   what a moved head does [abort]; reset is ignored when --sha is given
 #   --merge                 squash-merge the verified SHA once green (needs --pr)
 #   --delete-branch         with --merge, delete the head branch
+#   --require-protection    with --merge, exit 1 unless the base branch has GitHub-enforced required status checks
+#                           (branch protection or a ruleset) covering every required context, or a merge queue;
+#                           without it a missing one is a loud warning
 #   --merge-retries N       retries after a policy-blocked merge attempt [5]
 #   --merge-retry-delay S   seconds between merge attempts [30]
 #
@@ -91,6 +122,11 @@ pr=""
 want_sha=""
 contexts=()
 contexts_given=0
+required=()
+allowed=()
+allowed_names=()
+allowed_apps=()
+allow_reason=""
 min_checks=1
 timeout_s=1800
 hung_after=600
@@ -102,6 +138,7 @@ merge_retries=5
 merge_retry_delay=30
 app_id=15368
 any_app=0
+require_protection=0
 
 result="usage"
 verified=""
@@ -140,6 +177,22 @@ redact() {
 now() { date +%s; }
 nap() { sleep "$1"; }
 
+# A control character (C0, DEL, NEL, line and paragraph separator) must never reach a log line.
+has_ctrl() {
+  [[ "$1" == *[[:cntrl:]]* || "$1" == *$'\xc2\x85'* || "$1" == *$'\xe2\x80\xa8'* || "$1" == *$'\xe2\x80\xa9'* ]] && return 0
+  has_bidi "$1"
+}
+# Bidirectional formatting characters (U+061C, U+200E, U+200F, U+202A-U+202E, U+2066-U+2069) can reorder what a
+# reader sees in a log line: refused like a control character.
+has_bidi() {
+  local c
+  for c in $'\xd8\x9c' $'\xe2\x80\x8e' $'\xe2\x80\x8f' $'\xe2\x80\xaa' $'\xe2\x80\xab' $'\xe2\x80\xac' \
+    $'\xe2\x80\xad' $'\xe2\x80\xae' $'\xe2\x81\xa6' $'\xe2\x81\xa7' $'\xe2\x81\xa8' $'\xe2\x81\xa9'; do
+    [[ "$1" == *"$c"* ]] && return 0
+  done
+  return 1
+}
+
 need_value() { [[ $# -ge 2 ]] || die_usage "$1 needs a value"; }
 # need_num OPTION VALUE MIN MAX: a plain base-10 integer in range, else exit 64. The pattern admits at most
 # nine digits and no leading zero, so no later arithmetic can wrap, read an octal or see a sign.
@@ -166,6 +219,11 @@ while [[ $# -gt 0 ]]; do
       shift
       continue
       ;;
+    --require-protection)
+      require_protection=1
+      shift
+      continue
+      ;;
   esac
   need_value "$@"
   case "$1" in
@@ -176,6 +234,15 @@ while [[ $# -gt 0 ]]; do
       contexts_given=1
       [[ -z "$2" ]] || contexts+=("$2")
       ;;
+    --require-check)
+      [[ -n "$2" ]] || die_usage "--require-check needs a check name"
+      required+=("$2")
+      ;;
+    --allow-red)
+      [[ -n "$2" ]] || die_usage "--allow-red needs a check name"
+      allowed+=("$2")
+      ;;
+    --allow-red-reason) allow_reason="$2" ;;
     --min-checks) min_checks="$2" ;;
     --timeout) timeout_s="$2" ;;
     --hung-after) hung_after="$2" ;;
@@ -192,6 +259,8 @@ done
 if [[ $contexts_given -eq 0 ]]; then
   contexts=("CI green")
 fi
+# --require-check names are further required contexts: each must exist, from the expected app, and succeed.
+contexts+=("${required[@]}")
 
 [[ "$repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || die_usage "--repo must be OWNER/REPO (got '${repo}')"
 case "${repo%%/*}" in . | ..) die_usage "--repo owner must not be . or .." ;; esac
@@ -224,10 +293,32 @@ case "$on_push" in
 esac
 if [[ $merge -eq 1 && -z "$pr" ]]; then die_usage "--merge needs --pr"; fi
 for c in "${contexts[@]}"; do
-  case "$c" in
-    *$'\n'*) die_usage "a --context must be one line" ;;
-  esac
+  if has_ctrl "$c"; then die_usage "a --context or --require-check name must not hold a control character"; fi
 done
+
+for c in "${allowed[@]}"; do
+  if has_ctrl "$c"; then die_usage "an --allow-red name must not hold a control character"; fi
+  # NAME@APP scopes the exception to the check run reported by the app with that slug; a bare NAME matches the
+  # name from any app.
+  name="$c"
+  app=""
+  if [[ "$c" =~ ^(.+)@([a-z0-9][a-z0-9-]*)$ ]]; then
+    name="${BASH_REMATCH[1]}"
+    app="${BASH_REMATCH[2]}"
+  fi
+  allowed_names+=("$name")
+  allowed_apps+=("$app")
+  for g in "${contexts[@]}"; do
+    [[ "$name" != "$g" ]] || die_usage "--allow-red '${c}' is a required context; the gate cannot be allowed to fail"
+  done
+done
+if [[ ${#allowed[@]} -gt 0 ]]; then
+  [[ -n "${allow_reason//[[:space:]]/}" ]] || die_usage "--allow-red is a recorded exception and needs --allow-red-reason TEXT"
+  if has_ctrl "$allow_reason"; then die_usage "--allow-red-reason must be one line without control characters"; fi
+elif [[ -n "$allow_reason" ]]; then
+  die_usage "--allow-red-reason without --allow-red"
+fi
+if has_ctrl "$allow_reason"; then die_usage "--allow-red-reason must be one line without control characters"; fi
 
 errfile="$(mktemp)"
 
@@ -250,18 +341,21 @@ gh_try() {
 PR_MERGED=""
 PR_HEAD=""
 PR_MERGE_SHA=""
+PR_BASE=""
 pr_state() {
   local out
   out="$(gh_try api "repos/${repo}/pulls/${pr}" \
-    --jq '[(.merged | tostring), (.head.sha // "" | tostring), (.merge_commit_sha // "" | tostring)] | join("\u001f")')" || return 1
+    --jq '[(.merged | tostring), (.head.sha // "" | tostring), (.merge_commit_sha // "" | tostring), (.base.ref // "" | tostring)] | join("\u001f")')" || return 1
   PR_MERGED=""
+  PR_BASE=""
   PR_HEAD=""
   PR_MERGE_SHA=""
   if [[ "$out" == *$'\n'* ]]; then
     say "the API returned a malformed pull request state for ${repo}#${pr}" >&2
     return 1
   fi
-  IFS=$'\x1f' read -r PR_MERGED PR_HEAD PR_MERGE_SHA <<<"$out"
+  IFS=$'\x1f' read -r PR_MERGED PR_HEAD PR_MERGE_SHA PR_BASE <<<"$out"
+  [[ "$PR_BASE" =~ ^[A-Za-z0-9._/-]{1,200}$ ]] || PR_BASE=""
   if [[ "$PR_MERGED" != true && "$PR_MERGED" != false ]] || [[ ! "$PR_HEAD" =~ ^[0-9a-f]{40}$ ]] ||
     [[ -n "$PR_MERGE_SHA" && ! "$PR_MERGE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
     say "the API returned something that is not a pull request state with a full commit SHA for ${repo}#${pr}" >&2
@@ -278,12 +372,12 @@ pr_head() {
 # value (a name with a newline or the field separator in it) cannot add a line or a field. Fields are split
 # by \x1f.
 #   T <total_count>                                                       once per page
-#   R <id> <status> <conclusion> <app id> <hostile> <head_sha> <name>     once per run
+#   R <id> <status> <conclusion> <app id> <hostile> <head_sha> <app slug> <name>   once per run
 # The run id is plain digits (or "bad"), checked again in bash. hostile is 1 when the name holds a control
 # character, DEL, NEL or a Unicode line or paragraph separator (NUL included).
 check_page() {
   gh_try api "repos/${repo}/commits/${1}/check-runs?per_page=100&filter=latest&page=${2}" \
-    --jq '(["T", ((.total_count // -1) | tostring | @base64)] | join("\u001f")), (.check_runs[] | ["R", (.id | if type == "number" and . == floor and . >= 0 and . < 1000000000000000 then tostring else "bad" end), (.status // "" | tostring | @base64), (.conclusion // "" | tostring | @base64), ((.app.id // 0) | tostring | @base64), (.name // "" | tostring | if explode | any(. < 32 or . == 127 or . == 133 or . == 8232 or . == 8233) then "1" else "0" end), (.head_sha // "" | tostring | @base64), (.name // "" | tostring | @base64)] | join("\u001f"))'
+    --jq '(["T", ((.total_count // -1) | tostring | @base64)] | join("\u001f")), (.check_runs[] | ["R", (.id | if type == "number" and . == floor and . >= 0 and . < 1000000000000000 then tostring else "bad" end), (.status // "" | tostring | @base64), (.conclusion // "" | tostring | @base64), ((.app.id // 0) | tostring | @base64), (.name // "" | tostring | if explode | any(. < 32 or . == 127 or . == 133 or . == 1564 or . == 8206 or . == 8207 or . == 8232 or . == 8233 or (. >= 8234 and . <= 8238) or (. >= 8294 and . <= 8297)) then "1" else "0" end), (.head_sha // "" | tostring | @base64), ((.app.slug // "") | tostring | @base64), (.name // "" | tostring | @base64)] | join("\u001f"))'
 }
 
 # The number of CHECK SUITES on a commit, from a call of its own (one per poll). GitHub's cap is on suites:
@@ -320,14 +414,15 @@ b64_strict() {
 dec_display() {
   local d
   d="$(printf '%s' "$1" | base64 -d 2>/dev/null | tr -d '\000-\037\177')" || d=""
+  if has_bidi "$d"; then d="<name with bidirectional control characters>"; fi
   printf '%s' "${d:-unnamed}"
 }
 
-# A fingerprint of a read: the sorted (id, status, conclusion) of every run, in their encoded form.
+# A fingerprint of a read: the sorted (id, status, conclusion, app, name) of every run, in their encoded form.
 fingerprint() {
-  local kind f1 f2 f3 rest out=""
-  while IFS=$'\x1f' read -r kind f1 f2 f3 rest; do
-    if [[ "$kind" == R ]]; then out+="${f1} ${f2} ${f3}"$'\n'; fi
+  local kind f1 f2 f3 f4 f5 f6 f7 f8 rest out=""
+  while IFS=$'\x1f' read -r kind f1 f2 f3 f4 f5 f6 f7 f8 rest; do
+    if [[ "$kind" == R ]]; then out+="${f1} ${f2} ${f3} ${f4} ${f8}"$'\n'; fi
   done <<<"$1"
   printf '%s' "$out" | LC_ALL=C sort
 }
@@ -390,6 +485,9 @@ if [[ $any_app -eq 1 ]]; then
   say "warning: --any-app: a check run of any app with a required name counts; rely on branch protection pinning the app"
 fi
 say "pinned ${pin} (${repo}${pr:+#$pr}); gate: ${contexts[*]:-any checks}; min checks ${min_checks}"
+if [[ ${#allowed[@]} -gt 0 ]]; then
+  say "warning: recorded exception: these check runs may be red: $(printf "'%s' " "${allowed[@]}")(reason: ${allow_reason}); a bare name matches any app"
+fi
 
 start="$(now)"
 last_change="$start"
@@ -405,15 +503,34 @@ declare -A BAD_CONCLUSION=()
 for c in failure cancelled timed_out action_required startup_failure stale; do
   BAD_CONCLUSION["$(enc "$c")"]="$c"
 done
+B_NEUTRAL="$(enc neutral)"
+B_SKIPPED="$(enc skipped)"
 context_enc=()
 for c in "${contexts[@]}"; do
   context_enc+=("$(enc "$c")")
+done
+allowed_enc=()
+allowed_app_enc=()
+for i in "${!allowed_names[@]}"; do
+  allowed_enc+=("$(enc "${allowed_names[$i]}")")
+  if [[ -n "${allowed_apps[$i]}" ]]; then allowed_app_enc+=("$(enc "${allowed_apps[$i]}")"); else allowed_app_enc+=(""); fi
 done
 
 is_context_enc() {
   local e
   for e in "${context_enc[@]}"; do
     [[ "$1" == "$e" ]] && return 0
+  done
+  return 1
+}
+
+# is_allowed_enc NAME_ENC SLUG_ENC: the name matches an --allow-red entry and, when that entry carries @APP, the
+# reporting app's slug matches too. A bare name matches the name from any app.
+is_allowed_enc() {
+  local i
+  for i in "${!allowed_enc[@]}"; do
+    [[ "$1" == "${allowed_enc[$i]}" ]] || continue
+    if [[ -z "${allowed_app_enc[$i]}" || "$2" == "${allowed_app_enc[$i]}" ]]; then return 0; fi
   done
   return 1
 }
@@ -426,17 +543,18 @@ RUN_LIST_CAP=1000
 
 # Sets verdict (green|red|pending) and detail for the lines passed in, using $suites_a and $suites_b.
 evaluate() {
-  local lines="$1" kind f1 f2 f3 f4 f5 f6 f7 i b_pin first_count=""
+  local lines="$1" kind f1 f2 f3 f4 f5 f6 f7 f8 i b_pin first_count=""
   foreign=0
   hostile=0
   local runs_seen=0 count_lines=0 count_missing=0 count_mismatch=0 dups=0 total_count=0
   local total=0 complete=0 bad=0 badname="" seen_ok seen_any
+  local other_bad=0 other_badname="" other_open=0 other_openname="" allowed_bad=0 is_ctx
   local -A ctx_seen=() ctx_ok=() ctx_open=() seen_id=()
   b_pin="$(enc "$pin")"
-  while IFS=$'\x1f' read -r kind f1 f2 f3 f4 f5 f6 f7; do
-    [[ -n "$kind$f1$f2$f3$f4$f5$f6$f7" ]] || continue
+  while IFS=$'\x1f' read -r kind f1 f2 f3 f4 f5 f6 f7 f8; do
+    [[ -n "$kind$f1$f2$f3$f4$f5$f6$f7$f8" ]] || continue
     if [[ "$kind" == T ]]; then
-      if [[ -n "$f2$f3$f4$f5$f6$f7" ]] || ! b64_strict "$f1" || [[ ! "$B64_VALUE" =~ ^(-1|0|[1-9][0-9]{0,8})$ ]]; then
+      if [[ -n "$f2$f3$f4$f5$f6$f7$f8" ]] || ! b64_strict "$f1" || [[ ! "$B64_VALUE" =~ ^(-1|0|[1-9][0-9]{0,8})$ ]]; then
         hostile=$((hostile + 1))
         continue
       fi
@@ -472,25 +590,44 @@ evaluate() {
     # Anything that is not exactly the shape jq emits, a name that jq flagged, or a run for another
     # commit is hostile.
     if [[ ! "$f5" =~ ^0$ || ! "$f2" =~ $B64_RE || ! "$f3" =~ $B64_RE || ! "$f4" =~ $B64_RE || ! "$f6" =~ $B64_RE ||
-      ! "$f7" =~ $B64_RE || "$f6" != "$b_pin" ]]; then
+      ! "$f7" =~ $B64_RE || ! "$f8" =~ $B64_RE || "$f6" != "$b_pin" ]]; then
       hostile=$((hostile + 1))
       continue
     fi
-    # A run that carries a required name but comes from another app is ignored altogether.
-    if [[ $any_app -eq 0 && "$f4" != "$B_APP" ]] && is_context_enc "$f7"; then
-      foreign=$((foreign + 1))
-      continue
-    fi
+    # A run that carries a required name but comes from another app is NOT the gate: it cannot satisfy it, and it
+    # is judged like any other check (red blocks with exit 6, open is waited for), unless --any-app.
     total=$((total + 1))
+    is_ctx=0
+    if is_context_enc "$f8"; then
+      if [[ $any_app -eq 1 || "$f4" == "$B_APP" ]]; then
+        is_ctx=1
+      else
+        foreign=$((foreign + 1))
+      fi
+    fi
     if [[ "$f2" == "$B_COMPLETED" ]]; then
       complete=$((complete + 1))
       if [[ -n "$f3" && -n "${BAD_CONCLUSION[$f3]:-}" ]]; then
-        bad=$((bad + 1))
-        badname="${badname:-$(dec_display "$f7") (${BAD_CONCLUSION[$f3]})}"
+        if [[ $is_ctx -eq 1 ]]; then
+          bad=$((bad + 1))
+          badname="${badname:-$(dec_display "$f8") (${BAD_CONCLUSION[$f3]})}"
+        elif is_allowed_enc "$f8" "$f7"; then
+          allowed_bad=$((allowed_bad + 1))
+        else
+          other_bad=$((other_bad + 1))
+          other_badname="${other_badname:-$(dec_display "$f8") (${BAD_CONCLUSION[$f3]})}"
+        fi
+      elif [[ $is_ctx -eq 0 && "$f3" != "$B_SUCCESS" && "$f3" != "$B_NEUTRAL" && "$f3" != "$B_SKIPPED" ]]; then
+        # Completed but with no usable conclusion: not a pass, so it is waited for like an open run.
+        other_open=$((other_open + 1))
+        other_openname="${other_openname:-$(dec_display "$f8")}"
       fi
+    elif [[ $is_ctx -eq 0 ]]; then
+      other_open=$((other_open + 1))
+      other_openname="${other_openname:-$(dec_display "$f8")}"
     fi
     for i in "${!contexts[@]}"; do
-      [[ "$f7" == "${context_enc[$i]}" ]] || continue
+      [[ $is_ctx -eq 1 && "$f8" == "${context_enc[$i]}" ]] || continue
       ctx_seen[$i]=1
       if [[ "$f2" != "$B_COMPLETED" ]]; then
         ctx_open[$i]=1
@@ -515,11 +652,16 @@ evaluate() {
     return 0
   fi
   if [[ $foreign -gt 0 ]]; then
-    say "ignored ${foreign} run(s) named like a required check from an app other than ${app_id}"
+    say "${foreign} run(s) named like a required check come from an app other than ${app_id}: they do not count as the gate and are judged as other checks"
   fi
   if [[ $bad -gt 0 ]]; then
     verdict=red
     detail="${badname} on ${pin}"
+    return 0
+  fi
+  if [[ $other_bad -gt 0 ]]; then
+    verdict=other-red
+    detail="another check run is red, not only the gate: ${other_badname} on ${pin}"
     return 0
   fi
   if [[ -n "$suites_a" && -n "$suites_b" && "$suites_a" != "$suites_b" ]]; then
@@ -554,12 +696,20 @@ evaluate() {
     detail="${complete} of ${min_checks} required check runs complete"
     return 0
   fi
+  if [[ $other_open -gt 0 ]]; then
+    detail="gate satisfied, waiting for ${other_open} other check run(s) to finish (first: ${other_openname}); ${complete}/${total} runs complete"
+    return 0
+  fi
   verdict=green
-  detail="${complete}/${total} runs complete, gate satisfied"
+  detail="${complete}/${total} runs complete, gate satisfied, no other check red"
+  if [[ $allowed_bad -gt 0 ]]; then detail+=" (${allowed_bad} allowed red)"; fi
 }
 
 verdict=pending
 detail=""
+settle_fp=""
+settled_a=""
+settled_b=""
 suites_a=""
 suites_b=""
 while :; do
@@ -578,6 +728,7 @@ while :; do
         fi
         say "head moved: ${pin} -> ${cur}; resetting (the total timeout keeps running)"
         pin="$cur"
+        settle_fp=""
         last_sig=""
         last_change="$t"
       fi
@@ -617,11 +768,27 @@ while :; do
         fi
       fi
     fi
+    # Settle rule: a green read is believed only when the previous poll, one interval earlier, read the identical set
+    # of check runs (id, status, conclusion, app, name). A check that appears between two polls changes the set and
+    # restarts the wait; it is then judged like every other check.
+    if [[ "$verdict" == green ]]; then
+      fp_now="$(fingerprint "$W_LINES")"
+      settled_a="$W_A"
+      settled_b="$W_B"
+      if [[ -z "$settle_fp" || "$settle_fp" != "$fp_now" ]]; then
+        settle_fp="$fp_now"
+        verdict=pending
+        detail="settling: the check list must read identical twice, one interval apart, before it counts"
+      fi
+    else
+      settle_fp=""
+    fi
   elif [[ $rc -eq 2 ]]; then
     verdict=pending
     detail="check-run list may be truncated (more than ${MAX_RUN_PAGES} pages of check runs); not trusting it"
     sig="$last_sig"
     poll_failed=1
+    settle_fp=""
   else
     verdict=pending
     detail="the check-runs call failed, will retry"
@@ -639,6 +806,11 @@ while :; do
     say "red: ${detail}"
     result="red"
     exit 1
+  fi
+  if [[ "$verdict" == other-red ]]; then
+    say "other checks red: ${detail}"
+    result="other-red"
+    exit 6
   fi
   if [[ "$verdict" == green ]]; then
     break
@@ -666,11 +838,13 @@ done
 
 # Green on $pin. Re-read the head once more: a push after the last poll must not be merged.
 if [[ -n "$pr" ]]; then
-  if ! cur="$(pr_head)"; then
+  # Not in a command substitution: the base branch it reads (for the protection check) must survive.
+  if ! pr_state; then
     say "cannot re-read the head of ${repo}#${pr} after the checks; not trusting ${pin}"
     result="error"
     exit 1
   fi
+  cur="$PR_HEAD"
   if [[ "$cur" != "$pin" ]]; then
     say "head moved after the last check: ${pin} -> ${cur}; nothing merged"
     result="head-moved"
@@ -692,6 +866,103 @@ if [[ $merge -eq 0 ]]; then
   result="green"
   exit 0
 fi
+
+# What GitHub itself enforces on the base branch. The merge call is not atomic with the checks read above, so
+# GitHub-enforced required status checks (branch protection or a ruleset) or a merge queue are the real lock.
+# Sets PROT to covered, partial, none or unreadable. Context names cross as base64.
+PROT=unreadable
+PROT_MISSING=""
+read_protection() {
+  local base="$PR_BASE" rules classic line have_queue=0 got=0 n ctx
+  local -A have=() anyapp=()
+  PROT=unreadable
+  PROT_MISSING=""
+  [[ -n "$base" ]] || return 0
+  if rules="$("$gh_bin" api "repos/${repo}/rules/branches/${base}" --jq '.[] | select(.type == "merge_queue" or .type == "required_status_checks") | if .type == "merge_queue" then "Q" else ((.parameters.required_status_checks // [])[] | "C " + ((.context // "") | tostring | @base64) + " " + (if .integration_id == null or .integration_id == -1 then "any" else (.integration_id | tostring) end)) end' 2>/dev/null)"; then
+    got=1
+  else
+    rules=""
+  fi
+  if classic="$("$gh_bin" api "repos/${repo}/branches/${base}/protection/required_status_checks" --jq '(if ((.checks // []) | length) > 0 then .checks else (.contexts // [] | map({context: ., app_id: null})) end)[] | "C " + ((.context // "" | tostring) | @base64) + " " + (if .app_id == null or .app_id == -1 then "any" else (.app_id | tostring) end)' 2>/dev/null)"; then
+    got=1
+  else
+    classic=""
+  fi
+  [[ $got -eq 1 ]] || return 0
+  while IFS= read -r line; do
+    if [[ "$line" == Q ]]; then
+      have_queue=1
+    elif [[ "$line" == "C "* ]]; then
+      line="${line#C }"
+      have["$line"]=1
+      anyapp["${line%% *}"]=1
+    fi
+  done <<<"${rules}"$'\n'"${classic}"
+  if [[ $have_queue -eq 1 ]]; then
+    PROT=covered
+    return 0
+  fi
+  if [[ ${#have[@]} -eq 0 ]]; then
+    PROT=none
+    return 0
+  fi
+  PROT=covered
+  for ctx in "${contexts[@]}"; do
+    n="$(enc "$ctx")"
+    # A requirement counts when it names the app whose check run this script evaluates (--app-id), or names no app
+    # at all (GitHub then accepts the name from any app, which includes that one), or --any-app was given.
+    if [[ -z "${have["$n any"]:-}" && -z "${have["$n ${app_id}"]:-}" && ($any_app -eq 0 || -z "${anyapp[$n]:-}") ]]; then
+      PROT=partial
+      PROT_MISSING="${PROT_MISSING}'${ctx}' "
+    fi
+  done
+}
+check_protection() {
+  read_protection
+  case "$PROT" in
+    covered) say "base branch ${PR_BASE}: GitHub enforces the required checks (or a merge queue); this script is the second line" ;;
+    partial) say "WARNING: base branch ${PR_BASE} has required status checks, but none cover: ${PROT_MISSING}" ;;
+    none) say "WARNING: base branch ${PR_BASE} has no required status checks and no merge queue; nothing GitHub enforces stops a check that turns red at merge time" ;;
+    *) say "WARNING: could not read the required status checks of the base branch; assume GitHub enforces none" ;;
+  esac
+  if [[ "$PROT" != covered && $require_protection -eq 1 ]]; then
+    say "--require-protection: the base branch does not enforce the required checks; nothing merged"
+    result="error"
+    exit 1
+  fi
+}
+check_protection
+
+# Merge-time recheck, run before EVERY merge attempt (the first and each retry): read the check runs on the pinned
+# head again and apply the same all-green rule. A check that is new, open or red since the settled poll aborts;
+# nothing is merged.
+merge_recheck() {
+  local rc=0
+  read_world "$pin" || rc=$?
+  if [[ $rc -ne 0 ]]; then
+    say "cannot re-read the check runs of ${pin} right before the merge; nothing merged"
+    result="error"
+    exit 1
+  fi
+  suites_a="$W_A"
+  suites_b="$W_B"
+  if [[ $W_SUITE_FAILED -eq 1 || "$W_A" != "$settled_a" || "$W_B" != "$settled_b" ]]; then
+    say "the check suites changed or could not be read right before the merge; nothing merged"
+    result="other-red"
+    exit 6
+  fi
+  evaluate "$W_LINES"
+  if [[ "$verdict" == red ]]; then
+    say "red right before the merge: ${detail}"
+    result="red"
+    exit 1
+  fi
+  if [[ "$verdict" != green || "$(fingerprint "$W_LINES")" != "$settle_fp" ]]; then
+    say "the check runs changed right before the merge (${detail}); nothing merged"
+    result="other-red"
+    exit 6
+  fi
+}
 
 # What gh says when a branch policy, not the code, is what stands in the way. Everything else
 # (a conflict, a closed pull request, a 403) is not retried. Messages seen in the maintainer's merge
@@ -728,6 +999,7 @@ attempt=0
 last_err=""
 while :; do
   attempt=$((attempt + 1))
+  merge_recheck
   args=(pr merge "$pr" -R "$repo" --squash --match-head-commit "$verified")
   [[ $delete_branch -eq 1 ]] && args+=(--delete-branch)
   if "$gh_bin" "${args[@]}" >/dev/null 2>"$errfile"; then

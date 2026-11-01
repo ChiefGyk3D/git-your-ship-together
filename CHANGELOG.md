@@ -23,6 +23,44 @@ name what a caller sees after that.
 - **Step names changed.** "Scan the full history (gitleaks)" is now "Scan the commits (gitleaks)". A caller that matches the
   step name should update it; job names are unchanged. Existing callers: nothing else changes unless they set the input.
 
+### Changed: `wait-ci` rechecks the check runs right before the merge (issue #263)
+
+- `scripts/wait-ci.sh --merge` re-reads the check runs on the pinned head immediately before the merge call and applies the same
+  all-green rule again. A new or open check, or a red one, stops the merge (exit 6, or exit 1 for a red gate).
+- The recheck now runs before every merge attempt, retries included, and also compares the check suite counts.
+- **New option `--require-protection`.** Before merging, the script reads the base branch's required status checks (branch
+  protection and rulesets) and a merge queue. Without the option it warns loudly when none cover the required contexts; with it,
+  that is exit 1. The script is a second line only: the atomic guarantee is GitHub-enforced required checks or a merge queue.
+- A required status check counts as coverage only when it is bound to the app whose check run the script evaluates, or to no app
+  (or `--any-app` was given); one bound to a different app is a warning, and exit 1 under `--require-protection`.
+- Bidirectional control characters in a check name are refused like other control characters and never printed.
+
+### Changed: `wait-ci` requires every check run on the pinned commit, not only the gate (issue #259)
+
+- **What changed.** After it pins the head SHA, `scripts/wait-ci.sh` (and the `wait-ci` action) now needs the named gate **and**
+  every other check run on that commit to be complete and not red. Success, skipped and neutral pass. A check that is queued or in
+  progress is waited for, within the existing `timeout` and `hung-after` and the existing `interval`; a completed run with no
+  conclusion is waited for too. Before this, a gate could pass while a separate workflow (a security scan, say) was still running
+  or had been missed.
+- **New exit code 6, result `other-red`.** The gate held but another check run failed, was cancelled, timed out, needed action,
+  failed to start or went stale. A failed gate is still exit 1. Callers that treat any non-zero exit as a refusal need no change;
+  one that matches exit 1 for a red non-gate check must also match 6.
+- **New optional inputs `allow-red` and `allow-red-reason`** (script: `--allow-red NAME`, repeatable, and `--allow-red-reason TEXT`).
+  Empty by default. A named non-gate check may then be red. It is a recorded exception: the reason is required and printed, a
+  required context cannot be listed, and an allowed check that is still open is still waited for.
+- **Late checks.** New optional input `require-check` (script: `--require-check NAME`, repeatable): a further required check that must
+  exist from the expected app and succeed; a missing one is waited for until `timeout` (exit 2), never green. Success is also
+  returned only after two consecutive polls, one `interval` apart, read the identical set of check runs; a new check name
+  between them restarts the wait. A green therefore takes one interval longer.
+- **`allow-red` scoping.** `NAME@APP` matches the name and the reporting app's slug; a bare name matches that name from any app.
+- **Same-named run from another app.** It is no longer ignored: it cannot satisfy the gate and is judged as an other check
+  (red is exit 6, open is waited for). `--any-app` still counts it as the gate.
+- **Control characters** in `allow-red`, `allow-red-reason`, `context` and `require-check` values are exit 64.
+- **Reruns.** The latest run per check name and app decides (`filter=latest`); documented, with tests.
+- **Tests.** `tests/test_wait_ci.py`: gate green with another check red (every failure conclusion), open (queued, in progress,
+  waiting, pending), skipped and neutral, the allow-list and its misuse, a moved head, more than one page of runs, and two runs
+  with the gate's name. Docs: [wait-ci](docs/wiki/Action-wait-ci.md).
+
 ## v1.26.0 (2026-10-30)
 
 ### New: `advanced-security` input in `security.yml` for a private repository without Advanced Security (issue #248)

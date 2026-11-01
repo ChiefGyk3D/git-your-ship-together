@@ -13,6 +13,7 @@ broken on purpose in the script to confirm these tests go red; the mutations are
 
 from __future__ import annotations
 
+import ast
 import http.server
 import inspect
 import json
@@ -183,7 +184,22 @@ def pulls_response(st):
     if st.get("head_read_fails"):
         return 502, None
     head = st.get("head_garbage") or current_head(st)
-    return 200, {"merged": st["merged"], "head": {"sha": head}, "merge_commit_sha": st.get("merge_commit_sha")}
+    return 200, {
+        "merged": st["merged"],
+        "head": {"sha": head},
+        "merge_commit_sha": st.get("merge_commit_sha"),
+        "base": {"ref": "main"},
+    }
+
+
+def protection_response(st, kind):
+    # GET rules/branches/main (kind "rules": the active rules) and branches/main/protection/required_status_checks
+    # (kind "classic"). None in the state is what GitHub sends when nothing is configured or readable: 404.
+    # The rules endpoint answers 200 with an empty list when no rule applies; the classic one answers 404.
+    body = st.get(kind, [] if kind == "rules" else None)
+    if body is None:
+        return 404, None
+    return 200, body
 
 
 FAKE_GH = r"""#!@PYTHON@
@@ -234,6 +250,13 @@ if argv[:1] == ["api"]:
             sys.exit(1)
         if st.get("head_warns"):
             sys.stderr.write("warning: a new gh is available\n")
+        emit(body)
+        sys.exit(0)
+    if "/rules/branches/" in path or "/protection/required_status_checks" in path:
+        code, body = protection_response(st, "rules" if "/rules/branches/" in path else "classic")
+        if code != 200:
+            sys.stderr.write("HTTP 404 Not Found\n")
+            sys.exit(1)
         emit(body)
         sys.exit(0)
     if "/check-runs" in path:
@@ -319,6 +342,7 @@ HELPER_SOURCE = "\n\n".join(
         runs_response,
         suites_response,
         pulls_response,
+        protection_response,
     )
 )
 
@@ -395,6 +419,12 @@ class World:
 
                 if re.fullmatch(r"/api/v3/repos/[^/]+/[^/]+/pulls/\d+", url.path):
                     return finish(*pulls_response(st))
+                if re.fullmatch(r"/api/v3/repos/[^/]+/[^/]+/rules/branches/[^/]+", url.path):
+                    return finish(*protection_response(st, "rules"))
+                if re.fullmatch(
+                    r"/api/v3/repos/[^/]+/[^/]+/branches/[^/]+/protection/required_status_checks", url.path
+                ):
+                    return finish(*protection_response(st, "classic"))
                 m = re.fullmatch(r"/api/v3/repos/[^/]+/[^/]+/commits/([0-9a-f]+)/check-suites", url.path)
                 if m:
                     return finish(*suites_response(st, m.group(1)))
@@ -480,6 +510,24 @@ class World:
 
 FAST = ("--interval", "10", "--timeout", "300", "--hung-after", "1000")
 
+# The real gh is a process plus a TLS round trip per request, so a scenario with a thousand runs costs it about ten
+# times what any other scenario costs, and the job running this file has a ten-minute limit. Scenarios that big stay
+# on the jq engine; the real gh gets lists of up to this many runs (two pages of 100 and a bit).
+GH_ENGINE_MAX_RUNS = 300
+
+
+def largest_snapshot(checks) -> int:
+    return max((len(snapshot) for snapshots in (checks or {}).values() for snapshot in snapshots), default=0)
+
+
+def require_affordable(engine: str, checks) -> None:
+    size = largest_snapshot(checks)
+    if engine == "gh" and size > GH_ENGINE_MAX_RUNS:
+        raise AssertionError(
+            f"a scenario with {size} check runs is too big for the real gh engine (limit {GH_ENGINE_MAX_RUNS}); "
+            "run it on the jq engine only, as the one-thousand-cap tests do"
+        )
+
 
 def shown(p: subprocess.CompletedProcess[str]) -> str:
     return f"exit={p.returncode}\n--stdout--\n{p.stdout}\n--stderr--\n{p.stderr}"
@@ -534,6 +582,7 @@ def world(tmp_path, request):
         if engine == "gh":
             need("gh", REAL_GH)
             kw["cert"] = request.getfixturevalue("tls_cert")
+        require_affordable(engine, kw.get("checks"))
         w = World(tmp_path, engine=engine, **kw)
         made.append(w)
         return w
@@ -654,7 +703,7 @@ def test_the_context_reporting_late_turns_it_green_on_that_poll(world):
     w = world(checks={A: [others, others, others + [running("CI green")], others + [ok("CI green")]]})
     p = w.run("--repo", SLUG, "--pr", "7", *FAST)
     assert p.returncode == 0, shown(p)
-    assert w.load()["check_polls"] == 5  # four polls and the confirming read
+    assert w.load()["check_polls"] == 7  # five polls and two confirming reads (the settle rule adds a poll)
 
 
 @pytest.mark.parametrize(
@@ -673,13 +722,13 @@ def test_the_context_reporting_late_turns_it_green_on_that_poll(world):
 )
 def test_context_matching_is_exact_no_suffix_case_glob_or_space_tricks(world, name):
     w = world(checks={A: [[ok(name), ok("lint")]]})
-    p = w.run("--repo", SLUG, "--pr", "7", "--interval", "10", "--timeout", "60")
+    p = w.run("--repo", SLUG, "--pr", "7", "--interval", "10", "--timeout", "30")
     assert p.returncode == 2, f"{name!r} must not satisfy 'CI green'\n" + shown(p)
 
 
 def test_a_glob_given_as_the_context_is_literal(world):
     w = world(checks={A: [[ok("CI green")]]})
-    p = w.run("--repo", SLUG, "--pr", "7", "--context", "CI *", "--interval", "10", "--timeout", "60")
+    p = w.run("--repo", SLUG, "--pr", "7", "--context", "CI *", "--interval", "10", "--timeout", "30")
     assert p.returncode == 2, shown(p)
 
 
@@ -691,7 +740,7 @@ def test_an_exact_name_among_lookalikes_is_green(world):
 
 def test_every_required_context_is_needed(world):
     w = world(checks={A: [[ok("CI green")]]})
-    p = w.run("--repo", SLUG, "--pr", "7", "--context", "CI green", "--context", "Security", "--timeout", "60")
+    p = w.run("--repo", SLUG, "--pr", "7", "--context", "CI green", "--context", "Security", "--timeout", "30")
     assert p.returncode == 2, shown(p)
     assert "'Security' not reported" in p.stdout
     w2 = world(checks={A: [[ok("CI green"), ok("Security")]]})
@@ -702,24 +751,27 @@ def test_every_required_context_is_needed(world):
 def test_a_context_that_is_skipped_or_neutral_is_not_green(world):
     for conclusion in ("skipped", "neutral"):
         w = world(checks={A: [[ok("lint"), done("CI green", conclusion)]]})
-        p = w.run("--repo", SLUG, "--pr", "7", "--interval", "10", "--timeout", "60")
+        p = w.run("--repo", SLUG, "--pr", "7", "--interval", "10", "--timeout", "30")
         assert p.returncode == 2, f"{conclusion}\n" + shown(p)
 
 
 def test_min_checks_counts_completed_runs(world):
     w = world(checks={A: [[ok("CI green"), running("a"), running("b")]]})
-    p = w.run("--repo", SLUG, "--pr", "7", "--min-checks", "3", "--interval", "10", "--timeout", "60")
+    p = w.run("--repo", SLUG, "--pr", "7", "--min-checks", "3", "--interval", "10", "--timeout", "30")
     assert p.returncode == 2, shown(p)
     assert "1 of 3" in p.stdout
-    w2 = world(checks={A: [[ok("CI green"), ok("a"), running("b")]]})
+    w2 = world(checks={A: [[ok("CI green"), ok("a"), ok("b")]]})
     q = w2.run("--repo", SLUG, "--pr", "7", "--min-checks", "2", *FAST)
     assert q.returncode == 0, shown(q)
 
 
-def test_a_pending_non_gate_check_does_not_block_a_green_gate(world):
-    w = world(checks={A: [[ok("CI green"), running("nightly")]]})
+def test_a_pending_non_gate_check_blocks_a_green_gate_until_it_finishes(world):
+    # Issue #259: the gate is not the only check. Waits while another run is open, then passes.
+    w = world(checks={A: [[ok("CI green"), running("nightly")], [ok("CI green"), ok("nightly")]]})
     p = w.run("--repo", SLUG, "--pr", "7", *FAST)
     assert p.returncode == 0, shown(p)
+    assert "waiting for 1 other check run(s)" in p.stdout
+    assert w.sleeps(), "it waited at least one interval"
 
 
 # --- who reported the check run ------------------------------------------------------
@@ -729,10 +781,10 @@ FOREIGN = 99999
 
 def test_a_same_named_run_from_another_app_is_not_green(world):
     w = world(checks={A: [[ok("lint"), ok("CI green", FOREIGN)]]})
-    p = w.run("--repo", SLUG, "--pr", "7", "--interval", "10", "--timeout", "60")
+    p = w.run("--repo", SLUG, "--pr", "7", "--interval", "10", "--timeout", "30")
     assert p.returncode == 2, shown(p)
     assert "verified" not in p.stdout
-    assert "ignored 1 run(s)" in p.stdout
+    assert "1 run(s) named like a required check come from an app other than" in p.stdout
 
 
 def test_a_same_named_run_from_the_right_app_is_green(world):
@@ -743,21 +795,22 @@ def test_a_same_named_run_from_the_right_app_is_green(world):
 
 def test_a_foreign_app_cannot_satisfy_the_gate_while_the_real_one_is_still_running(world):
     w = world(checks={A: [[ok("CI green", FOREIGN), running("CI green")]]})
-    p = w.run("--repo", SLUG, "--pr", "7", "--interval", "10", "--timeout", "60")
+    p = w.run("--repo", SLUG, "--pr", "7", "--interval", "10", "--timeout", "30")
     assert p.returncode == 2, shown(p)
 
 
-def test_a_failed_same_named_run_from_another_app_is_ignored_not_red(world):
-    # Documented choice: a foreign run that borrows a required name is ignored in both directions,
-    # so it can neither satisfy the gate nor block a gate the right app reported green.
+def test_a_failed_same_named_run_from_another_app_is_another_check_and_blocks(world):
+    # Issue #259 (review G4-3): a foreign run that borrows the gate name cannot satisfy the gate, and it is not
+    # ignored either: it is judged like every other check, so a red one refuses with exit 6.
     w = world(checks={A: [[done("CI green", "failure", FOREIGN), ok("CI green")]]})
     p = w.run("--repo", SLUG, "--pr", "7", *FAST)
-    assert p.returncode == 0, shown(p)
+    assert p.returncode == 6, shown(p)
+    assert "CI green (failure)" in p.stdout
 
 
 def test_a_failed_run_with_another_name_is_red_whatever_its_app(world):
     w = world(checks={A: [[ok("CI green"), done("other", "failure", FOREIGN)]]})
-    assert w.run("--repo", SLUG, "--pr", "7", *FAST).returncode == 1
+    assert w.run("--repo", SLUG, "--pr", "7", *FAST).returncode == 6
 
 
 def test_app_id_selects_the_expected_app(world):
@@ -822,6 +875,9 @@ HOSTILE_NAMES = {
     "paragraph separator U+2029": "a b",
     "trailing newline": "CI green\n",
     "escape": "a\x1b[31mb",
+    "bidi override U+202E": "Security ‮)sseccus( etag",
+    "bidi isolate U+2066": "a⁦b",
+    "left-to-right mark U+200E": "a‎b",
 }
 
 
@@ -899,14 +955,14 @@ def test_the_gate_on_the_second_page_is_found(world, engine):
     w = world(checks={A: [many]})
     p = w.run("--repo", SLUG, "--pr", "7", *FAST)
     assert p.returncode == 0, shown(p)
-    assert w.load()["pages_served"] == 4  # two pages, read twice (the second read confirms the first)
+    assert w.load()["pages_served"] == 8  # two pages, read twice per poll, two polls (the settle rule)
 
 
 @ENGINES
 def test_a_failure_on_the_second_page_is_red(world, engine):
     many = [ok(f"job {n}") for n in range(130)] + [done("late", "failure"), ok("CI green")]
     w = world(checks={A: [many]})
-    assert w.run("--repo", SLUG, "--pr", "7", *FAST).returncode == 1
+    assert w.run("--repo", SLUG, "--pr", "7", *FAST).returncode == 6
 
 
 @ENGINES
@@ -923,13 +979,13 @@ def test_a_failed_rerun_of_a_green_run_is_red(world, engine):
 
 def test_a_rerun_in_progress_after_a_green_run_is_not_green(world):
     w = world(checks={A: [[ok("CI green"), running("CI green")]]})
-    assert w.run("--repo", SLUG, "--pr", "7", "--interval", "10", "--timeout", "60").returncode == 2
+    assert w.run("--repo", SLUG, "--pr", "7", "--interval", "10", "--timeout", "30").returncode == 2
 
 
 @ENGINES
 def test_a_completed_run_with_a_null_conclusion_is_not_green(world, engine):
     w = world(checks={A: [[("completed", None, "CI green")]]})
-    p = w.run("--repo", SLUG, "--pr", "7", "--interval", "10", "--timeout", "60")
+    p = w.run("--repo", SLUG, "--pr", "7", "--interval", "10", "--timeout", "30")
     assert p.returncode == 2, shown(p)
 
 
@@ -956,7 +1012,7 @@ def test_any_other_merge_failure_is_not_retried(world, err):
     p = w.run("--repo", SLUG, "--pr", "7", "--merge", "--merge-retry-delay", "30", *FAST)
     assert p.returncode == 1, shown(p)
     assert len(w.merges()) == 1
-    assert w.sleeps() == []
+    assert w.sleeps()[1:] == [], "only the settle interval before the merge, no merge retry delay"
     assert "merge blocked: not a policy block" in p.stdout
     assert w.outputs()["result"] == "merge-blocked"
 
@@ -966,7 +1022,7 @@ def test_a_policy_or_required_check_block_is_retried(world, block):
     w = world(checks={A: [GATE]}, merge_results=[block, {"rc": 0}])
     p = w.run("--repo", SLUG, "--pr", "7", "--merge", "--merge-retry-delay", "30", *FAST)
     assert p.returncode == 0, shown(p)
-    assert len(w.merges()) == 2 and w.sleeps() == [30]
+    assert len(w.merges()) == 2 and w.sleeps()[1:] == [30]
 
 
 def test_a_policy_block_that_never_clears_says_so_after_the_bound(world):
@@ -1017,7 +1073,7 @@ def test_repeated_gh_errors_back_off_and_the_backoff_is_bounded(world):
     w = world(checks={A: [GATE]}, check_failures=8)
     p = w.run("--repo", SLUG, "--pr", "7", "--interval", "10", "--timeout", "100000", "--hung-after", "100000")
     assert p.returncode == 0, shown(p)
-    assert w.sleeps() == [10, 20, 40, 80, 80, 80, 80, 80]
+    assert w.sleeps() == [10, 20, 40, 80, 80, 80, 80, 80, 10]
 
 
 def test_gh_stderr_is_not_mixed_into_the_data_stream(world):
@@ -1084,7 +1140,7 @@ def test_each_number_has_a_documented_maximum_and_zero_only_where_it_is_legal(wo
         assert w.run(*with_option(option, "0")).returncode == 64
     else:
         assert w.run(*with_option(option, "0"), *FAST).returncode == 0
-    at_max = w.run(*with_option(option, str(high)), "--timeout", "60", "--interval", "10")
+    at_max = w.run(*with_option(option, str(high)), "--timeout", "30", "--interval", "10")
     assert at_max.returncode != 64, shown(at_max)
 
 
@@ -1094,34 +1150,34 @@ def test_each_number_has_a_documented_maximum_and_zero_only_where_it_is_legal(wo
 @ENGINES
 def test_a_total_count_larger_than_the_runs_seen_is_not_green(world, engine):
     w = world(checks={A: [GATE]}, total_count_override=5)
-    p = w.run("--repo", SLUG, "--pr", "7", "--interval", "10", "--timeout", "60")
+    p = w.run("--repo", SLUG, "--pr", "7", "--interval", "10", "--timeout", "30")
     assert p.returncode == 2, shown(p)
     assert "check-run list may be truncated" in p.stdout
     assert "verified" not in p.stdout
 
 
-@ENGINES
-def test_a_list_at_the_one_thousand_cap_is_not_green_even_when_it_is_consistent(world, engine):
+def test_a_list_at_the_one_thousand_cap_is_not_green_even_when_it_is_consistent(world):
+    # jq engine only: a thousand-run list costs the real gh ten times the cost of any other scenario here, and the
+    # real gh's paging and parsing is already exercised by the 130-run tests (see GH_ENGINE_MAX_RUNS).
     runs = [ok(f"job {n}") for n in range(999)] + [ok("CI green")]
     w = world(checks={A: [runs]})
-    p = w.run("--repo", SLUG, "--pr", "7", "--interval", "10", "--timeout", "60")
+    p = w.run("--repo", SLUG, "--pr", "7", "--interval", "10", "--timeout", "30")
     assert p.returncode == 2, shown(p)
     assert "check-run list may be truncated" in p.stdout
 
 
-@ENGINES
-def test_a_consistent_list_just_under_the_cap_is_green(world, engine):
+def test_a_consistent_list_just_under_the_cap_is_green(world):
     runs = [ok(f"job {n}") for n in range(998)] + [ok("CI green")]
     w = world(checks={A: [runs]})
     p = w.run("--repo", SLUG, "--pr", "7", *FAST)
     assert p.returncode == 0, shown(p)
-    assert w.load()["pages_served"] == 20  # ten pages, read twice
+    assert w.load()["pages_served"] == 40  # ten pages, read twice per poll, two polls
 
 
 @ENGINES
 def test_a_failure_that_is_visible_is_still_red_when_the_list_may_be_truncated(world, engine):
     w = world(checks={A: [[ok("CI green"), done("lint", "failure")]]}, total_count_override=50)
-    assert w.run("--repo", SLUG, "--pr", "7", *FAST).returncode == 1
+    assert w.run("--repo", SLUG, "--pr", "7", *FAST).returncode == 6
 
 
 @ENGINES
@@ -1147,10 +1203,10 @@ def test_runs_for_the_pinned_commit_are_green(world, engine):
 @ENGINES
 @pytest.mark.parametrize("suites", [1000, 1001, 5000])
 def test_a_suite_count_at_or_over_the_cap_is_not_green_however_few_runs_show(world, engine, suites):
-    # 600 runs, so the run count is nowhere near 1000, yet the suites say the answer may have been cut.
-    runs = [ok(f"job {n}") for n in range(599)] + [ok("CI green")]
+    # 130 runs (two pages), so the run count is nowhere near 1000, yet the suites say the answer may have been cut.
+    runs = [ok(f"job {n}") for n in range(129)] + [ok("CI green")]
     w = world(checks={A: [runs]}, suites=suites)
-    p = w.run("--repo", SLUG, "--pr", "7", "--interval", "10", "--timeout", "60")
+    p = w.run("--repo", SLUG, "--pr", "7", "--interval", "10", "--timeout", "30")
     assert p.returncode == 2, shown(p)
     assert "check-run list may be truncated" in p.stdout
     assert "verified" not in p.stdout
@@ -1162,13 +1218,12 @@ def test_999_suites_is_under_the_cap_and_green(world, engine):
     assert w.run("--repo", SLUG, "--pr", "7", *FAST).returncode == 0
 
 
-@ENGINES
-def test_600_runs_in_400_suites_is_green(world, engine):
+def test_600_runs_in_400_suites_is_green(world):
     runs = [ok(f"job {n}") for n in range(599)] + [ok("CI green")]
     w = world(checks={A: [runs]}, suites=400)
     p = w.run("--repo", SLUG, "--pr", "7", *FAST)
     assert p.returncode == 0, shown(p)
-    assert w.load()["pages_served"] == 12  # six pages, read twice
+    assert w.load()["pages_served"] == 24  # six pages, read twice per poll, two polls
 
 
 @ENGINES
@@ -1176,7 +1231,7 @@ def test_600_runs_in_400_suites_is_green(world, engine):
 def test_an_unreadable_suite_count_is_not_green(world, engine, label):
     value = {"null": None, "string": "7", "negative": -1, "float": 3.5, "huge": 10**12, "bool": True}[label]
     w = world(checks={A: [GATE]}, suites=value)
-    p = w.run("--repo", SLUG, "--pr", "7", "--interval", "10", "--timeout", "60")
+    p = w.run("--repo", SLUG, "--pr", "7", "--interval", "10", "--timeout", "30")
     assert p.returncode == 2, f"{label}\n" + shown(p)
     assert "check-run list may be truncated" in p.stdout
 
@@ -1184,7 +1239,7 @@ def test_an_unreadable_suite_count_is_not_green(world, engine, label):
 @ENGINES
 def test_a_missing_suite_count_is_not_green(world, engine):
     w = world(checks={A: [GATE]}, suites_missing=True)
-    p = w.run("--repo", SLUG, "--pr", "7", "--interval", "10", "--timeout", "60")
+    p = w.run("--repo", SLUG, "--pr", "7", "--interval", "10", "--timeout", "30")
     assert p.returncode == 2, shown(p)
     assert "check-run list may be truncated" in p.stdout
 
@@ -1201,7 +1256,7 @@ def test_a_failing_suite_call_is_not_green_and_backs_off(world, engine):
 @ENGINES
 def test_a_visible_failure_is_still_red_when_the_suite_count_is_over_the_cap(world, engine):
     w = world(checks={A: [[ok("CI green"), done("lint", "failure")]]}, suites=1000)
-    assert w.run("--repo", SLUG, "--pr", "7", *FAST).returncode == 1
+    assert w.run("--repo", SLUG, "--pr", "7", *FAST).returncode == 6
 
 
 @ENGINES
@@ -1212,10 +1267,10 @@ def test_the_suite_count_is_read_before_and_after_each_read_not_per_page(world, 
     p = w.run("--repo", SLUG, "--pr", "7", *FAST)
     assert p.returncode == 0, shown(p)
     st = w.load()
-    assert st["check_polls"] == 3  # the pending poll, the green poll and the confirming read
+    assert st["check_polls"] == 5  # the pending poll, then two green polls (the settle rule), each confirmed
     assert st["suite_calls"] == 2 * st["check_polls"], "the count is read before and after each read, not per page"
     asked = [c for c in w.calls() if "check-suites" in c]
-    assert len(asked) == 6 and all("per_page=1" in c for c in asked)
+    assert len(asked) == 10 and all("per_page=1" in c for c in asked)
 
 
 # --- a collection that changes while it is read ------------------------------------------------------------
@@ -1251,7 +1306,7 @@ def test_codex_repro_a_rerun_shifts_the_offsets_and_a_run_appears_on_two_pages(w
     first = page_of(101, hundred(1, gate_id=10))
     second = page_of(101, [raw_run(10, "CI green")])
     w = world(checks={}, runs_script=[first, second], runs_script_repeat=page_of(101, [raw_run(10, "CI green")]))
-    p = w.run("--repo", SLUG, "--pr", "7", "--interval", "10", "--timeout", "60")
+    p = w.run("--repo", SLUG, "--pr", "7", "--interval", "10", "--timeout", "30")
     assert p.returncode == 2, shown(p)
     assert "verified" not in p.stdout
     assert "changed while it was read" in p.stdout
@@ -1304,7 +1359,7 @@ def test_the_read_is_confirmed_by_a_second_identical_read(world, engine):
     w = world(checks={}, runs_script_repeat=page_of(3, gate))
     p = w.run("--repo", SLUG, "--pr", "7", *FAST)
     assert p.returncode == 0, shown(p)
-    assert w.load()["check_polls"] == 2, "one poll and the confirming read"
+    assert w.load()["check_polls"] == 4, "two polls (the settle rule), each with its confirming read"
 
 
 @ENGINES
@@ -1315,7 +1370,7 @@ def test_a_confirming_read_that_differs_is_not_trusted(world, engine):
     p = w.run("--repo", SLUG, "--pr", "7", *FAST)
     assert p.returncode == 0, shown(p)
     assert "waiting for a stable snapshot" in p.stdout
-    assert w.load()["check_polls"] == 4, "poll one differed on confirmation; poll two and its confirmation agreed"
+    assert w.load()["check_polls"] == 6, "poll one differed on confirmation; polls two and three agreed (settle)"
 
 
 @ENGINES
@@ -1364,7 +1419,7 @@ def test_a_suite_count_that_falls_below_the_cap_during_the_read_is_not_green(wor
     p = w.run("--repo", SLUG, "--pr", "7", *FAST)
     assert "check suite count changed while reading (1000 then 999)" in p.stdout
     assert p.returncode == 0, "the next, steady read is trusted"
-    assert w.load()["check_polls"] == 3
+    assert w.load()["check_polls"] == 5
 
 
 @ENGINES
@@ -1381,7 +1436,7 @@ def test_equal_readable_suite_counts_around_both_reads_are_green(world, engine):
     w = world(checks={A: [GATE]}, suites_script=[999, 999, 999, 999])
     p = w.run("--repo", SLUG, "--pr", "7", *FAST)
     assert p.returncode == 0, shown(p)
-    assert w.load()["suite_calls"] == 4
+    assert w.load()["suite_calls"] == 8  # two polls of four calls
 
 
 @ENGINES
@@ -1402,7 +1457,7 @@ def test_a_concurrent_merge_of_a_different_head_is_not_attributed_to_the_verifie
     w = world(
         checks={A: [GATE]},
         merge_results=[{"rc": 1, "err": "boom"}],
-        pulls_script=[PIN, PIN, PIN, PIN, {"merged": True, "head": {"sha": B}}],
+        pulls_script=[PIN, PIN, PIN, PIN, PIN, {"merged": True, "head": {"sha": B}}],
     )
     p = w.run("--repo", SLUG, "--pr", "7", "--merge", *FAST)
     assert p.returncode == 1, shown(p)
@@ -1447,7 +1502,7 @@ def test_an_unreadable_pull_request_after_a_successful_merge_call_is_an_error_no
     w = world(
         checks={A: [GATE]},
         merge_results=[{"rc": 0, "queued": True}],
-        pulls_script=[PIN, PIN, PIN, UNREADABLE[label]],
+        pulls_script=[PIN, PIN, PIN, PIN, UNREADABLE[label]],
     )
     p = w.run("--repo", SLUG, "--pr", "7", "--merge", *FAST)
     assert p.returncode == 1, f"{label}\n" + shown(p)
@@ -1461,7 +1516,7 @@ def test_an_unreadable_pull_request_after_a_failed_merge_call_is_an_error(world,
     w = world(
         checks={A: [GATE]},
         merge_results=[{"rc": 1, "err": "the base branch policy prohibits the merge"}],
-        pulls_script=[PIN, PIN, PIN, UNREADABLE[label]],
+        pulls_script=[PIN, PIN, PIN, PIN, UNREADABLE[label]],
     )
     p = w.run("--repo", SLUG, "--pr", "7", "--merge", *FAST)
     assert p.returncode == 1, f"{label}\n" + shown(p)
@@ -1552,14 +1607,14 @@ def test_a_failed_or_cancelled_gate_is_red(world, conclusion):
 def test_a_failed_check_is_red_even_when_the_gate_succeeded(world, conclusion):
     w = world(checks={A: [[ok("CI green"), done("deploy preview", conclusion)]]})
     p = w.run("--repo", SLUG, "--pr", "7", "--merge", *FAST)
-    assert p.returncode == 1, shown(p)
+    assert p.returncode == 6, shown(p)
     assert w.merges() == []
 
 
 def test_red_is_immediate_while_the_gate_is_still_running(world):
     w = world(checks={A: [[running("CI green"), done("lint", "failure")]]})
     p = w.run("--repo", SLUG, "--pr", "7", *FAST)
-    assert p.returncode == 1, shown(p)
+    assert p.returncode == 6, shown(p)
     assert w.sleeps() == []
 
 
@@ -1600,7 +1655,9 @@ def test_a_transient_api_failure_is_retried(world):
     w = world(checks={A: [GATE]}, check_failures=2)
     p = w.run("--repo", SLUG, "--pr", "7", *FAST)
     assert p.returncode == 0, shown(p)
-    assert w.load()["check_polls"] == 4  # two failed polls, a green one and the confirming read
+    assert (
+        w.load()["check_polls"] == 6
+    )  # two failed polls, then two green polls (the settle rule), each with its confirming read
 
 
 # --- merge ------------------------------------------------------------------------
@@ -1628,7 +1685,7 @@ def test_merge_retries_a_policy_block_a_bounded_number_of_times(world):
     p = w.run("--repo", SLUG, "--pr", "7", "--merge", "--merge-retry-delay", "30", *FAST)
     assert p.returncode == 0, shown(p)
     assert len(w.merges()) == 3
-    assert w.sleeps() == [30, 30]
+    assert w.sleeps()[1:] == [30, 30]
 
 
 def test_merge_gives_up_after_the_retry_bound_with_exit_1(world):
@@ -1837,12 +1894,581 @@ def test_the_action_rejects_a_merge_value_that_is_not_true_or_false(world):
     assert w.calls() == []
 
 
+# --- every check on the pinned head, not only the gate (issue #259) ------------------------------------------
+#
+# Decision table (gate = "CI green", other = any other check run on the same commit):
+#   gate success, other success / skipped / neutral          -> exit 0
+#   gate success, other queued / in progress                 -> wait, then 0 (or 2 timeout / 3 hung)
+#   gate success, other failure / cancelled / timed_out /
+#                 action_required / startup_failure          -> exit 6 (other-red), never merged
+#   gate success, other red but named in --allow-red         -> exit 0 (needs --allow-red-reason)
+#   gate failure (other anything)                            -> exit 1 (gate wins)
+#   head moves while an other check is open                  -> exit 4
+
+OTHER_RED = ["failure", "cancelled", "timed_out", "action_required", "startup_failure"]
+
+
+@pytest.mark.parametrize("conclusion", OTHER_RED)
+def test_gate_green_but_another_workflow_red_is_refused_with_exit_6(world, conclusion):
+    w = world(checks={A: [[ok("CI green"), done("Security / semgrep", conclusion)]]})
+    p = w.run("--repo", SLUG, "--pr", "7", "--merge", *FAST)
+    assert p.returncode == 6, shown(p)
+    assert "another check run is red" in p.stdout and "Security / semgrep" in p.stdout and conclusion in p.stdout
+    assert "verified" not in p.stdout
+    assert w.outputs()["result"] == "other-red"
+    assert w.merges() == []
+
+
+def test_a_red_gate_with_a_red_other_is_still_exit_1(world):
+    w = world(checks={A: [[done("CI green", "failure"), done("Security", "failure")]]})
+    p = w.run("--repo", SLUG, "--pr", "7", *FAST)
+    assert p.returncode == 1, shown(p)
+    assert w.outputs()["result"] == "red"
+
+
+@pytest.mark.parametrize("state", ["queued", "in_progress", "waiting", "pending"])
+def test_another_check_that_is_open_is_waited_for_then_passes(world, state):
+    open_run = (state, "", "Security / codeql", 15368)
+    w = world(
+        checks={A: [[ok("CI green"), open_run], [ok("CI green"), open_run], [ok("CI green"), ok("Security / codeql")]]}
+    )
+    p = w.run("--repo", SLUG, "--pr", "7", *FAST)
+    assert p.returncode == 0, shown(p)
+    assert "waiting for 1 other check run(s)" in p.stdout and "Security / codeql" in p.stdout
+    assert len(w.sleeps()) >= 2
+
+
+def test_another_check_that_stays_open_times_out_with_exit_2(world):
+    w = world(checks={A: [[ok("CI green"), running("Security / semgrep")]]})
+    p = w.run("--repo", SLUG, "--pr", "7", "--interval", "10", "--timeout", "30")
+    assert p.returncode == 2, shown(p)
+    assert "verified" not in p.stdout
+    assert w.merges() == []
+
+
+def test_another_check_that_turns_red_while_waited_for_is_exit_6(world):
+    w = world(checks={A: [[ok("CI green"), running("Security")], [ok("CI green"), done("Security", "failure")]]})
+    p = w.run("--repo", SLUG, "--pr", "7", *FAST)
+    assert p.returncode == 6, shown(p)
+
+
+def test_a_completed_other_check_without_a_conclusion_is_waited_for(world):
+    w = world(checks={A: [[ok("CI green"), ("completed", "", "Security", 15368)]]})
+    assert w.run("--repo", SLUG, "--pr", "7", "--interval", "10", "--timeout", "30").returncode == 2
+
+
+@pytest.mark.parametrize("conclusion", ["skipped", "neutral", "success"])
+def test_skipped_and_neutral_other_checks_pass(world, conclusion):
+    w = world(checks={A: [[ok("CI green"), done("optional scan", conclusion), done("docs", conclusion)]]})
+    p = w.run("--repo", SLUG, "--pr", "7", "--merge", *FAST)
+    assert p.returncode == 0, shown(p)
+    assert f"verified {A}" in p.stdout
+    assert len(w.merges()) == 1
+
+
+def test_the_allow_list_lets_a_named_check_be_red_and_records_the_reason(world):
+    w = world(checks={A: [[ok("CI green"), done("nightly canary", "failure")]]})
+    p = w.run(
+        "--repo", SLUG, "--pr", "7", "--allow-red", "nightly canary", "--allow-red-reason", "EX-0001 canary", *FAST
+    )
+    assert p.returncode == 0, shown(p)
+    assert "recorded exception" in p.stdout and "nightly canary" in p.stdout and "EX-0001 canary" in p.stdout
+    assert "1 allowed red" in p.stdout
+
+
+def test_the_allow_list_is_exact_and_other_red_checks_still_refuse(world):
+    w = world(checks={A: [[ok("CI green"), done("nightly canary", "failure"), done("Security", "failure")]]})
+    args = ("--allow-red", "nightly canary", "--allow-red-reason", "canary", *FAST)
+    assert w.run("--repo", SLUG, "--pr", "7", *args).returncode == 6
+    w2 = world(checks={A: [[ok("CI green"), done("nightly canary 2", "failure")]]})
+    assert w2.run("--repo", SLUG, "--pr", "7", *args).returncode == 6
+
+
+def test_an_allowed_check_that_is_still_open_is_waited_for(world):
+    w = world(checks={A: [[ok("CI green"), running("nightly canary")]]})
+    p = w.run(
+        "--repo",
+        SLUG,
+        "--pr",
+        "7",
+        "--allow-red",
+        "nightly canary",
+        "--allow-red-reason",
+        "r",
+        "--interval",
+        "10",
+        "--timeout",
+        "60",
+    )
+    assert p.returncode == 2, shown(p)
+
+
+def test_the_allow_list_is_empty_by_default(world):
+    # Negative control: the same red check passes only when it is named.
+    w = world(checks={A: [[ok("CI green"), done("nightly canary", "failure")]]})
+    assert w.run("--repo", SLUG, "--pr", "7", *FAST).returncode == 6
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["--allow-red", "x"],  # no reason
+        ["--allow-red", "x", "--allow-red-reason", "   "],
+        ["--allow-red-reason", "why"],  # reason without a name
+        ["--allow-red", "", "--allow-red-reason", "why"],
+        ["--allow-red", "CI green", "--allow-red-reason", "why"],  # the gate cannot be allowed to fail
+        ["--allow-red", "a\nb", "--allow-red-reason", "why"],
+        ["--allow-red", "x", "--allow-red-reason", "two\nlines"],
+    ],
+)
+def test_the_allow_list_misuse_is_exit_64_and_calls_nothing(world, args):
+    w = world(checks={A: [GATE]})
+    p = w.run("--repo", SLUG, "--pr", "7", *args)
+    assert p.returncode == 64, shown(p)
+    assert w.calls() == []
+
+
+def test_the_head_moving_while_another_check_is_open_is_exit_4(world):
+    w = world(
+        checks={A: [[ok("CI green"), running("Security")]], B: [GATE]},
+        moves=[{"after_check_polls": 1, "head": B}],
+    )
+    p = w.run("--repo", SLUG, "--pr", "7", *FAST)
+    assert p.returncode == 4, shown(p)
+    assert set(w.load()["check_shas"]) == {A}
+
+
+@ENGINES
+def test_more_than_thirty_check_runs_are_all_read_pending_on_the_last_page_waits(world, engine):
+    many = [ok(f"job {n}") for n in range(130)] + [ok("CI green")]
+    w = world(checks={A: [many + [running("Security / late")], many + [ok("Security / late")]]})
+    p = w.run("--repo", SLUG, "--pr", "7", *FAST)
+    assert p.returncode == 0, shown(p)
+    assert "waiting for 1 other check run(s)" in p.stdout
+
+
+@ENGINES
+def test_more_than_thirty_check_runs_a_red_one_on_a_late_page_is_exit_6(world, engine):
+    many = [ok(f"job {n}") for n in range(40)] + [ok("CI green")] + [done("Security / secrets", "failure")]
+    w = world(checks={A: [many]})
+    p = w.run("--repo", SLUG, "--pr", "7", *FAST)
+    assert p.returncode == 6, shown(p)
+    assert "Security / secrets" in p.stdout
+
+
+def test_two_gate_named_runs_from_different_apps_must_both_be_green(world):
+    # --any-app makes both count; the right-app one alone is not enough.
+    both = [ok("CI green"), ok("CI green", FOREIGN)]
+    p = world(checks={A: [both]}).run("--repo", SLUG, "--pr", "7", "--any-app", *FAST)
+    assert p.returncode == 0, shown(p)
+    p = world(checks={A: [[ok("CI green"), running("CI green", FOREIGN)]]}).run(
+        "--repo", SLUG, "--pr", "7", "--any-app", "--interval", "10", "--timeout", "30"
+    )
+    assert p.returncode == 2, shown(p)
+    p = world(checks={A: [[ok("CI green"), done("CI green", "failure", FOREIGN)]]}).run(
+        "--repo", SLUG, "--pr", "7", "--any-app", *FAST
+    )
+    assert p.returncode == 1, shown(p)
+    p = world(checks={A: [[ok("CI green"), done("CI green", "skipped", FOREIGN)]]}).run(
+        "--repo", SLUG, "--pr", "7", "--any-app", "--interval", "10", "--timeout", "30"
+    )
+    assert p.returncode == 2, shown(p)
+
+
+def test_two_gate_named_runs_with_the_same_name_in_one_page_must_both_be_green(world):
+    # Both runs share name and app, which the real latest filter would collapse; serve them as served (filter=all
+    # semantics via a scripted page) so the script itself must refuse the pair when one is not a success.
+    pair = page_of(2, [raw_run(1, "CI green"), raw_run(2, "CI green", conclusion="failure")])
+    w = world(checks={A: [[]]}, runs_script_repeat=pair)
+    assert w.run("--repo", SLUG, "--pr", "7", *FAST).returncode == 1
+    good = page_of(2, [raw_run(1, "CI green"), raw_run(2, "CI green")])
+    assert world(checks={A: [[]]}, runs_script_repeat=good).run("--repo", SLUG, "--pr", "7", *FAST).returncode == 0
+    open_pair = page_of(2, [raw_run(1, "CI green"), raw_run(2, "CI green", status="in_progress", conclusion=None)])
+    p = world(checks={A: [[]]}, runs_script_repeat=open_pair).run(
+        "--repo", SLUG, "--pr", "7", "--interval", "10", "--timeout", "30"
+    )
+    assert p.returncode == 2, shown(p)
+
+
+def test_the_action_passes_the_allow_list_and_reason_and_exit_6_through(world):
+    w = world(checks={A: [[ok("CI green"), done("Security", "failure")]]})
+    assert run_action(w, **BASE_INPUTS).returncode == 6
+    p = run_action(w, **BASE_INPUTS, **{"allow-red": "Security", "allow-red-reason": "recorded exception"})
+    assert p.returncode == 0, shown(p)
+
+
+# --- review of PR 262 (issue #259): late checks, app scoping, control characters, reruns ------------------------
+#
+# Rules chosen and tested here:
+#   * success needs two consecutive polls, one interval apart, that read the identical set of check runs
+#     (id, status, conclusion, app, name); a new name between them restarts the wait (G4-1)
+#   * --require-check NAME: a further required context; missing -> waits to exit 2, red -> exit 1 (G4-1)
+#   * --allow-red NAME@APP matches name and app slug; a bare NAME matches any app (G4-2)
+#   * a same-named run from another app is another check, not the gate (G4-3)
+#   * control characters in --allow-red, its reason, --context, --require-check: exit 64 (G4-4)
+#   * reruns: the LATEST run per (name, app) decides, as GitHub's filter=latest returns (G4-5)
+
+
+def test_a_stable_list_is_believed_after_exactly_one_interval(world):
+    w = world(checks={A: [GATE]})
+    p = w.run("--repo", SLUG, "--pr", "7", *FAST)
+    assert p.returncode == 0, shown(p)
+    assert w.sleeps() == [10], "two polls, one interval apart"
+    assert "settling" in p.stdout
+
+
+def test_a_check_that_appears_between_the_two_reads_restarts_the_wait_and_is_judged(world):
+    late = GATE + [ok("Security / late")]
+    w = world(checks={A: [GATE, GATE, late]})
+    p = w.run("--repo", SLUG, "--pr", "7", *FAST)
+    assert p.returncode == 0, shown(p)
+    assert len(w.sleeps()) == 2, "the new name restarted the settle: three polls"
+
+
+def test_a_late_red_check_that_appears_after_the_first_good_read_is_exit_6(world):
+    w = world(checks={A: [GATE, GATE, GATE + [done("Security / late", "failure")]]})
+    p = w.run("--repo", SLUG, "--pr", "7", "--merge", *FAST)
+    assert p.returncode == 6, shown(p)
+    assert w.merges() == []
+
+
+def test_a_check_that_turns_red_just_before_the_merge_aborts_with_exit_6(world):
+    late_red = GATE + [done("Security / late", "failure")]
+    w = world(checks={A: [GATE, GATE, GATE, GATE, late_red]}, merge_results=[{"rc": 0}])
+    p = w.run("--repo", SLUG, "--pr", "7", "--merge", *FAST)
+    assert p.returncode == 6, shown(p)
+    assert w.merges() == []
+
+
+def test_a_check_that_is_pending_just_before_the_merge_aborts_with_exit_6(world):
+    late_open = GATE + [running("Security / late")]
+    w = world(checks={A: [GATE, GATE, GATE, GATE, late_open]}, merge_results=[{"rc": 0}])
+    p = w.run("--repo", SLUG, "--pr", "7", "--merge", *FAST)
+    assert p.returncode == 6, shown(p)
+    assert w.merges() == []
+
+
+@pytest.mark.parametrize("tail", [[5, 5], ["@fail", "@fail"]], ids=["count-changed", "call-failed"])
+def test_the_suite_counts_are_rechecked_just_before_the_merge(world, tail):
+    # Two polls read the suite count four times each (before and after, again for the confirming read);
+    # the ninth and tenth requests are the merge-time recheck.
+    w = world(checks={A: [GATE]}, suites_script=[3] * 8 + tail, suites_script_repeat=3, merge_results=[{"rc": 0}])
+    p = w.run("--repo", SLUG, "--pr", "7", "--merge", *FAST)
+    assert p.returncode == 6, shown(p)
+    assert w.merges() == []
+
+
+# --- review of PR 262, round 3 (issue #263): retries, protection, display ----------------------------------------
+
+
+def test_a_check_that_turns_red_between_merge_retries_aborts_with_exit_6(world):
+    late = GATE + [done("Security / late", "failure")]
+    w = world(checks={A: [GATE] * 5 + [late]}, merge_results=[POLICY, {"rc": 0}])
+    p = w.run("--repo", SLUG, "--pr", "7", "--merge", *FAST)
+    assert p.returncode == 6, shown(p)
+    assert len(w.merges()) == 1, "the retry must not reach gh pr merge"
+
+
+def test_a_check_that_is_pending_between_merge_retries_aborts_with_exit_6(world):
+    late = GATE + [running("Security / late")]
+    w = world(checks={A: [GATE] * 5 + [late]}, merge_results=[POLICY, {"rc": 0}])
+    p = w.run("--repo", SLUG, "--pr", "7", "--merge", *FAST)
+    assert p.returncode == 6, shown(p)
+    assert len(w.merges()) == 1
+
+
+def test_an_unchanged_check_list_between_merge_retries_still_merges(world):
+    w = world(checks={A: [GATE]}, merge_results=[POLICY, {"rc": 0}])
+    p = w.run("--repo", SLUG, "--pr", "7", "--merge", *FAST)
+    assert p.returncode == 0, shown(p)
+    assert len(w.merges()) == 2
+
+
+RULE_ALL = [{"type": "required_status_checks", "parameters": {"required_status_checks": [{"context": "CI green"}]}}]
+RULE_OTHER = [{"type": "required_status_checks", "parameters": {"required_status_checks": [{"context": "other"}]}}]
+
+
+def test_no_required_checks_on_the_base_branch_is_a_loud_warning_by_default(world):
+    w = world(checks={A: [GATE]})
+    p = w.run("--repo", SLUG, "--pr", "7", "--merge", *FAST)
+    assert p.returncode == 0, shown(p)
+    assert "WARNING" in p.stdout and "no required status checks" in p.stdout
+    assert len(w.merges()) == 1
+
+
+def test_no_required_checks_fails_under_require_protection(world):
+    w = world(checks={A: [GATE]})
+    p = w.run("--repo", SLUG, "--pr", "7", "--merge", "--require-protection", *FAST)
+    assert p.returncode == 1, shown(p)
+    assert w.merges() == []
+    assert w.outputs()["result"] == "error"
+
+
+def test_required_checks_that_miss_the_gate_do_not_count(world):
+    w = world(checks={A: [GATE]}, rules=RULE_OTHER)
+    p = w.run("--repo", SLUG, "--pr", "7", "--merge", "--require-protection", *FAST)
+    assert p.returncode == 1, shown(p)
+    assert "none cover" in p.stdout
+    assert w.merges() == []
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"rules": RULE_ALL},
+        {"classic": {"contexts": ["CI green"], "checks": []}},
+        {"classic": {"contexts": [], "checks": [{"context": "CI green", "app_id": 15368}]}},
+        {"rules": [{"type": "merge_queue", "parameters": {}}]},
+    ],
+    ids=["ruleset", "classic-contexts", "classic-checks", "merge-queue"],
+)
+def test_github_enforced_required_checks_satisfy_require_protection(world, extra):
+    w = world(checks={A: [GATE]}, merge_results=[{"rc": 0}], **extra)
+    p = w.run("--repo", SLUG, "--pr", "7", "--merge", "--require-protection", *FAST)
+    assert p.returncode == 0, shown(p)
+    assert "WARNING" not in p.stdout
+    assert len(w.merges()) == 1
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"classic": {"contexts": [], "checks": [{"context": "CI green", "app_id": 57789}]}},
+        {
+            "rules": [
+                {
+                    "type": "required_status_checks",
+                    "parameters": {"required_status_checks": [{"context": "CI green", "integration_id": 57789}]},
+                }
+            ]
+        },
+    ],
+    ids=["classic-other-app", "ruleset-other-app"],
+)
+def test_protection_bound_to_a_different_app_does_not_cover_the_gate(world, extra):
+    w = world(checks={A: [GATE]}, **extra)
+    p = w.run("--repo", SLUG, "--pr", "7", "--merge", "--require-protection", *FAST)
+    assert p.returncode == 1, shown(p)
+    assert "WARNING" in p.stdout and "none cover" in p.stdout
+    assert w.merges() == []
+    warn = w.run("--repo", SLUG, "--pr", "7", "--merge", *FAST)
+    assert warn.returncode == 0, shown(warn)
+    assert "WARNING" in warn.stdout
+
+
+def test_a_legacy_contexts_entry_does_not_hide_an_app_bound_check_of_the_same_name(world):
+    extra = {"classic": {"contexts": ["CI green"], "checks": [{"context": "CI green", "app_id": 57789}]}}
+    w = world(checks={A: [GATE]}, **extra)
+    p = w.run("--repo", SLUG, "--pr", "7", "--merge", "--require-protection", *FAST)
+    assert p.returncode == 1, shown(p)
+    assert "none cover" in p.stdout
+    assert w.merges() == []
+
+
+def test_an_app_id_of_minus_one_means_any_app(world):
+    extra = {"classic": {"contexts": ["CI green"], "checks": [{"context": "CI green", "app_id": -1}]}}
+    w = world(checks={A: [GATE]}, **extra)
+    p = w.run("--repo", SLUG, "--pr", "7", "--merge", "--require-protection", *FAST)
+    assert p.returncode == 0, shown(p)
+
+
+def test_protection_bound_to_a_different_app_counts_with_any_app(world):
+    extra = {"classic": {"contexts": [], "checks": [{"context": "CI green", "app_id": 57789}]}}
+    w = world(checks={A: [GATE]}, **extra)
+    p = w.run("--repo", SLUG, "--pr", "7", "--merge", "--require-protection", "--any-app", *FAST)
+    assert p.returncode == 0, shown(p)
+
+
+def test_a_bidirectional_control_character_in_a_name_never_reaches_a_log_line(world):
+    w = world(checks={A: [[ok("lint"), done("Security ‮)sseccus( etag", "failure", 57789)]]})
+    p = w.run("--repo", SLUG, "--pr", "7", "--merge", *FAST)
+    assert p.returncode == 1, shown(p)
+    assert not any(c in p.stdout + p.stderr for c in "‮⁦‎")
+    assert w.merges() == []
+
+
+def test_an_unchanged_check_list_just_before_the_merge_still_merges(world):
+    w = world(checks={A: [GATE]}, merge_results=[{"rc": 0}])
+    p = w.run("--repo", SLUG, "--pr", "7", "--merge", *FAST)
+    assert p.returncode == 0, shown(p)
+    assert len(w.merges()) == 1
+
+
+def test_a_late_open_check_is_waited_for(world):
+    w = world(
+        checks={
+            A: [
+                GATE,
+                GATE,
+                GATE + [running("Security / late")],
+                GATE + [running("Security / late")],
+                GATE + [ok("Security / late")],
+            ]
+        }
+    )
+    p = w.run("--repo", SLUG, "--pr", "7", *FAST)
+    assert p.returncode == 0, shown(p)
+    assert "Security / late" in p.stdout
+
+
+def test_a_list_that_keeps_growing_never_settles_and_times_out(world):
+    snaps = [GATE + [ok(f"extra {n}") for n in range(k)] for k in range(1, 40)]
+    w = world(checks={A: snaps})
+    p = w.run("--repo", SLUG, "--pr", "7", "--interval", "10", "--timeout", "30", "--hung-after", "1000")
+    assert p.returncode == 2, shown(p)
+    assert "verified" not in p.stdout
+
+
+def test_a_required_check_that_never_appears_is_exit_2_never_green(world):
+    w = world(checks={A: [GATE]})
+    p = w.run("--repo", SLUG, "--pr", "7", "--require-check", "Security / scan", "--interval", "10", "--timeout", "30")
+    assert p.returncode == 2, shown(p)
+    assert "'Security / scan' not reported" in p.stdout
+    assert "verified" not in p.stdout
+
+
+def test_a_required_check_that_appears_late_is_waited_for_then_passes(world):
+    w = world(
+        checks={
+            A: [
+                GATE,
+                GATE,
+                GATE + [running("Security / scan")],
+                GATE + [running("Security / scan")],
+                GATE + [ok("Security / scan")],
+            ]
+        }
+    )
+    p = w.run("--repo", SLUG, "--pr", "7", "--require-check", "Security / scan", *FAST)
+    assert p.returncode == 0, shown(p)
+
+
+def test_a_required_check_that_fails_is_red_and_one_from_another_app_does_not_count(world):
+    w = world(checks={A: [GATE + [done("Security / scan", "failure")]]})
+    assert w.run("--repo", SLUG, "--pr", "7", "--require-check", "Security / scan", *FAST).returncode == 1
+    w2 = world(checks={A: [GATE + [ok("Security / scan", FOREIGN)]]})
+    p = w2.run("--repo", SLUG, "--pr", "7", "--require-check", "Security / scan", "--interval", "10", "--timeout", "30")
+    assert p.returncode == 2, shown(p)
+
+
+def test_require_check_keeps_the_default_gate(world):
+    w = world(checks={A: [[ok("Security / scan")]]})
+    p = w.run("--repo", SLUG, "--pr", "7", "--require-check", "Security / scan", "--interval", "10", "--timeout", "30")
+    assert p.returncode == 2, shown(p)
+    assert "'CI green' not reported" in p.stdout
+
+
+def test_the_allow_list_can_be_scoped_to_an_app_and_a_bare_name_matches_any_app(world):
+    red_a = done("canary", "failure", 111)
+    red_b = done("canary", "failure", 222)
+    args = ("--allow-red-reason", "r", *FAST)
+    # one red canary from app 111, allowed with its slug: passes
+    w = world(checks={A: [GATE + [red_a]]})
+    assert w.run("--repo", SLUG, "--pr", "7", "--allow-red", "canary@app-111", *args).returncode == 0
+    # the same red name from another app is not excused by the scoped entry
+    w = world(checks={A: [GATE + [red_a, red_b]]})
+    p = w.run("--repo", SLUG, "--pr", "7", "--allow-red", "canary@app-111", *args)
+    assert p.returncode == 6, shown(p)
+    w = world(checks={A: [GATE + [red_b]]})
+    assert w.run("--repo", SLUG, "--pr", "7", "--allow-red", "canary@app-111", *args).returncode == 6
+    # a bare name excuses the name from any app, as documented
+    w = world(checks={A: [GATE + [red_a, red_b]]})
+    assert w.run("--repo", SLUG, "--pr", "7", "--allow-red", "canary", *args).returncode == 0
+    # both scoped
+    w = world(checks={A: [GATE + [red_a, red_b]]})
+    assert (
+        w.run(
+            "--repo", SLUG, "--pr", "7", "--allow-red", "canary@app-111", "--allow-red", "canary@app-222", *args
+        ).returncode
+        == 0
+    )
+
+
+def test_a_gate_name_with_an_app_suffix_cannot_be_allowed(world):
+    w = world(checks={A: [GATE]})
+    p = w.run("--repo", SLUG, "--pr", "7", "--allow-red", "CI green@app-15368", "--allow-red-reason", "r")
+    assert p.returncode == 64, shown(p)
+
+
+def test_a_same_named_open_run_from_another_app_is_waited_for(world):
+    w = world(checks={A: [[ok("CI green"), running("CI green", FOREIGN)]]})
+    p = w.run("--repo", SLUG, "--pr", "7", "--interval", "10", "--timeout", "30")
+    assert p.returncode == 2, shown(p)
+    assert "waiting for 1 other check run(s)" in p.stdout
+
+
+def test_a_same_named_green_run_from_another_app_passes_as_another_check(world):
+    w = world(checks={A: [[ok("CI green"), ok("CI green", FOREIGN)]]})
+    assert w.run("--repo", SLUG, "--pr", "7", *FAST).returncode == 0
+
+
+CONTROL_TEXT = [
+    "a\rb",
+    "a\tb",
+    "a\x1bb",
+    "a\x7fb",
+    "a\u0085b",
+    "a\u2028b",
+    "a\u2029b",
+    "plain\r::error title=forged::x",
+]
+
+
+@pytest.mark.parametrize("text", CONTROL_TEXT, ids=lambda t: repr(t))
+@pytest.mark.parametrize("where", ["reason", "allow", "context", "require"])
+def test_a_control_character_in_a_name_or_the_reason_is_exit_64_and_never_logged(world, where, text):
+    w = world(checks={A: [GATE]})
+    args = {
+        "reason": ["--allow-red", "x", "--allow-red-reason", text],
+        "allow": ["--allow-red", text, "--allow-red-reason", "r"],
+        "context": ["--context", text],
+        "require": ["--require-check", text],
+    }[where]
+    p = w.run("--repo", SLUG, "--pr", "7", *args)
+    assert p.returncode == 64, shown(p)
+    assert w.calls() == []
+    assert "\r" not in p.stdout + p.stderr and "::error" not in p.stdout
+
+
+def test_a_plain_reason_is_logged_as_given(world):
+    w = world(checks={A: [GATE + [done("x", "failure")]]})
+    p = w.run("--repo", SLUG, "--pr", "7", "--allow-red", "x", "--allow-red-reason", "EX-0001: canary, see #12", *FAST)
+    assert p.returncode == 0, shown(p)
+    assert "reason: EX-0001: canary, see #12" in p.stdout
+
+
+def test_rerun_rule_the_latest_run_per_name_and_app_decides_for_other_checks(world):
+    # red then green (a successful rerun): green. green then red: red. red then open: waits.
+    w = world(checks={A: [GATE + [done("Security", "failure"), ok("Security")]]})
+    assert w.run("--repo", SLUG, "--pr", "7", *FAST).returncode == 0
+    w = world(checks={A: [GATE + [ok("Security"), done("Security", "failure")]]})
+    assert w.run("--repo", SLUG, "--pr", "7", *FAST).returncode == 6
+    w = world(checks={A: [GATE + [done("Security", "failure"), running("Security")]]})
+    assert w.run("--repo", SLUG, "--pr", "7", "--interval", "10", "--timeout", "30").returncode == 2
+    # a red run from another app with the same name is a different check and still blocks
+    w = world(checks={A: [GATE + [done("Security", "failure", 111), ok("Security")]]})
+    assert w.run("--repo", SLUG, "--pr", "7", *FAST).returncode == 6
+
+
+def test_a_rerun_that_appears_after_the_first_read_restarts_the_settle(world):
+    red_then_green = GATE + [done("Security", "failure")]
+    w = world(checks={A: [GATE + [ok("Security")], GATE + [ok("Security")], red_then_green]})
+    assert w.run("--repo", SLUG, "--pr", "7", *FAST).returncode == 6
+
+
+def test_the_action_takes_require_check_one_per_line(world):
+    w = world(checks={A: [GATE]})
+    p = run_action(w, **{**BASE_INPUTS, "require-check": "Security / scan\nDeploy preview", "timeout": "60"})
+    assert p.returncode == 2, shown(p)
+    assert "'Security / scan' not reported" in p.stdout and "'Deploy preview' not reported" in p.stdout
+
+
 # --- docs -------------------------------------------------------------------------------
 
 
 def test_the_page_documents_every_exit_code_and_input():
     text = PAGE.read_text()
-    for code in ("0", "1", "2", "3", "4", "5", "64"):
+    for code in ("0", "1", "2", "3", "4", "5", "6", "64"):
         assert re.search(rf"^\| `{code}` \|", text, re.M), f"exit code {code} is not in the page's table"
     for name in action()["inputs"]:
         assert f"`{name}`" in text, f"input {name} is not documented"
@@ -1851,7 +2477,7 @@ def test_the_page_documents_every_exit_code_and_input():
 
 def test_the_script_header_and_page_agree_on_the_exit_codes():
     header = {m.group(1) for m in re.finditer(r"^#\s+(\d+)\s{2,}", SCRIPT.read_text(), re.M)}
-    assert header == {"0", "1", "2", "3", "4", "5", "64"}
+    assert header == {"0", "1", "2", "3", "4", "5", "6", "64"}
 
 
 def test_the_action_is_listed_in_the_readme_and_repository_map():
@@ -1864,3 +2490,50 @@ def test_the_changelog_names_the_watcher():
     changelog = (REPO / "CHANGELOG.md").read_text()
     release = changelog.split("## v1.26.0", 1)[1].split("\n## ", 1)[0]
     assert "wait-ci" in release and "#223" in release
+
+
+# --- the suite stays affordable ------------------------------------------------------------------------------------
+# tests/test_wait_ci.py is process-bound (every scenario spawns the script, a fake gh and jq several times), so its cost
+# is its test count times a second or so. The job running it (ci.yml, "Test the workflows") passed in six minutes on
+# main and hit its ten-minute limit on the pull request that added 117 tests here. Scenarios that build over a
+# thousand runs cost ten times the rest on the real gh, so they run on the jq engine only.
+
+
+def oversized_engine_tests(source: str, limit: int) -> tuple[list[str], list[str]]:
+    """(tests that build a list over `limit` runs, the ones among them that also take the `engine` argument)."""
+    big, on_both = [], []
+    for node in ast.walk(ast.parse(source)):
+        if not (isinstance(node, ast.FunctionDef) and node.name.startswith("test_")):
+            continue
+        sizes = [
+            arg.value
+            for call in ast.walk(node)
+            if isinstance(call, ast.Call) and getattr(call.func, "id", "") == "range"
+            for arg in call.args
+            if isinstance(arg, ast.Constant) and isinstance(arg.value, int)
+        ]
+        if any(size >= limit for size in sizes):
+            big.append(node.name)
+            if "engine" in [a.arg for a in node.args.args]:
+                on_both.append(node.name)
+    return big, on_both
+
+
+def test_the_real_gh_engine_refuses_a_scenario_over_the_limit():
+    many = lambda n: {A: [[ok(f"job {i}") for i in range(n)]]}  # noqa: E731
+    require_affordable("gh", many(GH_ENGINE_MAX_RUNS))
+    require_affordable("jq", many(1000))
+    with pytest.raises(AssertionError, match="too big for the real gh engine"):
+        require_affordable("gh", many(GH_ENGINE_MAX_RUNS + 1))
+    assert largest_snapshot(None) == 0 and largest_snapshot({A: [[], [ok("a")] * 3]}) == 3
+
+
+def test_no_thousand_run_test_takes_the_engine_argument():
+    big, on_both = oversized_engine_tests(Path(__file__).read_text(), GH_ENGINE_MAX_RUNS)
+    assert len(big) >= 3, f"the thousand-run tests were not found, the guard looks at nothing: {big}"
+    assert on_both == [], f"these build over {GH_ENGINE_MAX_RUNS} runs and would run on the real gh too: {on_both}"
+    # The guard bites: the same check flags a test written the way the slow ones used to be.
+    slow = "def test_x(world, engine):\n    runs = [n for n in range(999)]\n"
+    assert oversized_engine_tests(slow, GH_ENGINE_MAX_RUNS) == (["test_x"], ["test_x"])
+    fast = "def test_x(world):\n    runs = [n for n in range(999)]\n"
+    assert oversized_engine_tests(fast, GH_ENGINE_MAX_RUNS) == (["test_x"], [])
