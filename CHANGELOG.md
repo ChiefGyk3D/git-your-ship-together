@@ -18,6 +18,15 @@ name what a caller sees after that.
 - **New optional inputs `allow-red` and `allow-red-reason`** (script: `--allow-red NAME`, repeatable, and `--allow-red-reason TEXT`).
   Empty by default. A named non-gate check may then be red. It is a recorded exception: the reason is required and printed, a
   required context cannot be listed, and an allowed check that is still open is still waited for.
+- **Late checks.** New optional input `require-check` (script: `--require-check NAME`, repeatable): a further required check that must
+  exist from the expected app and succeed; a missing one is waited for until `timeout` (exit 2), never green. Success is also
+  returned only after two consecutive polls, one `interval` apart, read the identical set of check runs; a new check name
+  between them restarts the wait. A green therefore takes one interval longer.
+- **`allow-red` scoping.** `NAME@APP` matches the name and the reporting app's slug; a bare name matches that name from any app.
+- **Same-named run from another app.** It is no longer ignored: it cannot satisfy the gate and is judged as an other check
+  (red is exit 6, open is waited for). `--any-app` still counts it as the gate.
+- **Control characters** in `allow-red`, `allow-red-reason`, `context` and `require-check` values are exit 64.
+- **Reruns.** The latest run per check name and app decides (`filter=latest`); documented, with tests.
 - **Tests.** `tests/test_wait_ci.py`: gate green with another check red (every failure conclusion), open (queued, in progress,
   waiting, pending), skipped and neutral, the allow-list and its misuse, a moved head, more than one page of runs, and two runs
   with the gate's name. Docs: [wait-ci](docs/wiki/Action-wait-ci.md).

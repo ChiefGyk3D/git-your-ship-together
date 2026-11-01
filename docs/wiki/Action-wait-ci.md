@@ -22,21 +22,40 @@ race seen on GYST #218), and a push that moved the head under the loop. This scr
   `skipped` or `neutral`. One that is queued, waiting, pending or in progress (or completed with no conclusion) is waited for, with
   the same `--interval`, `--timeout` and `--hung-after` as everything else; the output says `waiting for N other check run(s)`.
   One that failed, was cancelled, timed out, needed action, failed to start or went stale ends the wait with exit 6 and result
-  `other-red`, and nothing is merged. A failed gate stays exit 1. A same-named run from another app that borrows a gate name is
-  still ignored (see the next rule); every other app's runs count as "other" checks.
-- **Allow-list, a recorded exception.** `--allow-red NAME` (repeatable; input `allow-red`, one name per line) lets a named
-  non-gate check be red. It is empty by default and is not a default: it needs `--allow-red-reason TEXT` (input
+  `other-red`, and nothing is merged. A failed gate stays exit 1. A run that carries a gate name but comes from another app is
+  not the gate (it cannot satisfy it) and is not ignored: it is judged as an other check, so a red one is exit 6 and an open one
+  is waited for. `--any-app` makes such a run count as the gate instead.
+- **Reruns: the latest run decides.** Check runs are read with `filter=latest`, which keeps the newest run for each check name
+  and app. A red run followed by a green rerun of the same check counts as green (the rerun is the check's current state, the
+  same state GitHub shows); a green run followed by a red rerun is red; a rerun that is open is waited for. The earlier attempt
+  is not consulted: the API gives no link from a rerun to the run it replaced, so a rule about "the same lineage" cannot be
+  checked. A same-named run from a different app is a different check, never a rerun. If an earlier red attempt must block,
+  fix the check (or record why it is flaky) rather than relying on this tool to remember it.
+- **Late checks.** A check run cannot be judged before it exists, and a workflow that starts late (a `workflow_run` workflow, a
+  second app) has none yet. Two measures. First, `--require-check NAME` (repeatable; input `require-check`, one name per line)
+  names a further required check: it must exist, from the expected app, and succeed. One that has not reported is waited for until
+  `--timeout` and then exit 2, never green; a red one is exit 1. Name every workflow you need, security scans first. Second, the
+  settle rule: success is returned only when two consecutive polls, one `--interval` apart, read the identical set of check
+  runs (id, status, conclusion, app, name). A name that appears between the polls restarts the wait and is then judged like any
+  other check. The settle adds one interval to every green. Neither measure proves that a check which never appears does not exist:
+  `--require-check` and branch protection or a ruleset are the real controls for that.
+- **Allow-list, a recorded exception.** `--allow-red NAME[@APP]` (repeatable; input `allow-red`, one name per line) lets a named
+  non-gate check be red. A bare `NAME` matches that name from **any** app and workflow. `NAME@APP` (APP is the reporting
+  app's slug: lowercase letters, digits and hyphens, for example `github-actions`) matches only the run reported by that
+  app. A name that itself ends in `@something` is read as `NAME@APP`. It is empty by default and is not a default: it needs `--allow-red-reason TEXT` (input
   `allow-red-reason`, one line), which is printed in the log as a "recorded exception". Names match exactly; a required context
-  cannot be allowed (exit 64); a reason without a name, or a name without a reason, is exit 64. An allowed check that is still
+  cannot be allowed (exit 64); a reason without a name, or a name without a reason, is exit 64; so is a control character (tab,
+  carriage return, escape, DEL, U+0085, U+2028, U+2029, newline) in a name or the reason, in `--context` or in `--require-check`,
+  so nothing that could forge a log line reaches the output. An allowed check that is still
   open is waited for, and the result counts it as `allowed red` when it passes. Use it for a known failing check that has its own
   written exception, and keep the reason pointing at that record.
 - **No check runs is not green.** `--min-checks` cannot be below 1, so an empty list never passes, even with no named context.
 - **A context that has not reported is not green.** Twenty passing jobs and no `CI green` yet means keep waiting.
 - **The reporting app matters.** A check run counts toward a required context only when it came from the expected GitHub
   App (`--app-id`, default 15368, GitHub Actions). Anything that can post a check run could otherwise copy the name `CI green`.
-  A same-named run from another app is ignored in both directions: it cannot satisfy the gate, and a failed one cannot turn a
-  green gate red (the output says `ignored N run(s)`). If it is the only run with that name, the result is not green. A failed
-  run with any other name is red whatever its app. `--any-app` switches this off and prints a warning. This is a second lock:
+  A same-named run from another app cannot satisfy the gate, and it is not ignored: it is judged as an other check, so a failed
+  one is exit 6 and an open one is waited for (the output says `N run(s) named like a required check come from an app other
+  than ...`). If it is the only run with that name, the gate has not reported and the result is not green. `--any-app` switches this off and prints a warning. This is a second lock:
   merge safety also relies on branch protection or a ruleset that pins the required check to an app, because the merge itself
   is decided by GitHub, not by this script.
 - **Names match exactly.** The comparison is a literal string compare: `CI green (old)`, `ci green`, `CI green ` with a trailing
@@ -95,7 +114,7 @@ race seen on GYST #218), and a push that moved the head under the loop. This scr
   suite count again (so the confirming read asks twice more). Both must be readable, equal to each other, and under 1000, or
   the read is not trusted; a count that moves during a read says `check suite count changed while reading`. This closes the
   window in which a suite could be deleted, or created, between the run list and a single later count.
-- **Cost.** One read is two suite-count requests plus one request per hundred runs: three for a commit with up to 100 runs, twelve
+- **Cost.** A green takes two polls (the settle rule), so the figures below double for the final answer. One read is two suite-count requests plus one request per hundred runs: three for a commit with up to 100 runs, twelve
   for one with 1000 (ten pages). A poll that finds nothing yet does one read; a poll that looks green does two, so six and
   twenty-four requests, plus the pull request reads (one per poll and one before the merge). Against the 5000 requests an
   hour a workflow token has, a 20 second interval on a 100-run commit is about 540 an hour.
@@ -157,7 +176,7 @@ echo "exit=$?"
 Run it from a checkout of this repository at a pinned commit, or fetch the file at that commit. It needs `bash`, `gh` and `cksum`.
 `GH_BIN` names a different `gh` (the tests use a fake). When `GITHUB_OUTPUT` is set it appends `result`, `sha` and `merged`.
 
-Options: `--repo`, `--pr`, `--sha`, `--context` (repeatable; `--context ''` means no named gate), `--app-id`, `--any-app`, `--min-checks`, `--timeout`,
+Options: `--repo`, `--pr`, `--sha`, `--context` (repeatable; `--context ''` means no named gate), `--require-check`, `--app-id`, `--any-app`, `--min-checks`, `--timeout`,
 `--hung-after`, `--interval`, `--allow-red`, `--allow-red-reason`, `--on-push`, `--merge`, `--delete-branch`, `--merge-retries`, `--merge-retry-delay`. The header of
 the script lists the defaults.
 
@@ -193,7 +212,8 @@ branch is supposed to trigger a deploy; pass a different `token` when it does.
 | `pr` | Pull request number; needed for `merge`. Give this or `sha`. |
 | `sha` | Full 40-character SHA to verify; with `pr` it must equal the head. |
 | `context` | Required check run names, one per line, exact. Default `CI green`; empty means no named gate. |
-| `allow-red` | Non-gate check names that may be red, one per line, exact. Empty by default; a recorded exception that needs `allow-red-reason`. |
+| `require-check` | Further required check names, one per line, exact, from the expected app; each must exist and succeed. Covers a workflow that starts late. |
+| `allow-red` | Non-gate check names that may be red, one per line, exact (`NAME@APP` scopes to an app slug; bare matches any app). Empty by default; a recorded exception that needs `allow-red-reason`. |
 | `allow-red-reason` | Why those checks may be red, on one line; printed in the log. |
 | `app-id` | GitHub App id whose check runs may satisfy a context; default 15368 (GitHub Actions). |
 | `any-app` | `true` accepts a same-named run from any app, with a warning. |
@@ -221,7 +241,8 @@ is merged at that commit). The outputs are written even when the step fails, so 
   `CI green`. There is no prefix option, on purpose: a prefix is a looser match.
 - It does not rerun failed jobs and it does not read branch protection; name the contexts you require.
 - It only sees check runs that exist when it reads. A workflow that has not started yet (for example one triggered late) has no
-  check run, so it cannot be waited for; add its job name to `context` to make the commit not green until it reports.
+  check run, so it cannot be waited for unless you name it: add it with `--require-check` (or `context`) to make the commit not
+  green until it reports. The settle rule narrows the window but cannot close it.
 
 ## How it is tested
 

@@ -16,6 +16,13 @@
 #     --timeout and --hung-after); one that failed ends the wait with exit 6. A gate that failed is still
 #     exit 1. --allow-red NAME (repeatable, empty by default) lets a named non-gate check be red; it is a
 #     recorded exception and needs --allow-red-reason TEXT, which is printed. A gate name cannot be allowed.
+#   * A late check cannot be seen before it exists. Two answers: --require-check NAME (repeatable) names a check
+#     that must exist from the expected app and succeed, so a workflow that starts late is waited for (a
+#     missing one ends in exit 2, never green); and success is returned only after two consecutive polls, one
+#     --interval apart, read the identical set of check runs (id, status, conclusion, app, name). A name that
+#     appears between the polls restarts the wait. A run named like the gate from another app is not the gate;
+#     it is judged as an other check (unless --any-app). Without a required name nothing can prove that a
+#     check which never appears does not exist: branch protection is the real control for that.
 #   * The list of check runs must be whole. The endpoint shows at most the 1000 most recent check
 #     suites of a ref, so the script asks for the suite count (GET .../check-suites, once per poll) and
 #     is NOT green when it is 1000 or more or cannot be read as a plain integer. It also keeps the
@@ -74,8 +81,11 @@
 #   --pr N                  pull request to watch; its head is pinned and re-read, and --merge needs it
 #   --sha SHA               commit to verify; with --pr it must equal the head, else exit 4
 #   --context NAME          required check run name, exact match; repeatable ["CI green"]; '' for none
-#   --allow-red NAME        a non-gate check run that may be red, exact name; repeatable [none]. A recorded
-#                           exception, never a default; needs --allow-red-reason
+#   --require-check NAME    a further required check run (exact name, expected app); repeatable [none]
+#   --allow-red NAME[@APP]  a non-gate check run that may be red, exact name; repeatable [none]. A recorded
+#                           exception, never a default; needs --allow-red-reason. @APP is the reporting app's
+#                           slug (lowercase letters, digits, hyphens) and then both must match; a bare NAME
+#                           matches that name from any app
 #   --allow-red-reason TEXT why those checks may be red (one line); printed with the exception
 #   --min-checks N          check runs that must be complete [1]
 #   --timeout S             total seconds to wait [1800]
@@ -102,7 +112,10 @@ pr=""
 want_sha=""
 contexts=()
 contexts_given=0
+required=()
 allowed=()
+allowed_names=()
+allowed_apps=()
 allow_reason=""
 min_checks=1
 timeout_s=1800
@@ -153,6 +166,11 @@ redact() {
 now() { date +%s; }
 nap() { sleep "$1"; }
 
+# A control character (C0, DEL, NEL, line and paragraph separator) must never reach a log line.
+has_ctrl() {
+  [[ "$1" == *[[:cntrl:]]* || "$1" == *$'\xc2\x85'* || "$1" == *$'\xe2\x80\xa8'* || "$1" == *$'\xe2\x80\xa9'* ]]
+}
+
 need_value() { [[ $# -ge 2 ]] || die_usage "$1 needs a value"; }
 # need_num OPTION VALUE MIN MAX: a plain base-10 integer in range, else exit 64. The pattern admits at most
 # nine digits and no leading zero, so no later arithmetic can wrap, read an octal or see a sign.
@@ -189,6 +207,10 @@ while [[ $# -gt 0 ]]; do
       contexts_given=1
       [[ -z "$2" ]] || contexts+=("$2")
       ;;
+    --require-check)
+      [[ -n "$2" ]] || die_usage "--require-check needs a check name"
+      required+=("$2")
+      ;;
     --allow-red)
       [[ -n "$2" ]] || die_usage "--allow-red needs a check name"
       allowed+=("$2")
@@ -210,6 +232,8 @@ done
 if [[ $contexts_given -eq 0 ]]; then
   contexts=("CI green")
 fi
+# --require-check names are further required contexts: each must exist, from the expected app, and succeed.
+contexts+=("${required[@]}")
 
 [[ "$repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || die_usage "--repo must be OWNER/REPO (got '${repo}')"
 case "${repo%%/*}" in . | ..) die_usage "--repo owner must not be . or .." ;; esac
@@ -242,27 +266,32 @@ case "$on_push" in
 esac
 if [[ $merge -eq 1 && -z "$pr" ]]; then die_usage "--merge needs --pr"; fi
 for c in "${contexts[@]}"; do
-  case "$c" in
-    *$'\n'*) die_usage "a --context must be one line" ;;
-  esac
+  if has_ctrl "$c"; then die_usage "a --context or --require-check name must not hold a control character"; fi
 done
 
 for c in "${allowed[@]}"; do
-  case "$c" in
-    *$'\n'*) die_usage "an --allow-red name must be one line" ;;
-  esac
+  if has_ctrl "$c"; then die_usage "an --allow-red name must not hold a control character"; fi
+  # NAME@APP scopes the exception to the check run reported by the app with that slug; a bare NAME matches the
+  # name from any app.
+  name="$c"
+  app=""
+  if [[ "$c" =~ ^(.+)@([a-z0-9][a-z0-9-]*)$ ]]; then
+    name="${BASH_REMATCH[1]}"
+    app="${BASH_REMATCH[2]}"
+  fi
+  allowed_names+=("$name")
+  allowed_apps+=("$app")
   for g in "${contexts[@]}"; do
-    [[ "$c" != "$g" ]] || die_usage "--allow-red '${c}' is a required context; the gate cannot be allowed to fail"
+    [[ "$name" != "$g" ]] || die_usage "--allow-red '${c}' is a required context; the gate cannot be allowed to fail"
   done
 done
 if [[ ${#allowed[@]} -gt 0 ]]; then
   [[ -n "${allow_reason//[[:space:]]/}" ]] || die_usage "--allow-red is a recorded exception and needs --allow-red-reason TEXT"
-  case "$allow_reason" in
-    *$'\n'*) die_usage "--allow-red-reason must be one line" ;;
-  esac
+  if has_ctrl "$allow_reason"; then die_usage "--allow-red-reason must be one line without control characters"; fi
 elif [[ -n "$allow_reason" ]]; then
   die_usage "--allow-red-reason without --allow-red"
 fi
+if has_ctrl "$allow_reason"; then die_usage "--allow-red-reason must be one line without control characters"; fi
 
 errfile="$(mktemp)"
 
@@ -313,12 +342,12 @@ pr_head() {
 # value (a name with a newline or the field separator in it) cannot add a line or a field. Fields are split
 # by \x1f.
 #   T <total_count>                                                       once per page
-#   R <id> <status> <conclusion> <app id> <hostile> <head_sha> <name>     once per run
+#   R <id> <status> <conclusion> <app id> <hostile> <head_sha> <app slug> <name>   once per run
 # The run id is plain digits (or "bad"), checked again in bash. hostile is 1 when the name holds a control
 # character, DEL, NEL or a Unicode line or paragraph separator (NUL included).
 check_page() {
   gh_try api "repos/${repo}/commits/${1}/check-runs?per_page=100&filter=latest&page=${2}" \
-    --jq '(["T", ((.total_count // -1) | tostring | @base64)] | join("\u001f")), (.check_runs[] | ["R", (.id | if type == "number" and . == floor and . >= 0 and . < 1000000000000000 then tostring else "bad" end), (.status // "" | tostring | @base64), (.conclusion // "" | tostring | @base64), ((.app.id // 0) | tostring | @base64), (.name // "" | tostring | if explode | any(. < 32 or . == 127 or . == 133 or . == 8232 or . == 8233) then "1" else "0" end), (.head_sha // "" | tostring | @base64), (.name // "" | tostring | @base64)] | join("\u001f"))'
+    --jq '(["T", ((.total_count // -1) | tostring | @base64)] | join("\u001f")), (.check_runs[] | ["R", (.id | if type == "number" and . == floor and . >= 0 and . < 1000000000000000 then tostring else "bad" end), (.status // "" | tostring | @base64), (.conclusion // "" | tostring | @base64), ((.app.id // 0) | tostring | @base64), (.name // "" | tostring | if explode | any(. < 32 or . == 127 or . == 133 or . == 8232 or . == 8233) then "1" else "0" end), (.head_sha // "" | tostring | @base64), ((.app.slug // "") | tostring | @base64), (.name // "" | tostring | @base64)] | join("\u001f"))'
 }
 
 # The number of CHECK SUITES on a commit, from a call of its own (one per poll). GitHub's cap is on suites:
@@ -358,11 +387,11 @@ dec_display() {
   printf '%s' "${d:-unnamed}"
 }
 
-# A fingerprint of a read: the sorted (id, status, conclusion) of every run, in their encoded form.
+# A fingerprint of a read: the sorted (id, status, conclusion, app, name) of every run, in their encoded form.
 fingerprint() {
-  local kind f1 f2 f3 rest out=""
-  while IFS=$'\x1f' read -r kind f1 f2 f3 rest; do
-    if [[ "$kind" == R ]]; then out+="${f1} ${f2} ${f3}"$'\n'; fi
+  local kind f1 f2 f3 f4 f5 f6 f7 f8 rest out=""
+  while IFS=$'\x1f' read -r kind f1 f2 f3 f4 f5 f6 f7 f8 rest; do
+    if [[ "$kind" == R ]]; then out+="${f1} ${f2} ${f3} ${f4} ${f8}"$'\n'; fi
   done <<<"$1"
   printf '%s' "$out" | LC_ALL=C sort
 }
@@ -426,7 +455,7 @@ if [[ $any_app -eq 1 ]]; then
 fi
 say "pinned ${pin} (${repo}${pr:+#$pr}); gate: ${contexts[*]:-any checks}; min checks ${min_checks}"
 if [[ ${#allowed[@]} -gt 0 ]]; then
-  say "warning: recorded exception: these check runs may be red: $(printf "'%s' " "${allowed[@]}")(reason: ${allow_reason})"
+  say "warning: recorded exception: these check runs may be red: $(printf "'%s' " "${allowed[@]}")(reason: ${allow_reason}); a bare name matches any app"
 fi
 
 start="$(now)"
@@ -450,8 +479,10 @@ for c in "${contexts[@]}"; do
   context_enc+=("$(enc "$c")")
 done
 allowed_enc=()
-for c in "${allowed[@]}"; do
-  allowed_enc+=("$(enc "$c")")
+allowed_app_enc=()
+for i in "${!allowed_names[@]}"; do
+  allowed_enc+=("$(enc "${allowed_names[$i]}")")
+  if [[ -n "${allowed_apps[$i]}" ]]; then allowed_app_enc+=("$(enc "${allowed_apps[$i]}")"); else allowed_app_enc+=(""); fi
 done
 
 is_context_enc() {
@@ -462,10 +493,13 @@ is_context_enc() {
   return 1
 }
 
+# is_allowed_enc NAME_ENC SLUG_ENC: the name matches an --allow-red entry and, when that entry carries @APP, the
+# reporting app's slug matches too. A bare name matches the name from any app.
 is_allowed_enc() {
-  local e
-  for e in "${allowed_enc[@]}"; do
-    [[ "$1" == "$e" ]] && return 0
+  local i
+  for i in "${!allowed_enc[@]}"; do
+    [[ "$1" == "${allowed_enc[$i]}" ]] || continue
+    if [[ -z "${allowed_app_enc[$i]}" || "$2" == "${allowed_app_enc[$i]}" ]]; then return 0; fi
   done
   return 1
 }
@@ -478,7 +512,7 @@ RUN_LIST_CAP=1000
 
 # Sets verdict (green|red|pending) and detail for the lines passed in, using $suites_a and $suites_b.
 evaluate() {
-  local lines="$1" kind f1 f2 f3 f4 f5 f6 f7 i b_pin first_count=""
+  local lines="$1" kind f1 f2 f3 f4 f5 f6 f7 f8 i b_pin first_count=""
   foreign=0
   hostile=0
   local runs_seen=0 count_lines=0 count_missing=0 count_mismatch=0 dups=0 total_count=0
@@ -486,10 +520,10 @@ evaluate() {
   local other_bad=0 other_badname="" other_open=0 other_openname="" allowed_bad=0 is_ctx
   local -A ctx_seen=() ctx_ok=() ctx_open=() seen_id=()
   b_pin="$(enc "$pin")"
-  while IFS=$'\x1f' read -r kind f1 f2 f3 f4 f5 f6 f7; do
-    [[ -n "$kind$f1$f2$f3$f4$f5$f6$f7" ]] || continue
+  while IFS=$'\x1f' read -r kind f1 f2 f3 f4 f5 f6 f7 f8; do
+    [[ -n "$kind$f1$f2$f3$f4$f5$f6$f7$f8" ]] || continue
     if [[ "$kind" == T ]]; then
-      if [[ -n "$f2$f3$f4$f5$f6$f7" ]] || ! b64_strict "$f1" || [[ ! "$B64_VALUE" =~ ^(-1|0|[1-9][0-9]{0,8})$ ]]; then
+      if [[ -n "$f2$f3$f4$f5$f6$f7$f8" ]] || ! b64_strict "$f1" || [[ ! "$B64_VALUE" =~ ^(-1|0|[1-9][0-9]{0,8})$ ]]; then
         hostile=$((hostile + 1))
         continue
       fi
@@ -525,41 +559,44 @@ evaluate() {
     # Anything that is not exactly the shape jq emits, a name that jq flagged, or a run for another
     # commit is hostile.
     if [[ ! "$f5" =~ ^0$ || ! "$f2" =~ $B64_RE || ! "$f3" =~ $B64_RE || ! "$f4" =~ $B64_RE || ! "$f6" =~ $B64_RE ||
-      ! "$f7" =~ $B64_RE || "$f6" != "$b_pin" ]]; then
+      ! "$f7" =~ $B64_RE || ! "$f8" =~ $B64_RE || "$f6" != "$b_pin" ]]; then
       hostile=$((hostile + 1))
       continue
     fi
-    # A run that carries a required name but comes from another app is ignored altogether.
-    if [[ $any_app -eq 0 && "$f4" != "$B_APP" ]] && is_context_enc "$f7"; then
-      foreign=$((foreign + 1))
-      continue
-    fi
+    # A run that carries a required name but comes from another app is NOT the gate: it cannot satisfy it, and it
+    # is judged like any other check (red blocks with exit 6, open is waited for), unless --any-app.
     total=$((total + 1))
     is_ctx=0
-    if is_context_enc "$f7"; then is_ctx=1; fi
+    if is_context_enc "$f8"; then
+      if [[ $any_app -eq 1 || "$f4" == "$B_APP" ]]; then
+        is_ctx=1
+      else
+        foreign=$((foreign + 1))
+      fi
+    fi
     if [[ "$f2" == "$B_COMPLETED" ]]; then
       complete=$((complete + 1))
       if [[ -n "$f3" && -n "${BAD_CONCLUSION[$f3]:-}" ]]; then
         if [[ $is_ctx -eq 1 ]]; then
           bad=$((bad + 1))
-          badname="${badname:-$(dec_display "$f7") (${BAD_CONCLUSION[$f3]})}"
-        elif is_allowed_enc "$f7"; then
+          badname="${badname:-$(dec_display "$f8") (${BAD_CONCLUSION[$f3]})}"
+        elif is_allowed_enc "$f8" "$f7"; then
           allowed_bad=$((allowed_bad + 1))
         else
           other_bad=$((other_bad + 1))
-          other_badname="${other_badname:-$(dec_display "$f7") (${BAD_CONCLUSION[$f3]})}"
+          other_badname="${other_badname:-$(dec_display "$f8") (${BAD_CONCLUSION[$f3]})}"
         fi
       elif [[ $is_ctx -eq 0 && "$f3" != "$B_SUCCESS" && "$f3" != "$B_NEUTRAL" && "$f3" != "$B_SKIPPED" ]]; then
         # Completed but with no usable conclusion: not a pass, so it is waited for like an open run.
         other_open=$((other_open + 1))
-        other_openname="${other_openname:-$(dec_display "$f7")}"
+        other_openname="${other_openname:-$(dec_display "$f8")}"
       fi
     elif [[ $is_ctx -eq 0 ]]; then
       other_open=$((other_open + 1))
-      other_openname="${other_openname:-$(dec_display "$f7")}"
+      other_openname="${other_openname:-$(dec_display "$f8")}"
     fi
     for i in "${!contexts[@]}"; do
-      [[ "$f7" == "${context_enc[$i]}" ]] || continue
+      [[ $is_ctx -eq 1 && "$f8" == "${context_enc[$i]}" ]] || continue
       ctx_seen[$i]=1
       if [[ "$f2" != "$B_COMPLETED" ]]; then
         ctx_open[$i]=1
@@ -584,7 +621,7 @@ evaluate() {
     return 0
   fi
   if [[ $foreign -gt 0 ]]; then
-    say "ignored ${foreign} run(s) named like a required check from an app other than ${app_id}"
+    say "${foreign} run(s) named like a required check come from an app other than ${app_id}: they do not count as the gate and are judged as other checks"
   fi
   if [[ $bad -gt 0 ]]; then
     verdict=red
@@ -639,6 +676,7 @@ evaluate() {
 
 verdict=pending
 detail=""
+settle_fp=""
 suites_a=""
 suites_b=""
 while :; do
@@ -657,6 +695,7 @@ while :; do
         fi
         say "head moved: ${pin} -> ${cur}; resetting (the total timeout keeps running)"
         pin="$cur"
+        settle_fp=""
         last_sig=""
         last_change="$t"
       fi
@@ -696,11 +735,25 @@ while :; do
         fi
       fi
     fi
+    # Settle rule: a green read is believed only when the previous poll, one interval earlier, read the identical set
+    # of check runs (id, status, conclusion, app, name). A check that appears between two polls changes the set and
+    # restarts the wait; it is then judged like every other check.
+    if [[ "$verdict" == green ]]; then
+      fp_now="$(fingerprint "$W_LINES")"
+      if [[ -z "$settle_fp" || "$settle_fp" != "$fp_now" ]]; then
+        settle_fp="$fp_now"
+        verdict=pending
+        detail="settling: the check list must read identical twice, one interval apart, before it counts"
+      fi
+    else
+      settle_fp=""
+    fi
   elif [[ $rc -eq 2 ]]; then
     verdict=pending
     detail="check-run list may be truncated (more than ${MAX_RUN_PAGES} pages of check runs); not trusting it"
     sig="$last_sig"
     poll_failed=1
+    settle_fp=""
   else
     verdict=pending
     detail="the check-runs call failed, will retry"

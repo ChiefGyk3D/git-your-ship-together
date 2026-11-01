@@ -29,8 +29,12 @@ inputs:
     description: Required check run names, one per line, matched exactly (no globs, no case folding, no trimming). Empty means no named gate; at least `min-checks` completed runs and none failed are still needed.
     required: false
     default: CI green
+  require-check:
+    description: Further required check run names, one per line, matched exactly, each from the expected app (`app-id`). Each must exist and succeed; one that has not reported is waited for until `timeout` (exit 2), never treated as green. This is how to cover a workflow that starts late. Empty by default.
+    required: false
+    default: ""
   allow-red:
-    description: Names of non-gate check runs that may be red, one per line, matched exactly. Empty by default. A recorded exception, never the default; it needs `allow-red-reason`. A required context cannot be listed.
+    description: Names of non-gate check runs that may be red, one per line, matched exactly; `NAME@APP` also requires the reporting app's slug (a bare name matches that name from any app). Empty by default. A recorded exception, never the default; it needs `allow-red-reason`. A required context cannot be listed.
     required: false
     default: ""
   allow-red-reason:
@@ -38,7 +42,7 @@ inputs:
     required: false
     default: ""
   app-id:
-    description: GitHub App id whose check runs may satisfy a context. The default is GitHub Actions. A same-named run from any other app is ignored, neither green nor red.
+    description: GitHub App id whose check runs may satisfy a context. The default is GitHub Actions. A same-named run from any other app does not count as the gate; it is judged as an other check.
     required: false
     default: "15368"
   any-app:
@@ -107,6 +111,7 @@ runs:
         WAIT_CI_PR: ${{ inputs.pr }}
         WAIT_CI_SHA: ${{ inputs.sha }}
         WAIT_CI_CONTEXT: ${{ inputs.context }}
+        WAIT_CI_REQUIRE_CHECK: ${{ inputs.require-check }}
         WAIT_CI_ALLOW_RED: ${{ inputs.allow-red }}
         WAIT_CI_ALLOW_RED_REASON: ${{ inputs.allow-red-reason }}
         WAIT_CI_APP_ID: ${{ inputs.app-id }}
@@ -142,6 +147,9 @@ runs:
         flag --delete-branch "$WAIT_CI_DELETE_BRANCH" delete-branch
         flag --any-app "$WAIT_CI_ANY_APP" any-app
         args+=(--app-id "$WAIT_CI_APP_ID")
+        while IFS= read -r line || [ -n "$line" ]; do
+          if [ -n "$line" ]; then args+=(--require-check "$line"); fi
+        done <<<"$WAIT_CI_REQUIRE_CHECK"
         while IFS= read -r line || [ -n "$line" ]; do
           if [ -n "$line" ]; then args+=(--allow-red "$line"); fi
         done <<<"$WAIT_CI_ALLOW_RED"
