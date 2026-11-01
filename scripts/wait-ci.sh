@@ -874,16 +874,16 @@ PROT=unreadable
 PROT_MISSING=""
 read_protection() {
   local base="$PR_BASE" rules classic line have_queue=0 got=0 n ctx
-  local -A have=()
+  local -A have=() anyapp=()
   PROT=unreadable
   PROT_MISSING=""
   [[ -n "$base" ]] || return 0
-  if rules="$("$gh_bin" api "repos/${repo}/rules/branches/${base}" --jq '.[] | select(.type == "merge_queue" or .type == "required_status_checks") | if .type == "merge_queue" then "Q" else ((.parameters.required_status_checks // [])[] | "C " + ((.context // "") | tostring | @base64)) end' 2>/dev/null)"; then
+  if rules="$("$gh_bin" api "repos/${repo}/rules/branches/${base}" --jq '.[] | select(.type == "merge_queue" or .type == "required_status_checks") | if .type == "merge_queue" then "Q" else ((.parameters.required_status_checks // [])[] | "C " + ((.context // "") | tostring | @base64) + " " + ((.integration_id // "any") | tostring)) end' 2>/dev/null)"; then
     got=1
   else
     rules=""
   fi
-  if classic="$("$gh_bin" api "repos/${repo}/branches/${base}/protection/required_status_checks" --jq '((.contexts // []) + [(.checks // [])[] | .context])[] | "C " + (tostring | @base64)' 2>/dev/null)"; then
+  if classic="$("$gh_bin" api "repos/${repo}/branches/${base}/protection/required_status_checks" --jq '((.contexts // [] | map({context: ., app_id: null})) + (.checks // []))[] | "C " + ((.context // "" | tostring) | @base64) + " " + ((.app_id // "any") | tostring)' 2>/dev/null)"; then
     got=1
   else
     classic=""
@@ -893,7 +893,9 @@ read_protection() {
     if [[ "$line" == Q ]]; then
       have_queue=1
     elif [[ "$line" == "C "* ]]; then
-      have["${line#C }"]=1
+      line="${line#C }"
+      have["$line"]=1
+      anyapp["${line%% *}"]=1
     fi
   done <<<"${rules}"$'\n'"${classic}"
   if [[ $have_queue -eq 1 ]]; then
@@ -907,7 +909,9 @@ read_protection() {
   PROT=covered
   for ctx in "${contexts[@]}"; do
     n="$(enc "$ctx")"
-    if [[ -z "${have[$n]:-}" ]]; then
+    # A requirement counts when it names the app whose check run this script evaluates (--app-id), or names no app
+    # at all (GitHub then accepts the name from any app, which includes that one), or --any-app was given.
+    if [[ -z "${have["$n any"]:-}" && -z "${have["$n ${app_id}"]:-}" && ( $any_app -eq 0 || -z "${anyapp[$n]:-}" ) ]]; then
       PROT=partial
       PROT_MISSING="${PROT_MISSING}'${ctx}' "
     fi

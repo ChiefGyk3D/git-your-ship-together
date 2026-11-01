@@ -2211,6 +2211,39 @@ def test_github_enforced_required_checks_satisfy_require_protection(world, extra
     assert len(w.merges()) == 1
 
 
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"classic": {"contexts": [], "checks": [{"context": "CI green", "app_id": 57789}]}},
+        {
+            "rules": [
+                {
+                    "type": "required_status_checks",
+                    "parameters": {"required_status_checks": [{"context": "CI green", "integration_id": 57789}]},
+                }
+            ]
+        },
+    ],
+    ids=["classic-other-app", "ruleset-other-app"],
+)
+def test_protection_bound_to_a_different_app_does_not_cover_the_gate(world, extra):
+    w = world(checks={A: [GATE]}, **extra)
+    p = w.run("--repo", SLUG, "--pr", "7", "--merge", "--require-protection", *FAST)
+    assert p.returncode == 1, shown(p)
+    assert "WARNING" in p.stdout and "none cover" in p.stdout
+    assert w.merges() == []
+    warn = w.run("--repo", SLUG, "--pr", "7", "--merge", *FAST)
+    assert warn.returncode == 0, shown(warn)
+    assert "WARNING" in warn.stdout
+
+
+def test_protection_bound_to_a_different_app_counts_with_any_app(world):
+    extra = {"classic": {"contexts": [], "checks": [{"context": "CI green", "app_id": 57789}]}}
+    w = world(checks={A: [GATE]}, **extra)
+    p = w.run("--repo", SLUG, "--pr", "7", "--merge", "--require-protection", "--any-app", *FAST)
+    assert p.returncode == 0, shown(p)
+
+
 def test_a_bidirectional_control_character_in_a_name_never_reaches_a_log_line(world):
     w = world(checks={A: [[ok("lint"), done("Security ‮)sseccus( etag", "failure", 57789)]]})
     p = w.run("--repo", SLUG, "--pr", "7", "--merge", *FAST)
