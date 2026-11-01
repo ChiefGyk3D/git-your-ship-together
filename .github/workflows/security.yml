@@ -63,7 +63,7 @@ on:
         type: boolean
         default: true
       gitleaks-scope:
-        description: What the gitleaks history scan covers - exactly `all-refs` (default, unchanged behavior - every ref in the clone) or `pr-commits`. `pr-commits` narrows only a `pull_request` run, to the commits of the pull request (base..head) plus a scan of the checked-out tree; a push, a schedule, a workflow_dispatch and any other event scan the full history whatever this is set to. Any other value fails the gitleaks job.
+        description: What the gitleaks history scan covers - exactly `all-refs` (default, unchanged behavior - every ref in the clone) or `pr-commits`. `pr-commits` narrows only a `pull_request` run, to the commits of the pull request (base..head) plus a scan of the checked-out tree; a push, a schedule, a workflow_dispatch and any other event scan the full history whatever this is set to. Any other value fails the gitleaks job. On a `pull_request` event, in both scopes, the scan reads `.gitleaks.toml` and `.gitleaksignore` from the base commit rather than the pull request's tree.
         type: string
         default: all-refs
       gitleaks-version:
@@ -625,6 +625,15 @@ jobs:
       # Every other event, and `all-refs`, scans every ref. The SHAs come from
       # the event payload through env (never inline in this script) and must
       # be full lowercase hex ids present in the clone, or the job fails.
+      #
+      # It also builds, once, the argument list every scan and the canary use
+      # (`scan_args`). On a pull_request event the scanner's configuration
+      # (.gitleaks.toml) and ignore file (.gitleaksignore) are read from the
+      # BASE commit with `git show` into a directory outside the workspace and
+      # passed explicitly, never from the pull request's own tree, which could
+      # allowlist its own secret. A base with no config gets the scanner
+      # defaults (written here, so the head's file is not auto-loaded). This
+      # applies to both scopes. Every other event keeps the checked-out file.
       - name: Resolve the gitleaks scan scope
         id: scope
         timeout-minutes: 1
@@ -646,19 +655,48 @@ jobs:
           esac
           log_opts="--all"
           tree=false
-          if [ "$scope" = pr-commits ] && [ "${EVENT_NAME-}" = pull_request ]; then
+          scan_args="--redact --no-banner --exit-code 1"
+          config_source=checkout
+          safe_re='^[A-Za-z0-9_./-]+$'
+          if [ "${EVENT_NAME-}" = pull_request ]; then
             sha_re='^([0-9a-f]{40}|[0-9a-f]{64})$'
             for sha in "${BASE_SHA-}" "${HEAD_SHA-}"; do
-              [[ "$sha" =~ $sha_re ]] || fail "gitleaks-scope pr-commits needs the pull request base and head as full commit ids, and got something else; refusing to guess a narrower scope"
-              git cat-file -e "${sha}^{commit}" 2>/dev/null || fail "gitleaks-scope pr-commits: ${sha:0:12} is not in the clone, so the pull request range cannot be scanned; refusing to guess a narrower scope"
+              [[ "$sha" =~ $sha_re ]] || fail "a pull request scan needs the pull request base and head as full commit ids, and got something else; refusing to guess a narrower scope or a configuration"
+              git cat-file -e "${sha}^{commit}" 2>/dev/null || fail "${sha:0:12} is not in the clone, so the pull request base and head cannot be used; refusing to guess a narrower scope or a configuration"
             done
-            log_opts="${BASE_SHA}..${HEAD_SHA}"
-            tree=true
+            if [ "$scope" = pr-commits ]; then
+              log_opts="${BASE_SHA}..${HEAD_SHA}"
+              tree=true
+            fi
+            cfg_dir="${RUNNER_TEMP:?}/gitleaks-base-config"
+            [[ "$cfg_dir" =~ $safe_re ]] || fail "the runner temp path holds a character the scan arguments cannot carry safely"
+            rm -rf "$cfg_dir"
+            mkdir -p "$cfg_dir/ignore"
+            if [ "$(git cat-file -t "${BASE_SHA}:.gitleaks.toml" 2>/dev/null || true)" = blob ]; then
+              git show "${BASE_SHA}:.gitleaks.toml" > "$cfg_dir/gitleaks.toml"
+            else
+              printf 'title = "gitleaks defaults"\n\n[extend]\nuseDefault = true\n' > "$cfg_dir/gitleaks.toml"
+            fi
+            if [ "$(git cat-file -t "${BASE_SHA}:.gitleaksignore" 2>/dev/null || true)" = blob ]; then
+              git show "${BASE_SHA}:.gitleaksignore" > "$cfg_dir/ignore/.gitleaksignore"
+            else
+              : > "$cfg_dir/ignore/.gitleaksignore"
+            fi
+            scan_args="$scan_args --config=$cfg_dir/gitleaks.toml --gitleaks-ignore-path=$cfg_dir/ignore"
+            config_source=base
+          else
+            workspace="${GITHUB_WORKSPACE:-$PWD}"
+            if [ -f "$workspace/.gitleaks.toml" ]; then
+              [[ "$workspace" =~ $safe_re ]] || fail "the workspace path holds a character the scan arguments cannot carry safely"
+              scan_args="$scan_args --config=$workspace/.gitleaks.toml"
+            fi
           fi
-          echo "scope=$scope event=${EVENT_NAME-} log-opts=$log_opts tree-scan=$tree"
+          echo "scope=$scope event=${EVENT_NAME-} log-opts=$log_opts tree-scan=$tree config-from=$config_source"
           {
             echo "log_opts=$log_opts"
             echo "tree=$tree"
+            echo "scan_args=$scan_args"
+            echo "config_source=$config_source"
           } >> "$GITHUB_OUTPUT"
 
       # The gitleaks binary is MIT and needs no licence; gitleaks-action
@@ -686,24 +724,32 @@ jobs:
 
       # The scan must be able to fail. This plants an AWS-shaped key (built at
       # run time, so no credential-shaped literal sits in this file) in a
-      # scratch repository, on top of a clean commit, and requires the same
-      # invocations to exit 1 on it. The all-refs scan is always checked; when
-      # the scope narrows (TREE_SCAN is true) the base..head form and the tree
-      # scan the job will run are checked as well.
+      # scratch repository, on top of a clean commit, and requires the real
+      # scan's own command shape to exit 1 on it: the same `scan_args` built
+      # by the resolve step (so the same configuration source, the base's on a
+      # pull request: a config that hides the planted key fails this step),
+      # the same SARIF options, scanning `.`. The all-refs form is always
+      # checked; when the scope narrows (TREE_SCAN is true) the base..head form
+      # (with real commit ids) and the tree scan are checked as well.
       - name: Check that the scan catches a planted key
         timeout-minutes: 2
         env:
           TREE_SCAN: ${{ steps.scope.outputs.tree }}
+          SCAN_ARGS: ${{ steps.scope.outputs.scan_args }}
         run: |
           set -euo pipefail
+          : "${SCAN_ARGS:?the resolve step produced no scan arguments}"
+          read -r -a args <<< "$SCAN_ARGS"
           canary="$(mktemp -d)"
+          report="$(mktemp -d)"
           git init -q "$canary"
-          printf 'nothing to see here\n' > "$canary/clean.txt"
-          git -C "$canary" add clean.txt
-          git -C "$canary" -c user.email=ci@example.invalid -c user.name=ci commit -q -m clean
-          printf 'aws_access_key_id = %s%s\naws_secret_access_key = %s\n' AKIA IOSFODNN7EXAMPLE 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYzq3x9KpZmQ' > "$canary/planted.txt"
-          git -C "$canary" add planted.txt
-          git -C "$canary" -c user.email=ci@example.invalid -c user.name=ci commit -q -m planted
+          cd "$canary"
+          printf 'nothing to see here\n' > clean.txt
+          git add clean.txt
+          git -c user.email=ci@example.invalid -c user.name=ci commit -q -m clean
+          printf 'aws_access_key_id = %s%s\naws_secret_access_key = %s\n' AKIA IOSFODNN7EXAMPLE 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYzq3x9KpZmQ' > planted.txt
+          git add planted.txt
+          git -c user.email=ci@example.invalid -c user.name=ci commit -q -m planted
           must_catch() {
             local what=$1
             shift
@@ -714,20 +760,26 @@ jobs:
               exit 1
             fi
           }
-          must_catch "all-refs" gitleaks git --redact --no-banner --exit-code 1 --log-opts="--all" "$canary"
+          must_catch "all-refs" gitleaks git "${args[@]}" --report-format sarif --report-path "$report/all.sarif" --log-opts="--all" .
           if [ "${TREE_SCAN-}" = true ]; then
-            must_catch "pull-request range" gitleaks git --redact --no-banner --exit-code 1 --log-opts="HEAD~1..HEAD" "$canary"
-            must_catch "working-tree" gitleaks dir --redact --no-banner --exit-code 1 "$canary"
+            range="$(git rev-parse HEAD~1)..$(git rev-parse HEAD)"
+            must_catch "pull-request range" gitleaks git "${args[@]}" --report-format sarif --report-path "$report/range.sarif" --log-opts="$range" .
+            must_catch "working-tree" gitleaks dir "${args[@]}" .
           fi
 
       # A `.gitleaks.toml` at the repository root is read automatically (the
       # target path's config, gitleaks' own order of precedence), so a caller
-      # allowlists documented placeholders there. The range is `--all` (every
+      # allowlists documented placeholders there; on a pull request it is the
+      # base commit's copy that is passed (see the resolve step). The range is `--all` (every
       # ref, as before) or, for a narrowed pull request, base..head.
       - name: Scan the commits (gitleaks)
         env:
           LOG_OPTS: ${{ steps.scope.outputs.log_opts }}
-        run: gitleaks git --redact --no-banner --exit-code 1 --report-format sarif --report-path gitleaks.sarif --log-opts="$LOG_OPTS" .
+          SCAN_ARGS: ${{ steps.scope.outputs.scan_args }}
+        run: |
+          set -euo pipefail
+          read -r -a args <<< "$SCAN_ARGS"
+          gitleaks git "${args[@]}" --report-format sarif --report-path gitleaks.sarif --log-opts="$LOG_OPTS" .
 
       # Only for a narrowed pull request: the history scan no longer sees every
       # ref, so the checked-out tree is scanned as well. It runs even when the
@@ -735,7 +787,12 @@ jobs:
       # under the same category would replace the first.
       - name: Scan the working tree (gitleaks)
         if: always() && steps.scope.outputs.tree == 'true'
-        run: gitleaks dir --redact --no-banner --exit-code 1 .
+        env:
+          SCAN_ARGS: ${{ steps.scope.outputs.scan_args }}
+        run: |
+          set -euo pipefail
+          read -r -a args <<< "$SCAN_ARGS"
+          gitleaks dir "${args[@]}" .
 
       - name: Note the skipped Advanced Security features
         if: inputs.advanced-security == 'false'

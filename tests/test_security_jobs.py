@@ -216,7 +216,7 @@ def test_gitleaks_scans_every_ref_by_default_and_uploads_sarif():
     checkout = next(s for s in steps_of(GITLEAKS) if str(s.get("uses", "")).startswith("actions/checkout@"))
     assert checkout["with"]["fetch-depth"] == 0
     scan = next(s for s in steps_of(GITLEAKS) if s.get("name", "").startswith("Scan the commits"))
-    assert "--exit-code 1" in scan["run"] and '--log-opts="$LOG_OPTS"' in scan["run"]
+    assert "$SCAN_ARGS" in scan["run"] and '--log-opts="$LOG_OPTS"' in scan["run"]
     assert INPUTS["gitleaks-scope"]["default"] == "all-refs"  # --all unless a caller narrows a pull request
     assert "--report-format sarif --report-path gitleaks.sarif" in scan["run"]
     upload = next(s for s in steps_of(GITLEAKS) if "upload-sarif" in str(s.get("uses", "")))
@@ -232,7 +232,7 @@ def test_gitleaks_upload_is_skippable_but_the_scan_is_not():
     assert "inputs.gitleaks-upload-sarif" in upload["if"]
     assert "hashFiles('gitleaks.sarif')" in upload["if"]
     scan = next(s for s in steps_of(GITLEAKS) if s.get("name", "").startswith("Scan the commits"))
-    assert "if" not in scan and "--exit-code 1" in scan["run"]
+    assert "if" not in scan and "$SCAN_ARGS" in scan["run"]
 
 
 def test_gitleaks_canary_is_wired_before_the_scan():
@@ -265,6 +265,6 @@ def test_gitleaks_pinned_release_catches_a_planted_key(tmp_path):
         (bindir / "gitleaks").write_bytes(tar.extractfile(member).read())  # type: ignore[union-attr]
     (bindir / "gitleaks").chmod(0o755)
     canary = next(s for s in steps_of(GITLEAKS) if "planted key" in s.get("name", ""))
-    env = {**os.environ, "PATH": f"{bindir}:{os.environ['PATH']}"}
+    env = {**os.environ, "PATH": f"{bindir}:{os.environ['PATH']}", "SCAN_ARGS": "--redact --no-banner --exit-code 1"}
     done = subprocess.run(["bash", "-c", canary["run"]], env=env, capture_output=True, text=True)
     assert done.returncode == 0, done.stdout + done.stderr

@@ -183,11 +183,13 @@ pull request is in that range, so it stays caught. The narrowing never applies t
 branch is still scanned in full. If the base or head is not a full commit id present in the clone, the job fails rather
 than scanning less.
 
+Configuration source, in both scopes: on a `pull_request` event the scan reads `.gitleaks.toml` and `.gitleaksignore` from the base commit (copied outside the workspace and passed explicitly), never from the pull request's own tree, so a pull request cannot allowlist its own secret. With no config on the base, the scanner defaults apply. A pull request that edits those files is scanned with the old version until it merges; a base config that extends another file by relative path is not supported on a pull request. Other events use the checked-out file, as before. The canary runs the same command shape and the same configuration as the real scan, so a config that hides the planted key fails it.
+
 What `pr-commits` does not see, so that nobody assumes more: a key in a commit that is already in the base history
 (the scan after the merge, or an earlier scan of that branch, covers it); a key on another unmerged branch (found when that
 branch has its own pull request); a key that only a merge-conflict resolution introduces and a later commit removes (git
 shows no patch for a merge commit; the tree scan sees it only while it is still in the tree); and a commit force-pushed away
-before the scan ran. The tree scan reports in the job log and is not uploaded as SARIF.
+before the scan ran. Also: an empty range (base equal to head, or a head already in the base) leaves only the tree scan; tags and notes outside `base..head`; a workflow re-run uses the original event payload; an inline `gitleaks:allow` comment in the pull request's own files is honored; the generated `gitleaks.sarif` lies in the workspace while the tree scan walks it (redacted); and the tree scanned is GitHub's merge-preview checkout, not the literal head tree. The tree scan reports in the job log and is not uploaded as SARIF. Protect `.gitleaks.toml` and `.gitleaksignore` with CODEOWNERS and branch protection, because a change to them takes effect after the merge.
 
 ## What this refuses to do
 

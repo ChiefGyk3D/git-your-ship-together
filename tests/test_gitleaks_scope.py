@@ -54,6 +54,7 @@ INVALID = [
     "all-refs​",  # zero-width space
     "all-rеfs",  # Cyrillic e
 ]
+PLAIN_ARGS = "--redact --no-banner --exit-code 1"
 EVENTS = ["pull_request", "push", "schedule", "workflow_dispatch", "pull_request_target", "merge_group", "release", ""]
 
 
@@ -105,7 +106,16 @@ def repo(tmp_path_factory):
 
 
 def run_step(name: str, env: dict, cwd=None, out=None):
-    prefixes = ("GITLEAKS_", "TREE_SCAN", "EVENT_NAME", "BASE_SHA", "HEAD_SHA")
+    prefixes = (
+        "GITLEAKS_",
+        "TREE_SCAN",
+        "SCAN_ARGS",
+        "EVENT_NAME",
+        "BASE_SHA",
+        "HEAD_SHA",
+        "RUNNER_TEMP",
+        "GITHUB_WORKSPACE",
+    )
     clean = {k: v for k, v in os.environ.items() if not k.startswith(prefixes)}
     if out is not None:
         clean["GITHUB_OUTPUT"] = str(out)
@@ -120,13 +130,21 @@ def run_step(name: str, env: dict, cwd=None, out=None):
     )
 
 
+def core(out: dict) -> dict:
+    return {k: out[k] for k in ("log_opts", "tree")}
+
+
 def resolve(repo_info, scope: str, event: str, tmp_path, base=None, head=None):
     r, b, h = repo_info
     out = tmp_path / "out"
     out.write_text("")
+    runner_temp = tmp_path / "runner"
+    runner_temp.mkdir(exist_ok=True)
     done = run_step(
         RESOLVE,
         {
+            "RUNNER_TEMP": str(runner_temp),
+            "GITHUB_WORKSPACE": str(r),
             "GITLEAKS_SCOPE": scope,
             "EVENT_NAME": event,
             "BASE_SHA": b if base is None else base,
@@ -198,7 +216,7 @@ def test_validate_rejects_an_unset_value():
 def test_all_refs_is_always_the_full_history(event, repo, tmp_path):
     done, out = resolve(repo, "all-refs", event, tmp_path)
     assert done.returncode == 0, done.stderr + done.stdout
-    assert out == {"log_opts": "--all", "tree": "false"}
+    assert core(out) == {"log_opts": "--all", "tree": "false"}
 
 
 @pytest.mark.parametrize("event", [e for e in EVENTS if e != "pull_request"])
@@ -206,14 +224,14 @@ def test_pr_commits_never_narrows_outside_a_pull_request(event, repo, tmp_path):
     # push (the default branch included), schedule, workflow_dispatch, any other event: full history, whatever is set.
     done, out = resolve(repo, "pr-commits", event, tmp_path)
     assert done.returncode == 0, done.stderr + done.stdout
-    assert out == {"log_opts": "--all", "tree": "false"}
+    assert core(out) == {"log_opts": "--all", "tree": "false"}
 
 
 def test_pr_commits_on_a_pull_request_scans_base_to_head_and_the_tree(repo, tmp_path):
     _, base, head = repo
     done, out = resolve(repo, "pr-commits", "pull_request", tmp_path)
     assert done.returncode == 0, done.stderr + done.stdout
-    assert out == {"log_opts": f"{base}..{head}", "tree": "true"}
+    assert core(out) == {"log_opts": f"{base}..{head}", "tree": "true"}
 
 
 def test_the_decision_table_in_one_place(repo, tmp_path):
@@ -293,7 +311,10 @@ def test_the_new_steps_read_every_value_from_env_never_from_an_expression():
         "BASE_SHA": "${{ github.event.pull_request.base.sha }}",
         "HEAD_SHA": "${{ github.event.pull_request.head.sha }}",
     }
-    assert step(COMMITS)["env"] == {"LOG_OPTS": "${{ steps.scope.outputs.log_opts }}"}
+    assert step(COMMITS)["env"] == {
+        "LOG_OPTS": "${{ steps.scope.outputs.log_opts }}",
+        "SCAN_ARGS": "${{ steps.scope.outputs.scan_args }}",
+    }
     assert step(COMMITS)["run"].count('--log-opts="$LOG_OPTS"') == 1
     assert '--log-opts="--all"' not in step(COMMITS)["run"]
 
@@ -304,7 +325,7 @@ def test_the_new_steps_read_every_value_from_env_never_from_an_expression():
 def test_the_tree_scan_runs_only_for_a_narrowed_pull_request_and_even_after_a_failed_history_scan():
     s = step(TREE)
     assert s["if"] == "always() && steps.scope.outputs.tree == 'true'"
-    assert "gitleaks dir " in s["run"] and "--exit-code 1" in s["run"] and "--redact" in s["run"]
+    assert 'gitleaks dir "${args[@]}" .' in s["run"]
     assert step(RESOLVE)["id"] == "scope"
     names = [x.get("name") for x in steps_of(GITLEAKS)]
     assert names.index(COMMITS) < names.index(TREE)
@@ -322,8 +343,24 @@ def test_the_clone_has_both_ends_of_the_range():
 
 def test_the_canary_follows_the_resolved_scope():
     s = step(CANARY)
-    assert s["env"] == {"TREE_SCAN": "${{ steps.scope.outputs.tree }}"}
+    assert s["env"] == {
+        "TREE_SCAN": "${{ steps.scope.outputs.tree }}",
+        "SCAN_ARGS": "${{ steps.scope.outputs.scan_args }}",
+    }
     assert '"$status" -ne 1' in s["run"]
+
+
+def test_canary_and_real_scans_use_the_one_argument_list_built_in_the_resolve_step():
+    # G3-2: one constructed list (config, ignore file, redact, exit code) for the canary and for both real scans.
+    for name in (CANARY, COMMITS, TREE):
+        assert "$SCAN_ARGS" in step(name)["run"], name
+        assert step(name)["env"]["SCAN_ARGS"] == "${{ steps.scope.outputs.scan_args }}"
+    for name in (COMMITS, TREE):
+        assert "--redact" not in step(name)["run"] and "--exit-code" not in step(name)["run"], name
+    canary = step(CANARY)["run"]
+    assert "--report-format sarif" in canary and "--log-opts=" in canary
+    scans = [line for line in canary.splitlines() if "must_catch " in line and "gitleaks" in line]
+    assert len(scans) == 3 and all(line.endswith(" .") for line in scans), "the canary scans . like the real scan"
 
 
 # --- against the real, pinned binary (needs the network) ----------------------------
@@ -414,7 +451,12 @@ def test_the_tree_scan_sees_a_key_in_a_file_and_ignores_git_history(gitleaks, tm
 
 @pytest.mark.parametrize("tree_scan", ["false", "true"])
 def test_the_canary_passes_in_both_modes_with_the_real_binary(gitleaks, tree_scan):
-    env = {**os.environ, "PATH": f"{os.path.dirname(gitleaks)}:{os.environ['PATH']}", "TREE_SCAN": tree_scan}
+    env = {
+        **os.environ,
+        "PATH": f"{os.path.dirname(gitleaks)}:{os.environ['PATH']}",
+        "TREE_SCAN": tree_scan,
+        "SCAN_ARGS": PLAIN_ARGS,
+    }
     done = subprocess.run(
         ["bash", "-eo", "pipefail", "-c", step(CANARY)["run"]], env=env, capture_output=True, text=True, timeout=120
     )
@@ -427,8 +469,159 @@ def test_the_canary_fails_when_the_scanner_catches_nothing(tree_scan, tmp_path):
     fake = tmp_path / "gitleaks"
     fake.write_text("#!/bin/sh\nexit 0\n")
     fake.chmod(0o755)
-    env = {**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}", "TREE_SCAN": tree_scan}
+    env = {**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}", "TREE_SCAN": tree_scan, "SCAN_ARGS": PLAIN_ARGS}
     done = subprocess.run(
         ["bash", "-eo", "pipefail", "-c", step(CANARY)["run"]], env=env, capture_output=True, text=True, timeout=60
     )
     assert done.returncode == 1 and "was not caught" in done.stdout
+
+
+# --- G3-1: the scan's configuration comes from the base of a pull request ----------------
+
+
+ALLOW_ALL = (
+    '[extend]\nuseDefault = true\n\n[[allowlists]]\ndescription = "hide it"\nregexes = ["AKIA[A-Z0-9]+"]\n'
+    'paths = ["leak\\\\.txt"]\ncondition = "OR"\n'
+)
+
+
+def cfg_repo(tmp_path, base_files: dict, head_files: dict):
+    r = tmp_path / "cfg-repo"
+    r.mkdir()
+    sh("git", "init", "-q", "-b", "main", cwd=r)
+    for name, body in {"a.txt": "one\n", **base_files}.items():
+        (r / name).write_text(body)
+        sh("git", "add", name, cwd=r)
+    sh("git", "-c", "user.email=ci@example.invalid", "-c", "user.name=ci", "commit", "-q", "-m", "base", cwd=r)
+    base = sh("git", "rev-parse", "HEAD", cwd=r)
+    sh("git", "checkout", "-q", "-b", "pr", cwd=r)
+    for name, body in head_files.items():
+        (r / name).write_text(body)
+        sh("git", "add", name, cwd=r)
+    sh(
+        "git",
+        "-c",
+        "user.email=ci@example.invalid",
+        "-c",
+        "user.name=ci",
+        "commit",
+        "--allow-empty",
+        "-q",
+        "-m",
+        "head",
+        cwd=r,
+    )
+    return r, base, sh("git", "rev-parse", "HEAD", cwd=r)
+
+
+def scan_args_of(out: dict) -> dict:
+    """The option=value pairs of the resolved argument list (the plain flags are checked separately)."""
+    return dict(p.split("=", 1) for p in out["scan_args"].split() if p.startswith("--") and "=" in p)
+
+
+@pytest.mark.parametrize("scope", ["all-refs", "pr-commits"])
+def test_a_pull_request_scans_with_the_configuration_of_its_base_not_its_head(scope, tmp_path):
+    info = cfg_repo(
+        tmp_path,
+        {".gitleaks.toml": "title = 'base config'\n[extend]\nuseDefault = true\n", ".gitleaksignore": "base-ignore\n"},
+        {".gitleaks.toml": ALLOW_ALL, ".gitleaksignore": "head-ignore\n"},
+    )
+    done, out = resolve(info, scope, "pull_request", tmp_path)
+    assert done.returncode == 0, done.stderr + done.stdout
+    args = scan_args_of(out)
+    assert open(args["--config"]).read() == "title = 'base config'\n[extend]\nuseDefault = true\n"
+    assert open(args["--gitleaks-ignore-path"] + "/.gitleaksignore").read() == "base-ignore\n"
+    assert str(info[0]) not in args["--config"] and str(info[0]) not in args["--gitleaks-ignore-path"]
+    assert (info[0] / ".gitleaks.toml").read_text() == ALLOW_ALL, "the checkout still holds the head's file"
+
+
+def test_a_pull_request_whose_base_has_no_config_gets_the_defaults_not_the_heads_file(tmp_path):
+    info = cfg_repo(tmp_path, {}, {".gitleaks.toml": ALLOW_ALL, ".gitleaksignore": "head-ignore\n"})
+    done, out = resolve(info, "pr-commits", "pull_request", tmp_path)
+    assert done.returncode == 0, done.stderr + done.stdout
+    args = scan_args_of(out)
+    assert "useDefault = true" in open(args["--config"]).read() and "hide it" not in open(args["--config"]).read()
+    assert open(args["--gitleaks-ignore-path"] + "/.gitleaksignore").read() == ""
+
+
+@pytest.mark.parametrize("event", [e for e in EVENTS if e != "pull_request"])
+def test_other_events_keep_the_checked_out_configuration(event, tmp_path):
+    info = cfg_repo(tmp_path, {".gitleaks.toml": "title = 'base'\n"}, {".gitleaks.toml": "title = 'head'\n"})
+    done, out = resolve(info, "all-refs", event, tmp_path)
+    assert done.returncode == 0, done.stderr + done.stdout
+    assert scan_args_of(out) == {"--config": str(info[0] / ".gitleaks.toml")}, "as today: the checkout's own file"
+    (tmp_path / "x").mkdir()
+    bare = cfg_repo(tmp_path / "x", {}, {})
+    done, out = resolve(bare, "all-refs", event, tmp_path)
+    assert scan_args_of(out) == {}, "no file, no option: the scanner defaults, as today"
+
+
+def test_the_common_arguments_are_the_same_everywhere(tmp_path):
+    info = cfg_repo(tmp_path, {}, {})
+    for event in ("pull_request", "push"):
+        done, out = resolve(info, "all-refs", event, tmp_path)
+        assert out["scan_args"].startswith(PLAIN_ARGS), out["scan_args"]
+
+
+def test_an_unusable_runner_temp_path_fails_closed(tmp_path):
+    info = cfg_repo(tmp_path, {}, {})
+    out = tmp_path / "o"
+    done = run_step(
+        RESOLVE,
+        {
+            "RUNNER_TEMP": str(tmp_path / "has space"),
+            "GITHUB_WORKSPACE": str(info[0]),
+            "GITLEAKS_SCOPE": "all-refs",
+            "EVENT_NAME": "pull_request",
+            "BASE_SHA": info[1],
+            "HEAD_SHA": info[2],
+        },
+        cwd=info[0],
+        out=out,
+    )
+    assert done.returncode == 1 and "::error title=gitleaks-scope::" in done.stdout
+
+
+def test_the_attack_works_with_the_heads_config_and_fails_with_the_resolved_arguments(gitleaks, tmp_path):
+    """A PR adds a key and a config that allowlists it. The head's config hides it; the base's config does not."""
+    info = cfg_repo(
+        tmp_path,
+        {".gitleaks.toml": "title = 'base'\n[extend]\nuseDefault = true\n"},
+        {".gitleaks.toml": ALLOW_ALL, "leak.txt": planted()},
+    )
+    r = info[0]
+    head_cfg = subprocess.run(
+        [gitleaks, "dir", "--redact", "--no-banner", "--exit-code", "1", "."], cwd=r, capture_output=True, text=True
+    )
+    assert head_cfg.returncode == 0, "the premise: the head's own config really hides its key"
+    done, out = resolve(info, "pr-commits", "pull_request", tmp_path)
+    assert done.returncode == 0, done.stderr + done.stdout
+    for cmd in (["dir"], ["git", f"--log-opts={out['log_opts']}"]):
+        fixed = subprocess.run(
+            [gitleaks, cmd[0], *out["scan_args"].split(), *cmd[1:], "."], cwd=r, capture_output=True, text=True
+        )
+        assert fixed.returncode == 1, (cmd, fixed.stdout + fixed.stderr)
+
+
+def test_the_base_defaults_config_catches_a_key_and_an_empty_ignore_file_hides_nothing(gitleaks, tmp_path):
+    info = cfg_repo(tmp_path, {}, {".gitleaks.toml": ALLOW_ALL, "leak.txt": planted()})
+    done, out = resolve(info, "pr-commits", "pull_request", tmp_path)
+    fixed = subprocess.run(
+        [gitleaks, "dir", *out["scan_args"].split(), "."], cwd=info[0], capture_output=True, text=True
+    )
+    assert fixed.returncode == 1, fixed.stdout + fixed.stderr
+
+
+def test_a_config_that_hides_the_planted_key_fails_the_canary(gitleaks, tmp_path):
+    cfg = tmp_path / "hide.toml"
+    cfg.write_text(ALLOW_ALL.replace('paths = ["leak\\\\.txt"]', 'paths = ["planted\\\\.txt"]'))
+    env = {
+        **os.environ,
+        "PATH": f"{os.path.dirname(gitleaks)}:{os.environ['PATH']}",
+        "TREE_SCAN": "true",
+        "SCAN_ARGS": f"{PLAIN_ARGS} --config={cfg}",
+    }
+    done = subprocess.run(
+        ["bash", "-eo", "pipefail", "-c", step(CANARY)["run"]], env=env, capture_output=True, text=True, timeout=120
+    )
+    assert done.returncode == 1 and "was not caught" in done.stdout, done.stdout + done.stderr

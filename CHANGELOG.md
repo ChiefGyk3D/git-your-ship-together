@@ -15,10 +15,10 @@ name what a caller sees after that.
   input says. The clone stays at full depth so both ends of the range are present.
 - **Fails closed.** Any other value fails the gitleaks job, and so does a pull request whose base or head is not a full
   commit id present in the clone; the scan never quietly covers less.
-- **Canary.** The planted-key check runs in both modes and, with `pr-commits`, also exercises the range form and the tree
-  scan the job will run.
+- **Canary.** The planted-key check runs in both modes with the same command shape and argument list as the real scan (one list, built once by the resolve step), and, with `pr-commits`, also exercises the range form (real commit ids) and the tree scan the job will run.
+- **Configuration comes from the base on a pull request (both scopes).** On a `pull_request` event the scan reads `.gitleaks.toml` and `.gitleaksignore` from the base commit, copied outside the workspace and passed explicitly, never from the pull request's own tree; a base with no `.gitleaks.toml` gets the scanner defaults; the canary uses the same configuration, so a config that hides the planted key fails it. **Compatibility:** a caller whose pull request changes either file sees the old version until it merges, and a base config that extends another file by relative path is not supported on a pull request. Push, schedule, `workflow_dispatch` and other events keep the checked-out file. This also applies to callers that leave `gitleaks-scope` at `all-refs`.
 - **Residual.** `pr-commits` does not cover a key already in the base history, a key on another unmerged branch, or a key that
-  a merge-conflict resolution adds and a later commit removes; the README row and the wiki page state each case. The tree
+  a merge-conflict resolution adds and a later commit removes; an empty range (only the tree scan then); tags and notes outside `base..head`; a workflow re-run (original payload); an inline `gitleaks:allow` comment in the pull request's own files; the generated SARIF file in the workspace during the tree scan; the merge-preview tree instead of the literal head tree. The README row and the wiki page state each case; protect `.gitleaks.toml` and `.gitleaksignore` with CODEOWNERS. The tree
   scan reports in the job log, with no SARIF upload.
 - **Step names changed.** "Scan the full history (gitleaks)" is now "Scan the commits (gitleaks)". A caller that matches the
   step name should update it; job names are unchanged. Existing callers: nothing else changes unless they set the input.
