@@ -838,11 +838,13 @@ done
 
 # Green on $pin. Re-read the head once more: a push after the last poll must not be merged.
 if [[ -n "$pr" ]]; then
-  if ! cur="$(pr_head)"; then
+  # Not in a command substitution: the base branch it reads (for the protection check) must survive.
+  if ! pr_state; then
     say "cannot re-read the head of ${repo}#${pr} after the checks; not trusting ${pin}"
     result="error"
     exit 1
   fi
+  cur="$PR_HEAD"
   if [[ "$cur" != "$pin" ]]; then
     say "head moved after the last check: ${pin} -> ${cur}; nothing merged"
     result="head-moved"
@@ -912,8 +914,6 @@ read_protection() {
   done
 }
 check_protection() {
-  # pr_head runs in a subshell, so the base branch is read here (a failed read leaves it unknown: unreadable).
-  pr_state || PR_BASE=""
   read_protection
   case "$PROT" in
     covered) say "base branch ${PR_BASE}: GitHub enforces the required checks (or a merge queue); this script is the second line" ;;
