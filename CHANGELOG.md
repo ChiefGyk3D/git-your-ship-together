@@ -5,6 +5,20 @@ name what a caller sees after that.
 
 ## Unreleased
 
+Nothing yet.
+
+## v1.27.0 (2026-11-02)
+
+### Changed: pinned actions and tools bumped (issue #270, pull requests #271 and #273, release #274)
+
+Callers pick these up when they re-pin.
+
+- **harden-runner v2.22.3.** Fixes GitHub's DNS resolver and outbound proxy blocking connections that the allow-list permits, in `block` mode.
+- **Actions:** setup-python 7.1.0, zizmor-action 0.8.0, docker/login-action 4.7.0, codeql-action 4.39.1.
+- **Tools** (each checked against the vendor checksums): OpenTofu 1.13.2, tflint 0.65.0, OPA 1.22.0, Trivy 0.76.1, syft 1.55.0.
+- **semgrep 1.183.0** in the `security.yml` scan, so callers get the new rules and fixes on re-pin. **mypy 2.4.1** in this repository's own `ci.yml` only; no caller sees it.
+- **ruff default 0.17.3.** The `lint-install-command` default pins ruff 0.17.3, so a caller on the default now lints with 0.17.3. A caller that pins its own ruff is unchanged.
+
 ### New: `gitleaks-scope` input in `security.yml` (issue #260)
 
 - **New input `gitleaks-scope`**, exactly `all-refs` (the default; behavior unchanged for every caller) or `pr-commits`.
