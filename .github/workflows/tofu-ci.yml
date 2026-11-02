@@ -47,11 +47,11 @@ on:
       tofu-version:
         description: OpenTofu release to download (opentofu/opentofu), without the `v`.
         type: string
-        default: "1.12.6"
+        default: "1.13.2"
       tofu-sha256:
         description: SHA-256 of the OpenTofu linux_amd64 zip for that version.
         type: string
-        default: "5dc43da4f750f33873dc25e94587128709e819e544b7be9016b255316153c3a8"
+        default: "723bebb0df8411daff1e5fc3862e28ff5581fe5634087f4c29a9aa41d78208b5"
       tflint:
         description: Run tflint over every directory.
         type: boolean
@@ -59,11 +59,11 @@ on:
       tflint-version:
         description: tflint release to download (terraform-linters/tflint), without the `v`.
         type: string
-        default: "0.64.0"
+        default: "0.65.0"
       tflint-sha256:
         description: SHA-256 of the tflint linux_amd64 zip for that version.
         type: string
-        default: "cca9d13e2e1d7a2c627af60ff899a3c9b74212899416aeb96ec764d2ef954537"
+        default: "d4c545ed2e29d6338604b586f34f544f380f70f243aa72f7b484713835eaec61"
       test:
         description: Run `tofu test` (or `terraform test`) in every directory, after `init -backend=false`. Off by default because a test file that reaches a real provider would need a credential this job never has; turn it on when the tests use mocked providers.
         type: boolean
@@ -75,11 +75,11 @@ on:
       opa-version:
         description: OPA release to download (open-policy-agent/opa), without the `v`.
         type: string
-        default: "1.21.0"
+        default: "1.22.0"
       opa-sha256:
         description: SHA-256 of the OPA linux_amd64_static binary for that version.
         type: string
-        default: "5eef70644868bb04d0556bcc795ee42f2ab379e73f51d1bfa30f83e1305bc9b9"
+        default: "791790254c598a942eb140959bcec9a47f844535a632fd01d11d870ba2a47047"
       trivy:
         description: Run Trivy's configuration scan over the repository.
         type: boolean
@@ -180,7 +180,7 @@ jobs:
           check semgrep-egress-policy "${POLICY_SEMGREP_EGRESS_POLICY+set}" "${POLICY_SEMGREP_EGRESS_POLICY-}"
           exit "$bad"
 
-      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
         with:
           egress-policy: ${{ (inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block' }}
           allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
@@ -351,7 +351,7 @@ jobs:
           check semgrep-egress-policy "${POLICY_SEMGREP_EGRESS_POLICY+set}" "${POLICY_SEMGREP_EGRESS_POLICY-}"
           exit "$bad"
 
-      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
         with:
           egress-policy: ${{ (inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block' }}
           allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
@@ -529,7 +529,7 @@ jobs:
           check semgrep-egress-policy "${POLICY_SEMGREP_EGRESS_POLICY+set}" "${POLICY_SEMGREP_EGRESS_POLICY-}"
           exit "$bad"
 
-      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
         with:
           egress-policy: ${{ (inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block' }}
           allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
@@ -701,7 +701,7 @@ jobs:
           check semgrep-egress-policy "${POLICY_SEMGREP_EGRESS_POLICY+set}" "${POLICY_SEMGREP_EGRESS_POLICY-}"
           exit "$bad"
 
-      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
         with:
           egress-policy: ${{ (inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block' }}
           allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
@@ -864,7 +864,7 @@ jobs:
           check semgrep-egress-policy "${POLICY_SEMGREP_EGRESS_POLICY+set}" "${POLICY_SEMGREP_EGRESS_POLICY-}"
           exit "$bad"
 
-      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
         with:
           egress-policy: ${{ (inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block' }}
           allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
@@ -1000,7 +1000,7 @@ jobs:
           check semgrep-egress-policy "${POLICY_SEMGREP_EGRESS_POLICY+set}" "${POLICY_SEMGREP_EGRESS_POLICY-}"
           exit "$bad"
 
-      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
         with:
           egress-policy: ${{ (inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block' }}
           allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
@@ -1171,7 +1171,7 @@ jobs:
           check semgrep-egress-policy "${POLICY_SEMGREP_EGRESS_POLICY+set}" "${POLICY_SEMGREP_EGRESS_POLICY-}"
           exit "$bad"
 
-      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
         with:
           egress-policy: ${{ inputs.egress-policy == 'audit' && 'audit' || 'block' }}
           allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
@@ -1457,7 +1457,7 @@ jobs:
           check semgrep-egress-policy "${POLICY_SEMGREP_EGRESS_POLICY+set}" "${POLICY_SEMGREP_EGRESS_POLICY-}"
           exit "$bad"
 
-      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
         with:
           egress-policy: ${{ (inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block' }}
           allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
@@ -1595,7 +1595,7 @@ jobs:
           check semgrep-egress-policy "${POLICY_SEMGREP_EGRESS_POLICY+set}" "${POLICY_SEMGREP_EGRESS_POLICY-}"
           exit "$bad"
 
-      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
         with:
           egress-policy: ${{ (inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block' }}
           allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443

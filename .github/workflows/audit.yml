@@ -72,7 +72,7 @@ jobs:
       contents: read
       id-token: write  # the Doppler fetch over OIDC
     steps:
-      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
         with:
           egress-policy: block
           allowed-endpoints: api.doppler.com:443 api.github.com:443 files.pythonhosted.org:443 github.com:443 pypi.org:443 results-receiver.actions.githubusercontent.com:443
@@ -342,7 +342,7 @@ jobs:
       contents: read
       issues: write  # one issue per expiring entry, in this repository only
     steps:
-      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
         with:
           egress-policy: block
           allowed-endpoints: api.github.com:443 files.pythonhosted.org:443 github.com:443 pypi.org:443 results-receiver.actions.githubusercontent.com:443

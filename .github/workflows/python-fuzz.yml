@@ -119,7 +119,7 @@ jobs:
           check semgrep-egress-policy "${POLICY_SEMGREP_EGRESS_POLICY+set}" "${POLICY_SEMGREP_EGRESS_POLICY-}"
           exit "$bad"
 
-      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
         with:
           egress-policy: ${{ (inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted' && contains(fromJSON('["ubuntu-latest","ubuntu-22.04","ubuntu-24.04","ubuntu-26.04","ubuntu-22.04-arm","ubuntu-24.04-arm","ubuntu-26.04-arm","ubuntu-slim","windows-latest","windows-2022","windows-2025","windows-2025-vs2026","windows-11-arm","windows-11-vs2026-arm","macos-latest","macos-14","macos-15","macos-15-intel","macos-26","macos-26-intel"]'), inputs.runner)) && 'audit' || 'block' }}
           allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
