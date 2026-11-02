@@ -871,7 +871,7 @@ def test_the_record_lists_the_widened_jobs_and_the_order():
     kept = text.split("**Kept in `block`**", 1)[1].split("Ambiguous means", 1)[0]
     assert "`dependency-review`" not in kept
     assert "| `python-ci.yml` | `test` |" not in kept
-    assert "| Expires | 2026-11-07" in text
+    assert "| Expires | was 2026-11-07" in text  # the original expiry stays in the history
 
 
 @pytest.mark.parametrize(
@@ -1185,3 +1185,67 @@ def test_the_secrets_guard_does_not_cry_wolf_on_look_alikes():
     job = {"permissions": {"contents": "read"}, "env": {"A": "${{ inputs.egress-policy-secretless }}"}}
     job["steps"] = [{"name": "my-secrets notes", "run": "echo secrets-are-not-here ${{ vars.secretsish }}"}]
     assert what_a_job_holds(job) == []
+
+
+# --- EX-0001 is closed: the secretless jobs block by default again -----------------------------------
+
+
+def secretless_defaults() -> dict[str, object]:
+    found = {}
+    for path in WORKFLOWS:
+        inputs = ((yaml.safe_load(path.read_text()).get(True) or {}).get("workflow_call") or {}).get("inputs") or {}
+        if "egress-policy-secretless" in inputs:
+            found[path.name] = inputs["egress-policy-secretless"].get("default")
+    return found
+
+
+def defaults_that_are_not_block(defaults: dict[str, object]) -> list[str]:
+    return sorted(name for name, value in defaults.items() if value != "block")
+
+
+def test_every_secretless_input_defaults_to_block_since_ex_0001_closed():
+    defaults = secretless_defaults()
+    assert len(defaults) >= 13, f"expected every reusable workflow with the input to be collected: {sorted(defaults)}"
+    assert defaults_that_are_not_block(defaults) == []
+
+
+def test_the_secretless_default_guard_bites():
+    assert defaults_that_are_not_block({"a.yml": "block", "b.yml": "audit"}) == ["b.yml"]
+    assert defaults_that_are_not_block({"a.yml": None}) == ["a.yml"]
+    assert defaults_that_are_not_block({"a.yml": "Block"}) == ["a.yml"]
+
+
+def test_the_per_job_follow_inputs_still_default_to_block():
+    for name, key in (
+        ("python-ci.yml", "distro-egress-policy"),
+        ("bash-ci.yml", "distro-egress-policy"),
+        ("security.yml", "semgrep-egress-policy"),
+    ):
+        doc = yaml.safe_load((REPO / ".github" / "workflows" / name).read_text())
+        assert doc[True]["workflow_call"]["inputs"][key]["default"] == "block", f"{name}:{key}"
+
+
+def test_the_record_and_the_docs_say_ex_0001_is_closed():
+    text = RECORD.read_text()
+    assert "| Status | **closed** |" in text and "| Closed | 2026-11-02" in text
+    assert "\n## Closure\n" in text
+    closure = text.split("\n## Closure\n", 1)[1].split("\n## Why\n", 1)[0]
+    for needle in (
+        "41490712453",
+        "41493344115",
+        "41496006377",
+        "15 of 15",
+        "135 of 135",
+        "13 of 13",
+        "root cause",
+        "egress-policy-secretless: audit",
+    ):
+        assert needle in closure, needle
+    assert "\n## Why\n" in text and "## Exact scope" in text, "the history stays"
+    index = (REPO / "docs" / "security" / "exceptions" / "README.md").read_text()
+    row = next(line for line in index.splitlines() if line.startswith("| [EX-0001]"))
+    assert "closed" in row and "2026-11-02" in row and "active" not in row
+    readme = (REPO / "README.md").read_text()
+    assert "**Status: closed on 2026-11-02.**" in readme
+    wiki = (REPO / "docs" / "wiki" / "Egress-control.md").read_text()
+    assert "Closed on 2026-11-02" in wiki and "egress-policy-secretless: audit" in wiki

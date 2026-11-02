@@ -13,8 +13,8 @@ not exactly `audit` or `block`.
 
 | Mode | Behaviour | Used for |
 |---|---|---|
-| `audit` | Logs every outbound connection to the job summary; blocks nothing | The default, and how a list is *measured* |
-| `block` | Refuses any host not in `allowed-endpoints` | Every adopted repository |
+| `audit` | Logs every outbound connection to the job summary; blocks nothing | The default of `egress-policy`, and how a list is *measured* |
+| `block` | Refuses any host not in `allowed-endpoints` | Every adopted repository; the default of `egress-policy-secretless` |
 
 Turning it on in a caller is one line:
 
@@ -23,22 +23,22 @@ with:
   egress-policy: block
 ```
 
-## Known platform issue: westus2 (EX-0001)
+## Known platform issue: westus2 (EX-0001), closed
 
-GitHub-hosted runners in `westus2` break `block` (a DNS experiment makes the agent drop allowed IPs). Until
-it is fixed upstream, jobs that hold no secret follow the `egress-policy-secretless` input (default `audit`),
-and every job that can run in `block` on a Linux runner starts with the **egress canary**
-(`.github/actions/egress-canary`; Linux-only because it needs `timeout` and `getent`, so macOS and Windows
-matrix legs skip it), which fails in seconds with "rerun the job" instead of hanging. The scope, the evidence, the residual risk,
-the expiry (2026-11-07 at the latest) and the rollback are in
+**Closed on 2026-11-02.** GitHub-hosted runners in `westus2` broke `block` (a DNS experiment made the agent drop
+allowed IPs), and from 2026-10-24 jobs that hold no secret followed the `egress-policy-secretless` input with a
+default of `audit`. A 600-job experiment on harden-runner v2.22.3 passed `block` on 15 of 15 westus2 jobs and
+135 of 135 on other regions, while the control (`block` on v2.22.2) failed 13 of 13 on westus2. The default is
+`block` again, and the pip and buildx caches are back in those jobs (they are on whenever a job's effective policy is
+`block`). Caveats: the root cause is not shown, only the symptom is gone with v2.22.3, and two control arms hit
+westus2 only 5 and 8 times.
+
+If it recurs, a caller sets `egress-policy-secretless: audit` on the workflow call. The **egress canary**
+(`.github/actions/egress-canary`; Linux-only because it needs `timeout` and `getent`, so macOS and Windows matrix
+legs skip it) stays in every job that can run in `block` and fails in seconds with "rerun the job" instead of
+hanging. The scope, the evidence, the closure and the history are in
 [EX-0001](../security/exceptions/EX-0001-harden-runner-block-westus2.md).
 Full description: [README](../../README.md#known-ci-platform-issue-westus2-ex-0001).
-
-Widened on 2026-10-26 (issue #225): `security.yml` `dependency-review` and `python-ci.yml` `test` follow
-`egress-policy-secretless` as well. `dependency-review` holds a comment-scoped `pull-requests: write` token, the one
-stated deviation from "secretless" (the record names the maintainer decision and why it is acceptable); `test` holds
-no credential. Jobs with a stored secret, an OIDC token or a publish-capable token, and the build jobs of the release
-paths, stay in `block`.
 
 ## Where the lists come from
 

@@ -7,6 +7,28 @@ name what a caller sees after that.
 
 Nothing yet.
 
+## v1.28.0 (2026-11-02)
+
+### Changed: secretless jobs run harden-runner `block` by default again (issue #278, security exception EX-0001 closed)
+
+Callers pick this up when they re-pin.
+
+- **`egress-policy-secretless` now defaults to `block`** (it was `audit` since 2026-10-24) in every reusable workflow that has the input: `agent-scan`, `arduino-ci`, `bash-ci`, `container-release`, `dast`, `python-ci`, `python-docker-release`, `python-fuzz`, `python-package-release`, `security`, `threat-model`, `tofu-ci` and `verify-published`. A caller that re-pins and sets nothing now runs its secretless jobs under the `block` allow-list, the same list that `egress-policy` uses. `distro-egress-policy` and `semgrep-egress-policy` already defaulted to `block` and are unchanged; `egress-policy` keeps its own defaults.
+- **The pip, buildx and Arduino-package caches come back** in those jobs. The cache gates follow each job's effective policy, so they are on under `block` and off only for a caller that opts into `audit`.
+- **Opt-out input.** The input stays. A caller that hits the westus2 symptom again sets `egress-policy-secretless: audit` on the workflow call. The exact-string policy check, the `github-hosted` runtime control and the fail-fast egress canary are unchanged.
+- **Check allow-lists.** A caller whose secretless jobs reached a host that only the `audit` default let through (a private mirror, an installer its code pulls) needs it in `extra-allowed-endpoints`; a blocked connection shows in the job log as `domain not allowed: <host>`.
+
+### Closed: security exception EX-0001 (westus2 harden-runner `block`)
+
+- **Status is closed on 2026-11-02**, by the maintainer's decision, before the 2026-11-07 expiry. The record keeps its history and gains a "Closure" section.
+- **Evidence.** A 600-job experiment on harden-runner v2.22.3 (the version pinned since v1.27.0): `block` passed 15 of 15 westus2 jobs and 135 of 135 on other regions; the control, `block` on v2.22.2, failed 13 of 13 on westus2 and every one hung to the 10-minute timeout. Audit v2.22.3 and the no-tool arm passed. Runs: [41490712453](https://github.com/ChiefGyk3D/git-your-ship-together/actions/runs/41490712453), [41493344115](https://github.com/ChiefGyk3D/git-your-ship-together/actions/runs/41493344115), [41496006377](https://github.com/ChiefGyk3D/git-your-ship-together/actions/runs/41496006377).
+- **Caveats.** The root cause is not shown, only the symptom is gone with v2.22.3. Two control arms hit westus2 only 5 and 8 times.
+- This repository's own `ci.yml` jobs that call harden-runner directly stay `audit` (they were `audit` before the exception, with no measured allow-list), so their pip caches stay off.
+
+### Changed: syft 1.56.0
+
+- **syft 1.55.0 to 1.56.0** in `python-package-release.yml` (`syft-version` and `syft-sha256` defaults). The SHA-256 is the vendor checksums file's entry for the linux_amd64 tarball, and matches `sha256sum` of the downloaded asset. A caller that pins its own `syft-version` is unchanged.
+
 ## v1.27.0 (2026-11-02)
 
 ### Changed: pinned actions and tools bumped (issue #270, pull requests #271 and #273, release #274)

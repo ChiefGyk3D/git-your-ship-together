@@ -4,9 +4,9 @@ A security exception is a dated, owned, time-boxed relaxation of a control that 
 a reason. It is written down before the relaxation ships, expires on its own, and is reverted by an input
 flip or a one-line change.
 
-| ID | Control relaxed | Status | Expires |
+| ID | Control relaxed | Status | Ended |
 |---|---|---|---|
-| [EX-0001](EX-0001-harden-runner-block-westus2.md) | harden-runner `block` to `audit` for secretless jobs (westus2 runner DNS defect) | active | 2026-11-07 |
+| [EX-0001](EX-0001-harden-runner-block-westus2.md) | harden-runner `block` to `audit` for secretless jobs (westus2 runner DNS defect) | closed | 2026-11-02 (was to expire 2026-11-07) |
 
 ## Rules
 
@@ -27,7 +27,7 @@ flip or a one-line change.
 | ID | EX-NNNN |
 | Date | YYYY-MM-DD |
 | Owner | <person> |
-| Status | active / expired / reverted |
+| Status | active / expired / reverted / closed |
 | Issue | owner/repo#N |
 | Expires | <date, and the upstream event if any> |
 | Control relaxed | <what changes, from what to what> |
