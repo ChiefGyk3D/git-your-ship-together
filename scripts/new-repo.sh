@@ -368,7 +368,7 @@ uses_line() {
 
 # The pinned harden-runner of the PyPI publish job below; keep it equal to the
 # pin in python-package-release.yml (tests/test_new_repo.py checks they agree).
-HARDEN_RUNNER="step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2"
+HARDEN_RUNNER="step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3"
 PYPI_HOSTS="api.github.com:443 files.pythonhosted.org:443 fulcio.sigstore.dev:443 ghcr.io:443 github.com:443 pkg-containers.githubusercontent.com:443 productionresultssa12.blob.core.windows.net:443 pypi.org:443 rekor.sigstore.dev:443 release-assets.githubusercontent.com:443 timestamp.sigstore.dev:443 tuf-repo-cdn.sigstore.dev:443 upload.pypi.org:443 uploads.github.com:443"
 
 write_ci() {

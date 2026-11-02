@@ -885,12 +885,12 @@ Inputs of `tofu-ci.yml`:
 |---|---|---|
 | `directories` | `.` | Space-separated root modules, validated and linted one by one (and tested, with `test`) |
 | `binary` | `tofu` | `tofu` (downloaded) or `terraform` (the runner's) |
-| `tofu-version`, `tofu-sha256` | `1.12.6` and its zip's hash | The OpenTofu release downloaded from opentofu/opentofu |
+| `tofu-version`, `tofu-sha256` | `1.13.2` and its zip's hash | The OpenTofu release downloaded from opentofu/opentofu |
 | `tflint` | `true` | Run tflint over every directory |
-| `tflint-version`, `tflint-sha256` | `0.64.0` and its zip's hash | The tflint release downloaded from terraform-linters/tflint |
+| `tflint-version`, `tflint-sha256` | `0.65.0` and its zip's hash | The tflint release downloaded from terraform-linters/tflint |
 | `test` | `false` | `tofu test` (or `terraform test`) in every directory after `init -backend=false`. Holds no credential, so turn it on when the tests use `mock_provider` |
 | `policy-directories` | empty (skips the job) | Space-separated directories of Rego policies with their `_test.rego` files; each gets `opa fmt --list --fail`, `opa check --strict` and `opa test` |
-| `opa-version`, `opa-sha256` | `1.21.0` and its binary's hash | The OPA release downloaded from open-policy-agent/opa (`opa_linux_amd64_static`) |
+| `opa-version`, `opa-sha256` | `1.22.0` and its binary's hash | The OPA release downloaded from open-policy-agent/opa (`opa_linux_amd64_static`) |
 | `trivy` | `true` | Trivy configuration scan over the repository |
 | `trivy-severity` | `CRITICAL,HIGH` | Severities the scan reports |
 | `trivy-exit-code` | `1` | `1` fails the job on a finding, `0` reports only. A migration aid |
@@ -1180,7 +1180,7 @@ Inputs of `verify-published.yml`:
 | `rescan-ignore-unfixed` | `true` | Skip advisories with no fixed version yet |
 | `rescan-ignore-advisories` | empty | Comma-separated CVE or GHSA IDs the rescan does not fail on; each needs a `where: trivy` entry for the repository in `baseline/risk-register.yaml`, which the weekly audit checks |
 | `rescan-artifact-name` | `verify-published-rescan` | Workflow artifact holding the SARIF and text reports |
-| `trivy-version`, `trivy-sha256` | `0.75.0`, its hash | The one pinned Trivy binary; change both together |
+| `trivy-version`, `trivy-sha256` | `0.76.1`, its hash | The one pinned Trivy binary; change both together |
 | `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `block`, the measured list, empty | harden-runner; the list covers the GHCR pull, Sigstore, and GitHub's attestation store |
 | `egress-policy-secretless` | `audit` | harden-runner policy for the jobs that hold no stored secret, no OIDC token and no write-scoped token, and whose output no privileged job consumes; exactly `audit` or `block`. Governed by security exception EX-0001, see [Known CI platform issue: westus2 (EX-0001)](#known-ci-platform-issue-westus2-ex-0001). `block` opts back in |
 | `timeout-minutes` | `20` | Job timeout |
@@ -1239,7 +1239,7 @@ jobs:
       contents: read
       id-token: write       # PyPI Trusted Publishing; the OIDC token names THIS workflow
     steps:
-      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
         with:
           egress-policy: block
           allowed-endpoints: api.github.com:443 files.pythonhosted.org:443 fulcio.sigstore.dev:443 ghcr.io:443 github.com:443 pkg-containers.githubusercontent.com:443 productionresultssa12.blob.core.windows.net:443 pypi.org:443 rekor.sigstore.dev:443 release-assets.githubusercontent.com:443 timestamp.sigstore.dev:443 tuf-repo-cdn.sigstore.dev:443 upload.pypi.org:443 uploads.github.com:443
@@ -1312,8 +1312,8 @@ Inputs of `python-package-release.yml`:
 | `github-release` | `true` | Attach the files, their SBOMs, `SHA256SUMS` and provenance to the GitHub release |
 | `release-title` | empty (the tag) | Title of a release this workflow creates |
 | `sbom` | `true` | Write `sbom.cdx.json` and `sbom.spdx.json` with syft and attach them to the release, listed in `SHA256SUMS` and attested with the rest |
-| `syft-version` | `1.54.0` | syft release to download, without the `v`. Changing it means changing `syft-sha256` |
-| `syft-sha256` | the 1.54.0 linux_amd64 tarball's | SHA-256 of that tarball |
+| `syft-version` | `1.55.0` | syft release to download, without the `v`. Changing it means changing `syft-sha256` |
+| `syft-sha256` | the 1.55.0 linux_amd64 tarball's | SHA-256 of that tarball |
 | `attest` | `true` | Record SLSA build provenance for every file, SBOMs included |
 | `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `audit`, the measured list, empty | harden-runner, as in `python-ci.yml`. The build's hosts were measured in block mode here; the release job's hosts are GitHub's and Sigstore's documented ones |
 | `egress-policy-secretless` | `audit` | harden-runner policy for the jobs that hold no stored secret, no OIDC token and no write-scoped token, and whose output no privileged job consumes; exactly `audit` or `block`. Governed by security exception EX-0001, see [Known CI platform issue: westus2 (EX-0001)](#known-ci-platform-issue-westus2-ex-0001). `block` opts back in |
