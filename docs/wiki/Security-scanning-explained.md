@@ -165,6 +165,37 @@ CodeQL has no in-source suppression marker comparable to `nosemgrep` that this r
 relies on; dismissal in the Security tab is the route. Whether a dismissed CodeQL alert
 re-opens after a refactor moves the line was not measured for this page.
 
+## Scoping the secret scan on a pull request
+
+By default the gitleaks scan reads every ref in the clone (`gitleaks-scope: all-refs`). One key-shaped fixture on an
+unmerged branch then fails the scan on every other pull request in the repository. A caller can set
+`gitleaks-scope: pr-commits` to scope a pull request's scan to that pull request:
+
+| Event | `all-refs` (default) | `pr-commits` |
+|---|---|---|
+| `pull_request` | every ref | the commits of the pull request (`base..head`) plus the checked-out tree |
+| `push` (the default branch included) | every ref | every ref |
+| `schedule`, `workflow_dispatch`, anything else | every ref | every ref |
+| any event, any other value of the input | the job fails | the job fails |
+
+`base..head` is the commits reachable from the head and not from the base. A key committed and then reverted inside the
+pull request is in that range, so it stays caught. The narrowing never applies to a push or a schedule, so the default
+branch is still scanned in full. If the base or head is not a full commit id present in the clone, the job fails rather
+than scanning less.
+
+| Event | Configuration and ignore file the scans use | Root `.gitleaksignore` of the checkout |
+|---|---|---|
+| `pull_request` (either scope) | the base commit's `.gitleaks.toml` (scanner defaults if none) and `.gitleaksignore`, copied outside the workspace | replaced by the base's copy, or removed |
+| any other event | the checked-out `.gitleaks.toml`, as before | left as checked out |
+
+Configuration source, in both scopes: on a `pull_request` event the scan reads `.gitleaks.toml` and `.gitleaksignore` from the base commit (copied outside the workspace and passed explicitly), never from the pull request's own tree, so a pull request cannot allowlist its own secret. With no config on the base, the scanner defaults apply. gitleaks also applies a `.gitleaksignore` at the root of the scanned tree whatever the ignore-path option says (measured with the pinned binary, for the `git` and the `dir` scan), so on a pull request that root file in the throwaway checkout is replaced by the base's copy, or removed when the base has none; both scans then use the base's. A pull request that changes either file gets a warning naming it. A pull request that edits those files is scanned with the old version until it merges; a base config that extends another file by relative path is not supported on a pull request. Other events use the checked-out file, as before. The canary runs the same command shape and the same configuration as the real scan, so a config that hides the planted key fails it.
+
+What `pr-commits` does not see, so that nobody assumes more: a key in a commit that is already in the base history
+(the scan after the merge, or an earlier scan of that branch, covers it); a key on another unmerged branch (found when that
+branch has its own pull request); a key that only a merge-conflict resolution introduces and a later commit removes (git
+shows no patch for a merge commit; the tree scan sees it only while it is still in the tree); and a commit force-pushed away
+before the scan ran. Also: an empty range (base equal to head, or a head already in the base) leaves only the tree scan; tags and notes outside `base..head`; a workflow re-run uses the original event payload; an inline `gitleaks:allow` comment in the pull request's own files is honored (the scanner's `--ignore-gitleaks-allow` would also fail legitimate allow comments, so it is not passed); the generated `gitleaks.sarif` lies in the workspace while the tree scan walks it (redacted); and the tree scanned is GitHub's merge-preview checkout, not the literal head tree. The tree scan reports in the job log and is not uploaded as SARIF. Protect `.gitleaks.toml` and `.gitleaksignore` with CODEOWNERS and branch protection, because a change to them takes effect after the merge.
+
 ## What this refuses to do
 
 - It never runs Snyk (or any token-holding scanner) on a pull request.
