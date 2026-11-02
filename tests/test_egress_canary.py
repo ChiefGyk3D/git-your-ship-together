@@ -1193,7 +1193,9 @@ def test_the_secrets_guard_does_not_cry_wolf_on_look_alikes():
 def secretless_defaults() -> dict[str, object]:
     found = {}
     for path in WORKFLOWS:
-        inputs = ((yaml.safe_load(path.read_text()).get(True) or {}).get("workflow_call") or {}).get("inputs") or {}
+        triggers = yaml.safe_load(path.read_text()).get(True)  # PyYAML reads the key `on` as True
+        call = triggers.get("workflow_call") if isinstance(triggers, dict) else None
+        inputs = (call or {}).get("inputs") or {}
         if "egress-policy-secretless" in inputs:
             found[path.name] = inputs["egress-policy-secretless"].get("default")
     return found
