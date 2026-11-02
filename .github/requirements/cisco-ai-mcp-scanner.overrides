@@ -1,0 +1,6 @@
+# litellm==1.93.2 is cisco-ai-mcp-scanner's own exact pin, and the latest release
+# (4.8.7) still pins it, so Dependabot/uv cannot move it on their own. Replaces the
+# pin with a version patching GHSA-g5ff-637f-6q2m and GHSA-7hp6-4w63-5g45 (security
+# scan 2026-11-02). Re-check on an mcp-scanner bump: drop this once it requires a
+# fixed litellm itself.
+litellm==1.100.4

@@ -997,8 +997,8 @@ jobs:
                 --hash=sha256:a352e7e428770286cc899e2542b6cdaedb2b4953ff269a210103ec58f6198a61
             filelock==4.1.0 ; python_full_version < '3.11' \
                 --hash=sha256:2ce9818e3e2d8f284c1a964414447ef148d42a5fd5e2a477a7118e574b293ec1
-            filelock==4.2.4 ; python_full_version >= '3.11' \
-                --hash=sha256:301241438c57936ef93f4243a94f2559022268bfcf9b375a9a72eb0f8db8358e
+            filelock==4.2.6 ; python_full_version >= '3.11' \
+                --hash=sha256:fd7d4fca497bf3e3d0945a13261f8e684f2aef12ce7cf76aef26e13bf7388b88
             idna==3.20 \
                 --hash=sha256:ab7ae7122974553370f0bdb919e1a960b2cd1bc1ef0276416d896db81c14582c
             license-expression==30.4.4 \
@@ -1032,8 +1032,8 @@ jobs:
                 --hash=sha256:4659bc2a667783e7a15d190f6fccf8b2486685b6dba4c19c3876314769c57526
             platformdirs==4.12.4 ; python_full_version < '3.11' \
                 --hash=sha256:78bfb9db2a8471ed7eebe3c3c932da413911042994e699b384fbb4493fa872d7
-            platformdirs==4.14.0 ; python_full_version >= '3.11' \
-                --hash=sha256:1dadfc59a8a5d7565b3d9270ae8fa71c065595352c4277b41c11ee6c222c4b91
+            platformdirs==4.14.3 ; python_full_version >= '3.11' \
+                --hash=sha256:cba2d05fe5e18b26b1fa6f376b8e6234c012abe1f8696c486fface7d0054e931
             py-serializable==2.1.0 \
                 --hash=sha256:b56d5d686b5a03ba4f4db5e769dc32336e142fc3bd4d68a8c25579ebb0a67304
             pygments==2.21.0 \
@@ -1368,8 +1368,8 @@ jobs:
             # Wheels for x86_64 and aarch64 Linux and CPython 3.10-3.14 only (see that script).
             annotated-types==0.8.0 \
                 --hash=sha256:f072f4d804ea359e4eaf198b1af7a8b0943881a87f31bb764f8bf219bb9419e0
-            anyio==4.15.1 \
-                --hash=sha256:6152fdbbf9a77fdec97731721bebf7c4c44f7c29b424b0065826173efc7ed101
+            anyio==4.16.0 \
+                --hash=sha256:c66ae634e0b8228396b801741beb3294326d4b6102f7bba4041c0dfb58c29026
             attrs==26.1.0 \
                 --hash=sha256:c647aa4a12dfbad9333ca4e71fe62ddc36f4e63b2d260a37a8b83d2f043ac309
             boltons==21.0.0 \
@@ -1505,8 +1505,10 @@ jobs:
                 --hash=sha256:42d59d631f7768a1028a64c7ff581a9bf7519804daf91fc5b6c56e30eec5e193
             python-dotenv==1.2.4 \
                 --hash=sha256:42269a8a5b3fd54ffa6f3d84b18abed50064717576b4ecf03dc4a55d8aa04fdc
-            python-multipart==0.0.32 \
+            python-multipart==0.0.32 ; python_full_version < '3.11' \
                 --hash=sha256:ff6d3f776f16878c894e52e107296ffc890e913c611b1a4ec6c44e2821fe2e23
+            python-multipart==0.0.33 ; python_full_version >= '3.11' \
+                --hash=sha256:8f16c07b36add9da6b2ee87d3efcaf0a45a6de9c3d0a5dd94e9ccf7675a7bc45
             referencing==0.37.0 \
                 --hash=sha256:381329a9f99628c9069361716891d34ad94af76e461dcb0335825aecc7692231
             requests==2.34.2 \
