@@ -27,11 +27,11 @@ with:
 
 **Closed on 2026-11-02.** GitHub-hosted runners in `westus2` broke `block` (a DNS experiment made the agent drop
 allowed IPs), and from 2026-10-24 jobs that hold no secret followed the `egress-policy-secretless` input with a
-default of `audit`. A 600-job experiment on harden-runner v2.22.3 passed `block` on 15 of 15 westus2 jobs and
-135 of 135 on other regions, while the control (`block` on v2.22.2) failed 13 of 13 on westus2. The default is
+default of `audit`. A 600-job experiment on harden-runner v2.22.3 (150 jobs per arm over 3 runs) passed `block` on 15 of 15 westus2 jobs and
+135 of 135 on other regions, while the control (`block` on v2.22.2) passed 137 of 137 on other regions and failed 13 of 13 on westus2. The default is
 `block` again, and the pip and buildx caches are back in those jobs (they are on whenever a job's effective policy is
 `block`). Caveats: the root cause is not shown, only the symptom is gone with v2.22.3, and two control arms hit
-westus2 only 5 and 8 times.
+westus2 only 5 and 8 times (145 and 142 ok on other regions).
 
 If it recurs, a caller sets `egress-policy-secretless: audit` on the workflow call. The **egress canary**
 (`.github/actions/egress-canary`; Linux-only because it needs `timeout` and `getent`, so macOS and Windows matrix

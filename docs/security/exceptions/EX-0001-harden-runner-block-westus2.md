@@ -22,22 +22,26 @@ The status is **closed**, not expired: it ended by decision on evidence, before 
 
 ### Evidence: a 600-job experiment on harden-runner v2.22.3 (2026-11-02)
 
-A controlled experiment of 600 jobs, each printing its region, with harden-runner v2.22.3 (commit
-`46b06cea07f9e64621fdf066ba77ac6915163d43`) as the version under test. The region of each job is taken from the
-`Region:` line under "Hosted Compute Agent" in the job's "Set up job" log.
+A controlled experiment of 600 jobs: 150 jobs per arm, over 3 runs, each job printing its region, with harden-runner
+v2.22.3 (commit `46b06cea07f9e64621fdf066ba77ac6915163d43`) as the version under test. The region of each job is
+taken from the `Region:` line under "Hosted Compute Agent" in the job's "Set up job" log. Cells are ok / bad.
 
 | Arm | Other regions | westus2 |
 |---|---|---|
-| block, v2.22.3 (the candidate) | 135 of 135 passed | **15 of 15 passed** |
-| block, v2.22.2 (control) | not reported here | **13 of 13 failed**, all hung to the 10-minute timeout |
-| audit, v2.22.3 | passed | passed |
-| no tool | passed | passed |
+| b: block, v2.22.3 (the candidate) | 135 / 0 | **15 / 0** |
+| d: block, v2.22.2 (control) | 137 / 0 | **0 / 13**, all hung to the 10-minute timeout |
+| a: audit v2.22.3 or no tool (the two controls are arms a and c) | 145 / 0 | 5 / 0 |
+| c: the other of those two | 142 / 0 | 8 / 0 |
 
 Runs:
 
 - https://github.com/ChiefGyk3D/git-your-ship-together/actions/runs/41490712453
 - https://github.com/ChiefGyk3D/git-your-ship-together/actions/runs/41493344115
 - https://github.com/ChiefGyk3D/git-your-ship-together/actions/runs/41496006377
+
+Totals per arm (ok / bad), 150 jobs per arm over 3 runs: westus2 a 5 / 0, b 15 / 0, c 8 / 0, d 0 / 13; other
+regions a 145 / 0, b 135 / 0, c 142 / 0, d 137 / 0. In words: block v2.22.3 passed 15 of 15 on westus2 and 135 of 135
+elsewhere; the control failed 13 of 13 on westus2 and passed 137 of 137 elsewhere.
 
 Reading: the control reproduces the original defect (v2.22.2 `block` fails on every westus2 job), and v2.22.3
 `block` passes on every westus2 job, so the symptom that justified the exception is gone with the version this

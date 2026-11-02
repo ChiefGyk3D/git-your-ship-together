@@ -2506,11 +2506,11 @@ showed `audit` and no tool both passed on westus2 and `block` failed there on ev
 v2.22.2, with the results hosts allowed or not. Upstream: step-security/harden-runner#705, #708, #709 and
 actions/runner-images#14925.
 
-**Why it is closed.** A 600-job experiment on harden-runner v2.22.3 (the version pinned here): `block` passed
-15 of 15 jobs on westus2 and 135 of 135 on other regions, while the control (`block` on v2.22.2) failed 13 of 13
-on westus2, every one hanging to the 10-minute timeout. The maintainer decided on 2026-11-02 to return to
+**Why it is closed.** A 600-job experiment on harden-runner v2.22.3 (the version pinned here; 150 jobs per arm over 3 runs): `block` passed
+15 of 15 jobs on westus2 and 135 of 135 on other regions, while the control (`block` on v2.22.2) passed 137 of 137
+on other regions and failed 13 of 13 on westus2, every one hanging to the 10-minute timeout. The maintainer decided on 2026-11-02 to return to
 `block` and end the exception. Caveats, stated plainly: the root cause is not shown, only the symptom is gone
-with v2.22.3; and arms a and c (the audit and no-tool controls) hit westus2 only 5 and 8 times, so the sample there is thin.
+with v2.22.3; and arms a and c (the audit and no-tool controls) hit westus2 only 5 and 8 times (all passed; the other regions gave 145 and 142 ok, 0 bad), so the sample there is thin.
 
 **If it recurs.** A caller opts back into `audit` for its secretless jobs with `egress-policy-secretless: audit`
 (the input, the exact-string policy check and the runtime `github-hosted` control are all kept). The fail-fast
