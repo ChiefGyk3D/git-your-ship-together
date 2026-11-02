@@ -5,10 +5,85 @@
 | ID | EX-0001 |
 | Date | 2026-10-24 |
 | Owner | ChiefGyk3D |
-| Status | **active** |
+| Status | **closed** |
+| Closed | 2026-11-02 (maintainer decision, ChiefGyk3D/git-your-ship-together#278); see "Closure" |
 | Issue | ChiefGyk3D/git-your-ship-together#189; widened 2026-10-26 under ChiefGyk3D/git-your-ship-together#225 |
-| Expires | 2026-11-07 at the latest, or earlier when the upstream defect is fixed (see "Expiry") |
+| Expires | was 2026-11-07 at the latest; ended early by the closure on 2026-11-02 (see "Closure" and "Expiry") |
 | Control relaxed | harden-runner `egress-policy: block` becomes `audit`, for secretless jobs only, by the new default of the `egress-policy-secretless` input |
+
+> **This exception is closed (2026-11-02).** Everything below the "Closure" section is the record as it stood while
+> the exception was active, kept unchanged as history. Present tense there ("is", "are relaxed") describes that
+> period. The control is restored: `egress-policy-secretless` defaults to `block` in every reusable workflow.
+
+## Closure
+
+Closed on **2026-11-02** by the maintainer, under ChiefGyk3D/git-your-ship-together#278, after the test below.
+The status is **closed**, not expired: it ended by decision on evidence, before its 2026-11-07 expiry.
+
+### Evidence: a 600-job experiment on harden-runner v2.22.3 (2026-11-02)
+
+A controlled experiment of 600 jobs: 150 jobs per arm, over 3 runs, each job printing its region, with harden-runner
+v2.22.3 (commit `46b06cea07f9e64621fdf066ba77ac6915163d43`) as the version under test. The region of each job is
+taken from the `Region:` line under "Hosted Compute Agent" in the job's "Set up job" log. Cells are ok / bad.
+
+| Arm | Other regions | westus2 |
+|---|---|---|
+| b: block, v2.22.3 (the candidate) | 135 / 0 | **15 / 0** |
+| d: block, v2.22.2 (control) | 137 / 0 | **0 / 13**, all hung to the 10-minute timeout |
+| a: audit v2.22.3 or no tool (the two controls are arms a and c) | 145 / 0 | 5 / 0 |
+| c: the other of those two | 142 / 0 | 8 / 0 |
+
+Runs:
+
+- https://github.com/ChiefGyk3D/git-your-ship-together/actions/runs/41490712453
+- https://github.com/ChiefGyk3D/git-your-ship-together/actions/runs/41493344115
+- https://github.com/ChiefGyk3D/git-your-ship-together/actions/runs/41496006377
+
+Totals per arm (ok / bad), 150 jobs per arm over 3 runs: westus2 a 5 / 0, b 15 / 0, c 8 / 0, d 0 / 13; other
+regions a 145 / 0, b 135 / 0, c 142 / 0, d 137 / 0. In words: block v2.22.3 passed 15 of 15 on westus2 and 135 of 135
+elsewhere; the control failed 13 of 13 on westus2 and passed 137 of 137 elsewhere.
+
+Reading: the control reproduces the original defect (v2.22.2 `block` fails on every westus2 job), and v2.22.3
+`block` passes on every westus2 job, so the symptom that justified the exception is gone with the version this
+repository already pins.
+
+### Caveats, stated plainly
+
+- **The root cause is not shown.** We know the symptom stopped with v2.22.3; we do not know why, and the
+  upstream issues (step-security/harden-runner#708, #705, actions/runner-images#14925) were not shown to be fixed
+  by this. GitHub's resolver experiment may simply have moved or ended.
+- **Thin westus2 samples on two arms.** The audit and no-tool arms (labelled a and c in the experiment) hit
+  westus2 only 5 and 8 times. The audit v2.22.3 and no-tool arms are controls; the claim rests on the block arms (15 passes against 13
+  failures of the control).
+- A pass in 15 jobs bounds the failure rate but does not exclude a low one. The canary is kept to name it if it
+  returns.
+
+### Decision
+
+Return to `block` and end the exception (maintainer, 2026-11-02). The compensating cost of `audit` (no egress
+filter, no cache in those jobs) is no longer paid.
+
+### What changed with the closure
+
+- `egress-policy-secretless` defaults to `block` in every reusable workflow that has the input (agent-scan,
+  arduino-ci, bash-ci, container-release, dast, python-ci, python-docker-release, python-fuzz,
+  python-package-release, security, threat-model, tofu-ci, verify-published). The input stays, so a caller can
+  still choose `audit`, and the exact-string policy check and the runtime `github-hosted` control stay.
+- The cache gates are computed from each job's effective policy, so the pip, buildx and Arduino-package caches
+  of the secretless jobs are on again by default. A caller that opts into `audit` loses them again.
+- The fail-fast egress canary is unchanged and stays as a diagnostic.
+- This repository's own `ci.yml` jobs that call `harden-runner` directly (`actionlint`, `zizmor`, `test`,
+  `rescan-live`, `dast-live`, `fixture-sbom`, `agent-scan-control`, `ci-green`) were `audit` before this
+  exception and for another reason (no measured allow-list), so they are unchanged and their pip caches stay off
+  until they are measured and moved to `block`. Every fixture job that calls a reusable workflow now runs the
+  secretless jobs in `block`.
+
+### If it recurs
+
+A caller sets `egress-policy-secretless: audit` on the workflow call. That is a new relaxation: record it with a
+new dated exception entry (EX-0002 or later) before relying on it across repositories. Rerun the experiment under
+"Verification" with the version in question.
+
 
 ## Why
 
