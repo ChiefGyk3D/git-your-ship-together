@@ -1188,3 +1188,25 @@ def test_python_ci_installs_a_pinned_ruff_by_default():
     wf = yaml.safe_load((WORKFLOWS / "python-ci.yml").read_text())
     default = wf[True]["workflow_call"]["inputs"]["lint-install-command"]["default"]
     assert re.search(r"ruff==\d+\.\d+\.\d+", default), default
+
+
+# `docker pull` fetches layer blobs from Docker's registry (registry-1.docker.io), then from the CDN or S3 host
+# the registry redirects to. hammunition-bunker PR 54 (issue #282) failed the distro pull under block with
+# `domain not allowed: docker-images-prod.s3.dualstack.us-east-1.amazonaws.com`. Docker's Desktop allowlist page
+# (docs.docker.com/desktop/setup/allow-list/, modified 2026-09-29) names the first three but not the S3 host, so
+# that one rests on the measured log.
+DOCKER_PULL_HOSTS = {
+    "auth.docker.io:443",
+    "registry-1.docker.io:443",
+    "production.cloudfront.docker.com:443",
+    "docker-images-prod.s3.dualstack.us-east-1.amazonaws.com:443",
+}
+
+
+@pytest.mark.parametrize("name", ["python-ci.yml", "bash-ci.yml"])
+def test_the_distro_default_allows_every_host_a_docker_pull_reaches(name):
+    endpoints = triggers(load(WORKFLOWS / name))["workflow_call"]["inputs"]["distro-allowed-endpoints"][
+        "default"
+    ].split()
+    assert DOCKER_PULL_HOSTS <= set(endpoints), f"{name}: the distro image pull is blocked under block"
+    assert not any("*" in e for e in endpoints), f"{name}: allow-list has a wildcard"
