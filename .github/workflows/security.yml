@@ -997,8 +997,8 @@ jobs:
                 --hash=sha256:a352e7e428770286cc899e2542b6cdaedb2b4953ff269a210103ec58f6198a61
             filelock==4.1.0 ; python_full_version < '3.11' \
                 --hash=sha256:2ce9818e3e2d8f284c1a964414447ef148d42a5fd5e2a477a7118e574b293ec1
-            filelock==4.2.6 ; python_full_version >= '3.11' \
-                --hash=sha256:fd7d4fca497bf3e3d0945a13261f8e684f2aef12ce7cf76aef26e13bf7388b88
+            filelock==4.2.7 ; python_full_version >= '3.11' \
+                --hash=sha256:d08972bbca2b8767ee552aff877b091dd111ffb1d22de7de885766ea7d719d5e
             idna==3.20 \
                 --hash=sha256:ab7ae7122974553370f0bdb919e1a960b2cd1bc1ef0276416d896db81c14582c
             license-expression==30.4.4 \
@@ -1022,8 +1022,8 @@ jobs:
                 --hash=sha256:31a85c2717bc41dd818f3c62908685ff9eebcb68588213745b14a6ee9e7df7c9
             packaging==26.3 \
                 --hash=sha256:d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c
-            pip==26.2.2 \
-                --hash=sha256:fd7f4dfa8190e014013b9f08f3e973f4e4c26ffd179a204895533a7254813a70
+            pip==26.3 \
+                --hash=sha256:f3b60b20ffaadd4415ed7957212a38ac63fa4c5fa375bd0f4a797777940fad13
             pip-api==0.0.35 \
                 --hash=sha256:66990d0da25378555cbb538db79384bab92d4617c6350dfd7a2126ba2a3a9894
             pip-audit==2.10.1 \

@@ -353,8 +353,8 @@ jobs:
                 --hash=sha256:aa75b6657ec129d0abded3bec745e6f7ab642e6dba3a5272a68247e85f5f316f \
                 --hash=sha256:ab32f74bd56565b186f036e33129da77db8be09178cd2f5206a5d4035fb2a23f \
                 --hash=sha256:bbb0c4b15d66b435d2538f3827f05e44e2baafcc003dd7d8472dc67807ab8fd8
-            filelock==3.32.7 \
-                --hash=sha256:65ff0d0190ea42038b32bda4b77834fb05be2cad4c5b9b01aa4dfb3614536e52
+            filelock==4.2.7 \
+                --hash=sha256:d08972bbca2b8767ee552aff877b091dd111ffb1d22de7de885766ea7d719d5e
             flatbuffers==25.12.19 \
                 --hash=sha256:7634f50c427838bb021c2d66a3d1168e9d199b0607e6329399f04846d42e20b4
             frozenlist==1.8.0 \
@@ -1422,8 +1422,8 @@ jobs:
                 --hash=sha256:a8a0dfea3972200f72d4c7df02c8ac70bad1bb4c58d7e0ec1e6f341679073a7f \
                 --hash=sha256:aa75b6657ec129d0abded3bec745e6f7ab642e6dba3a5272a68247e85f5f316f \
                 --hash=sha256:ab32f74bd56565b186f036e33129da77db8be09178cd2f5206a5d4035fb2a23f
-            filelock==4.2.6 \
-                --hash=sha256:fd7d4fca497bf3e3d0945a13261f8e684f2aef12ce7cf76aef26e13bf7388b88
+            filelock==4.2.7 \
+                --hash=sha256:d08972bbca2b8767ee552aff877b091dd111ffb1d22de7de885766ea7d719d5e
             frozenlist==1.8.0 \
                 --hash=sha256:0c18a16eab41e82c295618a77502e17b195883241c563b00f0aa5106fc4eaa0d \
                 --hash=sha256:494a5952b1c597ba44e0e78113a7266e656b9794eec897b19ead706bd7074383 \
@@ -1513,8 +1513,8 @@ jobs:
                 --hash=sha256:31a85c2717bc41dd818f3c62908685ff9eebcb68588213745b14a6ee9e7df7c9
             packaging==26.3 \
                 --hash=sha256:d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c
-            pip==26.2.2 \
-                --hash=sha256:fd7f4dfa8190e014013b9f08f3e973f4e4c26ffd179a204895533a7254813a70
+            pip==26.3 \
+                --hash=sha256:f3b60b20ffaadd4415ed7957212a38ac63fa4c5fa375bd0f4a797777940fad13
             pip-api==0.0.35 \
                 --hash=sha256:66990d0da25378555cbb538db79384bab92d4617c6350dfd7a2126ba2a3a9894
             pip-audit==2.10.1 \
