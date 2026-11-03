@@ -74,7 +74,7 @@ on:
           caller's lint red on the day ruff 0.17.0 changed its default target version (2026-10-09).
           Move the pin here, deliberately, with a release.
         type: string
-        default: pip install "ruff==0.16.9"
+        default: pip install "ruff==0.17.3"
       lint-command:
         description: Shell that lints. A non-zero exit fails the job unless `lint-continue-on-error` is set.
         type: string
@@ -84,7 +84,7 @@ on:
         type: boolean
         default: false
       typecheck-install-command:
-        description: Shell that installs the type checker and whatever it needs to resolve imports, e.g. `pip install mypy==2.4.0`; empty installs nothing. Runs on `lint-python-version`.
+        description: Shell that installs the type checker and whatever it needs to resolve imports, e.g. `pip install mypy==2.4.1`; empty installs nothing. Runs on `lint-python-version`.
         type: string
         default: ""
       typecheck-command:
@@ -182,9 +182,9 @@ on:
         type: string
         default: block
       distro-allowed-endpoints:
-        description: harden-runner allow-list for the `distro` job in `block`, space-separated host:port entries. The default is Docker Hub's image pull, the package mirrors of the Debian, Ubuntu, Kali and Parrot images, and the PyPI hosts the install command reaches. A distribution not named here (Fedora, whose metalink mirrors vary by run) needs its hosts in `extra-allowed-endpoints`, or `distro-egress-policy` set to `audit`. Wildcards are not supported and a newline-separated list matches nothing.
+        description: harden-runner allow-list for the `distro` job in `block`, space-separated host:port entries. The default is Docker Hub's image pull (registry, auth, CDN and the S3 host layer blobs redirect to), the package mirrors of the Debian, Ubuntu, Kali and Parrot images, and the PyPI hosts the install command reaches. A distribution not named here (Fedora, whose metalink mirrors vary by run) needs its hosts in `extra-allowed-endpoints`, or `distro-egress-policy` set to `audit`. Wildcards are not supported and a newline-separated list matches nothing.
         type: string
-        default: "archive.ubuntu.com:80 auth.docker.io:443 deb.debian.org:80 deb.parrot.sh:443 files.pythonhosted.org:443 kali.download:80 ports.ubuntu.com:80 production.cloudfront.docker.com:443 pypi.org:443 registry-1.docker.io:443 security.ubuntu.com:80"
+        default: "archive.ubuntu.com:80 auth.docker.io:443 deb.debian.org:80 deb.parrot.sh:443 docker-images-prod.s3.dualstack.us-east-1.amazonaws.com:443 files.pythonhosted.org:443 kali.download:80 ports.ubuntu.com:80 production.cloudfront.docker.com:443 pypi.org:443 registry-1.docker.io:443 security.ubuntu.com:80"
       distro-continue-on-error:
         description: Let a failing distro run leave the gate green. For a suite that assumes a non-root user or a newer Python than the distribution ships; the result stays visible on the job.
         type: boolean
@@ -194,9 +194,9 @@ on:
         type: string
         default: audit
       egress-policy-secretless:
-        description: harden-runner egress policy for the jobs that hold no stored secret, no OIDC token and no write-scoped or publish-capable token (read-only contents, a SARIF upload at most), and whose output no privileged job consumes - exactly `audit` or `block`. Defaults to `audit` while security exception EX-0001 is active (GitHub-hosted runners in westus2 break harden-runner `block`; expires 2026-11-07 or when step-security/harden-runner#708 is fixed; see docs/security/exceptions/). Every job still has the default read-only job token. Set `block` to opt back in. Any other job follows `egress-policy`. Any other value fails the job.
+        description: harden-runner egress policy for the jobs that hold no stored secret, no OIDC token and no write-scoped or publish-capable token (read-only contents, a SARIF upload at most), and whose output no privileged job consumes - exactly `audit` or `block`. Defaults to `block` since security exception EX-0001 (GitHub-hosted runners in westus2 broke harden-runner `block`) was closed on 2026-11-02 after harden-runner v2.22.3 passed on westus2; see docs/security/exceptions/. Every job still has the default read-only job token. Set `audit` to opt out if the defect recurs. Any other job follows `egress-policy`. Any other value fails the job.
         type: string
-        default: audit
+        default: block
       allowed-endpoints:
         description: harden-runner allow-list for `block`, space-separated host:port entries. The default is every endpoint this workflow's jobs reached in audit mode across the calling repositories; the runner's own infrastructure needs no entry. Wildcards are not supported and a newline-separated list matches nothing.
         type: string
@@ -264,7 +264,7 @@ jobs:
           check semgrep-egress-policy "${POLICY_SEMGREP_EGRESS_POLICY+set}" "${POLICY_SEMGREP_EGRESS_POLICY-}"
           exit "$bad"
 
-      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
         with:
           egress-policy: ${{ (inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block' }}
           allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
@@ -406,7 +406,7 @@ jobs:
           check semgrep-egress-policy "${POLICY_SEMGREP_EGRESS_POLICY+set}" "${POLICY_SEMGREP_EGRESS_POLICY-}"
           exit "$bad"
 
-      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
         with:
           egress-policy: ${{ (inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block' }}
           allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
@@ -548,7 +548,7 @@ jobs:
           check semgrep-egress-policy "${POLICY_SEMGREP_EGRESS_POLICY+set}" "${POLICY_SEMGREP_EGRESS_POLICY-}"
           exit "$bad"
 
-      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
         with:
           egress-policy: ${{ (inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block' }}
           allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
@@ -689,7 +689,7 @@ jobs:
           check semgrep-egress-policy "${POLICY_SEMGREP_EGRESS_POLICY+set}" "${POLICY_SEMGREP_EGRESS_POLICY-}"
           exit "$bad"
 
-      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
         with:
           egress-policy: ${{ (inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted' && contains(fromJSON('["ubuntu-latest","ubuntu-22.04","ubuntu-24.04","ubuntu-26.04","ubuntu-22.04-arm","ubuntu-24.04-arm","ubuntu-26.04-arm","ubuntu-slim","windows-latest","windows-2022","windows-2025","windows-2025-vs2026","windows-11-arm","windows-11-vs2026-arm","macos-latest","macos-14","macos-15","macos-15-intel","macos-26","macos-26-intel"]'), matrix.runner)) && 'audit' || 'block' }}
           allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
@@ -881,7 +881,7 @@ jobs:
           check semgrep-egress-policy "${POLICY_SEMGREP_EGRESS_POLICY+set}" "${POLICY_SEMGREP_EGRESS_POLICY-}"
           exit "$bad"
 
-      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
         with:
           egress-policy: ${{ ((inputs.egress-policy-secretless == 'audit' || inputs.distro-egress-policy == 'audit') && runner.environment == 'github-hosted' && contains(fromJSON('["ubuntu-latest","ubuntu-22.04","ubuntu-24.04","ubuntu-26.04","ubuntu-22.04-arm","ubuntu-24.04-arm","ubuntu-26.04-arm","ubuntu-slim","windows-latest","windows-2022","windows-2025","windows-2025-vs2026","windows-11-arm","windows-11-vs2026-arm","macos-latest","macos-14","macos-15","macos-15-intel","macos-26","macos-26-intel"]'), matrix.runner)) && 'audit' || 'block' }}
           allowed-endpoints: ${{ inputs.distro-allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443 github.com:443 api.github.com:443
@@ -1024,7 +1024,7 @@ jobs:
           check semgrep-egress-policy "${POLICY_SEMGREP_EGRESS_POLICY+set}" "${POLICY_SEMGREP_EGRESS_POLICY-}"
           exit "$bad"
 
-      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
         with:
           egress-policy: ${{ inputs.egress-policy == 'audit' && 'audit' || 'block' }}
           allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
@@ -1287,7 +1287,7 @@ jobs:
           check semgrep-egress-policy "${POLICY_SEMGREP_EGRESS_POLICY+set}" "${POLICY_SEMGREP_EGRESS_POLICY-}"
           exit "$bad"
 
-      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
         with:
           egress-policy: ${{ (inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block' }}
           allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
@@ -1428,7 +1428,7 @@ jobs:
           check semgrep-egress-policy "${POLICY_SEMGREP_EGRESS_POLICY+set}" "${POLICY_SEMGREP_EGRESS_POLICY-}"
           exit "$bad"
 
-      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
         with:
           egress-policy: ${{ (inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block' }}
           allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
@@ -1575,7 +1575,7 @@ jobs:
           check semgrep-egress-policy "${POLICY_SEMGREP_EGRESS_POLICY+set}" "${POLICY_SEMGREP_EGRESS_POLICY-}"
           exit "$bad"
 
-      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
         with:
           egress-policy: ${{ (inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block' }}
           allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
@@ -1706,7 +1706,7 @@ jobs:
           check semgrep-egress-policy "${POLICY_SEMGREP_EGRESS_POLICY+set}" "${POLICY_SEMGREP_EGRESS_POLICY-}"
           exit "$bad"
 
-      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
         with:
           egress-policy: ${{ (inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block' }}
           allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
@@ -1840,7 +1840,7 @@ jobs:
           check semgrep-egress-policy "${POLICY_SEMGREP_EGRESS_POLICY+set}" "${POLICY_SEMGREP_EGRESS_POLICY-}"
           exit "$bad"
 
-      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
         with:
           egress-policy: ${{ (inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block' }}
           allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443

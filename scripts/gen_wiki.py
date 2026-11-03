@@ -87,9 +87,7 @@ PR_SUFFIX = re.compile(r"\s*\(#(\d+)\)\s*$")
 
 def _git(*args: str) -> str:
     try:
-        done = subprocess.run(
-            ["git", *args], cwd=REPO_ROOT, capture_output=True, text=True, check=False
-        )
+        done = subprocess.run(["git", *args], cwd=REPO_ROOT, capture_output=True, text=True, check=False)
     except FileNotFoundError as e:
         raise WikiError("git is not installed; the release facts are read from it") from e
     if done.returncode != 0:
@@ -134,7 +132,10 @@ def _unreleased(tag: str, subjects: list[str]) -> str:
 
 
 def fill_placeholders(text: str, facts: dict[str, str]) -> str:
-    """Fill the placeholders; a backslash before one (`\\{{latest_release}}`) writes it literally, for the docs about them."""
+    """Fill the placeholders.
+
+    A backslash before one (`\\{{latest_release}}`) writes it literally, for the docs about them.
+    """
     return PLACEHOLDER.sub(lambda m: m.group(0)[1:] if m.group(1) else facts[m.group(2)], text)
 
 

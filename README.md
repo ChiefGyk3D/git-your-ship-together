@@ -280,7 +280,7 @@ Inputs of `python-ci.yml`:
 | `distro-runners` | `'["ubuntu-24.04"]'` | Runner labels the `distros` run on; add `ubuntu-24.04-arm` for native arm64 |
 | `distro-setup-command` | install python3, venv, pip, git and ca-certificates with `apt-get`, else `dnf` | Shell run as root in each image before the install command |
 | `distro-egress-policy` | `block` | harden-runner policy for the `distro` job only; `audit` for a distribution whose mirrors are not on the list |
-| `distro-allowed-endpoints` | the measured list | The `distro` job's own allow-list, kept apart from `allowed-endpoints`: Docker Hub's image pull, the Debian, Ubuntu, Kali and Parrot mirrors, and PyPI. `extra-allowed-endpoints` is appended to it |
+| `distro-allowed-endpoints` | the measured list | The `distro` job's own allow-list, kept apart from `allowed-endpoints`: Docker Hub's image pull (registry, auth, CDN and the S3 blob host), the Debian, Ubuntu, Kali and Parrot mirrors, and PyPI. `extra-allowed-endpoints` is appended to it |
 | `distro-continue-on-error` | `false` | Let a failing distro run leave the gate green, for a suite that assumes a non-root user or a newer Python than the distribution ships. |
 | `coverage-python-version` | `3.13` | The matrix leg that uploads coverage |
 | `install-command` | upgrade pip, `pip install -r requirements.txt` | Run before tests on every leg |
@@ -289,10 +289,10 @@ Inputs of `python-ci.yml`:
 | `coverage-threshold` | empty (no check) | Minimum total line coverage as a percentage, e.g. `85`. The `test` job fails below it, judged from the `line-rate` of `coverage-file` (Cobertura XML, as coverage.py and pytest-cov write it) on the leg that uploads it; the test command must write that file |
 | `codecov` | `false` | Also upload to Codecov over GitHub OIDC; no token, the repository just has to be enabled in the Codecov GitHub App |
 | `lint-python-version` | `3.13` | Python for the lint job |
-| `lint-install-command` | `pip install "ruff==0.16.9"` | Installs the linters; ruff is pinned so a new ruff release cannot turn every caller red at once |
+| `lint-install-command` | `pip install "ruff==0.17.3"` | Installs the linters; ruff is pinned so a new ruff release cannot turn every caller red at once |
 | `lint-command` | `ruff check .` | The lint step |
 | `lint-continue-on-error` | `false` | Report lint failures without failing CI. A migration aid; no caller sets it any more |
-| `typecheck-install-command` | empty | Installs the type checker, e.g. `pip install mypy==2.4.0`; empty installs nothing |
+| `typecheck-install-command` | empty | Installs the type checker, e.g. `pip install mypy==2.4.1`; empty installs nothing |
 | `typecheck-command` | empty (skips the job) | Type-checks, e.g. `mypy src`; runs as the `Type check` job on `lint-python-version` and is part of the gate |
 | `fragment-check-command` | empty (skips the job) | Pull requests only, full history, `BASE` set to the base branch name: the `Changelog fragment` job. See [Pull-request checks](#pull-request-checks) |
 | `commit-claims-command` | empty (skips the job) | Pull requests only, full history, `BASE` and `HEAD` set: the `Commit claims` job. See [Pull-request checks](#pull-request-checks) |
@@ -305,7 +305,7 @@ Inputs of `python-ci.yml`:
 | `workflow-lint` | `true` | actionlint and zizmor over the caller's own `.github/workflows` |
 | `zizmor-persona` | `regular` | zizmor strictness: `regular`, `pedantic`, `auditor` |
 | `egress-policy` | `audit` | harden-runner on every job except `distro`: `audit` logs outbound connections, `block` allows only `allowed-endpoints` |
-| `egress-policy-secretless` | `audit` | harden-runner policy for the jobs that hold no stored secret, no OIDC token and no write-scoped token, and whose output no privileged job consumes verbatim as code or a build output (`test` is a stated EX-0001 extension: its coverage report is a data file that the privileged `coverage` job sends to Codecov); exactly `audit` or `block`. Governed by security exception EX-0001, see [Known CI platform issue: westus2 (EX-0001)](#known-ci-platform-issue-westus2-ex-0001). `block` opts back in |
+| `egress-policy-secretless` | `block` | harden-runner policy for the jobs that hold no stored secret, no OIDC token and no write-scoped token, and whose output no privileged job consumes verbatim as code or a build output (`test` is a stated EX-0001 extension: its coverage report is a data file that the privileged `coverage` job sends to Codecov); exactly `audit` or `block`. Security exception EX-0001 is closed (2026-11-02), see [Known CI platform issue: westus2 (EX-0001)](#known-ci-platform-issue-westus2-ex-0001). `audit` opts out if the defect recurs |
 | `allowed-endpoints` | the measured list | harden-runner allow-list for `block`, space-separated `host:port`; see [Egress](#egress) |
 | `extra-allowed-endpoints` | empty | Appended to the list, for hosts only this repository reaches |
 | `doppler-project`, `doppler-config`, `doppler-identity-id` | empty | See [Doppler setup](#doppler-setup) |
@@ -408,7 +408,7 @@ Inputs of `bash-ci.yml`:
 | `distro-runners` | `'["ubuntu-24.04"]'` | Runner labels the `distros` run on; add `ubuntu-24.04-arm` for native arm64 |
 | `distro-setup-command` | install bash, git and ca-certificates with `apt-get`, else `dnf` | Shell run as root in each image before the install command |
 | `distro-egress-policy` | `block` | harden-runner policy for the `distro` job only; `audit` for a distribution whose mirrors are not on the list |
-| `distro-allowed-endpoints` | the measured list | The `distro` job's own allow-list, kept apart from `allowed-endpoints`: Docker Hub's image pull, the Debian, Ubuntu, Kali and Parrot mirrors. `extra-allowed-endpoints` is appended to it |
+| `distro-allowed-endpoints` | the measured list | The `distro` job's own allow-list, kept apart from `allowed-endpoints`: Docker Hub's image pull (registry, auth, CDN and the S3 blob host), the Debian, Ubuntu, Kali and Parrot mirrors. `extra-allowed-endpoints` is appended to it |
 | `distro-continue-on-error` | `false` | Let a failing distro run leave the gate green, for a suite that assumes a non-root user or a newer Python than the distribution ships. |
 | `test-command` | empty (skips the job) | The shell test suite: `bats tests/`, `./tests/run.sh`, whatever the repository has |
 | `config-lint-install-command` | `pip install yamllint` | Installs the configuration linters, with Python available |
@@ -419,7 +419,7 @@ Inputs of `bash-ci.yml`:
 | `workflow-lint` | `true` | actionlint and zizmor over the caller's own `.github/workflows`; turn off on one job when another caller job already runs it |
 | `zizmor-persona` | `regular` | zizmor strictness: `regular`, `pedantic`, `auditor` |
 | `egress-policy` | `audit` | harden-runner on every job; see [Egress](#egress) |
-| `egress-policy-secretless` | `audit` | harden-runner policy for the jobs that hold no stored secret, no OIDC token and no write-scoped token, and whose output no privileged job consumes; exactly `audit` or `block`. Governed by security exception EX-0001, see [Known CI platform issue: westus2 (EX-0001)](#known-ci-platform-issue-westus2-ex-0001). `block` opts back in |
+| `egress-policy-secretless` | `block` | harden-runner policy for the jobs that hold no stored secret, no OIDC token and no write-scoped token, and whose output no privileged job consumes; exactly `audit` or `block`. Security exception EX-0001 is closed (2026-11-02), see [Known CI platform issue: westus2 (EX-0001)](#known-ci-platform-issue-westus2-ex-0001). `audit` opts out if the defect recurs |
 | `allowed-endpoints` | the measured list | harden-runner allow-list for `block`, space-separated `host:port` |
 | `extra-allowed-endpoints` | empty | Appended to the list, for hosts only this repository reaches |
 | `timeout-minutes` | `10` | Per-job timeout |
@@ -518,7 +518,7 @@ Inputs of `python-fuzz.yml`:
 | `install-command` | `pip install -e .` | Installs the project under test before Atheris; override for extras |
 | `runner` | `ubuntu-24.04` | Must be x86_64 Linux: Atheris publishes no aarch64 wheel |
 | `egress-policy` | `audit` | harden-runner policy; see [Egress](#egress) |
-| `egress-policy-secretless` | `audit` | harden-runner policy for the jobs that hold no stored secret, no OIDC token and no write-scoped token, and whose output no privileged job consumes; exactly `audit` or `block`. Governed by security exception EX-0001, see [Known CI platform issue: westus2 (EX-0001)](#known-ci-platform-issue-westus2-ex-0001). `block` opts back in |
+| `egress-policy-secretless` | `block` | harden-runner policy for the jobs that hold no stored secret, no OIDC token and no write-scoped token, and whose output no privileged job consumes; exactly `audit` or `block`. Security exception EX-0001 is closed (2026-11-02), see [Known CI platform issue: westus2 (EX-0001)](#known-ci-platform-issue-westus2-ex-0001). `audit` opts out if the defect recurs |
 | `allowed-endpoints` | the measured list | harden-runner allow-list for `block`: GitHub and PyPI. Measured by this repository's own `fixture fuzz` job in `block` mode |
 | `extra-allowed-endpoints` | empty | Appended to the list, for hosts only this repository reaches |
 | `timeout-minutes` | `30` | Job timeout; targets run one after another, so raise it with `seconds-per-target` |
@@ -829,7 +829,7 @@ Inputs of `dast.yml`:
 | `sarif-category` | `zap` | Code scanning category; two scans in one repository need two, or each closes the other's alerts |
 | `artifact-name` | `zap-reports` | Name of the reports artifact; name two calls in one run apart |
 | `egress-policy` | `audit` | harden-runner policy; see [Egress](#egress) |
-| `egress-policy-secretless` | `audit` | harden-runner policy for the jobs that hold no stored secret, no OIDC token and no write-scoped token, and whose output no privileged job consumes; exactly `audit` or `block`. Governed by security exception EX-0001, see [Known CI platform issue: westus2 (EX-0001)](#known-ci-platform-issue-westus2-ex-0001). `block` opts back in |
+| `egress-policy-secretless` | `block` | harden-runner policy for the jobs that hold no stored secret, no OIDC token and no write-scoped token, and whose output no privileged job consumes; exactly `audit` or `block`. Security exception EX-0001 is closed (2026-11-02), see [Known CI platform issue: westus2 (EX-0001)](#known-ci-platform-issue-westus2-ex-0001). `audit` opts out if the defect recurs |
 | `allowed-endpoints` | the measured list | harden-runner allow-list for `block`: GitHub and GHCR (the ZAP image). Measured by this repository's own `fixture dast` job in `block` mode |
 | `extra-allowed-endpoints` | empty | Appended to the list, for hosts the service or its install command reaches |
 | `timeout-minutes` | `20` | Timeout of the scan job (install, service start and scan); raise it for a `full` scan of a large service |
@@ -885,20 +885,20 @@ Inputs of `tofu-ci.yml`:
 |---|---|---|
 | `directories` | `.` | Space-separated root modules, validated and linted one by one (and tested, with `test`) |
 | `binary` | `tofu` | `tofu` (downloaded) or `terraform` (the runner's) |
-| `tofu-version`, `tofu-sha256` | `1.12.6` and its zip's hash | The OpenTofu release downloaded from opentofu/opentofu |
+| `tofu-version`, `tofu-sha256` | `1.13.2` and its zip's hash | The OpenTofu release downloaded from opentofu/opentofu |
 | `tflint` | `true` | Run tflint over every directory |
-| `tflint-version`, `tflint-sha256` | `0.64.0` and its zip's hash | The tflint release downloaded from terraform-linters/tflint |
+| `tflint-version`, `tflint-sha256` | `0.65.0` and its zip's hash | The tflint release downloaded from terraform-linters/tflint |
 | `test` | `false` | `tofu test` (or `terraform test`) in every directory after `init -backend=false`. Holds no credential, so turn it on when the tests use `mock_provider` |
 | `policy-directories` | empty (skips the job) | Space-separated directories of Rego policies with their `_test.rego` files; each gets `opa fmt --list --fail`, `opa check --strict` and `opa test` |
-| `opa-version`, `opa-sha256` | `1.21.0` and its binary's hash | The OPA release downloaded from open-policy-agent/opa (`opa_linux_amd64_static`) |
+| `opa-version`, `opa-sha256` | `1.22.0` and its binary's hash | The OPA release downloaded from open-policy-agent/opa (`opa_linux_amd64_static`) |
 | `trivy` | `true` | Trivy configuration scan over the repository |
 | `trivy-severity` | `CRITICAL,HIGH` | Severities the scan reports |
 | `trivy-exit-code` | `1` | `1` fails the job on a finding, `0` reports only. A migration aid |
 | `plan-command` | empty (skips the job) | The plan, run only on a push to the default branch with the Doppler config's secrets in the environment |
 | `workflow-lint` | `true` | actionlint and zizmor over the caller's own `.github/workflows`; turn off when another caller job already runs it |
 | `zizmor-persona` | `regular` | zizmor strictness |
-| `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `audit`, the tool downloads, Trivy's checks bundle and workflow-lint hosts, empty | harden-runner, as in `python-ci.yml`. A provider registry or a cloud API the plan reaches goes in `extra-allowed-endpoints` |
-| `egress-policy-secretless` | `audit` | harden-runner policy for the jobs that hold no stored secret, no OIDC token and no write-scoped token, and whose output no privileged job consumes; exactly `audit` or `block`. Governed by security exception EX-0001, see [Known CI platform issue: westus2 (EX-0001)](#known-ci-platform-issue-westus2-ex-0001). `block` opts back in |
+| `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `audit`, the tool downloads, Trivy's checks bundle and the workflow-lint hosts (including `pypi.org` and `files.pythonhosted.org`, for actionlint's `pipx install pyflakes`), empty | harden-runner, as in `python-ci.yml`. A provider registry or a cloud API the plan reaches goes in `extra-allowed-endpoints` |
+| `egress-policy-secretless` | `block` | harden-runner policy for the jobs that hold no stored secret, no OIDC token and no write-scoped token, and whose output no privileged job consumes; exactly `audit` or `block`. Security exception EX-0001 is closed (2026-11-02), see [Known CI platform issue: westus2 (EX-0001)](#known-ci-platform-issue-westus2-ex-0001). `audit` opts out if the defect recurs |
 | `doppler-project`, `doppler-config`, `doppler-identity-id` | empty | See [Doppler setup](#doppler-setup); only the plan job reads them |
 | `doppler-trusted-refs-only` | `true` | Fetch only on the default branch, a version tag (vN.N.N) or a schedule; never on a pull request |
 | `timeout-minutes` | `16` | Per-job timeout |
@@ -944,7 +944,7 @@ Inputs of `arduino-ci.yml`:
 | `workflow-lint` | `true` | actionlint and zizmor over the caller's own `.github/workflows` |
 | `zizmor-persona` | `regular` | zizmor strictness |
 | `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `audit`, arduino-cli's download, Arduino's index and workflow-lint hosts, empty | harden-runner, as in `python-ci.yml`. A core from another index adds its hosts |
-| `egress-policy-secretless` | `audit` | harden-runner policy for the jobs that hold no stored secret, no OIDC token and no write-scoped token, and whose output no privileged job consumes; exactly `audit` or `block`. Governed by security exception EX-0001, see [Known CI platform issue: westus2 (EX-0001)](#known-ci-platform-issue-westus2-ex-0001). `block` opts back in |
+| `egress-policy-secretless` | `block` | harden-runner policy for the jobs that hold no stored secret, no OIDC token and no write-scoped token, and whose output no privileged job consumes; exactly `audit` or `block`. Security exception EX-0001 is closed (2026-11-02), see [Known CI platform issue: westus2 (EX-0001)](#known-ci-platform-issue-westus2-ex-0001). `audit` opts out if the defect recurs |
 | `timeout-minutes` | `30` | Per-job timeout; a first core install takes minutes |
 
 ### Container release
@@ -1070,7 +1070,7 @@ Inputs of `container-release.yml`:
 | `trivy-ignore-unfixed` | `true` | Skip an advisory that has no fix in the distribution, so it does not block |
 | `trivyignores` | empty | Path to the caller's `.trivyignore`, passed to trivy-action's `trivyignores` input. Give each entry a reason and a review date |
 | `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `audit`, the measured list, empty | harden-runner, as in `python-ci.yml` |
-| `egress-policy-secretless` | `audit` | harden-runner policy for the jobs that hold no stored secret, no OIDC token and no write-scoped token, and whose output no privileged job consumes; exactly `audit` or `block`. Governed by security exception EX-0001, see [Known CI platform issue: westus2 (EX-0001)](#known-ci-platform-issue-westus2-ex-0001). `block` opts back in |
+| `egress-policy-secretless` | `block` | harden-runner policy for the jobs that hold no stored secret, no OIDC token and no write-scoped token, and whose output no privileged job consumes; exactly `audit` or `block`. Security exception EX-0001 is closed (2026-11-02), see [Known CI platform issue: westus2 (EX-0001)](#known-ci-platform-issue-westus2-ex-0001). `audit` opts out if the defect recurs |
 | `doppler-project`, `doppler-config`, `doppler-identity-id` | empty | See [Doppler setup](#doppler-setup) |
 | `doppler-trusted-refs-only` | `true` | Fetch CI secrets only on the default branch, a version tag (vN.N.N) or a schedule; never on a pull request. See [Doppler setup](#doppler-setup) |
 | `timeout-minutes` | `60` | Timeout of each platform's build job; a platform built under QEMU is slow |
@@ -1180,9 +1180,9 @@ Inputs of `verify-published.yml`:
 | `rescan-ignore-unfixed` | `true` | Skip advisories with no fixed version yet |
 | `rescan-ignore-advisories` | empty | Comma-separated CVE or GHSA IDs the rescan does not fail on; each needs a `where: trivy` entry for the repository in `baseline/risk-register.yaml`, which the weekly audit checks |
 | `rescan-artifact-name` | `verify-published-rescan` | Workflow artifact holding the SARIF and text reports |
-| `trivy-version`, `trivy-sha256` | `0.75.0`, its hash | The one pinned Trivy binary; change both together |
+| `trivy-version`, `trivy-sha256` | `0.76.1`, its hash | The one pinned Trivy binary; change both together |
 | `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `block`, the measured list, empty | harden-runner; the list covers the GHCR pull, Sigstore, and GitHub's attestation store |
-| `egress-policy-secretless` | `audit` | harden-runner policy for the jobs that hold no stored secret, no OIDC token and no write-scoped token, and whose output no privileged job consumes; exactly `audit` or `block`. Governed by security exception EX-0001, see [Known CI platform issue: westus2 (EX-0001)](#known-ci-platform-issue-westus2-ex-0001). `block` opts back in |
+| `egress-policy-secretless` | `block` | harden-runner policy for the jobs that hold no stored secret, no OIDC token and no write-scoped token, and whose output no privileged job consumes; exactly `audit` or `block`. Security exception EX-0001 is closed (2026-11-02), see [Known CI platform issue: westus2 (EX-0001)](#known-ci-platform-issue-westus2-ex-0001). `audit` opts out if the defect recurs |
 | `timeout-minutes` | `20` | Job timeout |
 
 ### Python package release
@@ -1239,7 +1239,7 @@ jobs:
       contents: read
       id-token: write       # PyPI Trusted Publishing; the OIDC token names THIS workflow
     steps:
-      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
         with:
           egress-policy: block
           allowed-endpoints: api.github.com:443 files.pythonhosted.org:443 fulcio.sigstore.dev:443 ghcr.io:443 github.com:443 pkg-containers.githubusercontent.com:443 productionresultssa12.blob.core.windows.net:443 pypi.org:443 rekor.sigstore.dev:443 release-assets.githubusercontent.com:443 timestamp.sigstore.dev:443 tuf-repo-cdn.sigstore.dev:443 upload.pypi.org:443 uploads.github.com:443
@@ -1312,11 +1312,11 @@ Inputs of `python-package-release.yml`:
 | `github-release` | `true` | Attach the files, their SBOMs, `SHA256SUMS` and provenance to the GitHub release |
 | `release-title` | empty (the tag) | Title of a release this workflow creates |
 | `sbom` | `true` | Write `sbom.cdx.json` and `sbom.spdx.json` with syft and attach them to the release, listed in `SHA256SUMS` and attested with the rest |
-| `syft-version` | `1.54.0` | syft release to download, without the `v`. Changing it means changing `syft-sha256` |
-| `syft-sha256` | the 1.54.0 linux_amd64 tarball's | SHA-256 of that tarball |
+| `syft-version` | `1.56.0` | syft release to download, without the `v`. Changing it means changing `syft-sha256` |
+| `syft-sha256` | the 1.56.0 linux_amd64 tarball's | SHA-256 of that tarball |
 | `attest` | `true` | Record SLSA build provenance for every file, SBOMs included |
 | `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `audit`, the measured list, empty | harden-runner, as in `python-ci.yml`. The build's hosts were measured in block mode here; the release job's hosts are GitHub's and Sigstore's documented ones |
-| `egress-policy-secretless` | `audit` | harden-runner policy for the jobs that hold no stored secret, no OIDC token and no write-scoped token, and whose output no privileged job consumes; exactly `audit` or `block`. Governed by security exception EX-0001, see [Known CI platform issue: westus2 (EX-0001)](#known-ci-platform-issue-westus2-ex-0001). `block` opts back in |
+| `egress-policy-secretless` | `block` | harden-runner policy for the jobs that hold no stored secret, no OIDC token and no write-scoped token, and whose output no privileged job consumes; exactly `audit` or `block`. Security exception EX-0001 is closed (2026-11-02), see [Known CI platform issue: westus2 (EX-0001)](#known-ci-platform-issue-westus2-ex-0001). `audit` opts out if the defect recurs |
 | `timeout-minutes` | `20` | Per-job timeout |
 
 The workflow outputs `version`, the version the sdist was built as, for a
@@ -1602,7 +1602,7 @@ jobs:
 | `required-topics` | empty | Comma-separated topics each of which must appear in some threat |
 | `fail-on-open-severity` | `none` | Fail on an `Open` threat at or above `High`, `Medium` or `Low` |
 | `egress-policy` | `audit` | harden-runner on the job |
-| `egress-policy-secretless` | `audit` | harden-runner policy for the jobs that hold no stored secret, no OIDC token and no write-scoped token, and whose output no privileged job consumes; exactly `audit` or `block`. Governed by security exception EX-0001, see [Known CI platform issue: westus2 (EX-0001)](#known-ci-platform-issue-westus2-ex-0001). `block` opts back in |
+| `egress-policy-secretless` | `block` | harden-runner policy for the jobs that hold no stored secret, no OIDC token and no write-scoped token, and whose output no privileged job consumes; exactly `audit` or `block`. Security exception EX-0001 is closed (2026-11-02), see [Known CI platform issue: westus2 (EX-0001)](#known-ci-platform-issue-westus2-ex-0001). `audit` opts out if the defect recurs |
 | `allowed-endpoints` | `api.github.com`, `files.pythonhosted.org`, `github.com`, `pypi.org` | The allow-list for `block` |
 | `extra-allowed-endpoints` | empty | Appended to the list |
 | `timeout-minutes` | `10` | Job timeout |
@@ -1695,7 +1695,7 @@ jobs:
 | `sarif-category` | `agent-scan` | Category and artifact name prefix; `-skill` and `-mcp` are appended |
 | `python-version` | `3.13` | Python for the scanners, 3.12 to 3.14 |
 | `egress-policy` | `block` | harden-runner on the scan jobs, which run third-party scanner code beside your checkout. `block` allows only `allowed-endpoints`; `audit` opts out |
-| `egress-policy-secretless` | `audit` | harden-runner policy for the upload jobs; exactly `audit` or `block`. Governed by security exception EX-0001, see [Known CI platform issue: westus2 (EX-0001)](#known-ci-platform-issue-westus2-ex-0001) |
+| `egress-policy-secretless` | `block` | harden-runner policy for the upload jobs; exactly `audit` or `block`. Security exception EX-0001 is closed (2026-11-02), see [Known CI platform issue: westus2 (EX-0001)](#known-ci-platform-issue-westus2-ex-0001). `audit` opts out if the defect recurs |
 | `allowed-endpoints` | `api.github.com`, `files.pythonhosted.org`, `github.com`, `pypi.org` | The allow-list for `block`: the checkout and the pip install |
 | `extra-allowed-endpoints` | empty | Appended to the list |
 | `timeout-minutes` | `15` | Timeout of the scan jobs |
@@ -1818,7 +1818,7 @@ Inputs of `security.yml`:
 | `dependency-review-deny-licenses` | `AGPL-3.0, GPL-3.0, GPL-2.0, LGPL-3.0, SSPL-1.0` | Comma-separated SPDX identifiers the review fails on when a pull request adds a dependency under one. Empty means no licence rule. A dependency whose licence cannot be detected is reported, not failed. Passed as the action's `deny-licenses`, which upstream has marked deprecated for a future major release; the action rejects it beside `allow-licenses`, which this workflow does not expose |
 | `semgrep` | `true` | Semgrep over the repository, SARIF uploaded to the Security tab under category `semgrep`. Installed with pip, since `semgrep/*` actions are not in the allowed set, under `--require-hashes` from the lock in `.github/requirements/semgrep.txt`; the version is that file's, not an input (see [Hash-locked tools](#hash-locked-tools-in-securityyml)) |
 | `semgrep-config` | empty (auto-detect) | `p/github-actions p/secrets`, adding `p/python` only when tracked Python files exist. A nonempty value replaces these defaults: space-separated configs, each passed as `--config`; registry packs or paths in the repository. Shell-only repositories use the two base packs; no `p/bash` or `p/shell` registry pack exists, so `bash-ci.yml`'s ShellCheck provides shell coverage |
-| `semgrep-version` | empty | **Deprecated; will be removed.** Semgrep is installed from a hash lock, so the version is the lock's (currently `1.181.0`, in `.github/requirements/semgrep.in`). Leave empty. A value that is not the locked version fails the install step, naming the locked one; the locked version itself is accepted |
+| `semgrep-version` | empty | **Deprecated; will be removed.** Semgrep is installed from a hash lock, so the version is the lock's (currently `1.183.0`, in `.github/requirements/semgrep.in`). Leave empty. A value that is not the locked version fails the install step, naming the locked one; the locked version itself is accepted |
 | `semgrep-continue-on-error` | `false` | Report findings without failing (they still reach the Security tab). Without it the scan runs with `--error` and a finding fails the job. A migration aid |
 | `semgrep-egress-policy` | `block` | harden-runner policy for the Semgrep job only |
 | `semgrep-allowed-endpoints` | the measured list | The Semgrep job's own allow-list: PyPI for the pip install, `semgrep.dev` for the rule registry, and GitHub for the SARIF upload. `extra-allowed-endpoints` is appended to it, for a private rule registry or a config fetched from another host |
@@ -1828,7 +1828,7 @@ Inputs of `security.yml`:
 | `scorecard` | `false` | OpenSSF Scorecard, published; runs only on the default branch (push or schedule) |
 | `python-version` | `3.13` | Python for pip-audit, Semgrep and Snyk. The tool locks cover CPython 3.10 through 3.14 |
 | `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `audit`, the measured list, empty | harden-runner, as in `python-ci.yml` |
-| `egress-policy-secretless` | `audit` | harden-runner policy for the jobs that hold no stored secret, no OIDC token and no write-scoped token (`dependency-review` also holds its comment-scoped pull-requests write grant, a stated EX-0001 deviation), and whose output no privileged job consumes; exactly `audit` or `block`. Governed by security exception EX-0001, see [Known CI platform issue: westus2 (EX-0001)](#known-ci-platform-issue-westus2-ex-0001). `block` opts back in |
+| `egress-policy-secretless` | `block` | harden-runner policy for the jobs that hold no stored secret, no OIDC token and no write-scoped token (`dependency-review` also holds its comment-scoped pull-requests write grant, a stated EX-0001 deviation), and whose output no privileged job consumes; exactly `audit` or `block`. Security exception EX-0001 is closed (2026-11-02), see [Known CI platform issue: westus2 (EX-0001)](#known-ci-platform-issue-westus2-ex-0001). `audit` opts out if the defect recurs |
 | `doppler-project`, `doppler-config`, `doppler-identity-id` | empty | See [Doppler setup](#doppler-setup) |
 | `doppler-trusted-refs-only` | `true` | Fetch CI secrets only on the default branch, a version tag (vN.N.N) or a schedule; never on a pull request. See [Doppler setup](#doppler-setup) |
 | `timeout-minutes` | `15` | Per-job timeout |
@@ -2466,8 +2466,8 @@ The offline response-format and repository-content contracts still run by
 default; only live registry resolution requires this opt-in.
 
 Every caller in `baseline/repos.txt` runs `block` on all three workflows.
-While security exception EX-0001 is active, `block` governs the jobs that hold a secret; the jobs that
-hold none follow `egress-policy-secretless`, which defaults to `audit` (see below).
+`block` governs the jobs that hold a secret; the jobs that hold none follow `egress-policy-secretless`, which
+defaults to `block` again since security exception EX-0001 was closed on 2026-11-02 (see below).
 A host only one repository reaches, such as an apt repository or an
 installer its Dockerfile pulls, goes in `extra-allowed-endpoints` on that
 caller, not in the shared default. A blocked connection shows in the job log
@@ -2494,20 +2494,36 @@ under `block` with no `domain not allowed` line, which is the measurement.
 
 ## Known CI platform issue: westus2 (EX-0001)
 
-**What.** GitHub-hosted runners in the Azure region `westus2` break harden-runner in `block` mode. GitHub
-is running a DNS experiment there (`egress-dns-resolver.service`); the harden-runner agent records one IP
-per allowed domain and drops connections to the other addresses of the same name, GitHub's results
-receiver included. About 6 percent of jobs hang (steps stuck `in_progress`, a hang until the timeout) or
-fail with `ECONNREFUSED` or a refused checkout. A rerun on another region passes. A 250-job experiment
-showed `audit` and no tool both pass on westus2 and `block` fails there on every version tried, with the
-results hosts allowed or not. Upstream: step-security/harden-runner#705, #708, #709 and
-actions/runner-images#14925, with no fix date.
+**Status: closed on 2026-11-02.** The `egress-policy-secretless` default is `block` again. Record, evidence and
+caveats: [EX-0001](docs/security/exceptions/EX-0001-harden-runner-block-westus2.md), section "Closure".
+
+**What it was.** GitHub-hosted runners in the Azure region `westus2` broke harden-runner in `block` mode. GitHub
+was running a DNS experiment there (`egress-dns-resolver.service`); the harden-runner agent recorded one IP
+per allowed domain and dropped connections to the other addresses of the same name, GitHub's results
+receiver included. About 6 percent of jobs hung (steps stuck `in_progress`, a hang until the timeout) or
+failed with `ECONNREFUSED` or a refused checkout. A rerun on another region passed. A 250-job experiment
+showed `audit` and no tool both passed on westus2 and `block` failed there on every version tried up to
+v2.22.2, with the results hosts allowed or not. Upstream: step-security/harden-runner#705, #708, #709 and
+actions/runner-images#14925.
+
+**Why it is closed.** A 600-job experiment on harden-runner v2.22.3 (the version pinned here; 150 jobs per arm over 3 runs): `block` passed
+15 of 15 jobs on westus2 and 135 of 135 on other regions, while the control (`block` on v2.22.2) passed 137 of 137
+on other regions and failed 13 of 13 on westus2, every one hanging to the 10-minute timeout. The maintainer decided on 2026-11-02 to return to
+`block` and end the exception. Caveats, stated plainly: the root cause is not shown, only the symptom is gone
+with v2.22.3; and arms a and c (the audit and no-tool controls) hit westus2 only 5 and 8 times (all passed; the other regions gave 145 and 142 ok, 0 bad), so the sample there is thin.
+
+**If it recurs.** A caller opts back into `audit` for its secretless jobs with `egress-policy-secretless: audit`
+(the input, the exact-string policy check and the runtime `github-hosted` control are all kept). The fail-fast
+egress canary stays in every job that can run in `block`, as a diagnostic that names the symptom in seconds.
+Open a new dated exception entry before relying on `audit` across repositories.
+
+### History: what the exception did (2026-10-24 to 2026-11-02)
 
 **What we did.** A time-boxed, logged security exception,
-[EX-0001](docs/security/exceptions/EX-0001-harden-runner-block-westus2.md), expiring 2026-11-07 at the
-latest or when the upstream defect is fixed:
+[EX-0001](docs/security/exceptions/EX-0001-harden-runner-block-westus2.md), which was to expire 2026-11-07 at the
+latest (it was closed earlier, see above):
 
-- A new input `egress-policy-secretless` (exactly `audit` or `block`, default `audit`) on every reusable
+- A new input `egress-policy-secretless` (exactly `audit` or `block`, default `audit` during the exception, `block` now) on every reusable
   workflow that has a job it applies to. "Secretless" is defined narrowly: no stored secret, no OIDC
   `id-token`, no publish-capable or write-scoped token, `contents: read` (and `security-events: write` for a
   SARIF upload only), no token handed to an action or `gh` beyond the default, and no artifact or output
@@ -2543,11 +2559,11 @@ latest or when the upstream defect is fixed:
   `tofu-ci` 16 (was 20), `security` 15 (was 30), `docs-pages` 10 (was 30), `wiki-publish` 10 (was 30).
   Each is at least three times the slowest healthy p99 measured for that workflow. A caller that relied on
   an old default passes `timeout-minutes` itself.
-- harden-runner is pinned at v2.22.2 everywhere. That is hygiene, not the fix: the experiment shows v2.22.2
-  breaks the same way.
+- harden-runner was pinned at v2.22.2 at the time. That was hygiene, not the fix: the experiment showed v2.22.2
+  breaks the same way. v2.22.3 is what the closure experiment passed on.
 
-**Opting back in.** `egress-policy-secretless: block` on a caller restores `block` for the secretless jobs.
-That is the whole rollback.
+**Opting back in (while the exception lasted).** `egress-policy-secretless: block` on a caller restored `block`
+for the secretless jobs. The flip is now the other way round: `audit` opts out.
 
 ### The egress canary
 

@@ -98,7 +98,7 @@ def test_there_is_no_checkout_and_the_steps_are_the_expected_ones():
         "Call the Lory pipeline scan API",
         "Judge the Lory response",
     ]
-    assert uses == ["step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2"]
+    assert uses == ["step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43"]
 
 
 def test_no_input_can_add_an_endpoint_or_change_where_the_job_may_connect():

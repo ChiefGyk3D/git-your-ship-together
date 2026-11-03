@@ -5,6 +5,53 @@ name what a caller sees after that.
 
 ## Unreleased
 
+Nothing yet.
+
+## v1.28.1 (2026-11-02)
+
+### Fixed: workflow lint under `block` could not install pyflakes (issue #282)
+
+Callers pick this up when they re-pin.
+
+- **`tofu-ci.yml` and `arduino-ci.yml`** now allow exactly `pypi.org:443` and `files.pythonhosted.org:443` in the `allowed-endpoints` default. `raven-actions/actionlint` runs `pipx install pyflakes` when pyflakes is missing, and since v1.28.0 the secretless `workflow-lint` job runs `block`, which dropped the connection (`domain not allowed: pypi.org`) and failed the job after about 90 seconds. `python-ci.yml` and `bash-ci.yml` already had both hosts.
+- **Callers need no change.** A tofu-ci caller that added `pypi.org:443 files.pythonhosted.org:443` to `extra-allowed-endpoints` for this can remove them. No job went back to `audit`, and no wildcard was added.
+- **Guard.** `tests/test_workflows.py` fails if any reusable workflow that runs actionlint lacks the two hosts in its default.
+- **`python-ci.yml` and `bash-ci.yml` `distro-allowed-endpoints`** gain `docker-images-prod.s3.dualstack.us-east-1.amazonaws.com:443`. The distro image pull (`docker run debian:13`) failed in hammunition-bunker PR 54 with `domain not allowed` for that host and then an i/o timeout on the layer download; the job was already `block` before v1.28.0. No wildcard. Docker's allowlist page (docs.docker.com/desktop/setup/allow-list/, modified 2026-09-29) lists `registry-1.docker.io`, `auth.docker.io` and `production.cloudfront.docker.com` (already present) but not this S3 host, so it rests on the measured log. A caller that added it to `extra-allowed-endpoints` can remove it.
+
+## v1.28.0 (2026-11-02)
+
+### Changed: secretless jobs run harden-runner `block` by default again (issue #278, security exception EX-0001 closed)
+
+Callers pick this up when they re-pin.
+
+- **`egress-policy-secretless` now defaults to `block`** (it was `audit` since 2026-10-24) in every reusable workflow that has the input: `agent-scan`, `arduino-ci`, `bash-ci`, `container-release`, `dast`, `python-ci`, `python-docker-release`, `python-fuzz`, `python-package-release`, `security`, `threat-model`, `tofu-ci` and `verify-published`. A caller that re-pins and sets nothing now runs its secretless jobs under the `block` allow-list, the same list that `egress-policy` uses. `distro-egress-policy` and `semgrep-egress-policy` already defaulted to `block` and are unchanged; `egress-policy` keeps its own defaults.
+- **The pip, buildx and Arduino-package caches come back** in those jobs. The cache gates follow each job's effective policy, so they are on under `block` and off only for a caller that opts into `audit`.
+- **Opt-out input.** The input stays. A caller that hits the westus2 symptom again sets `egress-policy-secretless: audit` on the workflow call. The exact-string policy check, the `github-hosted` runtime control and the fail-fast egress canary are unchanged.
+- **Check allow-lists.** A caller whose secretless jobs reached a host that only the `audit` default let through (a private mirror, an installer its code pulls) needs it in `extra-allowed-endpoints`; a blocked connection shows in the job log as `domain not allowed: <host>`.
+
+### Closed: security exception EX-0001 (westus2 harden-runner `block`)
+
+- **Status is closed on 2026-11-02**, by the maintainer's decision, before the 2026-11-07 expiry. The record keeps its history and gains a "Closure" section.
+- **Evidence.** A 600-job experiment on harden-runner v2.22.3 (the version pinned since v1.27.0; 150 jobs per arm over 3 runs): `block` passed 15 of 15 westus2 jobs and 135 of 135 on other regions; the control, `block` on v2.22.2, passed 137 of 137 on other regions and failed 13 of 13 on westus2, every one hung to the 10-minute timeout. Audit v2.22.3 and the no-tool arm passed. Runs: [41490712453](https://github.com/ChiefGyk3D/git-your-ship-together/actions/runs/41490712453), [41493344115](https://github.com/ChiefGyk3D/git-your-ship-together/actions/runs/41493344115), [41496006377](https://github.com/ChiefGyk3D/git-your-ship-together/actions/runs/41496006377).
+- **Caveats.** The root cause is not shown, only the symptom is gone with v2.22.3. Two control arms hit westus2 only 5 and 8 times.
+- This repository's own `ci.yml` jobs that call harden-runner directly stay `audit` (they were `audit` before the exception, with no measured allow-list), so their pip caches stay off.
+
+### Changed: syft 1.56.0
+
+- **syft 1.55.0 to 1.56.0** in `python-package-release.yml` (`syft-version` and `syft-sha256` defaults). The SHA-256 is the vendor checksums file's entry for the linux_amd64 tarball, and matches `sha256sum` of the downloaded asset. A caller that pins its own `syft-version` is unchanged.
+
+## v1.27.0 (2026-11-02)
+
+### Changed: pinned actions and tools bumped (issue #270, pull requests #271 and #273, release #274)
+
+Callers pick these up when they re-pin.
+
+- **harden-runner v2.22.3.** Fixes GitHub's DNS resolver and outbound proxy blocking connections that the allow-list permits, in `block` mode.
+- **Actions:** setup-python 7.1.0, zizmor-action 0.8.0, docker/login-action 4.7.0, codeql-action 4.39.1.
+- **Tools** (each checked against the vendor checksums): OpenTofu 1.13.2, tflint 0.65.0, OPA 1.22.0, Trivy 0.76.1, syft 1.55.0.
+- **semgrep 1.183.0** in the `security.yml` scan, so callers get the new rules and fixes on re-pin. **mypy 2.4.1** in this repository's own `ci.yml` only; no caller sees it.
+- **ruff default 0.17.3.** The `lint-install-command` default pins ruff 0.17.3, so a caller on the default now lints with 0.17.3. A caller that pins its own ruff is unchanged.
+
 ### New: `gitleaks-scope` input in `security.yml` (issue #260)
 
 - **New input `gitleaks-scope`**, exactly `all-refs` (the default; behavior unchanged for every caller) or `pr-commits`.

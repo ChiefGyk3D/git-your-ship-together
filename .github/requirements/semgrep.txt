@@ -184,9 +184,9 @@ ruamel-yaml-clib==0.2.15 \
     --hash=sha256:ef71831bd61fbdb7aa0399d5c4da06bea37107ab5c79ff884cc07f2450910262
 semantic-version==2.10.0 \
     --hash=sha256:de78a3b8e0feda74cabc54aab2da702113e33ac9d9eb9d2389bcf1f58b7d9177
-semgrep==1.181.0 \
-    --hash=sha256:6dedd7d72dd7f7bd314439f469e143d57d84508c57c29246793378cccc2b90dc \
-    --hash=sha256:c142ec04a2ed144970cb0a92f6877651dd3c088505eec737bb7f4db7ae5f0ffa
+semgrep==1.183.0 \
+    --hash=sha256:b058cc62ca32af79d2eaf44c3ff0931bfecc74857107eaf6b1b0ebb6676604ec \
+    --hash=sha256:f36115c4d0cb43056ceb308273421a2f6a35e055e7e029601e130850f836646e
 sse-starlette==3.5.1 ; python_full_version < '3.11' \
     --hash=sha256:a6cdcfec47b952911b1d99a7b8056429b5984039b875bf6575174220364b551f
 sse-starlette==3.6.0 ; python_full_version >= '3.11' \

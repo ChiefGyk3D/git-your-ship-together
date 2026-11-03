@@ -454,7 +454,9 @@ def test_expanding_a_pattern_stops_at_the_entry_limit_and_the_depth_limit(bench)
 
 def test_the_scan_jobs_block_egress_unless_the_caller_chooses_audit():
     assert call()["inputs"]["egress-policy"]["default"] == "block"
-    assert call()["inputs"]["egress-policy-secretless"]["default"] == "audit", "the upload jobs follow EX-0001"
+    assert call()["inputs"]["egress-policy-secretless"]["default"] == "block", (
+        "EX-0001 is closed, the upload jobs block by default"
+    )
     for job in SCAN_JOBS:
         policy = doc()["jobs"][job]["steps"][1]["with"]["egress-policy"]
         assert "inputs.egress-policy ==" in policy

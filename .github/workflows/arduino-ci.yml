@@ -81,13 +81,13 @@ on:
         type: string
         default: audit
       egress-policy-secretless:
-        description: harden-runner egress policy for the jobs that hold no stored secret, no OIDC token and no write-scoped or publish-capable token (read-only contents, a SARIF upload at most), and whose output no privileged job consumes - exactly `audit` or `block`. Defaults to `audit` while security exception EX-0001 is active (GitHub-hosted runners in westus2 break harden-runner `block`; expires 2026-11-07 or when step-security/harden-runner#708 is fixed; see docs/security/exceptions/). Every job still has the default read-only job token. Set `block` to opt back in. Any other job follows `egress-policy`. Any other value fails the job.
+        description: harden-runner egress policy for the jobs that hold no stored secret, no OIDC token and no write-scoped or publish-capable token (read-only contents, a SARIF upload at most), and whose output no privileged job consumes - exactly `audit` or `block`. Defaults to `block` since security exception EX-0001 (GitHub-hosted runners in westus2 broke harden-runner `block`) was closed on 2026-11-02 after harden-runner v2.22.3 passed on westus2; see docs/security/exceptions/. Every job still has the default read-only job token. Set `audit` to opt out if the defect recurs. Any other job follows `egress-policy`. Any other value fails the job.
         type: string
-        default: audit
+        default: block
       allowed-endpoints:
         description: harden-runner allow-list for `block`, space-separated host:port entries. The default is arduino-cli's download and Arduino's package index and tools; a core from another index (Espressif's) adds its hosts through `extra-allowed-endpoints`. Wildcards are not supported and a newline-separated list matches nothing.
         type: string
-        default: "api.github.com:443 downloads.arduino.cc:443 ghcr.io:443 github.com:443 objects.githubusercontent.com:443 pkg-containers.githubusercontent.com:443 raw.githubusercontent.com:443 registry.npmjs.org:443 release-assets.githubusercontent.com:443"
+        default: "api.github.com:443 downloads.arduino.cc:443 files.pythonhosted.org:443 ghcr.io:443 github.com:443 objects.githubusercontent.com:443 pkg-containers.githubusercontent.com:443 pypi.org:443 raw.githubusercontent.com:443 registry.npmjs.org:443 release-assets.githubusercontent.com:443"
       extra-allowed-endpoints:
         description: Appended to `allowed-endpoints`, for the hosts a core or library index reaches. Same format.
         type: string
@@ -130,7 +130,7 @@ jobs:
           check semgrep-egress-policy "${POLICY_SEMGREP_EGRESS_POLICY+set}" "${POLICY_SEMGREP_EGRESS_POLICY-}"
           exit "$bad"
 
-      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
         with:
           egress-policy: ${{ (inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block' }}
           allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
@@ -350,7 +350,7 @@ jobs:
           check semgrep-egress-policy "${POLICY_SEMGREP_EGRESS_POLICY+set}" "${POLICY_SEMGREP_EGRESS_POLICY-}"
           exit "$bad"
 
-      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
         with:
           egress-policy: ${{ (inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block' }}
           allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
@@ -484,7 +484,7 @@ jobs:
           check semgrep-egress-policy "${POLICY_SEMGREP_EGRESS_POLICY+set}" "${POLICY_SEMGREP_EGRESS_POLICY-}"
           exit "$bad"
 
-      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
         with:
           egress-policy: ${{ (inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block' }}
           allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
@@ -622,7 +622,7 @@ jobs:
           check semgrep-egress-policy "${POLICY_SEMGREP_EGRESS_POLICY+set}" "${POLICY_SEMGREP_EGRESS_POLICY-}"
           exit "$bad"
 
-      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
         with:
           egress-policy: ${{ (inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block' }}
           allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
