@@ -16,15 +16,6 @@ Callers pick this up when they re-pin. **Security-sensitive release path.**
 - **Not changed:** per-registry signing, the multi-arch merge and the job's outputs (`digest`, `image`). The fixture still points at a mutable tag; pinning it to a known-good digest is tracked separately.
 - **Guard.** `tests/test_container_release_publish.py` runs the step scripts with stub `cosign` and `docker`: the order of the steps, a 409 that verifies and one that does not, an unconstrained verify refused, and the retry cap.
 
-### Fixed: workflow lint under `block` could not install pyflakes (issue #282, v1.28.1 candidate)
-
-Callers pick this up when they re-pin.
-
-- **`tofu-ci.yml` and `arduino-ci.yml`** now allow exactly `pypi.org:443` and `files.pythonhosted.org:443` in the `allowed-endpoints` default. `raven-actions/actionlint` runs `pipx install pyflakes` when pyflakes is missing, and since v1.28.0 the secretless `workflow-lint` job runs `block`, which dropped the connection (`domain not allowed: pypi.org`) and failed the job after about 90 seconds. `python-ci.yml` and `bash-ci.yml` already had both hosts.
-- **Callers need no change.** A tofu-ci caller that added `pypi.org:443 files.pythonhosted.org:443` to `extra-allowed-endpoints` for this can remove them. No job went back to `audit`, and no wildcard was added.
-- **Guard.** `tests/test_workflows.py` fails if any reusable workflow that runs actionlint lacks the two hosts in its default.
-- **`python-ci.yml` and `bash-ci.yml` `distro-allowed-endpoints`** gain `docker-images-prod.s3.dualstack.us-east-1.amazonaws.com:443`. The distro image pull (`docker run debian:13`) failed in hammunition-bunker PR 54 with `domain not allowed` for that host and then an i/o timeout on the layer download; the job was already `block` before v1.28.0. No wildcard. Docker's allowlist page (docs.docker.com/desktop/setup/allow-list/, modified 2026-09-29) lists `registry-1.docker.io`, `auth.docker.io` and `production.cloudfront.docker.com` (already present) but not this S3 host, so it rests on the measured log. A caller that added it to `extra-allowed-endpoints` can remove it.
-
 ## v1.28.1 (2026-11-02)
 
 ### Fixed: workflow lint under `block` could not install pyflakes (issue #282)

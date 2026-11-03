@@ -45,12 +45,22 @@ on:
           type=raw,value=latest,enable={{is_default_branch}}
       signer-identity-regexp:
         description: >-
-          Regular expression the cosign certificate identity must match when
-          the merge job checks its own signature and SBOM attestation (after a
-          Rekor conflict, and before it moves the release tags). The default
-          names this reusable workflow; a fork of it sets its own.
+          Certificate identity the merge job's own signature and SBOM
+          attestation must match (checked before the release tags move). It is
+          validated before anything is pushed: it must start with
+          ^https://github\.com/, name a workflow file under
+          \.github/workflows/, end with @, and use no metacharacter except an
+          escaped dot. The default names this reusable workflow; a fork of it
+          sets its own.
         type: string
-        default: ^https://github.com/ChiefGyk3D/git-your-ship-together/\.github/workflows/container-release\.yml@
+        default: ^https://github\.com/ChiefGyk3D/git-your-ship-together/\.github/workflows/container-release\.yml@
+      allow-unsigned-publish:
+        description: >-
+          Let a push move the release tags with sign, sbom or provenance turned
+          off. Default false: a push with any of the three off fails before it
+          builds, so an unsigned image cannot reach latest by accident.
+        type: boolean
+        default: false
       docker-test-command:
         description: Shell run against the locally built image; `$IMAGE` names it. Empty skips the check.
         type: string
@@ -216,6 +226,7 @@ jobs:
       sbom: ${{ inputs.sbom }}
       provenance: ${{ inputs.provenance }}
       signer-identity-regexp: ${{ inputs.signer-identity-regexp }}
+      allow-unsigned-publish: ${{ inputs.allow-unsigned-publish }}
       trivy: ${{ inputs.trivy }}
       trivy-severity: ${{ inputs.trivy-severity }}
       trivy-exit-code: ${{ inputs.trivy-exit-code }}

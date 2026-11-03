@@ -92,12 +92,22 @@ on:
           type=raw,value=latest,enable={{is_default_branch}}
       signer-identity-regexp:
         description: >-
-          Regular expression the cosign certificate identity must match when
-          the merge job checks its own signature and SBOM attestation (after a
-          Rekor conflict, and before it moves the release tags). The default
-          names this reusable workflow; a fork of it sets its own.
+          Certificate identity the merge job's own signature and SBOM
+          attestation must match (checked before the release tags move). It is
+          validated before anything is pushed: it must start with
+          ^https://github\.com/, name a workflow file under
+          \.github/workflows/, end with @, and use no metacharacter except an
+          escaped dot. The default names this reusable workflow; a fork of it
+          sets its own.
         type: string
-        default: ^https://github.com/ChiefGyk3D/git-your-ship-together/\.github/workflows/container-release\.yml@
+        default: ^https://github\.com/ChiefGyk3D/git-your-ship-together/\.github/workflows/container-release\.yml@
+      allow-unsigned-publish:
+        description: >-
+          Let a push move the release tags with sign, sbom or provenance turned
+          off. Default false: a push with any of the three off fails before it
+          builds, so an unsigned image cannot reach latest by accident.
+        type: boolean
+        default: false
       docker-test-command:
         description: Shell run against the locally built image; `$IMAGE` names it. Empty skips the check.
         type: string
@@ -263,6 +273,22 @@ jobs:
           check distro-egress-policy "${POLICY_DISTRO_EGRESS_POLICY+set}" "${POLICY_DISTRO_EGRESS_POLICY-}"
           check semgrep-egress-policy "${POLICY_SEMGREP_EGRESS_POLICY+set}" "${POLICY_SEMGREP_EGRESS_POLICY-}"
           exit "$bad"
+
+      - name: Require signing for a publish
+        timeout-minutes: 1
+        env:
+          PUSH: ${{ inputs.push }}
+          SIGN: ${{ inputs.sign }}
+          SBOM: ${{ inputs.sbom }}
+          PROVENANCE: ${{ inputs.provenance }}
+          ALLOW_UNSIGNED: ${{ inputs.allow-unsigned-publish }}
+        run: |
+          set -euo pipefail
+          if [ "$PUSH" = "true" ] && [ "$ALLOW_UNSIGNED" != "true" ] \
+            && { [ "$SIGN" != "true" ] || [ "$SBOM" != "true" ] || [ "$PROVENANCE" != "true" ]; }; then
+            echo "::error title=unsigned publish::push is true but sign, sbom or provenance is off; set all three, or set allow-unsigned-publish: true to accept an unsigned release"
+            exit 1
+          fi
 
       - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
         with:
@@ -807,6 +833,29 @@ jobs:
           provenance: false
           sbom: false
 
+      - name: Record this platform's image digest
+        if: inputs.push
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+          DIGEST_DIR: ${{ runner.temp }}/image-digest
+        run: |
+          set -euo pipefail
+          if ! [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error title=digest::the platform build returned no usable digest: ${DIGEST}"
+            exit 1
+          fi
+          mkdir -p "$DIGEST_DIR"
+          printf '%s\n' "$DIGEST" > "$DIGEST_DIR/digest.txt"
+
+      - name: Hand the digest to the merge job
+        if: inputs.push
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: image-digest-${{ matrix.arch }}
+          path: ${{ runner.temp }}/image-digest/digest.txt
+          retention-days: 1
+          if-no-files-found: error
+
   # Joins the per-platform images into one multi-arch index under the real
   # tags, then signs, attests and records provenance for that index.
   merge:
@@ -815,6 +864,11 @@ jobs:
     # tokens that sign and attest.
     if: inputs.push && github.event_name != 'pull_request'
     needs: [plan, build]
+    # One publish per image and commit at a time, and a running one is never
+    # cancelled halfway through signing.
+    concurrency:
+      group: container-release-${{ needs.plan.outputs.ghcr }}-${{ github.sha }}
+      cancel-in-progress: false
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -847,6 +901,22 @@ jobs:
           check distro-egress-policy "${POLICY_DISTRO_EGRESS_POLICY+set}" "${POLICY_DISTRO_EGRESS_POLICY-}"
           check semgrep-egress-policy "${POLICY_SEMGREP_EGRESS_POLICY+set}" "${POLICY_SEMGREP_EGRESS_POLICY-}"
           exit "$bad"
+
+      - name: Validate the signer identity
+        timeout-minutes: 1
+        env:
+          IDENTITY_REGEXP: ${{ inputs.signer-identity-regexp }}
+        run: |
+          set -euo pipefail
+          # Literal characters only: letters, digits, _ and -, an escaped dot,
+          # and / between path segments. No wildcard, alternation, group or
+          # class can pass, so the value names one workflow file.
+          seg='([A-Za-z0-9_-]|\\\.)+'
+          shape='^\^https://github\\\.com/'"${seg}/${seg}/"'\\\.github/workflows/'"${seg}"'@$'
+          if ! [[ "$IDENTITY_REGEXP" =~ $shape ]]; then
+            echo "::error title=signer-identity-regexp::must be ^https://github\\.com/<owner>/<repo>/\\.github/workflows/<file>@ with only letters, digits, _ - and escaped dots"
+            exit 1
+          fi
 
       - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
         with:
@@ -1125,10 +1195,19 @@ jobs:
           images: ${{ steps.names.outputs.images }}
           tags: ${{ inputs.tags }}
 
-      # The index goes up under an immutable staging tag (the commit SHA) on
-      # each registry, never under the release tags. `latest` and every other
-      # moving tag wait for "Publish the release tags", after the image is
-      # signed, attested and verified (issue #286).
+      - name: Fetch the per-platform digests
+        if: inputs.push
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: image-digest-*
+          path: ${{ runner.temp }}/image-digests
+
+      # The index is built from the digests the build jobs pushed, never from
+      # a tag, and goes up under a staging tag (the commit SHA) only. Its own
+      # digest is read from the create result and cross-checked against the
+      # manifests it lists. `latest` and every other moving tag wait for
+      # "Publish the release tags", after the image is signed, attested and
+      # verified (issue #286).
       - name: Create the multi-arch index
         id: index
         env:
@@ -1136,23 +1215,47 @@ jobs:
           DOCKERHUB: ${{ steps.names.outputs.dockerhub }}
           PLATFORMS: ${{ inputs.platforms }}
           SHA: ${{ github.sha }}
+          DIGESTS: ${{ runner.temp }}/image-digests
+          META: ${{ runner.temp }}/index-metadata.json
         run: |
           set -euo pipefail
-          args=(--tag "${GHCR}:${SHA}")
+          tags=(--tag "${GHCR}:${SHA}")
           if [ -n "$DOCKERHUB" ]; then
-            args+=(--tag "${DOCKERHUB}:${SHA}")
+            tags+=(--tag "${DOCKERHUB}:${SHA}")
           fi
           sources=()
+          expected=()
           IFS=',' read -r -a platforms <<< "$PLATFORMS"
           for platform in "${platforms[@]}"; do
             platform="$(printf '%s' "$platform" | tr -d '[:space:]')"
             [ -n "$platform" ] || continue
-            sources+=("${GHCR}:${SHA}-${platform//\//-}")
+            file="${DIGESTS}/image-digest-${platform//\//-}/digest.txt"
+            if [ ! -f "$file" ]; then
+              echo "::error title=index::no digest was recorded for ${platform}"
+              exit 1
+            fi
+            platform_digest="$(head -n 1 "$file")"
+            if ! [[ "$platform_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "::error title=index::the recorded digest for ${platform} is not a sha256 digest"
+              exit 1
+            fi
+            sources+=("${GHCR}@${platform_digest}")
+            expected+=("$platform_digest")
           done
-          docker buildx imagetools create "${args[@]}" "${sources[@]}"
-          digest="$(docker buildx imagetools inspect "${GHCR}:${SHA}" --format '{{.Manifest.Digest}}')"
+          if [ "${#sources[@]}" -eq 0 ]; then
+            echo "::error title=index::no platform to merge"
+            exit 1
+          fi
+          docker buildx imagetools create --metadata-file "$META" "${tags[@]}" "${sources[@]}"
+          digest="$(jq -r '."containerimage.digest" // .["containerimage.descriptor"].digest // empty' "$META")"
           if ! [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-            echo "::error title=index::the staging index has no usable digest: ${digest}"
+            echo "::error title=index::the create result has no usable index digest"
+            exit 1
+          fi
+          listed="$(docker buildx imagetools inspect "${GHCR}@${digest}" --raw | jq -r '.manifests[].digest' | sort)"
+          wanted="$(printf '%s\n' "${expected[@]}" | sort)"
+          if [ "$listed" != "$wanted" ]; then
+            echo "::error title=index::the index ${digest} does not list exactly the platform digests that were built"
             exit 1
           fi
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
@@ -1186,8 +1289,8 @@ jobs:
 
           # Never an unconstrained verify: an empty regexp matches every identity.
           rekor_verify() {
-            if [ -z "${IDENTITY_REGEXP:-}" ] || [ -z "${OIDC_ISSUER:-}" ] || [ -z "${SOURCE_REPOSITORY:-}" ]; then
-              echo "::error title=Rekor conflict::the identity, issuer and repository constraints are not all set; refusing an unconstrained verify"
+            if [ -z "${IDENTITY_REGEXP:-}" ] || [ -z "${OIDC_ISSUER:-}" ] || [ -z "${SOURCE_REPOSITORY:-}" ] || [ -z "${WORKFLOW_SHA:-}" ]; then
+              echo "::error title=Rekor conflict::the identity, issuer, repository and commit constraints are not all set; refusing an unconstrained verify"
               return 1
             fi
             case "$1" in
@@ -1195,12 +1298,14 @@ jobs:
                 cosign verify "$2" \
                   --certificate-identity-regexp "$IDENTITY_REGEXP" \
                   --certificate-oidc-issuer "$OIDC_ISSUER" \
-                  --certificate-github-workflow-repository "$SOURCE_REPOSITORY" > /dev/null ;;
+                  --certificate-github-workflow-repository "$SOURCE_REPOSITORY" \
+                  --certificate-github-workflow-sha "$WORKFLOW_SHA" > /dev/null ;;
               sbom)
                 cosign verify-attestation --type spdxjson "$2" \
                   --certificate-identity-regexp "$IDENTITY_REGEXP" \
                   --certificate-oidc-issuer "$OIDC_ISSUER" \
-                  --certificate-github-workflow-repository "$SOURCE_REPOSITORY" > /dev/null ;;
+                  --certificate-github-workflow-repository "$SOURCE_REPOSITORY" \
+                  --certificate-github-workflow-sha "$WORKFLOW_SHA" > /dev/null ;;
               *) return 1 ;;
             esac
           }
@@ -1249,9 +1354,12 @@ jobs:
           IDENTITY_REGEXP: ${{ inputs.signer-identity-regexp }}
           OIDC_ISSUER: https://token.actions.githubusercontent.com
           SOURCE_REPOSITORY: ${{ github.repository }}
+          WORKFLOW_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          for image in $GHCR $DOCKERHUB; do
+          images=("$GHCR")
+          if [ -n "$DOCKERHUB" ]; then images+=("$DOCKERHUB"); fi
+          for image in "${images[@]}"; do
             echo "signing ${image}@${DIGEST}"
             "$RUNNER_TEMP/rekor-run.sh" signature "${image}@${DIGEST}" cosign sign --yes "${image}@${DIGEST}"
           done
@@ -1278,9 +1386,12 @@ jobs:
           IDENTITY_REGEXP: ${{ inputs.signer-identity-regexp }}
           OIDC_ISSUER: https://token.actions.githubusercontent.com
           SOURCE_REPOSITORY: ${{ github.repository }}
+          WORKFLOW_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          for image in $GHCR $DOCKERHUB; do
+          images=("$GHCR")
+          if [ -n "$DOCKERHUB" ]; then images+=("$DOCKERHUB"); fi
+          for image in "${images[@]}"; do
             echo "attesting SBOM on ${image}@${DIGEST}"
             "$RUNNER_TEMP/rekor-run.sh" sbom "${image}@${DIGEST}" \
               cosign attest --yes --type spdxjson --predicate sbom.spdx.json "${image}@${DIGEST}"
@@ -1305,18 +1416,22 @@ jobs:
           IDENTITY_REGEXP: ${{ inputs.signer-identity-regexp }}
           OIDC_ISSUER: https://token.actions.githubusercontent.com
           SOURCE_REPOSITORY: ${{ github.repository }}
+          WORKFLOW_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          if [ -z "$IDENTITY_REGEXP" ] || [ -z "$OIDC_ISSUER" ] || [ -z "$SOURCE_REPOSITORY" ]; then
-            echo "::error title=verify::the identity, issuer and repository constraints must all be set; refusing an unconstrained verify"
+          if [ -z "$IDENTITY_REGEXP" ] || [ -z "$OIDC_ISSUER" ] || [ -z "$SOURCE_REPOSITORY" ] || [ -z "$WORKFLOW_SHA" ]; then
+            echo "::error title=verify::the identity, issuer, repository and commit constraints must all be set; refusing an unconstrained verify"
             exit 1
           fi
-          for image in $GHCR $DOCKERHUB; do
+          images=("$GHCR")
+          if [ -n "$DOCKERHUB" ]; then images+=("$DOCKERHUB"); fi
+          for image in "${images[@]}"; do
             if [ "$SIGN" = "true" ]; then
               if ! cosign verify "${image}@${DIGEST}" \
                 --certificate-identity-regexp "$IDENTITY_REGEXP" \
                 --certificate-oidc-issuer "$OIDC_ISSUER" \
-                --certificate-github-workflow-repository "$SOURCE_REPOSITORY" > /dev/null; then
+                --certificate-github-workflow-repository "$SOURCE_REPOSITORY" \
+                --certificate-github-workflow-sha "$WORKFLOW_SHA" > /dev/null; then
                 echo "::error title=verify::the signature of ${image}@${DIGEST} does not verify; the release tags were not moved"
                 exit 1
               fi
@@ -1326,7 +1441,8 @@ jobs:
               if ! cosign verify-attestation --type spdxjson "${image}@${DIGEST}" \
                 --certificate-identity-regexp "$IDENTITY_REGEXP" \
                 --certificate-oidc-issuer "$OIDC_ISSUER" \
-                --certificate-github-workflow-repository "$SOURCE_REPOSITORY" > /dev/null; then
+                --certificate-github-workflow-repository "$SOURCE_REPOSITORY" \
+                --certificate-github-workflow-sha "$WORKFLOW_SHA" > /dev/null; then
                 echo "::error title=verify::the SBOM attestation of ${image}@${DIGEST} does not verify; the release tags were not moved"
                 exit 1
               fi
@@ -1341,8 +1457,17 @@ jobs:
           GHCR: ${{ steps.names.outputs.ghcr }}
           DIGEST: ${{ steps.index.outputs.digest }}
           TAGS: ${{ steps.meta.outputs.tags }}
+          SIGN: ${{ inputs.sign }}
+          SBOM: ${{ inputs.sbom }}
+          PROVENANCE: ${{ inputs.provenance }}
+          ALLOW_UNSIGNED: ${{ inputs.allow-unsigned-publish }}
         run: |
           set -euo pipefail
+          if [ "$ALLOW_UNSIGNED" != "true" ] \
+            && { [ "$SIGN" != "true" ] || [ "$SBOM" != "true" ] || [ "$PROVENANCE" != "true" ]; }; then
+            echo "::error title=unsigned publish::sign, sbom or provenance is off and allow-unsigned-publish is not true; the release tags were not moved"
+            exit 1
+          fi
           args=()
           while IFS= read -r tag; do
             [ -n "$tag" ] && args+=(--tag "$tag")
