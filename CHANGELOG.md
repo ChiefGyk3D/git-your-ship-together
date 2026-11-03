@@ -5,7 +5,11 @@ name what a caller sees after that.
 
 ## Unreleased
 
-### Fixed: workflow lint under `block` could not install pyflakes (issue #282, v1.28.1 candidate)
+Nothing yet.
+
+## v1.28.1 (2026-11-02)
+
+### Fixed: workflow lint under `block` could not install pyflakes (issue #282)
 
 Callers pick this up when they re-pin.
 
