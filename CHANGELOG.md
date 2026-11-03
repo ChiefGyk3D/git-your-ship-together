@@ -5,16 +5,17 @@ name what a caller sees after that.
 
 ## Unreleased
 
-### Fixed: a Rekor 409 no longer leaves a published, unattested image (issue #286, v1.28.1 candidate)
+### Fixed: sign and attest before the release tags move (issue #286, v1.28.2 candidate)
 
 Callers pick this up when they re-pin. **Security-sensitive release path.**
 
-- **`container-release.yml` and `python-docker-release.yml`: the release tags move last.** The merge job used to push the index under `latest` and the other tags, then sign. A Rekor `409 createLogEntryConflict` on the Docker Hub sign stopped the job after the tags had moved, so Star-Daemon and solarstorm_scout (2026-11-02) published an image with no SBOM attestation or provenance. The index now goes up under the commit SHA tag only; `latest`, the branch, semver and `sha-` tags move after sign, SBOM attestation, provenance and a verify of both. If any of those fails, the tags stay where they were and the job fails. The `<sha>` staging tag stays in GHCR and Docker Hub beside the index.
-- **A 409 `equivalent entry already exists` counts as success only after `cosign verify` (or `verify-attestation` for the SBOM) of that digest passes** with the signer identity, the GitHub OIDC issuer and the calling repository, the same constraints `verify-published.yml` uses. If it does not verify, the job fails. Any other error fails at once.
-- **Bounded retry.** Transient Rekor/Fulcio errors (408, 425, 429, 5xx, timeouts, resets) are retried 4 times in all, waiting 5, 10 and 20 seconds.
-- **New input `signer-identity-regexp`** (default: the `container-release.yml` workflow file of `ChiefGyk3D/git-your-ship-together`). A caller needs no change; a fork of this repository sets its own. `python-docker-release.yml` forwards it.
-- **Not changed:** per-registry signing, the multi-arch merge and the job's outputs (`digest`, `image`). The fixture still points at a mutable tag; pinning it to a known-good digest is tracked separately.
-- **Guard.** `tests/test_container_release_publish.py` runs the step scripts with stub `cosign` and `docker`: the order of the steps, a 409 that verifies and one that does not, an unconstrained verify refused, and the retry cap.
+- **`container-release.yml` and `python-docker-release.yml`: the release tags move last.** The index used to go up under `latest` and the other tags before it was signed, so a failed sign left a published, unattested image. Now each platform job records its pushed digest, and the merge job builds the index from those digests, takes the index digest from the create result, pushes it under the commit SHA tag only, then signs, attests the SBOM, records provenance and verifies. `latest`, branch, semver and `sha-` tags move after that, and each is checked to point at the signed digest. If a step fails, the tags stay where they were and the job fails. The `<sha>` tag stays beside the index. Publishes of one image and commit are serialized and never cancelled midway.
+- **A Rekor 409 `equivalent entry already exists` counts as success only after `cosign verify` (`verify-attestation` for the SBOM) of that digest passes** with the signer identity, the OIDC issuer, the calling repository and the commit of the run. Any other error fails at once. Transient errors (408, 425, 429, 5xx, timeouts, resets) are retried 4 times in all, waiting 5, 10 and 20 seconds.
+- **New input `signer-identity-regexp`**, strictly validated before anything is pushed (literal characters and escaped dots only, ending in `@`). A caller needs no change; a fork of this repository sets its own. `python-docker-release.yml` forwards it.
+- **New input `allow-unsigned-publish`** (default `false`). A push with `sign`, `sbom` or `provenance` off now fails before it builds unless this is `true`. A caller that publishes unsigned on purpose sets it.
+- **New artifacts.** Each build job uploads a one-day `image-digest-<arch>` artifact; the merge job downloads them. A caller that restricts artifact hosts under `block` needs the same hosts the SBOM upload already uses.
+- **Not changed:** per-registry signing and the job's outputs (`digest`, `image`). The final verify does not re-check the GitHub provenance attestation.
+- **Guard.** `tests/test_container_release_publish.py` runs the step scripts with stub `cosign` and `docker`.
 
 ## v1.28.1 (2026-11-02)
 
