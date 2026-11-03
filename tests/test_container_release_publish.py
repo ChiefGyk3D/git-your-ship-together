@@ -477,11 +477,37 @@ def test_the_build_hands_each_platform_digest_to_the_merge_job():
     assert names().index(fetch["name"]) < names().index(INDEX)
 
 
-def test_one_publish_per_image_and_commit_at_a_time_and_never_cancelled():
+def test_one_publish_per_destination_and_ref_at_a_time_and_never_cancelled():
     merge = jobs(load(RELEASE))["merge"]
     group = merge["concurrency"]["group"]
-    assert "needs.plan.outputs.ghcr" in group and "github.sha" in group
+    assert "needs.plan.outputs.ghcr" in group
+    assert "github.ref" in group
+    assert "github.sha" not in group, "runs of one ref must queue, not race, whatever their commit"
+    assert "inputs.dockerhub" in group and "inputs.dockerhub-repository" in group
     assert merge["concurrency"]["cancel-in-progress"] is False
+
+
+def test_the_merge_job_never_runs_on_either_pull_request_event():
+    cond = str(jobs(load(RELEASE))["merge"]["if"])
+    assert "github.event_name != 'pull_request'" in cond
+    assert "github.event_name != 'pull_request_target'" in cond
+    assert "inputs.push" in cond
+
+
+def test_the_build_pushes_only_the_per_platform_tag_and_needs_the_plan():
+    build = jobs(load(RELEASE))["build"]
+    push = {s.get("name"): s for s in steps_of(build)}["Build and push this platform's image"]
+    tags = [t for t in str(push["with"]["tags"]).splitlines() if t.strip()]
+    assert tags == ["${{ needs.plan.outputs.ghcr }}:${{ github.sha }}-${{ matrix.arch }}"]
+    assert push["with"]["push"] is True
+    assert "needs.plan.result == 'success'" in str(build["if"])
+
+
+def test_the_digest_download_is_this_runs_own_artifacts_only():
+    fetch = step("Fetch the per-platform digests")
+    assert set(fetch["with"]) == {"pattern", "path"}, "no run-id, github-token or repository input"
+    assert fetch["with"]["pattern"] == "image-digest-*"
+    assert "if" not in fetch or fetch["if"] == "inputs.push"
 
 
 # --- the signer identity must be a strict, anchored, literal value ----------------
@@ -536,10 +562,22 @@ def test_the_validator_rejects_loose_identities(tmp_path, value):
     assert "::error" in done.stdout
 
 
-def test_the_validator_runs_before_anything_is_pushed():
-    order = names()
-    assert order.index(VALIDATE) < order.index(INDEX)
-    assert step(VALIDATE)["env"]["IDENTITY_REGEXP"] == "${{ inputs.signer-identity-regexp }}"
+def job_step(job: str, name: str) -> dict:
+    found = [s for s in steps_of(jobs(load(RELEASE))[job]) if s.get("name") == name]
+    assert len(found) == 1, (job, name)
+    return found[0]
+
+
+def test_the_validator_runs_in_the_plan_before_any_build_leg_and_is_rechecked_in_merge():
+    doc = load(RELEASE)
+    assert "plan" in doc["jobs"]["build"]["needs"]
+    for job in ("plan", "merge"):
+        validator = job_step(job, VALIDATE)
+        assert validator["env"]["IDENTITY_REGEXP"] == "${{ inputs.signer-identity-regexp }}"
+        assert "if" not in validator, f"the {job} validator must run on every event"
+        assert "continue-on-error" not in validator
+    assert job_step("plan", VALIDATE)["run"] == job_step("merge", VALIDATE)["run"]
+    assert names().index(VALIDATE) < names().index(INDEX)
 
 
 # --- unsigned publishes need an explicit opt-in -----------------------------------
@@ -577,6 +615,11 @@ def test_the_tags_do_not_move_with_signing_off_unless_allowed(tmp_path, stub, of
     assert calls(stub, "docker buildx imagetools create") == []
     ok = run_step(tmp_path, PUBLISH, stub, **{**env, "ALLOW_UNSIGNED": "true", "TAGS": "ghcr.io/o/r:latest"})
     assert ok.returncode == 0, ok.stdout + ok.stderr
+
+
+def test_the_plan_signing_check_has_no_condition():
+    check = plan_require()
+    assert "if" not in check and "continue-on-error" not in check
 
 
 def test_unsigned_publish_is_off_by_default_and_forwarded():

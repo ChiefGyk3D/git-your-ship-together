@@ -1021,8 +1021,16 @@ provenance and verifies the signature and the SBOM attestation of that exact
 digest. Only then does it move `latest` and every other tag in `tags` onto that
 digest, and it checks that each tag landed on it. If any earlier step fails,
 the release tags do not move and the job fails with a message saying so; the
-staging tag stays and is safe to delete. Publishes of one image and commit run
-one at a time and are never cancelled midway.
+staging tags (`<fullsha>` on the index, `<sha>-<arch>` per platform) stay and
+are safe to delete; after a failed run they point at images that are not
+signed. Publishes to one destination image from one ref run one at a time and
+a running one is never cancelled midway. The group is keyed on the image and
+the ref, not the commit, so an older commit cannot finish after a newer one and
+move `latest` back. The tradeoff: GitHub keeps one pending run per group, so a
+pending run is replaced by a newer pending run on the same ref (acceptable for
+moving tags, the newer commit supersedes it). Distinct refs, such as a main
+push and a tag push on one commit, have distinct groups and neither is dropped.
+The `merge` job never runs on `pull_request` or `pull_request_target`.
 
 A push with `sign`, `sbom` or `provenance` off fails before it builds, and the
 tag step refuses too, unless `allow-unsigned-publish: true` is set.
@@ -1035,11 +1043,22 @@ the commit of this run; if it does not, the job fails. A transient Rekor or
 Fulcio error (HTTP 408/425/429/5xx, a timeout, a reset connection) is retried
 4 times in total, waiting 5, 10 and 20 seconds. Any other error fails at once.
 
-**`signer-identity-regexp`** is validated before anything is pushed. It must be
+**`signer-identity-regexp`** is validated in the plan job, before any build leg pushes (and checked again in `merge`). It must be
 `^https://github\.com/<owner>/<repo>/\.github/workflows/<file>@` made of
 letters, digits, `_`, `-`, `/` and escaped dots only; a wildcard, alternation,
 group, class, unescaped dot or missing anchor fails the job. The default names
-this repository's `container-release.yml`; a fork sets its own.
+this repository's `container-release.yml`; a fork sets its own. The accepted
+identity matches any ref of the named reusable workflow, so callers pin the
+reusable workflow by commit SHA: that pin is the ref the certificate carries.
+
+**First real release.** Three things could not be measured before the first
+real release and it is their canary: the `--certificate-github-workflow-sha`
+constraint, the `containerimage.digest` field of the `imagetools create`
+metadata file, and artifact transfer between the build and merge jobs under
+`block`. Each fails closed: the job fails and the release tags stay where they
+were. If the sha flag misbehaves, delete the one line
+`--certificate-github-workflow-sha "$WORKFLOW_SHA"` from each verify (the
+helper script and the final verify step).
 
 The final verify does not re-check the GitHub provenance attestation: that
 needs a verifier and hosts this job's allow-list does not carry, and the

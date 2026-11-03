@@ -378,6 +378,22 @@ jobs:
             exit 1
           fi
 
+      - name: Validate the signer identity
+        timeout-minutes: 1
+        env:
+          IDENTITY_REGEXP: ${{ inputs.signer-identity-regexp }}
+        run: |
+          set -euo pipefail
+          # Literal characters only: letters, digits, _ and -, an escaped dot,
+          # and / between path segments. No wildcard, alternation, group or
+          # class can pass, so the value names one workflow file.
+          seg='([A-Za-z0-9_-]|\\\.)+'
+          shape='^\^https://github\\\.com/'"${seg}/${seg}/"'\\\.github/workflows/'"${seg}"'@$'
+          if ! [[ "$IDENTITY_REGEXP" =~ $shape ]]; then
+            echo "::error title=signer-identity-regexp::must be ^https://github\\.com/<owner>/<repo>/\\.github/workflows/<file>@ with only letters, digits, _ - and escaped dots"
+            exit 1
+          fi
+
       - name: Plan the matrix
         id: plan
         env:
@@ -862,12 +878,14 @@ jobs:
     name: Publish, sign
     # Never on a pull request, whatever the caller passes: this job holds the
     # tokens that sign and attest.
-    if: inputs.push && github.event_name != 'pull_request'
+    if: inputs.push && github.event_name != 'pull_request' && github.event_name != 'pull_request_target'
     needs: [plan, build]
-    # One publish per image and commit at a time, and a running one is never
-    # cancelled halfway through signing.
+    # One publish per destination image and ref at a time, and a running one is
+    # never cancelled halfway through signing. The group is not keyed on the
+    # commit: runs from different commits of one ref queue instead of racing
+    # for the moving tags.
     concurrency:
-      group: container-release-${{ needs.plan.outputs.ghcr }}-${{ github.sha }}
+      group: container-release-${{ needs.plan.outputs.ghcr }}-${{ inputs.dockerhub && format('hub-{0}', inputs.dockerhub-repository) || 'ghcr' }}-${{ github.ref }}
       cancel-in-progress: false
     runs-on: ubuntu-24.04
     timeout-minutes: 15
