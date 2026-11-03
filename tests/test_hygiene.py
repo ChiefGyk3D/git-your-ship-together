@@ -94,6 +94,8 @@ def test_a_job_that_keeps_sudo_runs_a_caller_install_command(name, job_name):
 FIXED_GROUPS = {
     ("docs-pages.yml", "deploy"): "pages",
     ("wiki-publish.yml", "publish"): "wiki",
+    # Keyed on the image and the commit, never on github.workflow (the caller's name): one publish at a time.
+    ("container-release.yml", "merge"): "container-release-${{ needs.plan.outputs.ghcr }}-${{ github.sha }}",
 }
 
 

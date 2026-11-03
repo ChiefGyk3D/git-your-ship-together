@@ -274,22 +274,6 @@ jobs:
           check semgrep-egress-policy "${POLICY_SEMGREP_EGRESS_POLICY+set}" "${POLICY_SEMGREP_EGRESS_POLICY-}"
           exit "$bad"
 
-      - name: Require signing for a publish
-        timeout-minutes: 1
-        env:
-          PUSH: ${{ inputs.push }}
-          SIGN: ${{ inputs.sign }}
-          SBOM: ${{ inputs.sbom }}
-          PROVENANCE: ${{ inputs.provenance }}
-          ALLOW_UNSIGNED: ${{ inputs.allow-unsigned-publish }}
-        run: |
-          set -euo pipefail
-          if [ "$PUSH" = "true" ] && [ "$ALLOW_UNSIGNED" != "true" ] \
-            && { [ "$SIGN" != "true" ] || [ "$SBOM" != "true" ] || [ "$PROVENANCE" != "true" ]; }; then
-            echo "::error title=unsigned publish::push is true but sign, sbom or provenance is off; set all three, or set allow-unsigned-publish: true to accept an unsigned release"
-            exit 1
-          fi
-
       - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
         with:
           egress-policy: ${{ inputs.egress-policy == 'audit' && 'audit' || 'block' }}
@@ -377,6 +361,22 @@ jobs:
             rc=124
           fi
           exit "$rc"
+
+      - name: Require signing for a publish
+        timeout-minutes: 1
+        env:
+          PUSH: ${{ inputs.push }}
+          SIGN: ${{ inputs.sign }}
+          SBOM: ${{ inputs.sbom }}
+          PROVENANCE: ${{ inputs.provenance }}
+          ALLOW_UNSIGNED: ${{ inputs.allow-unsigned-publish }}
+        run: |
+          set -euo pipefail
+          if [ "$PUSH" = "true" ] && [ "$ALLOW_UNSIGNED" != "true" ] \
+            && { [ "$SIGN" != "true" ] || [ "$SBOM" != "true" ] || [ "$PROVENANCE" != "true" ]; }; then
+            echo "::error title=unsigned publish::push is true but sign, sbom or provenance is off; set all three, or set allow-unsigned-publish: true to accept an unsigned release"
+            exit 1
+          fi
 
       - name: Plan the matrix
         id: plan
@@ -902,22 +902,6 @@ jobs:
           check semgrep-egress-policy "${POLICY_SEMGREP_EGRESS_POLICY+set}" "${POLICY_SEMGREP_EGRESS_POLICY-}"
           exit "$bad"
 
-      - name: Validate the signer identity
-        timeout-minutes: 1
-        env:
-          IDENTITY_REGEXP: ${{ inputs.signer-identity-regexp }}
-        run: |
-          set -euo pipefail
-          # Literal characters only: letters, digits, _ and -, an escaped dot,
-          # and / between path segments. No wildcard, alternation, group or
-          # class can pass, so the value names one workflow file.
-          seg='([A-Za-z0-9_-]|\\\.)+'
-          shape='^\^https://github\\\.com/'"${seg}/${seg}/"'\\\.github/workflows/'"${seg}"'@$'
-          if ! [[ "$IDENTITY_REGEXP" =~ $shape ]]; then
-            echo "::error title=signer-identity-regexp::must be ^https://github\\.com/<owner>/<repo>/\\.github/workflows/<file>@ with only letters, digits, _ - and escaped dots"
-            exit 1
-          fi
-
       - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
         with:
           egress-policy: ${{ inputs.egress-policy == 'audit' && 'audit' || 'block' }}
@@ -1007,6 +991,22 @@ jobs:
           exit "$rc"
 
       # --- Doppler (same steps as .github/actions/doppler-secrets) ---------
+      - name: Validate the signer identity
+        timeout-minutes: 1
+        env:
+          IDENTITY_REGEXP: ${{ inputs.signer-identity-regexp }}
+        run: |
+          set -euo pipefail
+          # Literal characters only: letters, digits, _ and -, an escaped dot,
+          # and / between path segments. No wildcard, alternation, group or
+          # class can pass, so the value names one workflow file.
+          seg='([A-Za-z0-9_-]|\\\.)+'
+          shape='^\^https://github\\\.com/'"${seg}/${seg}/"'\\\.github/workflows/'"${seg}"'@$'
+          if ! [[ "$IDENTITY_REGEXP" =~ $shape ]]; then
+            echo "::error title=signer-identity-regexp::must be ^https://github\\.com/<owner>/<repo>/\\.github/workflows/<file>@ with only letters, digits, _ - and escaped dots"
+            exit 1
+          fi
+
       - name: Decide how to authenticate to Doppler
         id: doppler
         if: inputs.push && inputs.dockerhub
