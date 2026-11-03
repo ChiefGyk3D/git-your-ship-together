@@ -122,12 +122,21 @@ DOCKER_STUB = (
 )
 
 
+GH_STUB = (
+    "#!/bin/bash\n"
+    'echo "gh $*" >> "$STUB/calls"\n'
+    '[ -f "$STUB/gh.out" ] && cat "$STUB/gh.out"\n'
+    '[ -f "$STUB/gh.rc" ] && exit "$(cat "$STUB/gh.rc")"\n'
+    "exit 0\n"
+)
+
+
 def make_stubs(tmp_path: Path) -> Path:
     stub = tmp_path / "stub"
     stub.mkdir()
     bindir = tmp_path / "bin"
     bindir.mkdir()
-    for tool_name, text in (("cosign", COSIGN_STUB), ("docker", DOCKER_STUB)):
+    for tool_name, text in (("cosign", COSIGN_STUB), ("docker", DOCKER_STUB), ("gh", GH_STUB)):
         path = bindir / tool_name
         path.write_text(text)
         path.chmod(path.stat().st_mode | stat.S_IEXEC)
@@ -313,7 +322,15 @@ def test_the_steps_receive_the_constraints_from_the_workflow():
 
 VERIFY = "Verify the image before publishing the tags"
 PUBLISH = "Publish the release tags"
-SIGNED = {"SIGN": "true", "SBOM": "true", "PROVENANCE": "true", "ALLOW_UNSIGNED": "false"}
+SIGNED = {
+    "SIGN": "true",
+    "SBOM": "true",
+    "PROVENANCE": "true",
+    "ALLOW_UNSIGNED": "false",
+    "REF": "refs/tags/v1.0.0",
+    "REPOSITORY": REPO,
+    "GH_TOKEN": "stub",
+}
 
 
 def test_the_final_verify_checks_signature_and_sbom_on_every_registry(tmp_path, stub):
@@ -663,3 +680,74 @@ def test_the_verify_step_refuses_an_empty_constraint(tmp_path, stub, empty):
 def test_no_loop_word_splits_the_image_names():
     for s in merge_steps():
         assert "for image in $" not in s.get("run", ""), s.get("name")
+
+
+# --- a stale run does not move a branch's moving tags ----------------------------------
+
+BRANCH_TAGS = "ghcr.io/o/r:latest\nghcr.io/o/r:main\nghcr.io/o/r:sha-1234567"
+
+
+def publish_on_branch(tmp_path, stub, head: str | None, rc: int = 0, ref: str = "refs/heads/main"):
+    (stub / "inspect.default.out").write_text(DIGEST + "\n")
+    if head is not None:
+        (stub / "gh.out").write_text(head + "\n")
+    (stub / "gh.rc").write_text(str(rc))
+    return run_step(tmp_path, PUBLISH, stub, **{**SIGNED, "REF": ref, "TAGS": BRANCH_TAGS})
+
+
+def test_a_run_at_the_branch_head_moves_every_tag(tmp_path, stub):
+    done = publish_on_branch(tmp_path, stub, SHA)
+    assert done.returncode == 0, done.stdout + done.stderr
+    create = calls(stub, "docker buildx imagetools create")
+    assert len(create) == 1
+    for tag in ("latest", "main", "sha-1234567"):
+        assert f"--tag ghcr.io/o/r:{tag}" in create[0]
+    gh = calls(stub, "gh api")
+    assert gh == [f"gh api repos/{REPO}/commits/main --jq .sha"]
+
+
+def test_a_stale_run_publishes_only_the_immutable_tag_and_does_not_fail(tmp_path, stub):
+    done = publish_on_branch(tmp_path, stub, "f" * 40)
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "::warning" in done.stdout
+    create = calls(stub, "docker buildx imagetools create")
+    assert len(create) == 1
+    assert "--tag ghcr.io/o/r:sha-1234567" in create[0]
+    assert "latest" not in create[0] and "ghcr.io/o/r:main" not in create[0]
+
+
+def test_a_stale_run_with_no_immutable_tag_publishes_nothing_and_does_not_fail(tmp_path, stub):
+    (stub / "inspect.default.out").write_text(DIGEST + "\n")
+    (stub / "gh.out").write_text("f" * 40 + "\n")
+    done = run_step(tmp_path, PUBLISH, stub, **{**SIGNED, "REF": "refs/heads/main", "TAGS": "ghcr.io/o/r:latest"})
+    assert done.returncode == 0 and "::warning" in done.stdout
+    assert calls(stub, "docker buildx imagetools create") == []
+
+
+@pytest.mark.parametrize("answer", [None, "", "not-a-sha", "ab" * 10])
+def test_an_unreadable_branch_head_fails_and_moves_nothing(tmp_path, stub, answer):
+    done = publish_on_branch(tmp_path, stub, answer, rc=1 if answer is None else 0)
+    assert done.returncode != 0 and "::error" in done.stdout
+    assert calls(stub, "docker buildx imagetools create") == []
+
+
+def test_a_tag_ref_is_unaffected_and_never_asks_the_api(tmp_path, stub):
+    done = publish_on_branch(tmp_path, stub, "f" * 40, ref="refs/tags/v1.2.3")
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert calls(stub, "gh") == []
+    assert "--tag ghcr.io/o/r:latest" in calls(stub, "docker buildx imagetools create")[0]
+
+
+def test_the_publish_step_has_the_api_env_and_the_job_can_read_contents():
+    env = step(PUBLISH)["env"]
+    assert env["REF"] == "${{ github.ref }}" and env["WORKFLOW_SHA"] == "${{ github.sha }}"
+    assert env["REPOSITORY"] == "${{ github.repository }}" and env["GH_TOKEN"] == "${{ github.token }}"
+    assert jobs(load(RELEASE))["merge"]["permissions"]["contents"] == "read"
+
+
+def test_the_merge_job_needs_the_plan_and_the_build_and_the_digests_come_from_one_path():
+    merge = jobs(load(RELEASE))["merge"]
+    assert merge["needs"] == ["plan", "build"], "without the plan the concurrency key is empty"
+    fetch = step("Fetch the per-platform digests")
+    assert fetch["with"]["path"] == "${{ runner.temp }}/image-digests"
+    assert step(INDEX)["env"]["DIGESTS"] == "${{ runner.temp }}/image-digests"

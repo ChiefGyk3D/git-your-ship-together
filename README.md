@@ -1025,12 +1025,16 @@ staging tags (`<fullsha>` on the index, `<sha>-<arch>` per platform) stay and
 are safe to delete; after a failed run they point at images that are not
 signed. Publishes to one destination image from one ref run one at a time and
 a running one is never cancelled midway. The group is keyed on the image and
-the ref, not the commit, so an older commit cannot finish after a newer one and
-move `latest` back. The tradeoff: GitHub keeps one pending run per group, so a
+the ref, not the commit. It serializes runs in the order they reach the job, not
+in commit order, so the tag step checks the branch head itself: on a branch ref
+it reads the head through the API, and a run whose commit is no longer the head
+publishes only its immutable `sha-` tags, with a warning, and leaves `latest`
+and the branch tag alone. If the head cannot be read, the job fails and nothing
+moves. Tag refs are unaffected. The tradeoff: GitHub keeps one pending run per group, so a
 pending run is replaced by a newer pending run on the same ref (acceptable for
 moving tags, the newer commit supersedes it). Distinct refs, such as a main
 push and a tag push on one commit, have distinct groups and neither is dropped.
-The `merge` job never runs on `pull_request` or `pull_request_target`.
+The `merge` job never runs on `pull_request` or `pull_request_target`. Two calls of this workflow in one caller run collide on the fixed artifact name `image-digest-<arch>` and fail closed.
 
 A push with `sign`, `sbom` or `provenance` off fails before it builds, and the
 tag step refuses too, unless `allow-unsigned-publish: true` is set.

@@ -881,9 +881,9 @@ jobs:
     if: inputs.push && github.event_name != 'pull_request' && github.event_name != 'pull_request_target'
     needs: [plan, build]
     # One publish per destination image and ref at a time, and a running one is
-    # never cancelled halfway through signing. The group is not keyed on the
-    # commit: runs from different commits of one ref queue instead of racing
-    # for the moving tags.
+    # never cancelled halfway through signing. The group serializes runs in the
+    # order they reach this job, not in commit order; the "Publish the release
+    # tags" step is what keeps a stale run from moving a branch's tags.
     concurrency:
       group: container-release-${{ needs.plan.outputs.ghcr }}-${{ inputs.dockerhub && format('hub-{0}', inputs.dockerhub-repository) || 'ghcr' }}-${{ github.ref }}
       cancel-in-progress: false
@@ -1479,6 +1479,10 @@ jobs:
           SBOM: ${{ inputs.sbom }}
           PROVENANCE: ${{ inputs.provenance }}
           ALLOW_UNSIGNED: ${{ inputs.allow-unsigned-publish }}
+          REF: ${{ github.ref }}
+          REPOSITORY: ${{ github.repository }}
+          WORKFLOW_SHA: ${{ github.sha }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           if [ "$ALLOW_UNSIGNED" != "true" ] \
@@ -1486,24 +1490,48 @@ jobs:
             echo "::error title=unsigned publish::sign, sbom or provenance is off and allow-unsigned-publish is not true; the release tags were not moved"
             exit 1
           fi
-          args=()
-          while IFS= read -r tag; do
-            [ -n "$tag" ] && args+=(--tag "$tag")
-          done <<< "$TAGS"
-          if [ "${#args[@]}" -eq 0 ]; then
+          mapfile -t release_tags < <(printf '%s\n' "$TAGS" | sed '/^$/d')
+          if [ "${#release_tags[@]}" -eq 0 ]; then
             echo "::error title=tags::no release tags to publish"
             exit 1
           fi
+          # A run on a branch moves the moving tags only if its commit is still
+          # the branch head. A stale run (an older commit, or a re-run) publishes
+          # its immutable sha- tags only and does not fail. Tag refs are unaffected.
+          # If the head cannot be read, nothing is moved and the job fails.
+          publish_tags=("${release_tags[@]}")
+          case "$REF" in
+            refs/heads/*)
+              if ! head="$(gh api "repos/${REPOSITORY}/commits/${REF#refs/heads/}" --jq .sha)" \
+                || ! [[ "$head" =~ ^[0-9a-f]{40}$ ]]; then
+                echo "::error title=branch head::could not read the head of ${REF#refs/heads/}; the release tags were not moved"
+                exit 1
+              fi
+              if [ "$head" != "$WORKFLOW_SHA" ]; then
+                publish_tags=()
+                for tag in "${release_tags[@]}"; do
+                  case "${tag##*:}" in sha-*) publish_tags+=("$tag") ;; esac
+                done
+                echo "::warning title=stale run::${WORKFLOW_SHA} is no longer the head of ${REF#refs/heads/}; only the immutable sha- tags are published, the moving tags were not moved"
+              fi ;;
+          esac
+          if [ "${#publish_tags[@]}" -eq 0 ]; then
+            echo "::warning title=stale run::this run is stale and has no immutable tag to publish"
+            exit 0
+          fi
+          args=()
+          for tag in "${publish_tags[@]}"; do
+            args+=(--tag "$tag")
+          done
           docker buildx imagetools create "${args[@]}" "${GHCR}@${DIGEST}"
-          while IFS= read -r tag; do
-            [ -n "$tag" ] || continue
+          for tag in "${publish_tags[@]}"; do
             got="$(docker buildx imagetools inspect "$tag" --format '{{.Manifest.Digest}}')"
             if [ "$got" != "$DIGEST" ]; then
               echo "::error title=tags::${tag} points at ${got}, not at the signed ${DIGEST}"
               exit 1
             fi
             echo "published ${tag} -> ${DIGEST}"
-          done <<< "$TAGS"
+          done
 
       - name: Summary
         if: inputs.push
