@@ -280,7 +280,7 @@ Inputs of `python-ci.yml`:
 | `distro-runners` | `'["ubuntu-24.04"]'` | Runner labels the `distros` run on; add `ubuntu-24.04-arm` for native arm64 |
 | `distro-setup-command` | install python3, venv, pip, git and ca-certificates with `apt-get`, else `dnf` | Shell run as root in each image before the install command |
 | `distro-egress-policy` | `block` | harden-runner policy for the `distro` job only; `audit` for a distribution whose mirrors are not on the list |
-| `distro-allowed-endpoints` | the measured list | The `distro` job's own allow-list, kept apart from `allowed-endpoints`: Docker Hub's image pull, the Debian, Ubuntu, Kali and Parrot mirrors, and PyPI. `extra-allowed-endpoints` is appended to it |
+| `distro-allowed-endpoints` | the measured list | The `distro` job's own allow-list, kept apart from `allowed-endpoints`: Docker Hub's image pull (registry, auth, CDN and the S3 blob host), the Debian, Ubuntu, Kali and Parrot mirrors, and PyPI. `extra-allowed-endpoints` is appended to it |
 | `distro-continue-on-error` | `false` | Let a failing distro run leave the gate green, for a suite that assumes a non-root user or a newer Python than the distribution ships. |
 | `coverage-python-version` | `3.13` | The matrix leg that uploads coverage |
 | `install-command` | upgrade pip, `pip install -r requirements.txt` | Run before tests on every leg |
@@ -408,7 +408,7 @@ Inputs of `bash-ci.yml`:
 | `distro-runners` | `'["ubuntu-24.04"]'` | Runner labels the `distros` run on; add `ubuntu-24.04-arm` for native arm64 |
 | `distro-setup-command` | install bash, git and ca-certificates with `apt-get`, else `dnf` | Shell run as root in each image before the install command |
 | `distro-egress-policy` | `block` | harden-runner policy for the `distro` job only; `audit` for a distribution whose mirrors are not on the list |
-| `distro-allowed-endpoints` | the measured list | The `distro` job's own allow-list, kept apart from `allowed-endpoints`: Docker Hub's image pull, the Debian, Ubuntu, Kali and Parrot mirrors. `extra-allowed-endpoints` is appended to it |
+| `distro-allowed-endpoints` | the measured list | The `distro` job's own allow-list, kept apart from `allowed-endpoints`: Docker Hub's image pull (registry, auth, CDN and the S3 blob host), the Debian, Ubuntu, Kali and Parrot mirrors. `extra-allowed-endpoints` is appended to it |
 | `distro-continue-on-error` | `false` | Let a failing distro run leave the gate green, for a suite that assumes a non-root user or a newer Python than the distribution ships. |
 | `test-command` | empty (skips the job) | The shell test suite: `bats tests/`, `./tests/run.sh`, whatever the repository has |
 | `config-lint-install-command` | `pip install yamllint` | Installs the configuration linters, with Python available |
@@ -897,7 +897,7 @@ Inputs of `tofu-ci.yml`:
 | `plan-command` | empty (skips the job) | The plan, run only on a push to the default branch with the Doppler config's secrets in the environment |
 | `workflow-lint` | `true` | actionlint and zizmor over the caller's own `.github/workflows`; turn off when another caller job already runs it |
 | `zizmor-persona` | `regular` | zizmor strictness |
-| `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `audit`, the tool downloads, Trivy's checks bundle and workflow-lint hosts, empty | harden-runner, as in `python-ci.yml`. A provider registry or a cloud API the plan reaches goes in `extra-allowed-endpoints` |
+| `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `audit`, the tool downloads, Trivy's checks bundle and the workflow-lint hosts (including `pypi.org` and `files.pythonhosted.org`, for actionlint's `pipx install pyflakes`), empty | harden-runner, as in `python-ci.yml`. A provider registry or a cloud API the plan reaches goes in `extra-allowed-endpoints` |
 | `egress-policy-secretless` | `block` | harden-runner policy for the jobs that hold no stored secret, no OIDC token and no write-scoped token, and whose output no privileged job consumes; exactly `audit` or `block`. Security exception EX-0001 is closed (2026-11-02), see [Known CI platform issue: westus2 (EX-0001)](#known-ci-platform-issue-westus2-ex-0001). `audit` opts out if the defect recurs |
 | `doppler-project`, `doppler-config`, `doppler-identity-id` | empty | See [Doppler setup](#doppler-setup); only the plan job reads them |
 | `doppler-trusted-refs-only` | `true` | Fetch only on the default branch, a version tag (vN.N.N) or a schedule; never on a pull request |

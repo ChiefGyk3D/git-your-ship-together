@@ -398,6 +398,34 @@ def test_workflow_lint_default_allows_its_download_hosts(path):
     } <= set(endpoints), f"{path.name}: workflow lint cannot download its tools under block"
 
 
+# raven-actions/actionlint runs `pipx install pyflakes` when pyflakes is absent (issue #282): the secretless
+# workflow-lint job needs exactly these two PyPI hosts, with no wildcard.
+PYPI_HOSTS = {"pypi.org:443", "files.pythonhosted.org:443"}
+ACTIONLINT_CALLERS = [
+    p
+    for p in REUSABLE
+    if any("raven-actions/actionlint@" in s.get("uses", "") for j in jobs(load(p)).values() for s in steps_of(j))
+]
+
+
+def test_the_actionlint_callers_are_found():
+    assert {p.name for p in ACTIONLINT_CALLERS} >= {"arduino-ci.yml", "bash-ci.yml", "python-ci.yml", "tofu-ci.yml"}
+
+
+@pytest.mark.parametrize("path", ACTIONLINT_CALLERS, ids=lambda p: p.name)
+def test_every_actionlint_job_allows_the_pypi_hosts_its_pipx_install_needs(path):
+    doc = load(path)
+    endpoints = triggers(doc)["workflow_call"]["inputs"]["allowed-endpoints"]["default"].split()
+    assert PYPI_HOSTS <= set(endpoints), f"{path.name}: `pipx install pyflakes` is blocked under block"
+    assert not any("*" in e for e in endpoints), f"{path.name}: allow-list has a wildcard"
+    for name, job in jobs(doc).items():
+        if any("raven-actions/actionlint@" in s.get("uses", "") for s in steps_of(job)):
+            hr = next(s for s in steps_of(job) if s.get("uses", "").startswith(HARDEN_RUNNER))
+            assert "inputs.allowed-endpoints" in hr["with"]["allowed-endpoints"], (
+                f"{path.name}: job {name!r} does not use the allowed-endpoints input"
+            )
+
+
 # --- script injection -------------------------------------------------------
 
 UNTRUSTED = re.compile(r"\$\{\{\s*(github\.event\.|github\.head_ref|github\.ref_name|env\.|inputs\.)")
@@ -1160,3 +1188,25 @@ def test_python_ci_installs_a_pinned_ruff_by_default():
     wf = yaml.safe_load((WORKFLOWS / "python-ci.yml").read_text())
     default = wf[True]["workflow_call"]["inputs"]["lint-install-command"]["default"]
     assert re.search(r"ruff==\d+\.\d+\.\d+", default), default
+
+
+# `docker pull` fetches layer blobs from Docker's registry (registry-1.docker.io), then from the CDN or S3 host
+# the registry redirects to. hammunition-bunker PR 54 (issue #282) failed the distro pull under block with
+# `domain not allowed: docker-images-prod.s3.dualstack.us-east-1.amazonaws.com`. Docker's Desktop allowlist page
+# (docs.docker.com/desktop/setup/allow-list/, modified 2026-09-29) names the first three but not the S3 host, so
+# that one rests on the measured log.
+DOCKER_PULL_HOSTS = {
+    "auth.docker.io:443",
+    "registry-1.docker.io:443",
+    "production.cloudfront.docker.com:443",
+    "docker-images-prod.s3.dualstack.us-east-1.amazonaws.com:443",
+}
+
+
+@pytest.mark.parametrize("name", ["python-ci.yml", "bash-ci.yml"])
+def test_the_distro_default_allows_every_host_a_docker_pull_reaches(name):
+    endpoints = triggers(load(WORKFLOWS / name))["workflow_call"]["inputs"]["distro-allowed-endpoints"][
+        "default"
+    ].split()
+    assert DOCKER_PULL_HOSTS <= set(endpoints), f"{name}: the distro image pull is blocked under block"
+    assert not any("*" in e for e in endpoints), f"{name}: allow-list has a wildcard"
