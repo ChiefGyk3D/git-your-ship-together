@@ -398,6 +398,34 @@ def test_workflow_lint_default_allows_its_download_hosts(path):
     } <= set(endpoints), f"{path.name}: workflow lint cannot download its tools under block"
 
 
+# raven-actions/actionlint runs `pipx install pyflakes` when pyflakes is absent (issue #282): the secretless
+# workflow-lint job needs exactly these two PyPI hosts, with no wildcard.
+PYPI_HOSTS = {"pypi.org:443", "files.pythonhosted.org:443"}
+ACTIONLINT_CALLERS = [
+    p
+    for p in REUSABLE
+    if any("raven-actions/actionlint@" in s.get("uses", "") for j in jobs(load(p)).values() for s in steps_of(j))
+]
+
+
+def test_the_actionlint_callers_are_found():
+    assert {p.name for p in ACTIONLINT_CALLERS} >= {"arduino-ci.yml", "bash-ci.yml", "python-ci.yml", "tofu-ci.yml"}
+
+
+@pytest.mark.parametrize("path", ACTIONLINT_CALLERS, ids=lambda p: p.name)
+def test_every_actionlint_job_allows_the_pypi_hosts_its_pipx_install_needs(path):
+    doc = load(path)
+    endpoints = triggers(doc)["workflow_call"]["inputs"]["allowed-endpoints"]["default"].split()
+    assert PYPI_HOSTS <= set(endpoints), f"{path.name}: `pipx install pyflakes` is blocked under block"
+    assert not any("*" in e for e in endpoints), f"{path.name}: allow-list has a wildcard"
+    for name, job in jobs(doc).items():
+        if any("raven-actions/actionlint@" in s.get("uses", "") for s in steps_of(job)):
+            hr = next(s for s in steps_of(job) if s.get("uses", "").startswith(HARDEN_RUNNER))
+            assert "inputs.allowed-endpoints" in hr["with"]["allowed-endpoints"], (
+                f"{path.name}: job {name!r} does not use the allowed-endpoints input"
+            )
+
+
 # --- script injection -------------------------------------------------------
 
 UNTRUSTED = re.compile(r"\$\{\{\s*(github\.event\.|github\.head_ref|github\.ref_name|env\.|inputs\.)")

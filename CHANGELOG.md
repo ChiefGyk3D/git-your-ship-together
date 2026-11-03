@@ -5,7 +5,13 @@ name what a caller sees after that.
 
 ## Unreleased
 
-Nothing yet.
+### Fixed: workflow lint under `block` could not install pyflakes (issue #282, v1.28.1 candidate)
+
+Callers pick this up when they re-pin.
+
+- **`tofu-ci.yml` and `arduino-ci.yml`** now allow exactly `pypi.org:443` and `files.pythonhosted.org:443` in the `allowed-endpoints` default. `raven-actions/actionlint` runs `pipx install pyflakes` when pyflakes is missing, and since v1.28.0 the secretless `workflow-lint` job runs `block`, which dropped the connection (`domain not allowed: pypi.org`) and failed the job after about 90 seconds. `python-ci.yml` and `bash-ci.yml` already had both hosts.
+- **Callers need no change.** A tofu-ci caller that added `pypi.org:443 files.pythonhosted.org:443` to `extra-allowed-endpoints` for this can remove them. No job went back to `audit`, and no wildcard was added.
+- **Guard.** `tests/test_workflows.py` fails if any reusable workflow that runs actionlint lacks the two hosts in its default.
 
 ## v1.28.0 (2026-11-02)
 

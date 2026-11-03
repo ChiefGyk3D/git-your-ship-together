@@ -897,7 +897,7 @@ Inputs of `tofu-ci.yml`:
 | `plan-command` | empty (skips the job) | The plan, run only on a push to the default branch with the Doppler config's secrets in the environment |
 | `workflow-lint` | `true` | actionlint and zizmor over the caller's own `.github/workflows`; turn off when another caller job already runs it |
 | `zizmor-persona` | `regular` | zizmor strictness |
-| `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `audit`, the tool downloads, Trivy's checks bundle and workflow-lint hosts, empty | harden-runner, as in `python-ci.yml`. A provider registry or a cloud API the plan reaches goes in `extra-allowed-endpoints` |
+| `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `audit`, the tool downloads, Trivy's checks bundle and the workflow-lint hosts (including `pypi.org` and `files.pythonhosted.org`, for actionlint's `pipx install pyflakes`), empty | harden-runner, as in `python-ci.yml`. A provider registry or a cloud API the plan reaches goes in `extra-allowed-endpoints` |
 | `egress-policy-secretless` | `block` | harden-runner policy for the jobs that hold no stored secret, no OIDC token and no write-scoped token, and whose output no privileged job consumes; exactly `audit` or `block`. Security exception EX-0001 is closed (2026-11-02), see [Known CI platform issue: westus2 (EX-0001)](#known-ci-platform-issue-westus2-ex-0001). `audit` opts out if the defect recurs |
 | `doppler-project`, `doppler-config`, `doppler-identity-id` | empty | See [Doppler setup](#doppler-setup); only the plan job reads them |
 | `doppler-trusted-refs-only` | `true` | Fetch only on the default branch, a version tag (vN.N.N) or a schedule; never on a pull request |
