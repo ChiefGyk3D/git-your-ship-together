@@ -90,6 +90,14 @@ on:
           type=semver,pattern={{major}}
           type=sha
           type=raw,value=latest,enable={{is_default_branch}}
+      signer-identity-regexp:
+        description: >-
+          Regular expression the cosign certificate identity must match when
+          the merge job checks its own signature and SBOM attestation (after a
+          Rekor conflict, and before it moves the release tags). The default
+          names this reusable workflow; a fork of it sets its own.
+        type: string
+        default: ^https://github.com/ChiefGyk3D/git-your-ship-together/\.github/workflows/container-release\.yml@
       docker-test-command:
         description: Shell run against the locally built image; `$IMAGE` names it. Empty skips the check.
         type: string
@@ -1117,19 +1125,23 @@ jobs:
           images: ${{ steps.names.outputs.images }}
           tags: ${{ inputs.tags }}
 
+      # The index goes up under an immutable staging tag (the commit SHA) on
+      # each registry, never under the release tags. `latest` and every other
+      # moving tag wait for "Publish the release tags", after the image is
+      # signed, attested and verified (issue #286).
       - name: Create the multi-arch index
         id: index
         env:
           GHCR: ${{ steps.names.outputs.ghcr }}
-          TAGS: ${{ steps.meta.outputs.tags }}
+          DOCKERHUB: ${{ steps.names.outputs.dockerhub }}
           PLATFORMS: ${{ inputs.platforms }}
           SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          args=()
-          while IFS= read -r tag; do
-            [ -n "$tag" ] && args+=(--tag "$tag")
-          done <<< "$TAGS"
+          args=(--tag "${GHCR}:${SHA}")
+          if [ -n "$DOCKERHUB" ]; then
+            args+=(--tag "${DOCKERHUB}:${SHA}")
+          fi
           sources=()
           IFS=',' read -r -a platforms <<< "$PLATFORMS"
           for platform in "${platforms[@]}"; do
@@ -1138,14 +1150,95 @@ jobs:
             sources+=("${GHCR}:${SHA}-${platform//\//-}")
           done
           docker buildx imagetools create "${args[@]}" "${sources[@]}"
-          first="$(head -n 1 <<< "$TAGS")"
-          digest="$(docker buildx imagetools inspect "$first" --format '{{.Manifest.Digest}}')"
+          digest="$(docker buildx imagetools inspect "${GHCR}:${SHA}" --format '{{.Manifest.Digest}}')"
+          if ! [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error title=index::the staging index has no usable digest: ${digest}"
+            exit 1
+          fi
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
-          echo "index digest: $digest"
+          echo "index digest: $digest (staging tag ${SHA}; release tags are not pushed yet)"
 
       - name: Install cosign
         if: inputs.push && (inputs.sign || inputs.sbom)
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      # A Rekor 409 ("an equivalent entry already exists") is not a failure by
+      # itself: it is success only if `cosign verify` of this exact digest
+      # passes with the constraints below. Transient Rekor/Fulcio errors are
+      # retried 4 times with a doubling backoff. Everything else is fatal.
+      - name: Prepare the Rekor retry helper
+        if: inputs.push && (inputs.sign || inputs.sbom)
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/rekor-run.sh" <<'HELPER'
+          #!/usr/bin/env bash
+          # usage: rekor-run.sh <signature|sbom> <image@digest> <command...>
+          set -uo pipefail
+          REKOR_ATTEMPTS=4
+
+          rekor_is_conflict() {
+            grep -Eqi '\[409\]|createLogEntryConflict' <<<"$1" && grep -qi 'equivalent entry already exists' <<<"$1"
+          }
+
+          rekor_is_transient() {
+            grep -Eqi '\[(408|425|429|500|502|503|504)\]|context deadline exceeded|i/o timeout|timed out|connection reset|connection refused|temporarily unavailable|unexpected EOF|TLS handshake timeout' <<<"$1"
+          }
+
+          # Never an unconstrained verify: an empty regexp matches every identity.
+          rekor_verify() {
+            if [ -z "${IDENTITY_REGEXP:-}" ] || [ -z "${OIDC_ISSUER:-}" ] || [ -z "${SOURCE_REPOSITORY:-}" ]; then
+              echo "::error title=Rekor conflict::the identity, issuer and repository constraints are not all set; refusing an unconstrained verify"
+              return 1
+            fi
+            case "$1" in
+              signature)
+                cosign verify "$2" \
+                  --certificate-identity-regexp "$IDENTITY_REGEXP" \
+                  --certificate-oidc-issuer "$OIDC_ISSUER" \
+                  --certificate-github-workflow-repository "$SOURCE_REPOSITORY" > /dev/null ;;
+              sbom)
+                cosign verify-attestation --type spdxjson "$2" \
+                  --certificate-identity-regexp "$IDENTITY_REGEXP" \
+                  --certificate-oidc-issuer "$OIDC_ISSUER" \
+                  --certificate-github-workflow-repository "$SOURCE_REPOSITORY" > /dev/null ;;
+              *) return 1 ;;
+            esac
+          }
+
+          rekor_run() {
+            local kind=$1 ref=$2 n=1 rc out delay
+            shift 2
+            while :; do
+              rc=0
+              out=$("$@" 2>&1) || rc=$?
+              printf '%s\n' "$out"
+              if [ "$rc" -eq 0 ]; then
+                return 0
+              fi
+              if rekor_is_conflict "$out"; then
+                echo "::notice title=Rekor conflict::an equivalent entry exists for ${ref}; accepting it only if the ${kind} verifies"
+                if rekor_verify "$kind" "$ref"; then
+                  echo "${kind} of ${ref} verified against the pinned identity; treating the conflict as success"
+                  return 0
+                fi
+                echo "::error title=Rekor conflict::the ${kind} of ${ref} did not verify after an equivalent-entry conflict; the release is stopped"
+                return 1
+              fi
+              if rekor_is_transient "$out" && [ "$n" -lt "$REKOR_ATTEMPTS" ]; then
+                delay=$(( ${REKOR_BACKOFF_SECONDS:-5} * (1 << (n - 1)) ))
+                echo "::warning title=Rekor retry::attempt ${n} of ${REKOR_ATTEMPTS} for the ${kind} of ${ref} hit a transient error; retrying in ${delay}s"
+                sleep "$delay"
+                n=$((n + 1))
+                continue
+              fi
+              echo "::error title=${kind} failed::the ${kind} of ${ref} failed on attempt ${n} of ${REKOR_ATTEMPTS} and is not retryable (or the attempts are used up); the release tags stay where they were"
+              return 1
+            done
+          }
+
+          rekor_run "$@"
+          HELPER
+          chmod 700 "$RUNNER_TEMP/rekor-run.sh"
 
       - name: Sign the image (keyless)
         if: inputs.push && inputs.sign
@@ -1153,11 +1246,14 @@ jobs:
           GHCR: ${{ steps.names.outputs.ghcr }}
           DOCKERHUB: ${{ steps.names.outputs.dockerhub }}
           DIGEST: ${{ steps.index.outputs.digest }}
+          IDENTITY_REGEXP: ${{ inputs.signer-identity-regexp }}
+          OIDC_ISSUER: https://token.actions.githubusercontent.com
+          SOURCE_REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
           for image in $GHCR $DOCKERHUB; do
             echo "signing ${image}@${DIGEST}"
-            cosign sign --yes "${image}@${DIGEST}"
+            "$RUNNER_TEMP/rekor-run.sh" signature "${image}@${DIGEST}" cosign sign --yes "${image}@${DIGEST}"
           done
 
       - name: Generate the SBOM with syft
@@ -1179,11 +1275,15 @@ jobs:
           GHCR: ${{ steps.names.outputs.ghcr }}
           DOCKERHUB: ${{ steps.names.outputs.dockerhub }}
           DIGEST: ${{ steps.index.outputs.digest }}
+          IDENTITY_REGEXP: ${{ inputs.signer-identity-regexp }}
+          OIDC_ISSUER: https://token.actions.githubusercontent.com
+          SOURCE_REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
           for image in $GHCR $DOCKERHUB; do
             echo "attesting SBOM on ${image}@${DIGEST}"
-            cosign attest --yes --type spdxjson --predicate sbom.spdx.json "${image}@${DIGEST}"
+            "$RUNNER_TEMP/rekor-run.sh" sbom "${image}@${DIGEST}" \
+              cosign attest --yes --type spdxjson --predicate sbom.spdx.json "${image}@${DIGEST}"
           done
 
       - name: Record build provenance
@@ -1193,6 +1293,74 @@ jobs:
           subject-name: ${{ steps.names.outputs.ghcr }}
           subject-digest: ${{ steps.index.outputs.digest }}
           push-to-registry: true
+
+      - name: Verify the image before publishing the tags
+        if: inputs.push && (inputs.sign || inputs.sbom)
+        env:
+          GHCR: ${{ steps.names.outputs.ghcr }}
+          DOCKERHUB: ${{ steps.names.outputs.dockerhub }}
+          DIGEST: ${{ steps.index.outputs.digest }}
+          SIGN: ${{ inputs.sign }}
+          SBOM: ${{ inputs.sbom }}
+          IDENTITY_REGEXP: ${{ inputs.signer-identity-regexp }}
+          OIDC_ISSUER: https://token.actions.githubusercontent.com
+          SOURCE_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ -z "$IDENTITY_REGEXP" ] || [ -z "$OIDC_ISSUER" ] || [ -z "$SOURCE_REPOSITORY" ]; then
+            echo "::error title=verify::the identity, issuer and repository constraints must all be set; refusing an unconstrained verify"
+            exit 1
+          fi
+          for image in $GHCR $DOCKERHUB; do
+            if [ "$SIGN" = "true" ]; then
+              if ! cosign verify "${image}@${DIGEST}" \
+                --certificate-identity-regexp "$IDENTITY_REGEXP" \
+                --certificate-oidc-issuer "$OIDC_ISSUER" \
+                --certificate-github-workflow-repository "$SOURCE_REPOSITORY" > /dev/null; then
+                echo "::error title=verify::the signature of ${image}@${DIGEST} does not verify; the release tags were not moved"
+                exit 1
+              fi
+              echo "signature verified: ${image}@${DIGEST}"
+            fi
+            if [ "$SBOM" = "true" ]; then
+              if ! cosign verify-attestation --type spdxjson "${image}@${DIGEST}" \
+                --certificate-identity-regexp "$IDENTITY_REGEXP" \
+                --certificate-oidc-issuer "$OIDC_ISSUER" \
+                --certificate-github-workflow-repository "$SOURCE_REPOSITORY" > /dev/null; then
+                echo "::error title=verify::the SBOM attestation of ${image}@${DIGEST} does not verify; the release tags were not moved"
+                exit 1
+              fi
+              echo "SBOM attestation verified: ${image}@${DIGEST}"
+            fi
+          done
+
+      # The only step that moves latest, the branch, semver and sha tags.
+      - name: Publish the release tags
+        if: inputs.push
+        env:
+          GHCR: ${{ steps.names.outputs.ghcr }}
+          DIGEST: ${{ steps.index.outputs.digest }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          args=()
+          while IFS= read -r tag; do
+            [ -n "$tag" ] && args+=(--tag "$tag")
+          done <<< "$TAGS"
+          if [ "${#args[@]}" -eq 0 ]; then
+            echo "::error title=tags::no release tags to publish"
+            exit 1
+          fi
+          docker buildx imagetools create "${args[@]}" "${GHCR}@${DIGEST}"
+          while IFS= read -r tag; do
+            [ -n "$tag" ] || continue
+            got="$(docker buildx imagetools inspect "$tag" --format '{{.Manifest.Digest}}')"
+            if [ "$got" != "$DIGEST" ]; then
+              echo "::error title=tags::${tag} points at ${got}, not at the signed ${DIGEST}"
+              exit 1
+            fi
+            echo "published ${tag} -> ${DIGEST}"
+          done <<< "$TAGS"
 
       - name: Summary
         if: inputs.push

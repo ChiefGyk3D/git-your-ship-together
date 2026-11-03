@@ -1012,6 +1012,22 @@ stay in GHCR beside the index; delete them when you no longer need them.
 On a pull request it builds, tests and scans and stops. Nothing is pushed,
 signed or attested from a pull request, and a test holds that order.
 
+**Order of a publish.** The `merge` job first pushes the index under an
+immutable staging tag, the commit SHA, on each registry. It then signs it,
+attests the SBOM, records provenance and verifies the signature and the SBOM
+attestation of that exact digest. Only then does it move `latest` and every
+other tag in `tags` onto that digest, and it checks that each tag landed on
+it. If any earlier step fails, the release tags do not move and the job fails
+with a message saying so; the staging tag stays and is safe to delete.
+
+**Rekor conflicts and retries.** A Rekor `409` (`an equivalent entry already
+exists`) on `cosign sign` or `cosign attest` is success only when
+`cosign verify` (or `verify-attestation`) of that digest passes with
+`signer-identity-regexp`, the GitHub OIDC issuer and the calling repository;
+if it does not, the job fails. A transient Rekor or Fulcio error (HTTP
+408/425/429/5xx, a timeout, a reset connection) is retried 4 times in total,
+waiting 5, 10 and 20 seconds. Any other error fails at once.
+
 Verify a published image:
 
 ```sh
@@ -1050,6 +1066,7 @@ Inputs of `container-release.yml`:
 | `image-name` | repository name, lower-cased | Name under `ghcr.io/<owner>/` |
 | `push` | `false` | Publish. `false` builds, tests and scans only |
 | `tags` | branch, pr, semver ×3, sha, `latest` on the default branch | `docker/metadata-action` tag rules |
+| `signer-identity-regexp` | `^https://github.com/ChiefGyk3D/git-your-ship-together/\.github/workflows/container-release\.yml@` | Certificate identity the job's own signature and SBOM attestation must match after a Rekor conflict and before the tags move; a fork of this repository sets its own |
 | `docker-test-command` | empty | Run against the locally built image; `$IMAGE` names it |
 | `hadolint` | `true` | Lint the Dockerfile with hadolint before building |
 | `hadolint-version` | `2.15.1` | hadolint release, downloaded as a pinned binary and cached |

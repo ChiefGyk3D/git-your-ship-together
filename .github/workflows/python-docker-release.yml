@@ -43,6 +43,14 @@ on:
           type=semver,pattern={{major}}
           type=sha
           type=raw,value=latest,enable={{is_default_branch}}
+      signer-identity-regexp:
+        description: >-
+          Regular expression the cosign certificate identity must match when
+          the merge job checks its own signature and SBOM attestation (after a
+          Rekor conflict, and before it moves the release tags). The default
+          names this reusable workflow; a fork of it sets its own.
+        type: string
+        default: ^https://github.com/ChiefGyk3D/git-your-ship-together/\.github/workflows/container-release\.yml@
       docker-test-command:
         description: Shell run against the locally built image; `$IMAGE` names it. Empty skips the check.
         type: string
@@ -207,6 +215,7 @@ jobs:
       sign: ${{ inputs.sign }}
       sbom: ${{ inputs.sbom }}
       provenance: ${{ inputs.provenance }}
+      signer-identity-regexp: ${{ inputs.signer-identity-regexp }}
       trivy: ${{ inputs.trivy }}
       trivy-severity: ${{ inputs.trivy-severity }}
       trivy-exit-code: ${{ inputs.trivy-exit-code }}

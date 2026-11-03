@@ -5,6 +5,17 @@ name what a caller sees after that.
 
 ## Unreleased
 
+### Fixed: a Rekor 409 no longer leaves a published, unattested image (issue #286, v1.28.1 candidate)
+
+Callers pick this up when they re-pin. **Security-sensitive release path.**
+
+- **`container-release.yml` and `python-docker-release.yml`: the release tags move last.** The merge job used to push the index under `latest` and the other tags, then sign. A Rekor `409 createLogEntryConflict` on the Docker Hub sign stopped the job after the tags had moved, so Star-Daemon and solarstorm_scout (2026-11-02) published an image with no SBOM attestation or provenance. The index now goes up under the commit SHA tag only; `latest`, the branch, semver and `sha-` tags move after sign, SBOM attestation, provenance and a verify of both. If any of those fails, the tags stay where they were and the job fails. The `<sha>` staging tag stays in GHCR and Docker Hub beside the index.
+- **A 409 `equivalent entry already exists` counts as success only after `cosign verify` (or `verify-attestation` for the SBOM) of that digest passes** with the signer identity, the GitHub OIDC issuer and the calling repository, the same constraints `verify-published.yml` uses. If it does not verify, the job fails. Any other error fails at once.
+- **Bounded retry.** Transient Rekor/Fulcio errors (408, 425, 429, 5xx, timeouts, resets) are retried 4 times in all, waiting 5, 10 and 20 seconds.
+- **New input `signer-identity-regexp`** (default: the `container-release.yml` workflow file of `ChiefGyk3D/git-your-ship-together`). A caller needs no change; a fork of this repository sets its own. `python-docker-release.yml` forwards it.
+- **Not changed:** per-registry signing, the multi-arch merge and the job's outputs (`digest`, `image`). The fixture still points at a mutable tag; pinning it to a known-good digest is tracked separately.
+- **Guard.** `tests/test_container_release_publish.py` runs the step scripts with stub `cosign` and `docker`: the order of the steps, a 409 that verifies and one that does not, an unconstrained verify refused, and the retry cap.
+
 ### Fixed: workflow lint under `block` could not install pyflakes (issue #282, v1.28.1 candidate)
 
 Callers pick this up when they re-pin.
