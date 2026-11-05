@@ -167,11 +167,11 @@ re-opens after a refactor moves the line was not measured for this page.
 
 ## Scoping the secret scan on a pull request
 
-By default the gitleaks scan reads every ref in the clone (`gitleaks-scope: all-refs`). One key-shaped fixture on an
-unmerged branch then fails the scan on every other pull request in the repository. A caller can set
-`gitleaks-scope: pr-commits` to scope a pull request's scan to that pull request:
+By default a pull request's gitleaks scan covers that pull request's own commits plus the tree
+(`gitleaks-scope: pr-commits`). The opt-in `gitleaks-scope: all-refs` reads every ref in the clone, and then one
+key-shaped fixture on an unmerged branch fails the scan on every other pull request in the repository:
 
-| Event | `all-refs` (default) | `pr-commits` |
+| Event | `all-refs` (opt-in) | `pr-commits` (default) |
 |---|---|---|
 | `pull_request` | every ref | the commits of the pull request (`base..head`) plus the checked-out tree |
 | `push` (the default branch included) | every ref | every ref |

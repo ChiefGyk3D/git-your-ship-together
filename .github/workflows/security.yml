@@ -1,10 +1,11 @@
 # Reusable security checks for a Python repository.
 #
 #   codeql             SAST; findings land in the Security tab.
-#   gitleaks           Secret scan over the full history (or, on a pull request
-#                      with gitleaks-scope: pr-commits, the pull request's own
-#                      commits plus the tree), on top of what Doppler already
-#                      prevents by keeping secrets out of the tree.
+#   gitleaks           Secret scan: on a pull request, the pull request's own
+#                      commits plus the tree (gitleaks-scope: pr-commits, the
+#                      default; all-refs scans every ref); on a push or a
+#                      schedule, the full history. On top of what Doppler
+#                      already prevents by keeping secrets out of the tree.
 #   pip-audit          Known vulnerabilities in the pinned dependencies.
 #   dependency-review  On pull requests: what a dependency change brings in,
 #                      and any dependency under a denied licence.
@@ -59,13 +60,13 @@ on:
         type: string
         default: ""
       gitleaks:
-        description: Run gitleaks over the full history.
+        description: Run the gitleaks scan (what it covers is set by `gitleaks-scope`).
         type: boolean
         default: true
       gitleaks-scope:
-        description: What the gitleaks history scan covers - exactly `all-refs` (default, unchanged behavior - every ref in the clone) or `pr-commits`. `pr-commits` narrows only a `pull_request` run, to the commits of the pull request (base..head) plus a scan of the checked-out tree; a push, a schedule, a workflow_dispatch and any other event scan the full history whatever this is set to. Any other value fails the gitleaks job. On a `pull_request` event, in both scopes, the scan reads `.gitleaks.toml` and `.gitleaksignore` from the base commit rather than the pull request's tree.
+        description: What the gitleaks history scan covers - exactly `pr-commits` (default) or `all-refs` (opt-in, every ref in the clone). `pr-commits` narrows only a `pull_request` run, to the commits of the pull request (base..head) plus a scan of the checked-out tree, so a key on some other unmerged branch no longer fails every pull request; a push (the default branch included), a schedule, a workflow_dispatch and any other event scan the full history whatever this is set to. Any other value fails the gitleaks job. On a `pull_request` event, in both scopes, the scan reads `.gitleaks.toml` and `.gitleaksignore` from the base commit rather than the pull request's tree.
         type: string
-        default: all-refs
+        default: pr-commits
       gitleaks-version:
         description: gitleaks release to download (gitleaks/gitleaks), without the `v`. Changing it means changing `gitleaks-sha256`.
         type: string
@@ -620,7 +621,7 @@ jobs:
           fetch-depth: 0
 
       # Decide what the history scan covers. Only a `pull_request` run with
-      # `pr-commits` narrows, to the commits reachable from the head and not
+      # `pr-commits` (the default) narrows, to the commits reachable from the head and not
       # from the base (git's base..head), plus a scan of the checked-out tree.
       # Every other event, and `all-refs`, scans every ref. The SHAs come from
       # the event payload through env (never inline in this script) and must

@@ -1,10 +1,11 @@
 """security.yml `gitleaks-scope`: scope the secret scan of a pull request to the pull request (issue #260).
 
 The scan used to run over every ref, so one key-shaped fixture on an unmerged branch turned the scan red on every
-other pull request. `pr-commits` narrows a pull request's history scan to `base..head` and adds a scan of the
-checked-out tree; `all-refs` (the default) is today's behavior. Only the `pull_request` event ever narrows: push,
-schedule, workflow_dispatch and everything else scan the full history whatever the input says, so a branch protection
-against a leak entering the default branch never gets weaker. An unknown value fails the job (fail closed).
+other pull request. `pr-commits` (the default) narrows a pull request's history scan to `base..head` and adds a scan
+of the checked-out tree; `all-refs` is the opt-in for the old every-ref scan. Only the `pull_request` event ever
+narrows: push, schedule, workflow_dispatch and everything else scan the full history whatever the input says, so a
+branch protection against a leak entering the default branch never gets weaker. An unknown value fails the job
+(fail closed).
 """
 
 from __future__ import annotations
@@ -159,10 +160,10 @@ def resolve(repo_info, scope: str, event: str, tmp_path, base=None, head=None):
 # --- the input ----------------------------------------------------------------
 
 
-def test_the_input_is_a_string_that_defaults_to_all_refs():
+def test_the_input_is_a_string_that_defaults_to_the_pull_request_range():
     spec = INPUTS["gitleaks-scope"]
     assert spec["type"] == "string"
-    assert spec["default"] == "all-refs", "a caller that sets nothing must keep scanning every ref"
+    assert spec["default"] == "pr-commits", "a caller that sets nothing scans only its pull request's commits"
     assert "pr-commits" in spec["description"] and "all-refs" in spec["description"]
 
 
@@ -171,6 +172,7 @@ def test_the_input_is_documented_in_the_readme_and_the_default_is_stated():
     row = next((line for line in text.splitlines() if line.startswith("| `gitleaks-scope` |")), "")
     assert row, "gitleaks-scope is not documented in the README"
     assert "`all-refs`" in row and "pr-commits" in row and "default" in row.lower()
+    assert row.split("|")[2].strip() == "`pr-commits`", "the README states the real default"
 
 
 # --- the validate step ----------------------------------------------------------
@@ -232,6 +234,24 @@ def test_pr_commits_on_a_pull_request_scans_base_to_head_and_the_tree(repo, tmp_
     done, out = resolve(repo, "pr-commits", "pull_request", tmp_path)
     assert done.returncode == 0, done.stderr + done.stdout
     assert core(out) == {"log_opts": f"{base}..{head}", "tree": "true"}
+
+
+@pytest.mark.parametrize("event", EVENTS)
+def test_the_declared_default_resolves_like_pr_commits_for_every_event(event, repo, tmp_path):
+    # What a caller that sets nothing gets: the default value is fed to the resolve step as-is.
+    default = INPUTS["gitleaks-scope"]["default"]
+    _, base, head = repo
+    done, out = resolve(repo, default, event, tmp_path)
+    assert done.returncode == 0, done.stderr + done.stdout
+    if event == "pull_request":
+        assert core(out) == {"log_opts": f"{base}..{head}", "tree": "true"}
+    else:
+        assert core(out) == {"log_opts": "--all", "tree": "false"}, "push, schedule and the rest keep the full history"
+
+
+def test_all_refs_stays_available_as_the_opt_in(repo, tmp_path):
+    done, out = resolve(repo, "all-refs", "pull_request", tmp_path)
+    assert done.returncode == 0 and core(out) == {"log_opts": "--all", "tree": "false"}
 
 
 def test_the_decision_table_in_one_place(repo, tmp_path):
