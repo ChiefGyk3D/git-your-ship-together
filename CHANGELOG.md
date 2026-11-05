@@ -5,7 +5,17 @@ name what a caller sees after that.
 
 ## Unreleased
 
-Nothing yet.
+### Changed: `gitleaks-scope` now defaults to `pr-commits` (issue #260)
+
+Callers pick this up when they re-pin (callers pin a commit; re-pinning downstream repositories is separate work).
+
+- **The default flips from `all-refs` to `pr-commits`.** A `pull_request` run now scans only the pull request's commits
+  (`base..head`) plus the checked-out tree, so a key-shaped fixture on an unmerged branch no longer turns every other pull
+  request red. A push (the default branch included), a schedule, a `workflow_dispatch` and every other event still scan the
+  full history, so nothing entering the default branch is scanned less.
+- **Opt back in** with `gitleaks-scope: all-refs` on the workflow call to keep the old every-ref scan on pull requests.
+- **Unchanged:** the accepted values (`pr-commits`, `all-refs`; anything else fails the job), the base-commit configuration
+  on a pull request, the canary, and the residuals listed under the `gitleaks-scope` entry below.
 
 ## v1.28.1 (2026-11-02)
 
