@@ -740,9 +740,13 @@ jobs:
               [ -n "$entry" ] || continue
               [[ "$entry" =~ ^[A-Za-z0-9_./-]+$ ]] || fail "gitleaks-hash-manifest-paths: each line must be one repository-relative file path of letters, digits, '_', '.', '-' and '/' (a line of ${#entry} characters is not)"
               IFS=/ read -r -a segments <<< "$entry"
-              [ "${#segments[@]}" -ge 1 ] && [[ "$entry" != */ && "$entry" != /* && "$entry" != *//* ]] || fail "gitleaks-hash-manifest-paths: a path must not start or end with '/' or hold '//' (line of ${#entry} characters)"
+              if ! { [ "${#segments[@]}" -ge 1 ] && [[ "$entry" != */ && "$entry" != /* && "$entry" != *//* ]]; }; then
+                fail "gitleaks-hash-manifest-paths: a path must not start or end with '/' or hold '//' (line of ${#entry} characters)"
+              fi
               for segment in "${segments[@]}"; do
-                [ "$segment" != . ] && [ "$segment" != .. ] || fail "gitleaks-hash-manifest-paths: a path must not hold a '.' or '..' segment (line of ${#entry} characters)"
+                if [ "$segment" = . ] || [ "$segment" = .. ]; then
+                  fail "gitleaks-hash-manifest-paths: a path must not hold a '.' or '..' segment (line of ${#entry} characters)"
+                fi
               done
               escaped=${entry//./\\.}
               path_regexes="${path_regexes:+$path_regexes, }'''^${escaped}\$'''"
