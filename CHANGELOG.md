@@ -5,6 +5,24 @@ name what a caller sees after that.
 
 ## Unreleased
 
+### New: `gitleaks-hash-manifest-paths` input in `security.yml` (issue #290)
+
+Callers pick this up when they re-pin (re-pinning downstream repositories is separate work). The default is empty, so a
+caller that sets nothing sees no change.
+
+- **The false positive.** The default rule `discord-api-token` flags a SHA-256 on a line keyed `discord` (the hash of a
+  `discord.svg` in an asset manifest; seen 2026-11-05 in a static-site repository).
+- **New input.** Newline-separated repository-relative paths of hash manifests. For exactly those files the job allows a
+  finding of `discord-api-token` whose value is exactly 64 lowercase hex characters (`condition = "AND"` over rule, value and
+  path; each path anchored at both ends, no globs). Any other rule, path or value is still reported, in the history scan and
+  the tree scan.
+- **A pull request still cannot allowlist itself.** The allowlist is an overlay that `extend`s the configuration the scan
+  uses: on a pull request the base commit's `.gitleaks.toml` (or the scanner defaults), on other events the checked-out one.
+  The list is the caller's workflow input.
+- **Fails closed.** A line with a glob, space, quote, `..`, an absolute path or any character outside letters, digits,
+  `_ . - /`, or more than 100 paths, fails the gitleaks job; the error never echoes the value.
+- **Canary** runs with the overlay in its arguments: the planted key must still be caught.
+
 ### Changed: `gitleaks-scope` now defaults to `pr-commits` (issue #260)
 
 Callers pick this up when they re-pin (callers pin a commit; re-pinning downstream repositories is separate work).
