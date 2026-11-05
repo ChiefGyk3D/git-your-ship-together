@@ -5,6 +5,10 @@ name what a caller sees after that.
 
 ## Unreleased
 
+Nothing yet.
+
+## v1.29.0 (2026-11-05)
+
 ### New: `gitleaks-hash-manifest-paths` input in `security.yml` (issue #290)
 
 Callers pick this up when they re-pin (re-pinning downstream repositories is separate work). The default is empty, so a
