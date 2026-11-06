@@ -5,7 +5,18 @@ name what a caller sees after that.
 
 ## Unreleased
 
-Nothing yet.
+### New: opt-in `vendored-drift.yml` and `base-image-digest.yml` (issue #296)
+
+Two new reusable workflows. Nothing existing changes: a caller sees them only by adding a job that calls one.
+
+- **`vendored-drift.yml`.** For a file vendored from another repository. Each lock file (path, source repository, commit,
+  SHA-256) must match the vendored file's hash, and an optional generator run with `--check` must agree. No lock file is a
+  failure. Read-only, no secret. Script: `scripts/check_vendored_drift.py`.
+- **`base-image-digest.yml`.** Scheduled check of `FROM image:tag@sha256:...` pins: resolves today's digest of each tag and
+  fails when the pinned digest has a fixable HIGH or CRITICAL finding that the current digest does not (the class that failed
+  the Reach Around v0.2.1 release scan at tag time). `exit-code: "0"` reports in the job summary only. Read-only, no secret,
+  no issue write. Script: `scripts/base_image_digest.py`.
+- Both run against `fixture/` in `ci.yml` and are in the `CI green` gate.
 
 ## v1.29.0 (2026-11-05)
 

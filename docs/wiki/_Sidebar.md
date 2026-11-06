@@ -47,6 +47,7 @@
 - [python-package-release](Workflow-python-package-release.md)
 - [artifact-release](Workflow-artifact-release.md)
 - [verify-published](Workflow-verify-published.md)
+- [base-image-digest](Workflow-base-image-digest.md)
 
 **Docs and project**
 
@@ -56,6 +57,7 @@
 - [threat-model](Workflow-threat-model.md)
 - [lory-audit](Workflow-lory-audit.md)
 - [agent-scan](Workflow-agent-scan.md)
+- [vendored-drift](Workflow-vendored-drift.md)
 
 **Tools**
 

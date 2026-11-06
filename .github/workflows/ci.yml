@@ -375,6 +375,32 @@ jobs:
       rescan-severity: CRITICAL
       rescan-artifact-name: fixture-rescan
 
+  # vendored-drift.yml at this ref over the fixture's vendored file: the lock's hash, then the generator's
+  # --check, in block mode with the workflow's own default list. That the same check FAILS on drift is proved
+  # by tests/test_vendored_drift.py, which runs the inlined script against hostile locks; a deliberately
+  # failing job here would leave every run red.
+  fixture-drift:
+    name: fixture drift
+    uses: ./.github/workflows/vendored-drift.yml # zizmor: ignore[self-repository]
+    permissions:
+      contents: read
+    with:
+      lock-files: fixture/vendored/tokens.lock.json
+      generator-command: python3 fixture/vendored/gen_tokens.py
+
+  # base-image-digest.yml at this ref over the fixture's Dockerfile, in block mode with the workflow's own
+  # default list, so the registry and database hosts are measured here. exit-code "0" because a new advisory on
+  # a Tuesday must not turn main red; that a fixable finding DOES fail the job is proved by
+  # tests/test_base_image_digest.py and tests/test_base_image_workflow.py against fake docker and trivy.
+  fixture-base-image:
+    name: fixture base image
+    uses: ./.github/workflows/base-image-digest.yml # zizmor: ignore[self-repository]
+    permissions:
+      contents: read
+    with:
+      dockerfile: fixture/Dockerfile
+      exit-code: "0"
+
   # The real Trivy, installed by the workflow's own pinned step, over an SBOM
   # naming a package with known critical advisories. tests/test_verify_published.py
   # skips these unless RESCAN_LIVE is set.
@@ -580,7 +606,7 @@ jobs:
   ci-green:
     name: CI green
     if: always()
-    needs: [actionlint, zizmor, test, fixture-ci, fixture-bash, fixture-fuzz, fixture-tofu, fixture-arduino, fixture-package, fixture-sbom, fixture-artifact, fixture-pages, fixture-wiki, fixture-release, fixture-verify, fixture-rescan, rescan-live, fixture-project-sync, fixture-dast, dast-live, fixture-threat-model, fixture-agent-scan, fixture-agent-scan-planted, agent-scan-control]
+    needs: [actionlint, zizmor, test, fixture-ci, fixture-bash, fixture-fuzz, fixture-tofu, fixture-arduino, fixture-package, fixture-sbom, fixture-artifact, fixture-pages, fixture-wiki, fixture-release, fixture-verify, fixture-rescan, fixture-drift, fixture-base-image, rescan-live, fixture-project-sync, fixture-dast, dast-live, fixture-threat-model, fixture-agent-scan, fixture-agent-scan-planted, agent-scan-control]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}

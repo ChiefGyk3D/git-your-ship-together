@@ -1,0 +1,9 @@
+{
+  "vendored": "fixture/vendored/tokens.css",
+  "sha256": "d40d2f562cfe71d815b3c6891d0857b491163042b67ad06bd2a41445167006a9",
+  "source": {
+    "repo": "example/brand-tokens",
+    "path": "dist/tokens.css",
+    "commit": "0123456789abcdef0123456789abcdef01234567"
+  }
+}
