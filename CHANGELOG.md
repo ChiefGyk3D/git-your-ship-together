@@ -5,7 +5,17 @@ name what a caller sees after that.
 
 ## Unreleased
 
-Nothing yet.
+### Fixed: sign and attest before the release tags move (issue #286, v1.28.2 candidate)
+
+Callers pick this up when they re-pin. **Security-sensitive release path.**
+
+- **`container-release.yml` and `python-docker-release.yml`: the release tags move last.** The index used to go up under `latest` and the other tags before it was signed, so a failed sign left a published, unattested image. Now each platform job records its pushed digest, and the merge job builds the index from those digests, takes the index digest from the create result, pushes it under the commit SHA tag only, then signs, attests the SBOM, records provenance and verifies. `latest`, branch, semver and `sha-` tags move after that, and each is checked to point at the signed digest. If a step fails, the tags stay where they were and the job fails. The `<sha>` tag stays beside the index. Publishes to one destination image from one ref are serialized and never cancelled midway; a pending run is replaced by a newer pending run on the same ref. The merge job also never runs on `pull_request_target`. On a branch ref the tag step reads the branch head first: a run whose commit is no longer the head publishes only its `sha-` tags and warns; an unreadable head fails the job. The staging tags stay unsigned after a failed run. The first real release is the canary for the commit constraint, the metadata field and artifact transfer under `block`; each fails closed.
+- **A Rekor 409 `equivalent entry already exists` counts as success only after `cosign verify` (`verify-attestation` for the SBOM) of that digest passes** with the signer identity, the OIDC issuer, the calling repository and the commit of the run. Any other error fails at once. Transient errors (408, 425, 429, 5xx, timeouts, resets) are retried 4 times in all, waiting 5, 10 and 20 seconds.
+- **New input `signer-identity-regexp`**, strictly validated in the plan job, before any build leg pushes (literal characters and escaped dots only, ending in `@`). A caller needs no change; a fork of this repository sets its own. `python-docker-release.yml` forwards it.
+- **New input `allow-unsigned-publish`** (default `false`). A push with `sign`, `sbom` or `provenance` off now fails before it builds unless this is `true`. A caller that publishes unsigned on purpose sets it.
+- **New artifacts.** Each build job uploads a one-day `image-digest-<arch>` artifact; the merge job downloads them. A caller that restricts artifact hosts under `block` needs the same hosts the SBOM upload already uses.
+- **Not changed:** per-registry signing and the job's outputs (`digest`, `image`). The final verify does not re-check the GitHub provenance attestation.
+- **Guard.** `tests/test_container_release_publish.py` runs the step scripts with stub `cosign` and `docker`.
 
 ## v1.29.0 (2026-11-05)
 

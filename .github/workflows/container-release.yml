@@ -90,6 +90,24 @@ on:
           type=semver,pattern={{major}}
           type=sha
           type=raw,value=latest,enable={{is_default_branch}}
+      signer-identity-regexp:
+        description: >-
+          Certificate identity the merge job's own signature and SBOM
+          attestation must match (checked before the release tags move). It is
+          validated before anything is pushed: it must start with
+          ^https://github\.com/, name a workflow file under
+          \.github/workflows/, end with @, and use no metacharacter except an
+          escaped dot. The default names this reusable workflow; a fork of it
+          sets its own.
+        type: string
+        default: ^https://github\.com/ChiefGyk3D/git-your-ship-together/\.github/workflows/container-release\.yml@
+      allow-unsigned-publish:
+        description: >-
+          Let a push move the release tags with sign, sbom or provenance turned
+          off. Default false: a push with any of the three off fails before it
+          builds, so an unsigned image cannot reach latest by accident.
+        type: boolean
+        default: false
       docker-test-command:
         description: Shell run against the locally built image; `$IMAGE` names it. Empty skips the check.
         type: string
@@ -343,6 +361,38 @@ jobs:
             rc=124
           fi
           exit "$rc"
+
+      - name: Require signing for a publish
+        timeout-minutes: 1
+        env:
+          PUSH: ${{ inputs.push }}
+          SIGN: ${{ inputs.sign }}
+          SBOM: ${{ inputs.sbom }}
+          PROVENANCE: ${{ inputs.provenance }}
+          ALLOW_UNSIGNED: ${{ inputs.allow-unsigned-publish }}
+        run: |
+          set -euo pipefail
+          if [ "$PUSH" = "true" ] && [ "$ALLOW_UNSIGNED" != "true" ] \
+            && { [ "$SIGN" != "true" ] || [ "$SBOM" != "true" ] || [ "$PROVENANCE" != "true" ]; }; then
+            echo "::error title=unsigned publish::push is true but sign, sbom or provenance is off; set all three, or set allow-unsigned-publish: true to accept an unsigned release"
+            exit 1
+          fi
+
+      - name: Validate the signer identity
+        timeout-minutes: 1
+        env:
+          IDENTITY_REGEXP: ${{ inputs.signer-identity-regexp }}
+        run: |
+          set -euo pipefail
+          # Literal characters only: letters, digits, _ and -, an escaped dot,
+          # and / between path segments. No wildcard, alternation, group or
+          # class can pass, so the value names one workflow file.
+          seg='([A-Za-z0-9_-]|\\\.)+'
+          shape='^\^https://github\\\.com/'"${seg}/${seg}/"'\\\.github/workflows/'"${seg}"'@$'
+          if ! [[ "$IDENTITY_REGEXP" =~ $shape ]]; then
+            echo "::error title=signer-identity-regexp::must be ^https://github\\.com/<owner>/<repo>/\\.github/workflows/<file>@ with only letters, digits, _ - and escaped dots"
+            exit 1
+          fi
 
       - name: Plan the matrix
         id: plan
@@ -799,14 +849,44 @@ jobs:
           provenance: false
           sbom: false
 
+      - name: Record this platform's image digest
+        if: inputs.push
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+          DIGEST_DIR: ${{ runner.temp }}/image-digest
+        run: |
+          set -euo pipefail
+          if ! [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error title=digest::the platform build returned no usable digest: ${DIGEST}"
+            exit 1
+          fi
+          mkdir -p "$DIGEST_DIR"
+          printf '%s\n' "$DIGEST" > "$DIGEST_DIR/digest.txt"
+
+      - name: Hand the digest to the merge job
+        if: inputs.push
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: image-digest-${{ matrix.arch }}
+          path: ${{ runner.temp }}/image-digest/digest.txt
+          retention-days: 1
+          if-no-files-found: error
+
   # Joins the per-platform images into one multi-arch index under the real
   # tags, then signs, attests and records provenance for that index.
   merge:
     name: Publish, sign
     # Never on a pull request, whatever the caller passes: this job holds the
     # tokens that sign and attest.
-    if: inputs.push && github.event_name != 'pull_request'
+    if: inputs.push && github.event_name != 'pull_request' && github.event_name != 'pull_request_target'
     needs: [plan, build]
+    # One publish per destination image and ref at a time, and a running one is
+    # never cancelled halfway through signing. The group serializes runs in the
+    # order they reach this job, not in commit order; the "Publish the release
+    # tags" step is what keeps a stale run from moving a branch's tags.
+    concurrency:
+      group: container-release-${{ needs.plan.outputs.ghcr }}-${{ inputs.dockerhub && format('hub-{0}', inputs.dockerhub-repository) || 'ghcr' }}-${{ github.ref }}
+      cancel-in-progress: false
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -929,6 +1009,22 @@ jobs:
           exit "$rc"
 
       # --- Doppler (same steps as .github/actions/doppler-secrets) ---------
+      - name: Validate the signer identity
+        timeout-minutes: 1
+        env:
+          IDENTITY_REGEXP: ${{ inputs.signer-identity-regexp }}
+        run: |
+          set -euo pipefail
+          # Literal characters only: letters, digits, _ and -, an escaped dot,
+          # and / between path segments. No wildcard, alternation, group or
+          # class can pass, so the value names one workflow file.
+          seg='([A-Za-z0-9_-]|\\\.)+'
+          shape='^\^https://github\\\.com/'"${seg}/${seg}/"'\\\.github/workflows/'"${seg}"'@$'
+          if ! [[ "$IDENTITY_REGEXP" =~ $shape ]]; then
+            echo "::error title=signer-identity-regexp::must be ^https://github\\.com/<owner>/<repo>/\\.github/workflows/<file>@ with only letters, digits, _ - and escaped dots"
+            exit 1
+          fi
+
       - name: Decide how to authenticate to Doppler
         id: doppler
         if: inputs.push && inputs.dockerhub
@@ -1117,35 +1213,155 @@ jobs:
           images: ${{ steps.names.outputs.images }}
           tags: ${{ inputs.tags }}
 
+      - name: Fetch the per-platform digests
+        if: inputs.push
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: image-digest-*
+          path: ${{ runner.temp }}/image-digests
+
+      # The index is built from the digests the build jobs pushed, never from
+      # a tag, and goes up under a staging tag (the commit SHA) only. Its own
+      # digest is read from the create result and cross-checked against the
+      # manifests it lists. `latest` and every other moving tag wait for
+      # "Publish the release tags", after the image is signed, attested and
+      # verified (issue #286).
       - name: Create the multi-arch index
         id: index
         env:
           GHCR: ${{ steps.names.outputs.ghcr }}
-          TAGS: ${{ steps.meta.outputs.tags }}
+          DOCKERHUB: ${{ steps.names.outputs.dockerhub }}
           PLATFORMS: ${{ inputs.platforms }}
           SHA: ${{ github.sha }}
+          DIGESTS: ${{ runner.temp }}/image-digests
+          META: ${{ runner.temp }}/index-metadata.json
         run: |
           set -euo pipefail
-          args=()
-          while IFS= read -r tag; do
-            [ -n "$tag" ] && args+=(--tag "$tag")
-          done <<< "$TAGS"
+          tags=(--tag "${GHCR}:${SHA}")
+          if [ -n "$DOCKERHUB" ]; then
+            tags+=(--tag "${DOCKERHUB}:${SHA}")
+          fi
           sources=()
+          expected=()
           IFS=',' read -r -a platforms <<< "$PLATFORMS"
           for platform in "${platforms[@]}"; do
             platform="$(printf '%s' "$platform" | tr -d '[:space:]')"
             [ -n "$platform" ] || continue
-            sources+=("${GHCR}:${SHA}-${platform//\//-}")
+            file="${DIGESTS}/image-digest-${platform//\//-}/digest.txt"
+            if [ ! -f "$file" ]; then
+              echo "::error title=index::no digest was recorded for ${platform}"
+              exit 1
+            fi
+            platform_digest="$(head -n 1 "$file")"
+            if ! [[ "$platform_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "::error title=index::the recorded digest for ${platform} is not a sha256 digest"
+              exit 1
+            fi
+            sources+=("${GHCR}@${platform_digest}")
+            expected+=("$platform_digest")
           done
-          docker buildx imagetools create "${args[@]}" "${sources[@]}"
-          first="$(head -n 1 <<< "$TAGS")"
-          digest="$(docker buildx imagetools inspect "$first" --format '{{.Manifest.Digest}}')"
+          if [ "${#sources[@]}" -eq 0 ]; then
+            echo "::error title=index::no platform to merge"
+            exit 1
+          fi
+          docker buildx imagetools create --metadata-file "$META" "${tags[@]}" "${sources[@]}"
+          digest="$(jq -r '."containerimage.digest" // .["containerimage.descriptor"].digest // empty' "$META")"
+          if ! [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error title=index::the create result has no usable index digest"
+            exit 1
+          fi
+          listed="$(docker buildx imagetools inspect "${GHCR}@${digest}" --raw | jq -r '.manifests[].digest' | sort)"
+          wanted="$(printf '%s\n' "${expected[@]}" | sort)"
+          if [ "$listed" != "$wanted" ]; then
+            echo "::error title=index::the index ${digest} does not list exactly the platform digests that were built"
+            exit 1
+          fi
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
-          echo "index digest: $digest"
+          echo "index digest: $digest (staging tag ${SHA}; release tags are not pushed yet)"
 
       - name: Install cosign
         if: inputs.push && (inputs.sign || inputs.sbom)
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      # A Rekor 409 ("an equivalent entry already exists") is not a failure by
+      # itself: it is success only if `cosign verify` of this exact digest
+      # passes with the constraints below. Transient Rekor/Fulcio errors are
+      # retried 4 times with a doubling backoff. Everything else is fatal.
+      - name: Prepare the Rekor retry helper
+        if: inputs.push && (inputs.sign || inputs.sbom)
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/rekor-run.sh" <<'HELPER'
+          #!/usr/bin/env bash
+          # usage: rekor-run.sh <signature|sbom> <image@digest> <command...>
+          set -uo pipefail
+          REKOR_ATTEMPTS=4
+
+          rekor_is_conflict() {
+            grep -Eqi '\[409\]|createLogEntryConflict' <<<"$1" && grep -qi 'equivalent entry already exists' <<<"$1"
+          }
+
+          rekor_is_transient() {
+            grep -Eqi '\[(408|425|429|500|502|503|504)\]|context deadline exceeded|i/o timeout|timed out|connection reset|connection refused|temporarily unavailable|unexpected EOF|TLS handshake timeout' <<<"$1"
+          }
+
+          # Never an unconstrained verify: an empty regexp matches every identity.
+          rekor_verify() {
+            if [ -z "${IDENTITY_REGEXP:-}" ] || [ -z "${OIDC_ISSUER:-}" ] || [ -z "${SOURCE_REPOSITORY:-}" ] || [ -z "${WORKFLOW_SHA:-}" ]; then
+              echo "::error title=Rekor conflict::the identity, issuer, repository and commit constraints are not all set; refusing an unconstrained verify"
+              return 1
+            fi
+            case "$1" in
+              signature)
+                cosign verify "$2" \
+                  --certificate-identity-regexp "$IDENTITY_REGEXP" \
+                  --certificate-oidc-issuer "$OIDC_ISSUER" \
+                  --certificate-github-workflow-repository "$SOURCE_REPOSITORY" \
+                  --certificate-github-workflow-sha "$WORKFLOW_SHA" > /dev/null ;;
+              sbom)
+                cosign verify-attestation --type spdxjson "$2" \
+                  --certificate-identity-regexp "$IDENTITY_REGEXP" \
+                  --certificate-oidc-issuer "$OIDC_ISSUER" \
+                  --certificate-github-workflow-repository "$SOURCE_REPOSITORY" \
+                  --certificate-github-workflow-sha "$WORKFLOW_SHA" > /dev/null ;;
+              *) return 1 ;;
+            esac
+          }
+
+          rekor_run() {
+            local kind=$1 ref=$2 n=1 rc out delay
+            shift 2
+            while :; do
+              rc=0
+              out=$("$@" 2>&1) || rc=$?
+              printf '%s\n' "$out"
+              if [ "$rc" -eq 0 ]; then
+                return 0
+              fi
+              if rekor_is_conflict "$out"; then
+                echo "::notice title=Rekor conflict::an equivalent entry exists for ${ref}; accepting it only if the ${kind} verifies"
+                if rekor_verify "$kind" "$ref"; then
+                  echo "${kind} of ${ref} verified against the pinned identity; treating the conflict as success"
+                  return 0
+                fi
+                echo "::error title=Rekor conflict::the ${kind} of ${ref} did not verify after an equivalent-entry conflict; the release is stopped"
+                return 1
+              fi
+              if rekor_is_transient "$out" && [ "$n" -lt "$REKOR_ATTEMPTS" ]; then
+                delay=$(( ${REKOR_BACKOFF_SECONDS:-5} * (1 << (n - 1)) ))
+                echo "::warning title=Rekor retry::attempt ${n} of ${REKOR_ATTEMPTS} for the ${kind} of ${ref} hit a transient error; retrying in ${delay}s"
+                sleep "$delay"
+                n=$((n + 1))
+                continue
+              fi
+              echo "::error title=${kind} failed::the ${kind} of ${ref} failed on attempt ${n} of ${REKOR_ATTEMPTS} and is not retryable (or the attempts are used up); the release tags stay where they were"
+              return 1
+            done
+          }
+
+          rekor_run "$@"
+          HELPER
+          chmod 700 "$RUNNER_TEMP/rekor-run.sh"
 
       - name: Sign the image (keyless)
         if: inputs.push && inputs.sign
@@ -1153,11 +1369,17 @@ jobs:
           GHCR: ${{ steps.names.outputs.ghcr }}
           DOCKERHUB: ${{ steps.names.outputs.dockerhub }}
           DIGEST: ${{ steps.index.outputs.digest }}
+          IDENTITY_REGEXP: ${{ inputs.signer-identity-regexp }}
+          OIDC_ISSUER: https://token.actions.githubusercontent.com
+          SOURCE_REPOSITORY: ${{ github.repository }}
+          WORKFLOW_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          for image in $GHCR $DOCKERHUB; do
+          images=("$GHCR")
+          if [ -n "$DOCKERHUB" ]; then images+=("$DOCKERHUB"); fi
+          for image in "${images[@]}"; do
             echo "signing ${image}@${DIGEST}"
-            cosign sign --yes "${image}@${DIGEST}"
+            "$RUNNER_TEMP/rekor-run.sh" signature "${image}@${DIGEST}" cosign sign --yes "${image}@${DIGEST}"
           done
 
       - name: Generate the SBOM with syft
@@ -1179,11 +1401,18 @@ jobs:
           GHCR: ${{ steps.names.outputs.ghcr }}
           DOCKERHUB: ${{ steps.names.outputs.dockerhub }}
           DIGEST: ${{ steps.index.outputs.digest }}
+          IDENTITY_REGEXP: ${{ inputs.signer-identity-regexp }}
+          OIDC_ISSUER: https://token.actions.githubusercontent.com
+          SOURCE_REPOSITORY: ${{ github.repository }}
+          WORKFLOW_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          for image in $GHCR $DOCKERHUB; do
+          images=("$GHCR")
+          if [ -n "$DOCKERHUB" ]; then images+=("$DOCKERHUB"); fi
+          for image in "${images[@]}"; do
             echo "attesting SBOM on ${image}@${DIGEST}"
-            cosign attest --yes --type spdxjson --predicate sbom.spdx.json "${image}@${DIGEST}"
+            "$RUNNER_TEMP/rekor-run.sh" sbom "${image}@${DIGEST}" \
+              cosign attest --yes --type spdxjson --predicate sbom.spdx.json "${image}@${DIGEST}"
           done
 
       - name: Record build provenance
@@ -1193,6 +1422,116 @@ jobs:
           subject-name: ${{ steps.names.outputs.ghcr }}
           subject-digest: ${{ steps.index.outputs.digest }}
           push-to-registry: true
+
+      - name: Verify the image before publishing the tags
+        if: inputs.push && (inputs.sign || inputs.sbom)
+        env:
+          GHCR: ${{ steps.names.outputs.ghcr }}
+          DOCKERHUB: ${{ steps.names.outputs.dockerhub }}
+          DIGEST: ${{ steps.index.outputs.digest }}
+          SIGN: ${{ inputs.sign }}
+          SBOM: ${{ inputs.sbom }}
+          IDENTITY_REGEXP: ${{ inputs.signer-identity-regexp }}
+          OIDC_ISSUER: https://token.actions.githubusercontent.com
+          SOURCE_REPOSITORY: ${{ github.repository }}
+          WORKFLOW_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [ -z "$IDENTITY_REGEXP" ] || [ -z "$OIDC_ISSUER" ] || [ -z "$SOURCE_REPOSITORY" ] || [ -z "$WORKFLOW_SHA" ]; then
+            echo "::error title=verify::the identity, issuer, repository and commit constraints must all be set; refusing an unconstrained verify"
+            exit 1
+          fi
+          images=("$GHCR")
+          if [ -n "$DOCKERHUB" ]; then images+=("$DOCKERHUB"); fi
+          for image in "${images[@]}"; do
+            if [ "$SIGN" = "true" ]; then
+              if ! cosign verify "${image}@${DIGEST}" \
+                --certificate-identity-regexp "$IDENTITY_REGEXP" \
+                --certificate-oidc-issuer "$OIDC_ISSUER" \
+                --certificate-github-workflow-repository "$SOURCE_REPOSITORY" \
+                --certificate-github-workflow-sha "$WORKFLOW_SHA" > /dev/null; then
+                echo "::error title=verify::the signature of ${image}@${DIGEST} does not verify; the release tags were not moved"
+                exit 1
+              fi
+              echo "signature verified: ${image}@${DIGEST}"
+            fi
+            if [ "$SBOM" = "true" ]; then
+              if ! cosign verify-attestation --type spdxjson "${image}@${DIGEST}" \
+                --certificate-identity-regexp "$IDENTITY_REGEXP" \
+                --certificate-oidc-issuer "$OIDC_ISSUER" \
+                --certificate-github-workflow-repository "$SOURCE_REPOSITORY" \
+                --certificate-github-workflow-sha "$WORKFLOW_SHA" > /dev/null; then
+                echo "::error title=verify::the SBOM attestation of ${image}@${DIGEST} does not verify; the release tags were not moved"
+                exit 1
+              fi
+              echo "SBOM attestation verified: ${image}@${DIGEST}"
+            fi
+          done
+
+      # The only step that moves latest, the branch, semver and sha tags.
+      - name: Publish the release tags
+        if: inputs.push
+        env:
+          GHCR: ${{ steps.names.outputs.ghcr }}
+          DIGEST: ${{ steps.index.outputs.digest }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+          SIGN: ${{ inputs.sign }}
+          SBOM: ${{ inputs.sbom }}
+          PROVENANCE: ${{ inputs.provenance }}
+          ALLOW_UNSIGNED: ${{ inputs.allow-unsigned-publish }}
+          REF: ${{ github.ref }}
+          REPOSITORY: ${{ github.repository }}
+          WORKFLOW_SHA: ${{ github.sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [ "$ALLOW_UNSIGNED" != "true" ] \
+            && { [ "$SIGN" != "true" ] || [ "$SBOM" != "true" ] || [ "$PROVENANCE" != "true" ]; }; then
+            echo "::error title=unsigned publish::sign, sbom or provenance is off and allow-unsigned-publish is not true; the release tags were not moved"
+            exit 1
+          fi
+          mapfile -t release_tags < <(printf '%s\n' "$TAGS" | sed '/^$/d')
+          if [ "${#release_tags[@]}" -eq 0 ]; then
+            echo "::error title=tags::no release tags to publish"
+            exit 1
+          fi
+          # A run on a branch moves the moving tags only if its commit is still
+          # the branch head. A stale run (an older commit, or a re-run) publishes
+          # its immutable sha- tags only and does not fail. Tag refs are unaffected.
+          # If the head cannot be read, nothing is moved and the job fails.
+          publish_tags=("${release_tags[@]}")
+          case "$REF" in
+            refs/heads/*)
+              if ! head="$(gh api "repos/${REPOSITORY}/commits/${REF#refs/heads/}" --jq .sha)" \
+                || ! [[ "$head" =~ ^[0-9a-f]{40}$ ]]; then
+                echo "::error title=branch head::could not read the head of ${REF#refs/heads/}; the release tags were not moved"
+                exit 1
+              fi
+              if [ "$head" != "$WORKFLOW_SHA" ]; then
+                publish_tags=()
+                for tag in "${release_tags[@]}"; do
+                  case "${tag##*:}" in sha-*) publish_tags+=("$tag") ;; esac
+                done
+                echo "::warning title=stale run::${WORKFLOW_SHA} is no longer the head of ${REF#refs/heads/}; only the immutable sha- tags are published, the moving tags were not moved"
+              fi ;;
+          esac
+          if [ "${#publish_tags[@]}" -eq 0 ]; then
+            echo "::warning title=stale run::this run is stale and has no immutable tag to publish"
+            exit 0
+          fi
+          args=()
+          for tag in "${publish_tags[@]}"; do
+            args+=(--tag "$tag")
+          done
+          docker buildx imagetools create "${args[@]}" "${GHCR}@${DIGEST}"
+          for tag in "${publish_tags[@]}"; do
+            got="$(docker buildx imagetools inspect "$tag" --format '{{.Manifest.Digest}}')"
+            if [ "$got" != "$DIGEST" ]; then
+              echo "::error title=tags::${tag} points at ${got}, not at the signed ${DIGEST}"
+              exit 1
+            fi
+            echo "published ${tag} -> ${DIGEST}"
+          done
 
       - name: Summary
         if: inputs.push

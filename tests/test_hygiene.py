@@ -94,6 +94,11 @@ def test_a_job_that_keeps_sudo_runs_a_caller_install_command(name, job_name):
 FIXED_GROUPS = {
     ("docs-pages.yml", "deploy"): "pages",
     ("wiki-publish.yml", "publish"): "wiki",
+    # Keyed on the destination image and the ref, never on github.workflow (the caller's name) or the commit.
+    ("container-release.yml", "merge"): (
+        "container-release-${{ needs.plan.outputs.ghcr }}-"
+        "${{ inputs.dockerhub && format('hub-{0}', inputs.dockerhub-repository) || 'ghcr' }}-${{ github.ref }}"
+    ),
 }
 
 
