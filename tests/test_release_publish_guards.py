@@ -1,4 +1,4 @@
-"""Publishing from artifact-release.yml and python-package-release.yml is an allow-list, and an existing release is never rewritten.
+"""Release publishing is an allow-list and an existing release is never rewritten (artifact and package release).
 
 Two rules, held still for both workflows:
 
@@ -14,6 +14,7 @@ The scripts are run under bash against a stub `gh`, so the behavior is exercised
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -176,12 +177,6 @@ esac
 """
 
 
-def sha(path: Path) -> str:
-    import hashlib
-
-    return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
-
-
 @pytest.fixture
 def sandbox(tmp_path):
     bindir = tmp_path / "bin"
@@ -238,7 +233,7 @@ def test_new_release_is_created(sandbox, name, job, dirname):
 def test_existing_identical_release_uploads_nothing(sandbox, name, job, dirname):
     files = {"a.whl": b"A", "SHA256SUMS": b"S"}
     tmp, work = sandbox
-    remote = {n: "sha256:" + __import__("hashlib").sha256(c).hexdigest() for n, c in files.items()}
+    remote = {n: "sha256:" + hashlib.sha256(c).hexdigest() for n, c in files.items()}
     result, calls = run_upload(sandbox, name, job, dirname, files, remote=remote)
     assert result.returncode == 0, result.stdout + result.stderr
     assert not any(c.startswith("release upload") or c.startswith("release create") for c in calls)
@@ -246,8 +241,6 @@ def test_existing_identical_release_uploads_nothing(sandbox, name, job, dirname)
 
 @pytest.mark.parametrize(("name", "job", "dirname"), CASES, ids=IDS)
 def test_partial_release_is_completed_with_only_the_missing_assets(sandbox, name, job, dirname):
-    import hashlib
-
     files = {"a.whl": b"A", "b.tar.gz": b"B"}
     remote = {"a.whl": "sha256:" + hashlib.sha256(b"A").hexdigest()}
     result, calls = run_upload(sandbox, name, job, dirname, files, remote=remote)
@@ -259,8 +252,6 @@ def test_partial_release_is_completed_with_only_the_missing_assets(sandbox, name
 
 @pytest.mark.parametrize(("name", "job", "dirname"), CASES, ids=IDS)
 def test_a_differing_asset_fails_names_it_and_uploads_nothing(sandbox, name, job, dirname):
-    import hashlib
-
     files = {"a.whl": b"A", "b.tar.gz": b"B"}
     remote = {"a.whl": "sha256:" + hashlib.sha256(b"A").hexdigest(), "b.tar.gz": "sha256:" + "0" * 64}
     result, calls = run_upload(sandbox, name, job, dirname, files, remote=remote)
