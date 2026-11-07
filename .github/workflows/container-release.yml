@@ -365,32 +365,42 @@ jobs:
           set -euo pipefail
           set -f
           shopt -u nocasematch nocaseglob
+          is_semver_release_tag() {
+            local re='^refs/tags/v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+            [[ $1 =~ $re ]]
+          }
           # Pushing, signing and attesting follow this one decision: the
-          # `push` input, an allowed event, and (by default) a v* tag ref.
-          ok=true
-          case "$EVENT" in
-            pull_request | pull_request_target | "") ok=false ;;
-          esac
-          if [ "$ok" = true ]; then
-            ok=false
-            IFS=',' read -r -a allowed <<< "$ALLOWED_EVENTS"
-            for item in ${allowed[@]+"${allowed[@]}"}; do
-              item="$(printf '%s' "$item" | tr -d '[:space:]')"
-              if [ "$item" = "*" ] || [ "$item" = "$EVENT" ]; then ok=true; fi
-            done
+          # `push` input, an allowed event, and (by default) a SemVer v-tag.
+          events_re='^(\*|[a-z][a-z_]*(,[a-z][a-z_]*)*)$'
+          if ! [[ $ALLOWED_EVENTS =~ $events_re ]]; then
+            echo "::error title=allowed-publish-events::allowed-publish-events must be * or comma-separated lowercase event names with no spaces or empty entries, such as push or push,workflow_dispatch"
+            exit 1
           fi
-          if [ "$ok" = true ] && [ "$REQUIRE_TAG" != "false" ]; then
-            case "$REF" in
-              refs/tags/v?*) ;;
-              *) ok=false ;;
-            esac
+          IFS=',' read -r -a items <<< "$ALLOWED_EVENTS"
+          for ((i = 0; i < ${#items[@]}; i++)); do
+            for ((j = i + 1; j < ${#items[@]}; j++)); do
+              if [ "${items[i]}" = "${items[j]}" ]; then
+                echo "::error title=allowed-publish-events::allowed-publish-events lists '${items[i]}' twice"
+                exit 1
+              fi
+            done
+          done
+          ok=false
+          case "$EVENT" in
+            pull_request | pull_request_target | "") ;;
+            *) case ",$ALLOWED_EVENTS," in ",*,") ok=true ;; *",$EVENT,"*) ok=true ;; esac ;;
+          esac
+          if [ "$ok" = true ] && [ "$REQUIRE_TAG" != "false" ] && ! is_semver_release_tag "$REF"; then
+            ok=false
           fi
           publish=false
           if [ "$PUSH" = "true" ]; then
             if [ "$ok" = true ]; then
               publish=true
             else
-              echo "::warning title=publish::push is true but event '$EVENT' on ref '$REF' is not allowed to publish (allowed-publish-events, require-tag-ref); building and scanning only"
+              msg="push is true but this run will NOT publish: event '$EVENT' on ref '$REF' is not allowed. Publishing needs the event in allowed-publish-events (now '$ALLOWED_EVENTS') and, while require-tag-ref is true, a vMAJOR.MINOR.PATCH tag ref. To publish from branches, schedules or manual runs, set allowed-publish-events (for example push,schedule,workflow_dispatch) and require-tag-ref: false in the caller. This run builds and scans only."
+              echo "::warning title=publish skipped::$msg"
+              { echo "### Publish skipped"; echo; echo "$msg"; } >> "$GITHUB_STEP_SUMMARY"
             fi
           fi
           echo "publish=$publish" >> "$GITHUB_OUTPUT"
@@ -777,6 +787,7 @@ jobs:
           tags: ${{ inputs.tags }}
 
       - name: Build for this platform and load it
+        if: needs.plan.outputs.publish != 'true'
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: ${{ inputs.context }}
@@ -791,6 +802,63 @@ jobs:
           # platform so the architectures do not overwrite each other.
           cache-from: ${{ !inputs.push && (inputs.egress-policy == 'audit' && 'audit' || 'block') == 'block' && format('type=gha,scope={0}', matrix.arch) || '' }}
           cache-to: ${{ !inputs.push && (inputs.egress-policy == 'audit' && 'audit' || 'block') == 'block' && format('type=gha,mode=max,scope={0}', matrix.arch) || '' }}
+
+      - name: Build and push this platform's image
+        if: needs.plan.outputs.publish == 'true'
+        id: push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ${{ inputs.context }}
+          file: ${{ inputs.dockerfile }}
+          platforms: ${{ matrix.platform }}
+          push: true
+          tags: ${{ needs.plan.outputs.ghcr }}:${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.arch }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # No cache here: a publishing build never reads the Actions cache.
+          # Signing, the SBOM and provenance are produced by `merge` as
+          # explicit, verifiable artefacts; BuildKit's own attestation
+          # manifests would duplicate them and add unknown/unknown entries.
+          provenance: false
+          sbom: false
+
+  # Joins the per-platform images into one multi-arch index under the real
+  # tags, then signs, attests and records provenance for that index.
+
+      - name: Pull and verify the pushed image
+        id: pushed
+        if: needs.plan.outputs.publish == 'true'
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+          PLATFORM: ${{ matrix.platform }}
+          GHCR: ${{ needs.plan.outputs.ghcr }}
+        run: |
+          set -euo pipefail
+          shopt -u nocasematch
+          verify_platform_image() {
+            local ref=$1 want=$2 raw config actual wos warch wvar aos aarch avar def
+            raw="$(docker buildx imagetools inspect --raw "$ref")" || return 1
+            if ! jq -e 'type == "object" and (has("manifests") | not) and has("config") and has("layers")' <<< "$raw" > /dev/null; then
+              echo "::error title=digest::$ref is not a single-platform image manifest"
+              return 1
+            fi
+            config="$(docker buildx imagetools inspect "$ref" --format '{{json .Image}}')" || return 1
+            actual="$(jq -r 'if type != "object" then "invalid" elif has("architecture") then "\(.os)/\(.architecture)/\(.variant // "")" elif length == 1 then (.[] | "\(.os)/\(.architecture)/\(.variant // "")") else "invalid" end' <<< "$config")"
+            IFS=/ read -r wos warch wvar <<< "$want"
+            IFS=/ read -r aos aarch avar <<< "$actual"
+            # An omitted variant means the architecture's default, on both sides.
+            case "$warch" in arm64) def=v8 ;; arm) def=v7 ;; amd64) def=v1 ;; *) def="" ;; esac
+            if [ "$wos/$warch/${wvar:-$def}" != "$aos/$aarch/${avar:-$def}" ]; then
+              echo "::error title=digest::$ref is $actual, expected $want"
+              return 1
+            fi
+          }
+
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error title=digest::the push of $PLATFORM produced no valid digest"; exit 1; }
+          ref="${GHCR}@${DIGEST}"
+          # The checks below run against exactly the image that was pushed.
+          verify_platform_image "$ref" "$PLATFORM"
+          docker pull --platform "$PLATFORM" "$ref"
+          docker tag "$ref" release-candidate:local
 
       - name: Require a non-root user
         if: inputs.require-non-root
@@ -848,27 +916,6 @@ jobs:
           sarif_file: trivy-results.sarif
           category: trivy-image-${{ matrix.arch }}
 
-      - name: Build and push this platform's image
-        if: needs.plan.outputs.publish == 'true'
-        id: push
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: ${{ inputs.context }}
-          file: ${{ inputs.dockerfile }}
-          platforms: ${{ matrix.platform }}
-          push: true
-          tags: ${{ needs.plan.outputs.ghcr }}:${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.arch }}
-          labels: ${{ steps.meta.outputs.labels }}
-          # No cache here: a publishing build never reads the Actions cache.
-          # Signing, the SBOM and provenance are produced by `merge` as
-          # explicit, verifiable artefacts; BuildKit's own attestation
-          # manifests would duplicate them and add unknown/unknown entries.
-          provenance: false
-          sbom: false
-
-  # Joins the per-platform images into one multi-arch index under the real
-  # tags, then signs, attests and records provenance for that index.
-
       - name: Record this platform's digest
         id: record
         if: needs.plan.outputs.publish == 'true'
@@ -876,21 +923,13 @@ jobs:
           DIGEST: ${{ steps.push.outputs.digest }}
           PLATFORM: ${{ matrix.platform }}
           IDX: ${{ matrix.idx }}
-          GHCR: ${{ needs.plan.outputs.ghcr }}
         run: |
           set -euo pipefail
           shopt -u nocasematch
           [[ "$IDX" =~ ^[0-7]$ ]] || { echo "::error title=digest::bad platform index"; exit 1; }
+          [[ "$PLATFORM" =~ ^linux/[a-z0-9]+(/v[0-9]+)?$ ]] || { echo "::error title=digest::bad platform"; exit 1; }
           [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error title=digest::the push of $PLATFORM produced no valid digest"; exit 1; }
-          # The digest must be an image of this platform, whatever the tag says.
-          config="$(docker buildx imagetools inspect "${GHCR}@${DIGEST}" --format '{{json .Image}}')"
-          actual="$(jq -r '(if has("architecture") then . else (to_entries | first | .value) end) | "\(.os)/\(.architecture)\(if .variant then "/" + .variant else "" end)"' <<< "$config")"
-          want="$PLATFORM"
-          if [ "$(awk -F/ '{print NF}' <<< "$want")" -eq 2 ]; then actual="$(cut -d/ -f1-2 <<< "$actual")"; fi
-          if [ "$actual" != "$want" ]; then
-            echo "::error title=digest::${GHCR}@${DIGEST} is $actual, expected $want"
-            exit 1
-          fi
+          # Reached only after the checks passed on this exact digest.
           echo "d${IDX}=${PLATFORM} ${DIGEST}" >> "$GITHUB_OUTPUT"
           echo "recorded ${PLATFORM} ${DIGEST}"
 
@@ -1217,6 +1256,9 @@ jobs:
           GHCR: ${{ steps.names.outputs.ghcr }}
           TAGS: ${{ steps.meta.outputs.tags }}
           MATRIX: ${{ needs.plan.outputs.matrix }}
+          SHA: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
           D0: ${{ needs.build.outputs.d0 }}
           D1: ${{ needs.build.outputs.d1 }}
           D2: ${{ needs.build.outputs.d2 }}
@@ -1228,40 +1270,68 @@ jobs:
         run: |
           set -euo pipefail
           shopt -u nocasematch
-          args=()
-          while IFS= read -r tag; do
-            [ -n "$tag" ] && args+=(--tag "$tag")
-          done <<< "$TAGS"
-          # The index is made from the digests the build jobs pushed, one per
-          # planned platform, each checked to be an image of that platform.
+          verify_platform_image() {
+            local ref=$1 want=$2 raw config actual wos warch wvar aos aarch avar def
+            raw="$(docker buildx imagetools inspect --raw "$ref")" || return 1
+            if ! jq -e 'type == "object" and (has("manifests") | not) and has("config") and has("layers")' <<< "$raw" > /dev/null; then
+              echo "::error title=digest::$ref is not a single-platform image manifest"
+              return 1
+            fi
+            config="$(docker buildx imagetools inspect "$ref" --format '{{json .Image}}')" || return 1
+            actual="$(jq -r 'if type != "object" then "invalid" elif has("architecture") then "\(.os)/\(.architecture)/\(.variant // "")" elif length == 1 then (.[] | "\(.os)/\(.architecture)/\(.variant // "")") else "invalid" end' <<< "$config")"
+            IFS=/ read -r wos warch wvar <<< "$want"
+            IFS=/ read -r aos aarch avar <<< "$actual"
+            # An omitted variant means the architecture's default, on both sides.
+            case "$warch" in arm64) def=v8 ;; arm) def=v7 ;; amd64) def=v1 ;; *) def="" ;; esac
+            if [ "$wos/$warch/${wvar:-$def}" != "$aos/$aarch/${avar:-$def}" ]; then
+              echo "::error title=digest::$ref is $actual, expected $want"
+              return 1
+            fi
+          }
+
+          fail() { echo "::error title=digest::$1"; exit 1; }
+          digest_re='^sha256:[0-9a-f]{64}$'
+          # The index is made from the digests the build jobs pushed and
+          # checked, one per planned platform, each an image of its platform.
           slots=("$D0" "$D1" "$D2" "$D3" "$D4" "$D5" "$D6" "$D7")
           count="$(jq 'length' <<< "$MATRIX")"
           sources=()
+          digests=()
           for i in 0 1 2 3 4 5 6 7; do
             value="${slots[$i]}"
             if [ "$i" -ge "$count" ]; then
-              [ -z "$value" ] || { echo "::error title=digest::unexpected digest in slot $i"; exit 1; }
+              [ -z "$value" ] || fail "unexpected digest in slot $i"
               continue
             fi
             want="$(jq -r --argjson i "$i" '.[] | select(.idx == $i) | .platform' <<< "$MATRIX")"
             platform="${value%% *}"
             digest="${value#* }"
-            if [ -z "$value" ] || [ "$platform" != "$want" ] || ! [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-              echo "::error title=digest::no valid digest was recorded for $want"
-              exit 1
+            if [ -z "$value" ] || [ "$platform" != "$want" ] || ! [[ "$digest" =~ $digest_re ]]; then
+              fail "no valid digest was recorded for $want"
             fi
-            config="$(docker buildx imagetools inspect "${GHCR}@${digest}" --format '{{json .Image}}')"
-            actual="$(jq -r '(if has("architecture") then . else (to_entries | first | .value) end) | "\(.os)/\(.architecture)\(if .variant then "/" + .variant else "" end)"' <<< "$config")"
-            if [ "$(awk -F/ '{print NF}' <<< "$want")" -eq 2 ]; then actual="$(cut -d/ -f1-2 <<< "$actual")"; fi
-            if [ "$actual" != "$want" ]; then
-              echo "::error title=digest::${GHCR}@${digest} is $actual, expected $want"
-              exit 1
-            fi
+            verify_platform_image "${GHCR}@${digest}" "$want" || exit 1
             sources+=("${GHCR}@${digest}")
+            digests+=("$digest")
           done
-          docker buildx imagetools create "${args[@]}" "${sources[@]}"
-          first="$(head -n 1 <<< "$TAGS")"
-          digest="$(docker buildx imagetools inspect "$first" --format '{{.Manifest.Digest}}')"
+          # Stage the index under a tag of this run only, and learn its digest.
+          staging="${GHCR}:stage-${SHA}-${RUN_ID}-${RUN_ATTEMPT}"
+          docker buildx imagetools create --tag "$staging" "${sources[@]}"
+          digest="$(docker buildx imagetools inspect "$staging" --format '{{.Manifest.Digest}}')"
+          [[ "$digest" =~ $digest_re ]] || fail "the staged index has no valid digest"
+          # The staged index must hold exactly the digests that passed.
+          got="$(docker buildx imagetools inspect --raw "${GHCR}@${digest}" | jq -c '[.manifests[]?.digest] | sort')"
+          want_set="$(printf '%s\n' "${digests[@]}" | jq -R . | jq -sc 'sort')"
+          [ "$got" = "$want_set" ] || fail "the staged index does not hold exactly the recorded platform digests"
+          # Promote that exact digest to the final tags, and require each tag to resolve to it.
+          tags=()
+          while IFS= read -r tag; do
+            [ -n "$tag" ] || continue
+            tags+=("$tag")
+            docker buildx imagetools create --tag "$tag" "${GHCR}@${digest}"
+          done <<< "$TAGS"
+          for tag in "${tags[@]}"; do
+            [ "$(docker buildx imagetools inspect "$tag" --format '{{.Manifest.Digest}}')" = "$digest" ] || fail "$tag does not resolve to the staged index"
+          done
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
           echo "index digest: $digest"
 

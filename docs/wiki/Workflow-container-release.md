@@ -16,9 +16,15 @@ tested natively, so the arm64 image the test runs against is the arm64 image tha
 | `plan` | `contents: read` | Works out the per-platform build matrix and the lower-cased GHCR image name |
 | `dockerfile-lint` | `contents: read` | hadolint, pinned version and per-architecture sha256, cached and hash-checked on disk |
 | `build` (per platform) | `contents: read`, `packages: write`, `security-events: write` | Builds and tests on a native runner (`ubuntu-24.04-arm` for arm64); non-root check; optional read-only probe; Trivy scan to SARIF. When publishing, pushes a temporary `<sha>-<run id>-<attempt>-<arch>` tag and records its digest |
-| `merge` | `contents: read`, `packages: write`, `id-token: write`, `attestations: write` | Joins the platform images, by recorded digest, into the index under the real tags, then signs, attaches the SBOM and records provenance. Only after a push, never on a pull request |
+| `merge` | `contents: read`, `packages: write`, `id-token: write`, `attestations: write` | Stages the index from the recorded digests under a tag of this run, checks its digest and contents, promotes that exact digest to the real tags, then signs, attaches the SBOM and records provenance. Only after a push, never on a pull request |
 
 The build job pushes only its own temporary platform tags; the signing identity exists only in `merge`.
+
+**Publishing is an allow-list.** With `push: true` the run publishes only for a push of a `vMAJOR.MINOR.PATCH` tag (SemVer 2.0.0 pre-release and build parts allowed). Any other run builds and scans, and says so in a warning annotation and the step summary. `allowed-publish-events` (default `push`; `*` or comma-separated lowercase names, no spaces) and `require-tag-ref` (default `true`) widen it.
+
+**Migrating.** A caller that published from `main`, a schedule or a manual run (for example `penguin-overlord` and `solarstorm_scout`, which pass `push: ${{ github.event_name != 'pull_request' }}`) sets `allowed-publish-events: push,schedule,workflow_dispatch` and `require-tag-ref: false`; a caller that releases only from `v*.*.*` tags changes nothing.
+
+**One build per platform.** A publishing leg builds once, pushes it, pulls it back by digest and runs the checks and the Trivy scan on that image; a non-publishing leg builds once, locally. `merge` stages the index under `stage-<sha>-<run id>-<attempt>`, verifies its digest and contents, and promotes that digest.
 
 ## A minimal caller
 

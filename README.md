@@ -960,7 +960,7 @@ on:
   pull_request:
     branches: [main]
   schedule:
-    - cron: '0 5 * * 1'   # weekly rebuild of `latest`, so base-image fixes ship between commits
+    - cron: '0 5 * * 1'   # weekly build and scan; it publishes only if the caller allows it, see below
   workflow_dispatch:
 
 permissions:
@@ -980,6 +980,10 @@ jobs:
     with:
       dockerfile: Docker/Dockerfile
       push: ${{ github.event_name != 'pull_request' }}
+      # Publishing is allowed by default only for a push of a vMAJOR.MINOR.PATCH tag. To publish
+      # from main, the weekly schedule and manual runs as well, add both lines:
+      #   allowed-publish-events: push,schedule,workflow_dispatch
+      #   require-tag-ref: false
       dockerhub: true
       docker-test-command: docker run --rm "$IMAGE" python -c "import stream_daemon"
       egress-policy: block
@@ -1015,8 +1019,33 @@ stay in GHCR beside the index; delete them when you no longer need them.
 On a pull request it builds, tests and scans and stops. Nothing is pushed,
 signed or attested from a pull request, and a test holds that order. With
 `push: true` the workflow publishes only for the events in
-`allowed-publish-events` (default `push`) on a `refs/tags/v*` ref; any other run
-builds and scans only, with a warning.
+`allowed-publish-events` (default `push`) on a `vMAJOR.MINOR.PATCH` tag ref; any
+other run builds and scans only, with a warning annotation and a step summary
+that name the inputs to set.
+
+**Migrating a caller that published from branches, schedules or manual runs.**
+A caller with `push: ${{ github.event_name != 'pull_request' }}` that publishes
+on a push to `main`, a weekly schedule or `workflow_dispatch` (the shape of
+`penguin-overlord` and `solarstorm_scout`) stops publishing after it re-pins to
+this version, until it sets both inputs it needs:
+
+```yaml
+    with:
+      push: ${{ github.event_name != 'pull_request' }}
+      allowed-publish-events: push,schedule,workflow_dispatch   # the events it publishes from
+      require-tag-ref: false                                    # also publish from branches
+```
+
+`allowed-publish-events: "*"` allows every event except pull requests. A caller
+that publishes only from `v*.*.*` tag pushes needs no change.
+
+When publishing, each leg builds once, pushes that build under the temporary
+tag, pulls it back by digest and runs the non-root check, the probe and the Trivy
+scan against it; `merge` receives exactly the digest that passed. The index is
+staged under a tag of this run, its digest and contents are checked against the
+recorded digests, and only that digest is promoted to the final tags, signed and
+attested. The Trivy scan and checks therefore run after the image is pushed under
+its temporary tag; a failing check fails the job before `merge` runs.
 
 Verify a published image:
 
@@ -1079,8 +1108,8 @@ Inputs of `container-release.yml`:
 | `egress-policy-secretless` | `block` | harden-runner policy for the jobs that hold no stored secret, no OIDC token and no write-scoped token, and whose output no privileged job consumes; exactly `audit` or `block`. Security exception EX-0001 is closed (2026-11-02), see [Known CI platform issue: westus2 (EX-0001)](#known-ci-platform-issue-westus2-ex-0001). `audit` opts out if the defect recurs |
 | `doppler-project`, `doppler-config`, `doppler-identity-id` | empty | See [Doppler setup](#doppler-setup) |
 | `doppler-trusted-refs-only` | `true` | Fetch CI secrets only on the default branch, a version tag (vN.N.N) or a schedule; never on a pull request. See [Doppler setup](#doppler-setup) |
-| `allowed-publish-events` | `push` | Comma-separated events from which `push: true` may publish, sign and attest. `*` allows every event except `pull_request` and `pull_request_target`, which never publish |
-| `require-tag-ref` | `true` | Publish only from a `refs/tags/v*` ref. With `allowed-publish-events: "*"` and `require-tag-ref: false` the earlier behavior (any non-pull-request ref) is restored |
+| `allowed-publish-events` | `push` | Events from which `push: true` may publish, sign and attest: `*`, or lowercase event names separated by commas with no spaces, no empty or repeated entries (anything else fails the plan job). `*` allows every event except `pull_request` and `pull_request_target`, which never publish |
+| `require-tag-ref` | `true` | Publish only from a `refs/tags/vMAJOR.MINOR.PATCH` ref, with optional SemVer 2.0.0 pre-release and build parts (no leading zeroes, no empty identifiers); `v1`, `v1.2` and `vnot-a-release` do not publish. With `allowed-publish-events: "*"` and `require-tag-ref: false` the earlier behavior (any non-pull-request ref) is restored |
 | `timeout-minutes` | `60` | Timeout of each platform's build job; a platform built under QEMU is slow |
 
 Outputs: `digest` and `image` (`ghcr.io/...@sha256:...`) of the published
