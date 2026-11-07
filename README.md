@@ -1047,6 +1047,20 @@ recorded digests, and only that digest is promoted to the final tags, signed and
 attested. The Trivy scan and checks therefore run after the image is pushed under
 its temporary tag; a failing check fails the job before `merge` runs.
 
+What the final-tag checks prove, and what they do not. After promotion, and
+again just before signing and after attestation, `merge` reads each final tag
+and requires it to resolve to the staged digest. That shows each tag pointed
+at the digest at the moment it was read. It does not make a tag immutable, it
+does not make the tags change together, and it cannot stop another writer with
+registry access from moving a tag afterwards. Signatures, the SBOM and the
+provenance attach to the digest, so consumers should deploy by digest or verify
+the signature of the digest they pull; serialize releases of one image with a
+`concurrency` group in the caller if two runs may publish the same tags. The
+build job keeps `packages: write` on runs that do not publish, because GitHub
+offers no expression for a job's `permissions:`; only the gated login step uses
+the token. Platforms must be listed once each (`linux/arm64` and
+`linux/arm64/v8` are the same platform).
+
 Verify a published image:
 
 ```sh

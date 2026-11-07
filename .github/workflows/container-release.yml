@@ -421,6 +421,7 @@ jobs:
           # arm64 and amd64 build natively on their own runner; anything else
           # falls back to an amd64 runner with QEMU.
           matrix='[]'
+          seen=""
           IFS=',' read -r -a platforms <<< "$PLATFORMS"
           for platform in "${platforms[@]}"; do
             platform="$(printf '%s' "$platform" | tr -d '[:space:]')"
@@ -429,6 +430,18 @@ jobs:
               echo "::error title=platforms::'$platform' is not a linux/<arch> platform"
               exit 1
             fi
+            # One image per platform: a repeat (after default variants are
+            # applied) would share a temporary tag and make the index ambiguous.
+            IFS=/ read -r _ parch pvar <<< "$platform"
+            case "$parch" in arm64) pdef=v8 ;; arm) pdef=v7 ;; amd64) pdef=v1 ;; *) pdef="" ;; esac
+            key="${parch}/${pvar:-$pdef}"
+            case " $seen " in
+              *" $key "*)
+                echo "::error title=platforms::'$platform' is a duplicate platform (after default variants); list each platform once"
+                exit 1
+                ;;
+            esac
+            seen="$seen $key"
             case "$platform" in
               linux/arm64) runner=ubuntu-24.04-arm ;;
               *) runner=ubuntu-24.04 ;;
@@ -633,6 +646,10 @@ jobs:
     if: ${{ !cancelled() && needs.plan.result == 'success' && (needs.dockerfile-lint.result == 'success' || needs.dockerfile-lint.result == 'skipped') }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
+    # The permission cannot depend on the publish decision: GitHub offers no
+    # expression context for a job's `permissions:` (see the context availability
+    # table in the GitHub contexts documentation). Only the gated login step uses
+    # the token, and a test holds that.
     permissions:
       contents: read
       packages: write  # push the per-platform image under its temporary tag
@@ -1335,6 +1352,28 @@ jobs:
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
           echo "index digest: $digest"
 
+      - name: Re-check the final tags before signing
+        if: needs.plan.outputs.publish == 'true'
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+          DIGEST: ${{ steps.index.outputs.digest }}
+        run: |
+          set -euo pipefail
+          # Reads each final tag again. This proves only that, at the moment of
+          # each read, the tag resolved to the staged digest; it does not make
+          # a tag immutable or the tags simultaneous. Consumers deploy by digest.
+          fail=0
+          while IFS= read -r tag; do
+            [ -n "$tag" ] || continue
+            got="$(docker buildx imagetools inspect "$tag" --format '{{.Manifest.Digest}}' || true)"
+            if [ "$got" != "$DIGEST" ]; then
+              echo "::error title=tag::$tag resolves to '${got}', not to the staged index $DIGEST"
+              fail=1
+            fi
+          done <<< "$TAGS"
+          exit "$fail"
+
+
       - name: Install cosign
         if: needs.plan.outputs.publish == 'true' && (inputs.sign || inputs.sbom)
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
@@ -1385,6 +1424,28 @@ jobs:
           subject-name: ${{ steps.names.outputs.ghcr }}
           subject-digest: ${{ steps.index.outputs.digest }}
           push-to-registry: true
+
+      - name: Re-check the final tags after attestation
+        if: needs.plan.outputs.publish == 'true'
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+          DIGEST: ${{ steps.index.outputs.digest }}
+        run: |
+          set -euo pipefail
+          # Reads each final tag again. This proves only that, at the moment of
+          # each read, the tag resolved to the staged digest; it does not make
+          # a tag immutable or the tags simultaneous. Consumers deploy by digest.
+          fail=0
+          while IFS= read -r tag; do
+            [ -n "$tag" ] || continue
+            got="$(docker buildx imagetools inspect "$tag" --format '{{.Manifest.Digest}}' || true)"
+            if [ "$got" != "$DIGEST" ]; then
+              echo "::error title=tag::$tag resolves to '${got}', not to the staged index $DIGEST"
+              fail=1
+            fi
+          done <<< "$TAGS"
+          exit "$fail"
+
 
       - name: Summary
         if: needs.plan.outputs.publish == 'true'

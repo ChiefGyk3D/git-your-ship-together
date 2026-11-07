@@ -496,49 +496,99 @@ def test_the_index_is_staged_under_a_run_scoped_tag_and_promoted_by_digest():
         assert s["env"][f"D{n}"] == f"${{{{ needs.build.outputs.d{n} }}}}"
 
 
-# Stub registry: one JSON file of what exists, answers by reference and format.
-def stub(db: dict, tmp_path: Path) -> str:
-    (tmp_path / "registry.json").write_text(json.dumps(db))
-    return f"""#!/usr/bin/env python3
-import json, sys
+# A stateful stub registry. It keeps manifests by digest and tags by reference in a JSON file, and models these
+# transitions: `create --tag T src...` resolves each source, makes an index of the sources (a single index source is
+# copied unchanged, as the buildx documentation describes), and then moves every named tag; inspect reads that state.
+# `hooks` simulate another writer moving a tag right after the Nth `create`. `drops_last` and `adds_extra` simulate a
+# misbehaving create. What it cannot model is the real registry and the real buildx output format.
+STUB = r"""#!/usr/bin/env python3
+import hashlib, json, sys
+STATE = %(state)r
 a = sys.argv[1:]
-db = json.load(open({str(tmp_path / "registry.json")!r}))
-log = open({str(tmp_path / "docker.log")!r}, "a")
-log.write(" ".join(a) + "\\n")
+db = json.load(open(STATE))
+open(%(log)r, "a").write(" ".join(a) + "\n")
+
+
+def save():
+    json.dump(db, open(STATE, "w"))
+
+
+def resolve(ref):
+    if "@" in ref:
+        d = ref.split("@", 1)[1]
+        if d not in db["manifests"]:
+            sys.exit(1)
+        return d
+    if ref not in db["tags"]:
+        sys.exit(1)
+    return db["tags"][ref]
+
+
 if a[:3] == ["buildx", "imagetools", "inspect"]:
-    ref = a[3] if a[3] != "--raw" else a[4]
-    if "--raw" in a:
-        if ref not in db["raw"]:
-            sys.exit(1)
-        print(json.dumps(db["raw"][ref]))
-    elif "{{{{json .Image}}}}" in a:
-        if ref not in db["image"]:
-            sys.exit(1)
-        print(json.dumps(db["image"][ref]))
-    elif "{{{{.Manifest.Digest}}}}" in a:
-        if ref not in db["tag"]:
-            sys.exit(1)
-        print(db["tag"][ref])
+    raw = "--raw" in a
+    fmt = a[a.index("--format") + 1] if "--format" in a else ""
+    ref = [x for x in a[3:] if not x.startswith("--") and x != fmt][0]
+    d = resolve(ref)
+    m = db["manifests"][d]
+    if raw:
+        print(json.dumps(m))
+    elif fmt == "{{.Manifest.Digest}}":
+        print(d)
+    elif fmt == "{{json .Image}}":
+        if "manifests" in m:
+            print(json.dumps({c["platform"]: db["configs"][c["digest"]] for c in m["manifests"]}))
+        elif d in db["configs"]:
+            print(json.dumps(db["configs"][d]))
+        else:
+            print("{}")
     else:
         sys.exit(3)
 elif a[:3] == ["buildx", "imagetools", "create"]:
-    open({str(tmp_path / "create.log")!r}, "a").write(" ".join(a) + "\\n")
-    if db.get("create_fails"):
-        sys.exit(1)
+    open(%(creates)r, "a").write(" ".join(a) + "\n")
     tags = [a[i + 1] for i, x in enumerate(a) if x == "--tag"]
-    # creating a tag moves it to the stub's chosen digest
+    srcs = [x for i, x in enumerate(a[3:], 3) if x != "--tag" and a[i - 1] != "--tag"]
+    digs = [resolve(s) for s in srcs]
+    if len(digs) == 1 and "manifests" in db["manifests"][digs[0]]:
+        new = digs[0]
+    else:
+        kids = list(digs)
+        if db.get("drops_last"):
+            kids = kids[:-1]
+        if db.get("adds_extra"):
+            kids.append(db["adds_extra"])
+        idx = {"schemaVersion": 2, "manifests": [{"digest": k, "platform": db["platform_of"][k]} for k in kids]}
+        new = "sha256:" + hashlib.sha256(json.dumps(idx, sort_keys=True).encode()).hexdigest()
+        db["manifests"][new] = idx
     for t in tags:
-        if t in db.get("promote_to", {{}}):
-            pass
-elif a[0] in ("pull", "tag"):
+        db["tags"][t] = new
+    db["creates"] = db.get("creates", 0) + 1
+    for h in db.get("hooks", []):
+        if h["after_create"] == db["creates"]:
+            db["tags"][h["tag"]] = h["digest"]
+    save()
+elif a[0] == "pull":
+    if a[-1].split("@", 1)[-1] not in db["manifests"]:
+        sys.exit(1)
+elif a[0] == "tag":
     pass
 else:
     sys.exit(2)
 """
 
 
-SINGLE = {"schemaVersion": 2, "config": {"digest": "sha256:" + "1" * 64}, "layers": []}
-INDEX = {"schemaVersion": 2, "manifests": [{"digest": DIGEST_A}, {"digest": DIGEST_B}]}
+def stub(db: dict, tmp_path: Path) -> str:
+    state = tmp_path / "registry.json"
+    state.write_text(json.dumps(db))
+    return STUB % {"state": str(state), "log": str(tmp_path / "docker.log"), "creates": str(tmp_path / "create.log")}
+
+
+def registry_state(tmp_path: Path) -> dict:
+    return json.loads((tmp_path / "registry.json").read_text())
+
+
+SINGLE_A = {"schemaVersion": 2, "config": {"digest": "sha256:" + "1" * 64}, "layers": []}
+SINGLE_B = {"schemaVersion": 2, "config": {"digest": "sha256:" + "2" * 64}, "layers": []}
+MULTI = {"schemaVersion": 2, "manifests": [{"digest": DIGEST_A, "platform": "linux/amd64"}]}
 AMD = {"os": "linux", "architecture": "amd64"}
 ARM = {"os": "linux", "architecture": "arm64", "variant": "v8"}
 ARM_NOVAR = {"os": "linux", "architecture": "arm64"}
@@ -547,11 +597,12 @@ TAG1 = "ghcr.io/owner/img:1.2.3"
 TAGL = "ghcr.io/owner/img:latest"
 
 
-def good_db(**over):
+def make_db(**over):
     db = {
-        "raw": {f"{GHCR}@{DIGEST_A}": SINGLE, f"{GHCR}@{DIGEST_B}": SINGLE, f"{GHCR}@{DIGEST_IDX}": INDEX},
-        "image": {f"{GHCR}@{DIGEST_A}": AMD, f"{GHCR}@{DIGEST_B}": ARM},
-        "tag": {STAGE: DIGEST_IDX, TAG1: DIGEST_IDX, TAGL: DIGEST_IDX},
+        "manifests": {DIGEST_A: SINGLE_A, DIGEST_B: SINGLE_B, DIGEST_IDX: MULTI},
+        "configs": {DIGEST_A: AMD, DIGEST_B: ARM},
+        "platform_of": {DIGEST_A: "linux/amd64", DIGEST_B: "linux/arm64", DIGEST_IDX: "linux/amd64"},
+        "tags": {},
     }
     db.update(over)
     return db
@@ -567,7 +618,7 @@ def pull_env(**over):
 
 
 def test_the_pushed_image_is_pulled_by_digest_and_becomes_the_image_under_test(tmp_path):
-    docker = stub(good_db(), tmp_path)
+    docker = stub(make_db(), tmp_path)
     code, _, log = run_script(step("build", "Pull and verify the pushed image")["run"], tmp_path, pull_env(), docker)
     assert code == 0, log
     calls = (tmp_path / "docker.log").read_text()
@@ -584,13 +635,13 @@ def test_the_pushed_image_is_pulled_by_digest_and_becomes_the_image_under_test(t
         ({"DIGEST": "sha256:abc"}, {}),
         ({"DIGEST": "sha256:" + "A" * 64}, {}),
         ({"DIGEST": DIGEST_A + "\nx=y"}, {}),
-        ({"DIGEST": DIGEST_A}, {"raw": {}}),  # the registry does not have it
-        ({"DIGEST": DIGEST_IDX}, {"image": {f"{GHCR}@{DIGEST_IDX}": AMD}}),  # an index passes as a single image
+        ({"DIGEST": "sha256:" + "9" * 64}, {}),  # the registry does not have it
+        ({"DIGEST": DIGEST_IDX}, {"configs": {DIGEST_A: AMD, DIGEST_IDX: AMD}}),  # an index passes as a single image
         ({"PLATFORM": "linux/arm/v6", "DIGEST": DIGEST_B}, {}),
     ],
 )
 def test_a_missing_malformed_mismatched_or_multi_platform_digest_is_refused(tmp_path, env, db):
-    docker = stub(good_db(**db), tmp_path)
+    docker = stub(make_db(**db), tmp_path)
     code, out, _ = run_script(
         step("build", "Pull and verify the pushed image")["run"], tmp_path, pull_env(**env), docker
     )
@@ -619,13 +670,10 @@ def test_a_missing_malformed_mismatched_or_multi_platform_digest_is_refused(tmp_
         ("linux/amd64", {"os": "linux", "architecture": "arm64"}, False),
         ("linux/amd64", {"os": "windows", "architecture": "amd64"}, False),
         ("linux/amd64", {}, False),
-        ("linux/amd64", {"linux/amd64": AMD}, True),  # a one-entry map is accepted ...
-        ("linux/amd64", {"linux/amd64": AMD, "linux/arm64": ARM}, False),  # ... two entries are not
     ],
 )
 def test_the_platform_must_match_including_the_variant(tmp_path, platform, config, ok):
-    db = good_db(image={f"{GHCR}@{DIGEST_A}": config})
-    docker = stub(db, tmp_path)
+    docker = stub(make_db(configs={DIGEST_A: config}), tmp_path)
     code, _, log = run_script(
         step("build", "Pull and verify the pushed image")["run"], tmp_path, pull_env(PLATFORM=platform), docker
     )
@@ -669,9 +717,12 @@ def index_env(**over):
     return base
 
 
-def run_index(tmp_path, db=None, **over):
-    docker = stub(db or good_db(), tmp_path)
-    return run_script(step("merge", "Create the multi-arch index")["run"], tmp_path, index_env(**over), docker)
+INDEX_SCRIPT = step("merge", "Create the multi-arch index")["run"]
+
+
+def run_index(tmp_path, db=None, script=None, **over):
+    docker = stub(db or make_db(), tmp_path)
+    return run_script(script or INDEX_SCRIPT, tmp_path, index_env(**over), docker)
 
 
 def create_calls(tmp_path):
@@ -679,80 +730,199 @@ def create_calls(tmp_path):
     return p.read_text().splitlines() if p.exists() else []
 
 
-def test_the_index_is_staged_from_digests_then_the_exact_digest_is_promoted(tmp_path):
+def test_the_index_is_created_from_digests_and_creation_causes_the_verified_state(tmp_path):
     code, out, log = run_index(tmp_path)
     assert code == 0, log
-    calls = create_calls(tmp_path)
-    assert len(calls) == 3
-    assert calls[0] == f"buildx imagetools create --tag {STAGE} {GHCR}@{DIGEST_A} {GHCR}@{DIGEST_B}"
-    assert calls[1] == f"buildx imagetools create --tag {TAG1} {GHCR}@{DIGEST_IDX}"
-    assert calls[2] == f"buildx imagetools create --tag {TAGL} {GHCR}@{DIGEST_IDX}"
-    assert out["digest"] == DIGEST_IDX
+    state = registry_state(tmp_path)
+    digest = out["digest"]
+    assert re.fullmatch(r"sha256:[0-9a-f]{64}", digest)
+    stage_create = f"buildx imagetools create --tag {STAGE} {GHCR}@{DIGEST_A} {GHCR}@{DIGEST_B}"
+    assert create_calls(tmp_path) == [
+        stage_create,
+        f"buildx imagetools create --tag {TAG1} {GHCR}@{digest}",
+        f"buildx imagetools create --tag {TAGL} {GHCR}@{digest}",
+    ]
+    assert state["tags"] == {STAGE: digest, TAG1: digest, TAGL: digest}
+    assert [c["digest"] for c in state["manifests"][digest]["manifests"]] == [DIGEST_A, DIGEST_B]
+    # the staged tag is read only after it was created, and the final tags are read after their creates
+    order = (tmp_path / "docker.log").read_text().splitlines()
+    first_inspect = next(i for i, c in enumerate(order) if "inspect" in c and STAGE in c)
+    assert order.index(stage_create) < first_inspect
+    last_create = max(i for i, c in enumerate(order) if "imagetools create" in c)
+    assert any("inspect" in c and TAG1 in c for c in order[last_create:])
+
+
+BAD_SLOTS = [
+    {"D1": ""},  # a platform produced no digest
+    {"D1": f"linux/amd64 {DIGEST_B}"},  # recorded under the wrong platform
+    {"D1": f"linux/arm64 {DIGEST_A}"},  # an amd64 image labelled arm64
+    {"D2": f"linux/arm64 {DIGEST_B}"},  # an extra slot
+    {"D1": "linux/arm64 sha256:xyz"},
+]
+
+
+@pytest.mark.parametrize("over", BAD_SLOTS)
+def test_a_bad_slot_is_refused_before_anything_is_created(tmp_path, over):
+    code, out, _ = run_index(tmp_path, **over)
+    assert code != 0 and "digest" not in out and create_calls(tmp_path) == []
 
 
 @pytest.mark.parametrize(
-    "over,db",
+    "db",
     [
-        ({"D1": ""}, {}),  # a platform produced no digest
-        ({"D1": f"linux/amd64 {DIGEST_B}"}, {}),  # recorded under the wrong platform
-        ({"D1": f"linux/arm64 {DIGEST_A}"}, {}),  # an amd64 image labelled arm64
-        ({"D2": f"linux/arm64 {DIGEST_B}"}, {}),  # an extra slot
-        ({"D1": "linux/arm64 sha256:xyz"}, {}),
-        ({}, {"raw": {f"{GHCR}@{DIGEST_B}": INDEX}}),  # one source is itself an index
-        (
-            {},
-            {
-                "image": {
-                    f"{GHCR}@{DIGEST_A}": AMD,
-                    f"{GHCR}@{DIGEST_B}": {"os": "linux", "architecture": "arm", "variant": "v6"},
-                }
-            },
-        ),
-        ({}, {"tag": {STAGE: "not-a-digest"}}),
-        ({}, {"tag": {STAGE: DIGEST_IDX.upper().replace("SHA256", "sha256")}}),
-        ({}, {"tag": {STAGE: DIGEST_A}}),  # the staged tag now points at a single image, not the index
-        (
-            {},
-            {
-                "raw": {
-                    f"{GHCR}@{DIGEST_A}": SINGLE,
-                    f"{GHCR}@{DIGEST_B}": SINGLE,
-                    f"{GHCR}@{DIGEST_IDX}": {"manifests": [{"digest": DIGEST_A}]},
-                }
-            },
-        ),  # index lacks a platform
-        (
-            {},
-            {
-                "raw": {
-                    f"{GHCR}@{DIGEST_A}": SINGLE,
-                    f"{GHCR}@{DIGEST_B}": SINGLE,
-                    f"{GHCR}@{DIGEST_IDX}": {
-                        "manifests": [{"digest": DIGEST_A}, {"digest": DIGEST_B}, {"digest": "sha256:" + "d" * 64}]
-                    },
-                }
-            },
-        ),  # extra
-        (
-            {},
-            {"tag": {STAGE: DIGEST_IDX, TAG1: DIGEST_B, TAGL: DIGEST_IDX}},
-        ),  # a final tag does not resolve to the index
+        {"manifests": {DIGEST_A: SINGLE_A, DIGEST_B: MULTI, DIGEST_IDX: MULTI}},  # one source is itself an index
+        {"configs": {DIGEST_A: AMD, DIGEST_B: {"os": "linux", "architecture": "arm", "variant": "v6"}}},
     ],
 )
-def test_the_index_step_refuses_and_signs_nothing_after_a_bad_input(tmp_path, over, db):
-    merged = good_db(**db)
-    if db.get("tag") is not None and STAGE in db["tag"]:
-        merged["tag"] = {**good_db()["tag"], **db["tag"]}
-    code, out, _ = run_index(tmp_path, merged, **over)
+def test_a_multi_platform_or_wrong_variant_source_is_refused_before_anything_is_created(tmp_path, db):
+    code, out, _ = run_index(tmp_path, make_db(**db))
+    assert code != 0 and "digest" not in out and create_calls(tmp_path) == []
+
+
+HOSTILE = {
+    "drops a platform": {"drops_last": True},
+    "adds a manifest": {"adds_extra": DIGEST_IDX},
+    "stage tag replaced": {"hooks": [{"after_create": 1, "tag": STAGE, "digest": DIGEST_A}]},
+    "final tag replaced": {"hooks": [{"after_create": 2, "tag": TAG1, "digest": DIGEST_B}]},
+    "last tag replaced": {"hooks": [{"after_create": 3, "tag": TAGL, "digest": DIGEST_B}]},
+}
+
+
+@pytest.mark.parametrize("name", list(HOSTILE))
+def test_a_wrong_index_or_a_replaced_tag_stops_the_job_before_the_digest_is_published(tmp_path, name):
+    code, out, _ = run_index(tmp_path, make_db(**HOSTILE[name]))
     assert code != 0 and "digest" not in out
 
 
-def test_no_final_tag_is_touched_before_every_check_has_passed(tmp_path):
-    code, _, _ = run_index(
-        tmp_path,
-        good_db(raw={f"{GHCR}@{DIGEST_A}": SINGLE, f"{GHCR}@{DIGEST_B}": INDEX, f"{GHCR}@{DIGEST_IDX}": INDEX}),
-    )
-    assert code != 0 and create_calls(tmp_path) == []
+def mutated_index_scripts() -> dict[str, tuple[str, str | None]]:
+    """name -> (weakened script, the HOSTILE case that only that guard stops, or None if a plain run must fail)."""
+    s = INDEX_SCRIPT
+    stage_create = 'docker buildx imagetools create --tag "$staging" "${sources[@]}"'
+    promote = 'docker buildx imagetools create --tag "$tag" "${GHCR}@${digest}"'
+    verify = '[ "$(docker buildx imagetools inspect "$tag" --format \'{{.Manifest.Digest}}\')" = "$digest" ]'
+    assert stage_create in s and promote in s and verify in s
+    swapped = 'docker buildx imagetools create --tag "$tag" "${sources[0]}"'
+    out = {
+        "no staging create": (s.replace(stage_create, "true"), None),
+        "no promotion": (s.replace(promote, "true"), None),
+        "promote from the first source": (s.replace(promote, swapped), None),
+        "no final tag check": (s.replace(verify, "true"), "final tag replaced"),
+        "no content binding": (s.replace('[ "$got" = "$want_set" ]', "true"), "adds a manifest"),
+    }
+    for name, (mutated, _) in out.items():
+        assert mutated != s, name
+    return out
+
+
+@pytest.mark.parametrize("name", list(mutated_index_scripts()))
+def test_removing_or_redirecting_a_step_of_the_index_script_is_caught(tmp_path, name):
+    mutated, hostile = mutated_index_scripts()[name]
+    real = tmp_path / "real"
+    real.mkdir()
+    assert run_index(real)[0] == 0
+    weak = tmp_path / "weak"
+    weak.mkdir()
+    if hostile is None:
+        code, out, _ = run_index(weak, script=mutated)
+        assert code != 0 and "digest" not in out
+    else:
+        # only this guard stops the hostile registry: the real script refuses, the weakened one publishes
+        refused = tmp_path / "refused"
+        refused.mkdir()
+        assert run_index(refused, make_db(**HOSTILE[hostile]))[0] != 0
+        code, out, _ = run_index(weak, make_db(**HOSTILE[hostile]), script=mutated)
+        assert code == 0 and "digest" in out
+
+
+# --- the re-check of the final tags ------------------------------------------
+
+RECHECKS = ("Re-check the final tags before signing", "Re-check the final tags after attestation")
+
+
+def recheck_env(**over):
+    return {"TAGS": f"{TAG1}\n{TAGL}", "DIGEST": DIGEST_IDX, **over}
+
+
+@pytest.mark.parametrize("name", RECHECKS)
+def test_the_recheck_passes_only_when_every_final_tag_resolves_to_the_digest(tmp_path, name):
+    script = step("merge", name)["run"]
+    cases = [
+        ({TAG1: DIGEST_IDX, TAGL: DIGEST_IDX}, True),
+        ({TAG1: DIGEST_IDX, TAGL: DIGEST_A}, False),  # the second tag moved
+        ({TAG1: DIGEST_A, TAGL: DIGEST_IDX}, False),  # the first tag moved
+        ({TAG1: DIGEST_IDX}, False),  # a tag is gone
+    ]
+    for n, (tags, ok) in enumerate(cases):
+        sub = tmp_path / str(n)
+        sub.mkdir()
+        code, _, out = run_script(script, sub, recheck_env(), stub(make_db(tags=tags), sub))
+        assert (code == 0) == ok, out
+        assert ok or "::error" in out
+
+
+def test_the_recheck_steps_are_the_same_script_before_signing_and_after_attestation():
+    names = [s.get("name") for s in steps_of(jobs(load(RELEASE))["merge"])]
+    a, b = (step("merge", n) for n in RECHECKS)
+    assert a["run"] == b["run"] and a["env"] == b["env"]
+    assert a["env"]["DIGEST"] == "${{ steps.index.outputs.digest }}"
+    assert names.index(RECHECKS[0]) < names.index("Install cosign") < names.index("Sign the image (keyless)")
+    assert names.index(RECHECKS[1]) > names.index("Record build provenance")
+    assert names.index(RECHECKS[1]) < names.index("Summary")
+
+
+def test_the_documentation_states_what_the_final_tag_check_does_not_guarantee():
+    text = (WORKFLOWS.parent.parent / "README.md").read_text()
+    assert "does not make a tag immutable" in text and "deploy by digest" in text
+
+
+# --- duplicate platforms and the token ---------------------------------------
+
+
+def run_plan(tmp_path, platforms: str):
+    env = {"PLATFORMS": platforms, "REPOSITORY": "Owner/Img", "IMAGE_NAME": ""}
+    return run_script(step("plan", "Plan the matrix")["run"], tmp_path, env)
+
+
+@pytest.mark.parametrize(
+    "platforms",
+    [
+        "linux/amd64,linux/amd64",
+        " linux/amd64 , linux/amd64",
+        "linux/arm64,linux/arm64/v8",
+        "linux/arm64/v8,linux/arm64",
+        "linux/arm,linux/arm/v7",
+        "linux/amd64,linux/arm64,linux/amd64/v1",
+        "linux/amd64,linux/arm64,linux/arm64",
+    ],
+)
+def test_a_duplicate_platform_is_refused_by_the_plan(tmp_path, platforms):
+    code, out, log = run_plan(tmp_path, platforms)
+    assert code != 0 and "matrix" not in out and "duplicate" in log
+
+
+@pytest.mark.parametrize(
+    "platforms", ["linux/amd64", "linux/amd64,linux/arm64", "linux/arm/v6,linux/arm/v7", "linux/arm64,linux/arm/v7"]
+)
+def test_distinct_platforms_are_planned_with_distinct_temporary_tags(tmp_path, platforms):
+    code, out, log = run_plan(tmp_path, platforms)
+    assert code == 0, log
+    matrix = json.loads(out["matrix"])
+    assert len({m["arch"] for m in matrix}) == len(matrix) == len(platforms.split(","))
+    assert [m["idx"] for m in matrix] == list(range(len(matrix)))
+
+
+def test_the_package_token_is_used_only_by_gated_steps():
+    """GitHub does not allow an expression in a job's `permissions:` (the context-availability table in
+    https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#context-availability has no entry for
+    it), so the build job keeps `packages: write`; what is checked here is that only gated steps can use it."""
+    build = jobs(load(RELEASE))["build"]
+    assert build["permissions"]["packages"] == "write"
+    users = [s for s in steps_of(build) if "GITHUB_TOKEN" in json.dumps(s) or "github.token" in json.dumps(s)]
+    assert users, "collected nothing"
+    for s in users:
+        assert terms_ok(str(s.get("if", ""))), s.get("name")
+    text = RELEASE.read_text()
+    assert "# The permission cannot depend on the publish decision" in text
 
 
 def test_the_signing_steps_use_only_the_validated_index_digest():
@@ -766,7 +936,8 @@ def test_the_signing_steps_use_only_the_validated_index_digest():
         step("merge", "Record build provenance", doc)["with"]["subject-digest"] == "${{ steps.index.outputs.digest }}"
     )
     for s in steps_of(jobs(doc)["merge"]):
-        assert "imagetools inspect" not in (s.get("run") or "") or s.get("name") == "Create the multi-arch index"
+        allowed = ("Create the multi-arch index", *RECHECKS)
+        assert "imagetools inspect" not in (s.get("run") or "") or s.get("name") in allowed
 
 
 def test_the_plan_numbers_the_platforms_and_bounds_them():
