@@ -415,6 +415,8 @@ case "$1" in
         if [ -n "${STUB_TAMPER:-}" ] && [ "$n" -ge "${STUB_TAMPER_FROM:-2}" ]; then
           case "$STUB_TAMPER_MODE" in
             delete) jq --arg n "$STUB_TAMPER" '.assets |= map(select(.name != $n))' "$state" > "$state.view" ;;
+            starter) jq --arg n "$STUB_TAMPER" '.assets |= map(if .name == $n then .state = "starter" else . end)' \
+                       "$state" > "$state.view" ;;
             add) jq --arg n "$STUB_TAMPER" '.assets += [{name: $n, digest: "sha256:beef"}]' "$state" > "$state.view" ;;
             *) jq --arg n "$STUB_TAMPER" \
                  '.assets |= map(if .name == $n then .digest = "sha256:dead" else . end)' "$state" > "$state.view" ;;
@@ -427,7 +429,8 @@ case "$1" in
         ;;
       repos/o/r/releases?per_page=100)
         [ "$paginate" = 1 ] && [ "$slurp" = 1 ] || { echo "releases need --paginate --slurp" >&2; exit 98; }
-        [ "${STUB_LIST_MODE:-ok}" = ok ] || { echo "gh: x (HTTP ${STUB_LIST_MODE})" >&2; exit 1; }
+        case "${STUB_LIST_MODE:-ok}" in ok|malformed) ;; *) echo "gh: x (HTTP ${STUB_LIST_MODE})" >&2; exit 1 ;; esac
+        if [ "${STUB_LIST_MODE:-ok}" = malformed ]; then echo '[{"unexpected":"object-page-not-array"}]'; exit 0; fi
         jq -c '[[ (if .draft == true then {tag_name: "v1.0.0", draft: true} else empty end),
                   {tag_name: "v0.9.0", draft: false} ]]' "$state"
         ;;
@@ -441,8 +444,11 @@ case "$1" in
         for a in "${@:3}"; do
           if [ -f "$a" ]; then
             d="sha256:$(sha256sum "$a" | cut -d' ' -f1)"
-            jq --arg n "$(basename "$a")" --arg d "$d" \
-              '.assets += [{name: $n, digest: $d}] | .exists = true' "$state" > "$state.new"
+            # GitHub renames what it does not keep as is: other characters become periods, and leading
+            # and trailing periods are dropped (docs: "Upload a release asset", Notes).
+            uploaded=$(basename "$a" | LC_ALL=C sed -E 's/[^A-Za-z0-9._-]/./g; s/^\.+//; s/\.+$//')
+            jq --arg n "$uploaded" --arg d "$d" \
+              '.assets += [{name: $n, digest: $d, state: "uploaded"}] | .exists = true' "$state" > "$state.new"
             mv "$state.new" "$state"
           fi
         done
@@ -472,7 +478,10 @@ def sandbox(tmp_path):
     return tmp_path, work
 
 
-def run_upload(sandbox, name, job, dirname, files, remote=None, extra_env=None, draft=False):
+ABSENT = object()  # drop the key from a remote asset
+
+
+def run_upload(sandbox, name, job, dirname, files, remote=None, extra_env=None, draft=False, overrides=None, dupes=()):
     """remote: None for no release, else {asset name: digest or None}."""
     tmp, work = sandbox
     asset_dir = work / dirname
@@ -485,7 +494,7 @@ def run_upload(sandbox, name, job, dirname, files, remote=None, extra_env=None, 
             {
                 "exists": remote is not None,
                 "draft": draft,
-                "assets": [{"name": n, "digest": d} for n, d in (remote or {}).items()],
+                "assets": remote_assets(remote, overrides, dupes),
             }
         )
     )
@@ -510,6 +519,19 @@ def run_upload(sandbox, name, job, dirname, files, remote=None, extra_env=None, 
     assert set(step["env"]) >= {"GH_TOKEN", "GH_REPO", "TAG", "TITLE", "ASSET_DIR"}
     result = subprocess.run(["bash", "-c", step["run"]], env=env, cwd=work, capture_output=True, text=True, check=False)
     return result, log.read_text().splitlines(), int(count.read_text())
+
+
+def remote_assets(remote, overrides, dupes):
+    assets = [{"name": n, "digest": d, "state": "uploaded"} for n, d in (remote or {}).items()]
+    for asset in assets:
+        for key, value in (overrides or {}).get(asset["name"], {}).items():
+            if value is ABSENT:
+                asset.pop(key, None)
+            else:
+                asset[key] = value
+    for n in dupes:
+        assets.append(dict(next(a for a in assets if a["name"] == n)))
+    return assets
 
 
 def writes(calls):
@@ -807,3 +829,116 @@ def test_a_draft_release_for_the_tag_stops_the_run(sandbox, name, job, dirname):
 def test_a_failing_draft_listing_stops_the_run(sandbox, name, job, dirname):
     result, calls, _ = run_upload(sandbox, name, job, dirname, {"a.whl": b"A"}, extra_env={"STUB_LIST_MODE": "500"})
     assert result.returncode != 0 and writes(calls) == []
+
+
+# --- round 4: filenames, asset state, duplicates, newlines, draft-list shape ----------------------------------
+
+BAD_NAMES = [
+    "firmware beta.bin",  # space (GitHub renames it)
+    "pkg.tar.gz.",  # trailing period (a leading period is never globbed, so never uploaded)
+    "-leading-dash.bin",
+    "café.bin",  # non-ASCII
+    "a+b.bin",
+    "a:b.bin",
+    "tab\tname.bin",
+    "line\nbreak.bin",
+    "_underscore_lead.bin",
+    "name.bin_",
+]
+GOOD_NAMES = [
+    "a.whl",
+    "SHA256SUMS",
+    "pkg-1.2.3.tar.gz",
+    "pkg_1.2.3_amd64.deb",
+    "a.whl.sigstore.json",
+    "sbom.cdx.json",
+    "X",
+]
+
+
+@pytest.mark.parametrize(("name", "job", "dirname"), CASES, ids=IDS)
+@pytest.mark.parametrize("bad", BAD_NAMES, ids=lambda s: repr(s))
+def test_a_filename_github_would_rename_is_refused_before_any_gh_call(sandbox, name, job, dirname, bad):
+    result, calls, _ = run_upload(sandbox, name, job, dirname, {"a.whl": b"A", bad: b"B"})
+    text = result.stdout + result.stderr
+    assert result.returncode != 0
+    assert "GitHub-safe" in text and "::error" in text
+    assert calls == [], "no gh call, read or write, may precede the filename check"
+
+
+@pytest.mark.parametrize(("name", "job", "dirname"), CASES, ids=IDS)
+@pytest.mark.parametrize("good", GOOD_NAMES)
+def test_safe_filenames_pass_the_check_and_survive_github_renaming(sandbox, name, job, dirname, good):
+    result, calls, _ = run_upload(sandbox, name, job, dirname, {good: b"A"})
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert any(c.startswith("release create") for c in calls)
+
+
+@pytest.mark.parametrize(("name", "job", "dirname"), CASES, ids=IDS)
+@pytest.mark.parametrize("state", ["starter", ABSENT, None, 5, ["uploaded"], "open", "Uploaded", ""], ids=repr)
+def test_every_remote_asset_must_be_uploaded(sandbox, name, job, dirname, state):
+    files = {"a.whl": b"A"}
+    result, calls, _ = run_upload(
+        sandbox,
+        name,
+        job,
+        dirname,
+        files,
+        remote={"a.whl": digest(b"A")},
+        overrides={"a.whl": {"state": state}},
+    )
+    text = result.stdout + result.stderr
+    assert result.returncode != 0 and "a.whl" in text and "uploaded" in text
+    assert writes(calls) == []
+
+
+@pytest.mark.parametrize(("name", "job", "dirname"), CASES, ids=IDS)
+def test_an_asset_that_is_not_uploaded_after_the_upload_is_caught(sandbox, name, job, dirname):
+    # b.tar.gz is uploaded by the run; the stub marks it starter on the final read via the override of a.whl
+    result, calls, _ = run_upload(
+        sandbox,
+        name,
+        job,
+        dirname,
+        {"a.whl": b"A", "b.tar.gz": b"B"},
+        remote={"a.whl": digest(b"A")},
+        extra_env={"STUB_TAMPER": "a.whl", "STUB_TAMPER_MODE": "starter"},
+    )
+    assert writes(calls), "the missing asset was uploaded first"
+    assert result.returncode != 0 and "a.whl" in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(("name", "job", "dirname"), CASES, ids=IDS)
+def test_a_duplicate_remote_name_is_not_an_exact_set(sandbox, name, job, dirname):
+    result, calls, _ = run_upload(
+        sandbox, name, job, dirname, {"a.whl": b"A"}, remote={"a.whl": digest(b"A")}, dupes=["a.whl"]
+    )
+    text = result.stdout + result.stderr
+    assert result.returncode != 0 and "a.whl" in text and "more than once" in text
+    assert writes(calls) == []
+
+
+@pytest.mark.parametrize(("name", "job", "dirname"), CASES, ids=IDS)
+def test_a_newline_in_a_remote_name_is_one_asset_not_two(sandbox, name, job, dirname):
+    result, calls, _ = run_upload(
+        sandbox,
+        name,
+        job,
+        dirname,
+        {"a.whl": b"A", "b": b"B"},
+        remote={"a.whl": digest(b"A"), "b": digest(b"B"), "x\ny": digest(b"C")},
+    )
+    out = result.stdout
+    assert result.returncode != 0 and writes(calls) == []
+    # one error for the one odd asset; its second line must not be reported as the real asset "b"
+    assert "::error title=release asset::b is on release" not in out
+    assert out.count("is on release v1.0.0 but is not part of this build") == 1
+
+
+@pytest.mark.parametrize(("name", "job", "dirname"), CASES, ids=IDS)
+def test_a_malformed_draft_listing_fails_closed(sandbox, name, job, dirname):
+    result, calls, _ = run_upload(
+        sandbox, name, job, dirname, {"a.whl": b"A"}, extra_env={"STUB_LIST_MODE": "malformed"}
+    )
+    assert result.returncode != 0 and writes(calls) == []
+    assert "::error" in result.stdout

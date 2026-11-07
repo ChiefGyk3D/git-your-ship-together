@@ -799,9 +799,27 @@ jobs:
             echo "::error title=release assets::nothing to upload in $ASSET_DIR"
             exit 1
           fi
+          # GitHub renames an uploaded file whose name has other characters or
+          # a leading or trailing period, which would make the exact comparison
+          # below fail after the release was already written. So refuse, before
+          # any release call, a name outside: ASCII letters, digits, ".", "_"
+          # and "-", beginning and ending with a letter or digit.
+          safe_name='^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$'
+          bad_names=0
+          for f in "${files[@]}"; do
+            asset=${f##*/}
+            if ! (LC_ALL=C; [[ "$asset" =~ $safe_name ]]); then
+              echo "::error title=release asset name::$(printf '%q' "$asset") is not a GitHub-safe asset name (GitHub renames it on upload); use only ASCII letters, digits, '.', '_' and '-', starting and ending with a letter or digit"
+              bad_names=1
+            fi
+          done
+          if [ "$bad_names" -ne 0 ]; then
+            exit 1
+          fi
           err=$(mktemp)
           declare -A local_names=()
           for f in "${files[@]}"; do local_names["${f##*/}"]=1; done
+          local_json=$(printf '%s\n' "${!local_names[@]}" | jq -Rnc '[inputs]')
 
           # Read the release for this tag. The HTTP status comes from the
           # status line of `gh api --include`, never from message text: 200 is
@@ -820,7 +838,11 @@ jobs:
                 echo "::error title=release lookup::could not list releases to look for a draft of $TAG: $(tr '\n' ' ' < "$err")"
                 exit 1
               fi
-              if jq -e --arg t "$TAG" '[.[][] | select(.tag_name == $t)] | length > 0' <<< "$pages" > /dev/null 2>&1; then
+              if ! releases=$(jq -ce '[.[][]] | select(all(.[]; (.tag_name | type) == "string"))' <<< "$pages" 2> /dev/null); then
+                echo "::error title=release lookup::the release listing is not a list of releases, so a draft of $TAG cannot be ruled out"
+                exit 1
+              fi
+              if jq -e --arg t "$TAG" 'any(.[]; .tag_name == $t)' <<< "$releases" > /dev/null; then
                 echo "::error title=release $TAG::a draft release for $TAG exists. A draft is not completed automatically: publish or delete it, or burn this version and publish a new one."
                 exit 1
               fi
@@ -857,10 +879,16 @@ jobs:
             for f in "${files[@]}"; do
               asset=${f##*/}
               want="sha256:$(sha256sum "$f" | cut -d' ' -f1)"
-              have=$(jq -r --arg n "$asset" '[.[] | select(.name == $n)] | if length == 0 then "absent" else (.[0].digest // "unknown") end' <<< "$assets")
-              if [ "$have" = "absent" ]; then
+              have=$(jq -r --arg n "$asset" '[.[] | select(.name == $n)] | if length == 0 then "!absent" elif length > 1 then "!duplicate" elif .[0].state != "uploaded" then "!state" elif (.[0].digest | type) != "string" then "!unknown" else .[0].digest end' <<< "$assets")
+              if [ "$have" = "!absent" ]; then
                 missing+=("$f")
-              elif [ "$have" = "unknown" ]; then
+              elif [ "$have" = "!duplicate" ]; then
+                echo "::error title=release asset::$asset appears more than once on release $TAG"
+                differ=1
+              elif [ "$have" = "!state" ]; then
+                echo "::error title=release asset::$asset on release $TAG is not in state uploaded (state: $(jq -c --arg n "$asset" '[.[] | select(.name == $n)][0].state' <<< "$assets"))"
+                differ=1
+              elif [ "$have" = "!unknown" ]; then
                 echo "::error title=release asset::$asset exists on release $TAG without a digest, so it cannot be shown identical"
                 differ=1
               elif [ "$have" = "$want" ]; then
@@ -870,12 +898,11 @@ jobs:
                 differ=1
               fi
             done
-            while IFS= read -r remote_name; do
-              if [ -z "${local_names[$remote_name]:-}" ]; then
-                echo "::error title=release asset::$remote_name is on release $TAG but is not part of this build"
-                differ=1
-              fi
-            done < <(jq -r '.[].name' <<< "$assets")
+            extras=$(jq -r --argjson l "$local_json" '[.[].name | select(. as $x | any($l[]; . == $x) | not)] | map(@json) | join(", ")' <<< "$assets")
+            if [ -n "$extras" ]; then
+              echo "::error title=release asset::$extras is on release $TAG but is not part of this build"
+              differ=1
+            fi
           }
 
           fetch_release
