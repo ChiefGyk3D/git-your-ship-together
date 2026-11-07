@@ -410,7 +410,11 @@ case "$1" in
       repos/o/r/releases/7/assets*)
         [ "$paginate" = 1 ] && [ "$slurp" = 1 ] || { echo "assets must be read with --paginate --slurp" >&2; exit 98; }
         n=$(cat "$STUB_COUNT" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$STUB_COUNT"
-        [ "${STUB_ASSETS_MODE:-ok}" = ok ] || { echo "gh: x (HTTP ${STUB_ASSETS_MODE})" >&2; exit 1; }
+        case "${STUB_ASSETS_MODE:-ok}" in
+          ok) ;;
+          shape:*) echo "${STUB_ASSETS_MODE#shape:}"; exit 0 ;;
+          *) echo "gh: x (HTTP ${STUB_ASSETS_MODE})" >&2; exit 1 ;;
+        esac
         view="$state"
         if [ -n "${STUB_TAMPER:-}" ] && [ "$n" -ge "${STUB_TAMPER_FROM:-2}" ]; then
           case "$STUB_TAMPER_MODE" in
@@ -429,8 +433,11 @@ case "$1" in
         ;;
       repos/o/r/releases?per_page=100)
         [ "$paginate" = 1 ] && [ "$slurp" = 1 ] || { echo "releases need --paginate --slurp" >&2; exit 98; }
-        case "${STUB_LIST_MODE:-ok}" in ok|malformed) ;; *) echo "gh: x (HTTP ${STUB_LIST_MODE})" >&2; exit 1 ;; esac
-        if [ "${STUB_LIST_MODE:-ok}" = malformed ]; then echo '[{"unexpected":"object-page-not-array"}]'; exit 0; fi
+        case "${STUB_LIST_MODE:-ok}" in
+          ok) ;;
+          shape:*) echo "${STUB_LIST_MODE#shape:}"; exit 0 ;;
+          *) echo "gh: x (HTTP ${STUB_LIST_MODE})" >&2; exit 1 ;;
+        esac
         jq -c '[[ (if .draft == true then {tag_name: "v1.0.0", draft: true} else empty end),
                   {tag_name: "v0.9.0", draft: false} ]]' "$state"
         ;;
@@ -834,16 +841,16 @@ def test_a_failing_draft_listing_stops_the_run(sandbox, name, job, dirname):
 # --- round 4: filenames, asset state, duplicates, newlines, draft-list shape ----------------------------------
 
 BAD_NAMES = [
-    "firmware beta.bin",  # space (GitHub renames it)
+    "firmware beta.bin",  # space (GitHub renames it, per its docs)
     "pkg.tar.gz.",  # trailing period (a leading period is never globbed, so never uploaded)
-    "-leading-dash.bin",
+    "-leading-dash.bin",  # policy only: the docs do not say GitHub renames it
     "café.bin",  # non-ASCII
     "a+b.bin",
     "a:b.bin",
     "tab\tname.bin",
     "line\nbreak.bin",
-    "_underscore_lead.bin",
-    "name.bin_",
+    "_underscore_lead.bin",  # policy only
+    "name.bin_",  # policy only
 ]
 GOOD_NAMES = [
     "a.whl",
@@ -858,11 +865,11 @@ GOOD_NAMES = [
 
 @pytest.mark.parametrize(("name", "job", "dirname"), CASES, ids=IDS)
 @pytest.mark.parametrize("bad", BAD_NAMES, ids=lambda s: repr(s))
-def test_a_filename_github_would_rename_is_refused_before_any_gh_call(sandbox, name, job, dirname, bad):
+def test_a_filename_outside_the_naming_policy_is_refused_before_any_gh_call(sandbox, name, job, dirname, bad):
     result, calls, _ = run_upload(sandbox, name, job, dirname, {"a.whl": b"A", bad: b"B"})
     text = result.stdout + result.stderr
     assert result.returncode != 0
-    assert "GitHub-safe" in text and "::error" in text
+    assert "naming policy" in text and "::error" in text
     assert calls == [], "no gh call, read or write, may precede the filename check"
 
 
@@ -938,7 +945,96 @@ def test_a_newline_in_a_remote_name_is_one_asset_not_two(sandbox, name, job, dir
 @pytest.mark.parametrize(("name", "job", "dirname"), CASES, ids=IDS)
 def test_a_malformed_draft_listing_fails_closed(sandbox, name, job, dirname):
     result, calls, _ = run_upload(
-        sandbox, name, job, dirname, {"a.whl": b"A"}, extra_env={"STUB_LIST_MODE": "malformed"}
+        sandbox,
+        name,
+        job,
+        dirname,
+        {"a.whl": b"A"},
+        extra_env={"STUB_LIST_MODE": 'shape:[{"unexpected":"object-page-not-array"}]'},
     )
     assert result.returncode != 0 and writes(calls) == []
     assert "::error" in result.stdout
+
+
+# --- round 5: listing shapes, global asset invariants --------------------------------------------------------
+
+BAD_SHAPES = [
+    "[{}]",  # a page that is an object, which a vacuous flatten turns into an empty list
+    '[{"x":[]}]',
+    "{}",
+    "null",
+    "[[],{}]",  # mixed page types
+    "[[1]]",  # a scalar inside a page
+    "[[null]]",
+    "[1]",
+    '"text"',
+    '[[["nested"]]]',
+]
+
+
+@pytest.mark.parametrize(("name", "job", "dirname"), CASES, ids=IDS)
+@pytest.mark.parametrize("shape", BAD_SHAPES)
+def test_a_malformed_release_listing_never_reads_as_no_draft(sandbox, name, job, dirname, shape):
+    result, calls, _ = run_upload(
+        sandbox, name, job, dirname, {"a.whl": b"A"}, extra_env={"STUB_LIST_MODE": f"shape:{shape}"}
+    )
+    assert result.returncode != 0 and "::error" in result.stdout
+    assert writes(calls) == []
+
+
+@pytest.mark.parametrize(("name", "job", "dirname"), CASES, ids=IDS)
+@pytest.mark.parametrize("shape", [*BAD_SHAPES, '[[{"digest":"sha256:x"}]]', '[[{"name":5}]]'])
+def test_a_malformed_asset_listing_never_reads_as_no_assets(sandbox, name, job, dirname, shape):
+    result, calls, _ = run_upload(
+        sandbox,
+        name,
+        job,
+        dirname,
+        {"a.whl": b"A"},
+        remote={"a.whl": digest(b"A")},
+        extra_env={"STUB_ASSETS_MODE": f"shape:{shape}"},
+    )
+    assert result.returncode != 0 and "::error" in result.stdout
+    assert writes(calls) == []
+
+
+@pytest.mark.parametrize(("name", "job", "dirname"), CASES, ids=IDS)
+def test_an_empty_listing_of_pages_is_still_valid(sandbox, name, job, dirname):
+    result, calls, _ = run_upload(
+        sandbox, name, job, dirname, {"a.whl": b"A"}, extra_env={"STUB_LIST_MODE": "shape:[[]]"}
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert any(c.startswith("release create") for c in calls)
+
+
+@pytest.mark.parametrize(("name", "job", "dirname"), CASES, ids=IDS)
+@pytest.mark.parametrize("state", ["starter", ABSENT, None, 5, "open"], ids=repr)
+def test_an_extra_remote_asset_must_also_be_uploaded(sandbox, name, job, dirname, state):
+    result, calls, _ = run_upload(
+        sandbox,
+        name,
+        job,
+        dirname,
+        {"a.whl": b"A"},
+        remote={"a.whl": digest(b"A"), "extra.bin": digest(b"E")},
+        overrides={"extra.bin": {"state": state}},
+    )
+    text = result.stdout + result.stderr
+    assert result.returncode != 0 and "extra.bin" in text and "not in state uploaded" in text
+    assert writes(calls) == []
+
+
+@pytest.mark.parametrize(("name", "job", "dirname"), CASES, ids=IDS)
+def test_duplicate_extra_assets_are_refused(sandbox, name, job, dirname):
+    result, calls, _ = run_upload(
+        sandbox,
+        name,
+        job,
+        dirname,
+        {"a.whl": b"A"},
+        remote={"a.whl": digest(b"A"), "x.bin": digest(b"X")},
+        dupes=["x.bin"],
+    )
+    text = result.stdout + result.stderr
+    assert result.returncode != 0 and "x.bin" in text and "more than once" in text
+    assert writes(calls) == []
