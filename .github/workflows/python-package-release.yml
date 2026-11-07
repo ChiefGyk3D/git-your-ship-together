@@ -793,7 +793,9 @@ jobs:
           ASSET_DIR: dist
         run: |
           set -euo pipefail
-          shopt -s nullglob
+          # dotglob: a hidden file in the staging directory is listed, so the
+          # naming policy below rejects it instead of the glob skipping it.
+          shopt -s nullglob dotglob
           files=("$ASSET_DIR"/*)
           if [ "${#files[@]}" -eq 0 ]; then
             echo "::error title=release assets::nothing to upload in $ASSET_DIR"
@@ -930,6 +932,12 @@ jobs:
               args+=(--notes-file notes/release-notes.md)
             else
               args+=(--generate-notes)
+            fi
+            # A SemVer prerelease (a "-" before any "+build" part of the validated
+            # tag) is published as a prerelease, not as the latest release.
+            core=${TAG%%+*}
+            if [[ "$core" == *-* ]]; then
+              args+=(--prerelease)
             fi
             gh release create "$TAG" "${files[@]}" "${args[@]}"
           fi

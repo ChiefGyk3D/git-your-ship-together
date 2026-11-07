@@ -384,7 +384,7 @@ case "$1" in
       esac
     done
     case "$path" in
-      repos/o/r/releases/tags/v1.0.0)
+      repos/o/r/releases/tags/*)
         [ "$include" = 1 ] || { echo "the tag lookup must use --include" >&2; exit 98; }
         case "${STUB_API_MODE:-ok}" in
           401) reply "HTTP/2.0 401 Unauthorized" '{"message":"Bad credentials"}'
@@ -488,7 +488,19 @@ def sandbox(tmp_path):
 ABSENT = object()  # drop the key from a remote asset
 
 
-def run_upload(sandbox, name, job, dirname, files, remote=None, extra_env=None, draft=False, overrides=None, dupes=()):
+def run_upload(
+    sandbox,
+    name,
+    job,
+    dirname,
+    files,
+    remote=None,
+    extra_env=None,
+    draft=False,
+    overrides=None,
+    dupes=(),
+    tag="v1.0.0",
+):
     """remote: None for no release, else {asset name: digest or None}."""
     tmp, work = sandbox
     asset_dir = work / dirname
@@ -513,7 +525,7 @@ def run_upload(sandbox, name, job, dirname, files, remote=None, extra_env=None, 
         "PATH": f"{tmp / 'bin'}:{os.environ['PATH']}",
         "GH_TOKEN": "x",
         "GH_REPO": "o/r",
-        "TAG": "v1.0.0",
+        "TAG": tag,
         "TITLE": "",
         "ASSET_DIR": dirname,
         "STUB_LOG": str(log),
@@ -1038,3 +1050,39 @@ def test_duplicate_extra_assets_are_refused(sandbox, name, job, dirname):
     text = result.stdout + result.stderr
     assert result.returncode != 0 and "x.bin" in text and "more than once" in text
     assert writes(calls) == []
+
+
+# --- round 6: prerelease flag, hidden files ------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(("name", "job", "dirname"), CASES, ids=IDS)
+@pytest.mark.parametrize("tag", ["v1.2.3-rc.1", "v1.2.3-0.3.7", "v1.2.3-beta+exp.sha.5114f85", "v0.0.1-a"])
+def test_a_prerelease_tag_creates_a_prerelease(sandbox, name, job, dirname, tag):
+    result, calls, _ = run_upload(sandbox, name, job, dirname, {"a.whl": b"A"}, tag=tag)
+    assert result.returncode == 0, result.stdout + result.stderr
+    creates = [c for c in calls if c.startswith("release create")]
+    assert len(creates) == 1 and "--prerelease" in creates[0].split()
+
+
+@pytest.mark.parametrize(("name", "job", "dirname"), CASES, ids=IDS)
+@pytest.mark.parametrize("tag", ["v1.2.3", "v1.2.3+build.1", "v1.2.3+build-1", "v10.0.0+a-b-c"])
+def test_a_stable_tag_is_not_a_prerelease(sandbox, name, job, dirname, tag):
+    result, calls, _ = run_upload(sandbox, name, job, dirname, {"a.whl": b"A"}, tag=tag)
+    assert result.returncode == 0, result.stdout + result.stderr
+    creates = [c for c in calls if c.startswith("release create")]
+    assert len(creates) == 1 and "--prerelease" not in creates[0].split()
+
+
+@pytest.mark.parametrize(("name", "job", "dirname"), CASES, ids=IDS)
+@pytest.mark.parametrize("hidden", [".manifest", ".firmware.bin", ".a"])
+def test_a_hidden_file_is_rejected_not_skipped(sandbox, name, job, dirname, hidden):
+    result, calls, _ = run_upload(sandbox, name, job, dirname, {"a.whl": b"A", hidden: b"H"})
+    text = result.stdout + result.stderr
+    assert result.returncode != 0 and hidden in text and "::error" in text
+    assert calls == [], "no gh call may precede the rejection"
+
+
+@pytest.mark.parametrize(("name", "job", "dirname"), CASES, ids=IDS)
+def test_a_directory_of_only_hidden_files_fails(sandbox, name, job, dirname):
+    result, calls, _ = run_upload(sandbox, name, job, dirname, {".only": b"H"})
+    assert result.returncode != 0 and calls == []
