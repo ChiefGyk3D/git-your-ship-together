@@ -1325,6 +1325,7 @@ jobs:
       attestations: write  # the provenance record
     with:
       publish: ${{ github.event_name == 'release' }}   # the GitHub release step; pypi stays false
+      allowed-publish-events: push,release             # publishing is an allow-list; the default is push only
       verify-command: grep -q "^## \[$VERSION\]" CHANGELOG.md
       smoke-command: my-cli --version
       release-notes-command: python scripts/changelog_section.py "$VERSION"
@@ -1365,7 +1366,11 @@ plugin all answer alike), refuse a tag that disagrees with it, run
 nothing out; `github-release` records build
 provenance for every file and attaches them with a `SHA256SUMS` to the
 release for the tag, creating it from the notes when it does not exist and
-uploading to it when it does (a caller that triggers on `release: published`).
+completing it when it does (a caller that triggers on `release: published`
+sets `allowed-publish-events: push,release`). An existing release is never
+rewritten: each asset must be absent or already there with the identical
+sha256 digest, or the run fails naming the asset and the version is burned.
+Publication needs an allowed event and a `refs/tags/v<major>.<minor>.<patch>` ref.
 Nothing needs a secret.
 
 Every release also carries `sbom.cdx.json` (CycloneDX) and
@@ -1409,6 +1414,7 @@ Inputs of `python-package-release.yml`:
 | `smoke-command` | empty (skips the check) | Run with the built wheel installed in a fresh venv on `PATH`, e.g. `my-cli --version` |
 | `release-notes-command` | empty (GitHub generates them) | Prints the release notes to stdout with `$VERSION` set |
 | `publish` | `false` | Publish the GitHub release. A pull request never publishes whatever this says |
+| `allowed-publish-events` | `push` | Comma-separated events (no spaces) that may publish, and only on a `refs/tags/v<major>.<minor>.<patch>` ref. Set `push,release` for a caller triggered by `release: published`. A pull request event is refused even if listed |
 | `pypi` | `false` | Unsupported: `true` fails the run with the fix, because PyPI cannot trust a reusable workflow as the publisher. Publish with the two-step `publish-pypi` job in the caller's own workflow (above) |
 | `pypi-environment` | `pypi` | Unused here; the environment belongs to the caller's `publish-pypi` job. Kept so existing callers parse |
 | `github-release` | `true` | Attach the files, their SBOMs, `SHA256SUMS` and provenance to the GitHub release |
@@ -1464,7 +1470,11 @@ matching `artifacts`, and `release-notes-command`. The publish job checks
 nothing out. It writes a `SHA256SUMS`, records build provenance for every
 file, signs every file with cosign (keyless, a `<file>.sigstore.json` bundle
 beside it), and attaches all of it to the release for the tag, creating it
-from the notes or uploading to it when it exists. Verify a download with
+from the notes or completing it when it exists: every asset must be absent or
+already there with the identical sha256 digest, never replaced (a differing
+asset fails the run and the version is burned). Publication needs an allowed
+event (`allowed-publish-events`, default `push`) and a
+`refs/tags/v<major>.<minor>.<patch>` ref. Verify a download with
 `cosign verify-blob --bundle <file>.sigstore.json <file>` against this
 repository's identity, or `gh attestation verify <file> --owner ChiefGyk3D`.
 
@@ -1479,6 +1489,7 @@ Inputs of `artifact-release.yml`:
 | `verify-command` | empty | Run after the build with `$VERSION` set, to refuse a release whose files disagree with it |
 | `release-notes-command` | empty (GitHub generates them) | Prints the release notes to stdout with `$VERSION` set |
 | `publish` | `false` | Publish. A pull request never publishes whatever this says |
+| `allowed-publish-events` | `push` | Comma-separated events (no spaces) that may publish, and only on a `refs/tags/v<major>.<minor>.<patch>` ref. A pull request event is refused even if listed |
 | `github-release` | `true` | Attach the files, sums, signatures and provenance to the GitHub release |
 | `release-title` | empty (the tag) | Title of a release this workflow creates |
 | `sign` | `true` | cosign keyless signature bundle per file |

@@ -9,6 +9,8 @@ because PyPI cannot trust a reusable workflow as the publisher. No secret anywhe
 **Why it exists.** Four repositories had written build, check, tag-against-version and PyPI publish by hand, four slightly different
 ways. The checks that matter are the ones that catch a release that does not match its tag, or a wheel that does not install.
 
+**Publishing is an allow-list.** The publish job, and each step in it that signs, attests or uploads, runs only for an event named in `allowed-publish-events` (default `push`; a caller triggered by `release: published` sets `push,release`) on a `refs/tags/v<major>.<minor>.<patch>` ref. An existing release is only completed: every asset must be absent or already there with the identical sha256 digest. Nothing is replaced; a differing asset fails the run and names it, and that version is burned.
+
 ## Jobs and trust boundaries
 
 | Job | Holds | Notes |
