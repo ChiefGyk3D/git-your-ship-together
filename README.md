@@ -1325,6 +1325,7 @@ jobs:
       attestations: write  # the provenance record
     with:
       publish: ${{ github.event_name == 'release' }}   # the GitHub release step; pypi stays false
+      allowed-publish-events: push,release             # publishing is an allow-list; the default is push only
       verify-command: grep -q "^## \[$VERSION\]" CHANGELOG.md
       smoke-command: my-cli --version
       release-notes-command: python scripts/changelog_section.py "$VERSION"
@@ -1365,7 +1366,11 @@ plugin all answer alike), refuse a tag that disagrees with it, run
 nothing out; `github-release` records build
 provenance for every file and attaches them with a `SHA256SUMS` to the
 release for the tag, creating it from the notes when it does not exist and
-uploading to it when it does (a caller that triggers on `release: published`).
+completing it when it does (a caller that triggers on `release: published`
+sets `allowed-publish-events: push,release`). An existing release is never
+rewritten: each asset must be absent or already there with the identical
+sha256 digest, or the run fails naming the asset and the version is burned. The set is read again after the upload and re-checked against exactly the built files (file names follow a conservative naming policy, stricter than GitHub's documented renaming: ASCII letters, digits, `.`, `_`, `-`, starting and ending with a letter or digit, so a build that produces other names must rename them before re-pinning; every remote asset, extras included, must be in state `uploaded` and no name may repeat; listing pages are validated before use; a new release for a SemVer prerelease tag is created with `--prerelease` (a behavior change: earlier versions never set it) and hidden files in the staging directory are rejected, not skipped; names that differ only in letter case are refused (a conservative policy; GitHub's exact rule is not verified here); an existing release must carry the prerelease flag its tag implies; an extra asset fails the run); the asset listing is paginated; a lookup that is not a clean 404 stops the run; a draft release for the tag fails the run until it is published or deleted; concurrent writers to one release are unsupported.
+Publication needs an allowed event and a `refs/tags/v<semver>` (SemVer 2.0.0: no leading zeroes, no empty identifiers) ref.
 Nothing needs a secret.
 
 Every release also carries `sbom.cdx.json` (CycloneDX) and
@@ -1409,6 +1414,7 @@ Inputs of `python-package-release.yml`:
 | `smoke-command` | empty (skips the check) | Run with the built wheel installed in a fresh venv on `PATH`, e.g. `my-cli --version` |
 | `release-notes-command` | empty (GitHub generates them) | Prints the release notes to stdout with `$VERSION` set |
 | `publish` | `false` | Publish the GitHub release. A pull request never publishes whatever this says |
+| `allowed-publish-events` | `push` | Comma-separated events (no spaces) that may publish, and only on a `refs/tags/v<semver>` (SemVer 2.0.0: no leading zeroes, no empty identifiers) ref. Set `push,release` for a caller triggered by `release: published`. A pull request event is refused even if listed |
 | `pypi` | `false` | Unsupported: `true` fails the run with the fix, because PyPI cannot trust a reusable workflow as the publisher. Publish with the two-step `publish-pypi` job in the caller's own workflow (above) |
 | `pypi-environment` | `pypi` | Unused here; the environment belongs to the caller's `publish-pypi` job. Kept so existing callers parse |
 | `github-release` | `true` | Attach the files, their SBOMs, `SHA256SUMS` and provenance to the GitHub release |
@@ -1464,7 +1470,11 @@ matching `artifacts`, and `release-notes-command`. The publish job checks
 nothing out. It writes a `SHA256SUMS`, records build provenance for every
 file, signs every file with cosign (keyless, a `<file>.sigstore.json` bundle
 beside it), and attaches all of it to the release for the tag, creating it
-from the notes or uploading to it when it exists. Verify a download with
+from the notes or completing it when it exists: every asset must be absent or
+already there with the identical sha256 digest, never replaced (a differing
+asset fails the run and the version is burned; the set is read again after the upload and re-checked against exactly the built files, so an extra asset also fails; the asset listing is paginated; a lookup that is not a clean 404 stops the run; a draft release for the tag fails the run until it is published or deleted; and concurrent writers to one release are unsupported). Publication needs an allowed
+event (`allowed-publish-events`, default `push`) and a
+`refs/tags/v<semver>` (SemVer 2.0.0: no leading zeroes, no empty identifiers) ref. Verify a download with
 `cosign verify-blob --bundle <file>.sigstore.json <file>` against this
 repository's identity, or `gh attestation verify <file> --owner ChiefGyk3D`.
 
@@ -1479,6 +1489,7 @@ Inputs of `artifact-release.yml`:
 | `verify-command` | empty | Run after the build with `$VERSION` set, to refuse a release whose files disagree with it |
 | `release-notes-command` | empty (GitHub generates them) | Prints the release notes to stdout with `$VERSION` set |
 | `publish` | `false` | Publish. A pull request never publishes whatever this says |
+| `allowed-publish-events` | `push` | Comma-separated events (no spaces) that may publish, and only on a `refs/tags/v<semver>` (SemVer 2.0.0: no leading zeroes, no empty identifiers) ref. A pull request event is refused even if listed |
 | `github-release` | `true` | Attach the files, sums, signatures and provenance to the GitHub release |
 | `release-title` | empty (the tag) | Title of a release this workflow creates |
 | `sign` | `true` | cosign keyless signature bundle per file |
