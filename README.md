@@ -1369,8 +1369,8 @@ release for the tag, creating it from the notes when it does not exist and
 completing it when it does (a caller that triggers on `release: published`
 sets `allowed-publish-events: push,release`). An existing release is never
 rewritten: each asset must be absent or already there with the identical
-sha256 digest, or the run fails naming the asset and the version is burned.
-Publication needs an allowed event and a `refs/tags/v<major>.<minor>.<patch>` ref.
+sha256 digest, or the run fails naming the asset and the version is burned. The set is read again after the upload and re-checked; concurrent writers to one release are unsupported.
+Publication needs an allowed event and a `refs/tags/v<semver>` (SemVer 2.0.0: no leading zeroes, no empty identifiers) ref.
 Nothing needs a secret.
 
 Every release also carries `sbom.cdx.json` (CycloneDX) and
@@ -1414,7 +1414,7 @@ Inputs of `python-package-release.yml`:
 | `smoke-command` | empty (skips the check) | Run with the built wheel installed in a fresh venv on `PATH`, e.g. `my-cli --version` |
 | `release-notes-command` | empty (GitHub generates them) | Prints the release notes to stdout with `$VERSION` set |
 | `publish` | `false` | Publish the GitHub release. A pull request never publishes whatever this says |
-| `allowed-publish-events` | `push` | Comma-separated events (no spaces) that may publish, and only on a `refs/tags/v<major>.<minor>.<patch>` ref. Set `push,release` for a caller triggered by `release: published`. A pull request event is refused even if listed |
+| `allowed-publish-events` | `push` | Comma-separated events (no spaces) that may publish, and only on a `refs/tags/v<semver>` (SemVer 2.0.0: no leading zeroes, no empty identifiers) ref. Set `push,release` for a caller triggered by `release: published`. A pull request event is refused even if listed |
 | `pypi` | `false` | Unsupported: `true` fails the run with the fix, because PyPI cannot trust a reusable workflow as the publisher. Publish with the two-step `publish-pypi` job in the caller's own workflow (above) |
 | `pypi-environment` | `pypi` | Unused here; the environment belongs to the caller's `publish-pypi` job. Kept so existing callers parse |
 | `github-release` | `true` | Attach the files, their SBOMs, `SHA256SUMS` and provenance to the GitHub release |
@@ -1472,9 +1472,9 @@ file, signs every file with cosign (keyless, a `<file>.sigstore.json` bundle
 beside it), and attaches all of it to the release for the tag, creating it
 from the notes or completing it when it exists: every asset must be absent or
 already there with the identical sha256 digest, never replaced (a differing
-asset fails the run and the version is burned). Publication needs an allowed
+asset fails the run and the version is burned; the set is read again after the upload and re-checked, a lookup failing for any reason but 404 stops the run, and concurrent writers to one release are unsupported). Publication needs an allowed
 event (`allowed-publish-events`, default `push`) and a
-`refs/tags/v<major>.<minor>.<patch>` ref. Verify a download with
+`refs/tags/v<semver>` (SemVer 2.0.0: no leading zeroes, no empty identifiers) ref. Verify a download with
 `cosign verify-blob --bundle <file>.sigstore.json <file>` against this
 repository's identity, or `gh attestation verify <file> --owner ChiefGyk3D`.
 
@@ -1489,7 +1489,7 @@ Inputs of `artifact-release.yml`:
 | `verify-command` | empty | Run after the build with `$VERSION` set, to refuse a release whose files disagree with it |
 | `release-notes-command` | empty (GitHub generates them) | Prints the release notes to stdout with `$VERSION` set |
 | `publish` | `false` | Publish. A pull request never publishes whatever this says |
-| `allowed-publish-events` | `push` | Comma-separated events (no spaces) that may publish, and only on a `refs/tags/v<major>.<minor>.<patch>` ref. A pull request event is refused even if listed |
+| `allowed-publish-events` | `push` | Comma-separated events (no spaces) that may publish, and only on a `refs/tags/v<semver>` (SemVer 2.0.0: no leading zeroes, no empty identifiers) ref. A pull request event is refused even if listed |
 | `github-release` | `true` | Attach the files, sums, signatures and provenance to the GitHub release |
 | `release-title` | empty (the tag) | Title of a release this workflow creates |
 | `sign` | `true` | cosign keyless signature bundle per file |

@@ -7,7 +7,7 @@ build provenance. No secret anywhere.
 **Why it exists.** Three repositories each built a file by hand and attached it to a release with nothing a downloader could verify.
 This is the container release's supply-chain story for a file.
 
-**Publishing is an allow-list.** The publish job, and each step in it that signs, attests or uploads, runs only for an event named in `allowed-publish-events` (default `push`; a caller triggered by `release: published` sets `push,release`) on a `refs/tags/v<major>.<minor>.<patch>` ref. An existing release is only completed: every asset must be absent or already there with the identical sha256 digest. Nothing is replaced; a differing asset fails the run and names it, and that version is burned.
+**Publishing is an allow-list.** The publish job, and each step in it that signs, attests or uploads, runs only for an event named in `allowed-publish-events` (default `push`; a caller triggered by `release: published` sets `push,release`) on a `refs/tags/v<semver>` (SemVer 2.0.0: no leading zeroes, no empty identifiers) ref. An existing release is only completed: every asset must be absent or already there with the identical sha256 digest. Nothing is replaced; a differing asset fails the run and names it, and that version is burned. The asset set is read again after the upload and must hold exactly this build's files with identical digests, or the run fails. Concurrent writers to the same release are unsupported; a lookup that fails for any reason other than 404 stops the run.
 
 ## Jobs and trust boundaries
 

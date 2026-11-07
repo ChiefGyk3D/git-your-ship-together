@@ -713,9 +713,10 @@ jobs:
           exit "$rc"
 
       # Publication is an allow-list: an allowed event and a release-shaped tag.
-      # The same condition is on the job and on each step that signs, attests
-      # or uploads; this step also fails loudly on a malformed list or tag.
+      # The job condition repeats the check; every step that signs, attests
+      # or uploads runs only on this step's `publish` output.
       - name: Check the publish context
+        id: context
         shell: bash
         env:
           EVENT_NAME: ${{ github.event_name }}
@@ -740,10 +741,15 @@ jobs:
               exit 1
               ;;
           esac
-          if ! [[ "$REF" =~ ^refs/tags/v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.+-]+)?$ ]]; then
-            echo "::error title=publish context::ref is not a release tag (refs/tags/v<major>.<minor>.<patch>[-pre][+build])"
+          num='(0|[1-9][0-9]*)'
+          pre='(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)'
+          bld='[0-9A-Za-z-]+'
+          semver="^refs/tags/v${num}\\.${num}\\.${num}(-${pre}(\\.${pre})*)?(\\+${bld}(\\.${bld})*)?$"
+          if ! [[ "$REF" =~ $semver ]]; then
+            echo "::error title=publish context::ref is not a SemVer 2.0.0 release tag (refs/tags/v<major>.<minor>.<patch>[-prerelease][+build], no leading zeroes)"
             exit 1
           fi
+          echo "publish=true" >> "$GITHUB_OUTPUT"
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -772,13 +778,13 @@ jobs:
           cat SHA256SUMS
 
       - name: Record build provenance
-        if: inputs.attest && contains(format(',{0},', inputs.allowed-publish-events), format(',{0},', github.event_name)) && startsWith(github.ref, 'refs/tags/v')
+        if: inputs.attest && steps.context.outputs.publish == 'true'
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: dist/*
 
       - name: Create the release, or upload to the one that exists
-        if: contains(format(',{0},', inputs.allowed-publish-events), format(',{0},', github.event_name)) && startsWith(github.ref, 'refs/tags/v')
+        if: steps.context.outputs.publish == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -793,11 +799,29 @@ jobs:
             echo "::error title=release assets::nothing to upload in $ASSET_DIR"
             exit 1
           fi
-          if gh release view "$TAG" > /dev/null 2>&1; then
-            # An existing release is only ever completed: each asset is either
-            # absent or already there with the identical sha256 digest.
-            # Nothing is replaced.
-            release=$(gh api "repos/$GH_REPO/releases/tags/$TAG")
+          err=$(mktemp)
+
+          # One lookup that tells "no such release" (HTTP 404) from every other
+          # failure; anything but a 404 or a well-formed release stops the run.
+          fetch_release() {
+            if release=$(gh api "repos/$GH_REPO/releases/tags/$TAG" 2> "$err"); then
+              if ! jq -e '.assets | type == "array"' <<< "$release" > /dev/null 2>&1; then
+                echo "::error title=release lookup::the release response for $TAG is not a release object"
+                exit 1
+              fi
+              found=1
+            elif grep -q 'HTTP 404' "$err"; then
+              found=0
+              release=""
+            else
+              echo "::error title=release lookup::could not read release $TAG: $(tr '\n' ' ' < "$err")"
+              exit 1
+            fi
+          }
+
+          # Each local file is absent from the release, identical to the asset
+          # of the same name there (sha256), or a difference. Sets missing and differ.
+          compare_assets() {
             missing=()
             differ=0
             for f in "${files[@]}"; do
@@ -810,19 +834,23 @@ jobs:
                 echo "::error title=release asset::$asset exists on release $TAG without a digest, so it cannot be shown identical"
                 differ=1
               elif [ "$have" = "$want" ]; then
-                echo "$asset: already on the release, identical"
+                echo "$asset: on the release, identical"
               else
                 echo "::error title=release asset::$asset exists on release $TAG with a different digest (release $have, built $want)"
                 differ=1
               fi
             done
+          }
+
+          fetch_release
+          if [ "$found" -eq 1 ]; then
+            # An existing release is only ever completed. Nothing is replaced.
+            compare_assets
             if [ "$differ" -ne 0 ]; then
               echo "::error title=release $TAG::assets are never replaced; this release is in a different state from this build. Burn this version and publish a new one."
               exit 1
             fi
-            if [ "${#missing[@]}" -eq 0 ]; then
-              echo "release $TAG already has every asset, identical; nothing to upload"
-            else
+            if [ "${#missing[@]}" -gt 0 ]; then
               echo "release $TAG exists; uploading ${#missing[@]} missing asset(s)"
               gh release upload "$TAG" "${missing[@]}"
             fi
@@ -835,3 +863,18 @@ jobs:
             fi
             gh release create "$TAG" "${files[@]}" "${args[@]}"
           fi
+
+          # Read the release again before reporting success: every file must
+          # now be there with the identical digest. Concurrent writers to the
+          # same release are unsupported; this catches one that interfered.
+          fetch_release
+          if [ "$found" -ne 1 ]; then
+            echo "::error title=release $TAG::the release is not readable after the upload"
+            exit 1
+          fi
+          compare_assets
+          if [ "$differ" -ne 0 ] || [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error title=release $TAG::the release does not hold exactly this build's assets after the upload (${#missing[@]} missing, differing: $differ). Burn this version and publish a new one."
+            exit 1
+          fi
+          echo "release $TAG verified: every asset present with the identical digest"
