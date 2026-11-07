@@ -1055,11 +1055,30 @@ does not make the tags change together, and it cannot stop another writer with
 registry access from moving a tag afterwards. Signatures, the SBOM and the
 provenance attach to the digest, so consumers should deploy by digest or verify
 the signature of the digest they pull; serialize releases of one image with a
-`concurrency` group in the caller if two runs may publish the same tags. The
-build job keeps `packages: write` on runs that do not publish, because GitHub
-offers no expression for a job's `permissions:`; only the gated login step uses
-the token. Platforms must be listed once each (`linux/arm64` and
-`linux/arm64/v8` are the same platform).
+`concurrency` group in the caller if two runs may publish the same tags.
+
+**Two build jobs.** Every action in a job can read the job's `GITHUB_TOKEN`
+([Use GITHUB_TOKEN for authentication](https://docs.github.com/en/actions/tutorials/authenticate-with-github_token)),
+and a job's `permissions:` cannot depend on an expression, so the work is split
+by a job-level `if`
+([Control the execution of jobs](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-jobs-with-conditions)).
+`build` runs only when the run publishes and holds `packages: write`.
+`build-local` runs when it does not, with `contents: read` and the SARIF upload
+permission only, no login and no push. The checks are the same text in both
+jobs, and a test holds them identical. The caller still grants the union of the
+permissions; the called workflow can only narrow them.
+
+**Docker Hub.** With `dockerhub: true` and credentials, `merge` builds a
+separate index in each registry from the same verified GHCR platform digests
+(buildx copies the manifests across registries, as the previous version of this
+workflow also relied on), checks each registry's index against the recorded
+digests, requires the two index digests to be equal, promotes that digest to the
+registry's tags, and signs and attests it. The build jobs never hold Docker Hub
+credentials. A temporary `stage-...` tag is left in each registry.
+
+Platforms are `linux/<arch>` or `linux/<arch>/v<N>` entries separated by commas,
+with no spaces and no empty entries (anything else fails the plan job), each
+platform once (`linux/arm64` and `linux/arm64/v8` are the same platform).
 
 Verify a published image:
 

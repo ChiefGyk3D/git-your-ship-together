@@ -39,10 +39,8 @@ APPROVED_TERMS = {
 # Steps that may run without the gate: they hold no push, signing or attestation ability, or are gated by an
 # output that only a gated step sets. A new step must be gated or be added here on purpose.
 BUILD_UNGATED = {
-    "Validate the egress policy inputs (EX-0001)",
     "Egress canary (EX-0001)",
     "Image metadata",
-    "Build for this platform and load it",  # the non-publishing build, gated on the opposite condition
     "Require a non-root user",
     "Check the image",
     "Probe with a read-only root filesystem",
@@ -77,15 +75,42 @@ def terms_ok(cond: str, first: str = GATE) -> bool:
     return parts[0] == first and all(p in APPROVED_TERMS for p in parts[1:])
 
 
+PUBLISH_ONLY_USES = ("docker/login-action@", "actions/attest-build-provenance@", "sigstore/cosign-installer@")
+
+
 def violations(doc: dict) -> list[str]:
     """Every way this workflow fails the publishing invariants; empty for the real file."""
     out = []
-    build, merge = jobs(doc)["build"], jobs(doc)["merge"]
+    build, local, merge = jobs(doc)["build"], jobs(doc)["build-local"], jobs(doc)["merge"]
     mcond = str(merge.get("if", ""))
     if not (mcond.split(" && ")[0] == GATE and set(mcond.split(" && ")[1:]) <= {"github.event_name != 'pull_request'"}):
         out.append(f"merge job condition: {mcond!r}")
     if merge.get("continue-on-error"):
         out.append("merge job continue-on-error")
+    # the publishing build job runs only when publishing and the local-only job only when not publishing
+    bterms = str(build.get("if", "")).split(" && ")
+    if GATE not in bterms or NOT_GATE in bterms:
+        out.append(f"build job condition: {build.get('if')!r}")
+    lterms = str(local.get("if", "")).split(" && ")
+    if NOT_GATE not in lterms or GATE in lterms:
+        out.append(f"build-local job condition: {local.get('if')!r}")
+    perms = local.get("permissions") or {}
+    if perms != {"contents": "read", "security-events": "write"}:
+        out.append(f"build-local permissions: {perms!r}")
+    if local.get("continue-on-error"):
+        out.append("build-local job continue-on-error")
+    for s in steps_of(local):
+        uses, run = str(s.get("uses", "")), str(s.get("run", ""))
+        pushes = uses.startswith("docker/build-push-action@") and (s.get("with") or {}).get("push") is not False
+        if (
+            uses.startswith(PUBLISH_ONLY_USES)
+            or pushes
+            or "docker push" in run
+            or "cosign" in run
+            or "imagetools" in run
+            or "secrets." in json.dumps(s)
+        ):
+            out.append(f"build-local: {s.get('name') or uses} can publish or sign")
     for job_name, job, ungated, ungated_uses in (
         ("build", build, BUILD_UNGATED, BUILD_UNGATED_USES),
         ("merge", merge, MERGE_UNGATED, MERGE_UNGATED_USES),
@@ -95,10 +120,7 @@ def violations(doc: dict) -> list[str]:
             name, uses = s.get("name"), str(s.get("uses", ""))
             cond = s.get("if")
             if name in ungated or uses.startswith(ungated_uses):
-                if name == "Build for this platform and load it":
-                    if cond != NOT_GATE:
-                        out.append(f"{label}: the non-publishing build must run only when not publishing")
-                elif cond is not None and GATE in str(cond):
+                if cond is not None and GATE in str(cond):
                     out.append(f"{label}: unexpectedly gated, update the allow-list")
                 continue
             if name == "Doppler" or uses.startswith("docker/setup-qemu-action@"):
@@ -161,6 +183,82 @@ def test_weakening_the_merge_job_condition_is_caught(cond):
     assert violations(d)
 
 
+LOCAL_MUTATIONS = {
+    "packages write": lambda d: d["jobs"]["build-local"]["permissions"].update({"packages": "write"}),
+    "id-token write": lambda d: d["jobs"]["build-local"]["permissions"].update({"id-token": "write"}),
+    "no job condition": lambda d: d["jobs"]["build-local"].pop("if"),
+    "publish condition": lambda d: d["jobs"]["build-local"].update({"if": f"x && {GATE}"}),
+    "login step": lambda d: d["jobs"]["build-local"]["steps"].append(
+        {"name": "login", "uses": "docker/login-action@" + "0" * 40}
+    ),
+    "push build": lambda d: d["jobs"]["build-local"]["steps"].append(
+        {"name": "p", "uses": "docker/build-push-action@" + "0" * 40, "with": {"push": True}}
+    ),
+    "secret use": lambda d: d["jobs"]["build-local"]["steps"].append(
+        {"name": "s", "run": "echo", "env": {"T": "${{ secrets.GITHUB_TOKEN }}"}}
+    ),
+    "continue-on-error": lambda d: d["jobs"]["build-local"].update({"continue-on-error": True}),
+    "build job not gated": lambda d: d["jobs"]["build"].update({"if": "${{ !cancelled() }}"}),
+}
+
+
+@pytest.mark.parametrize("name", list(LOCAL_MUTATIONS))
+def test_weakening_the_local_only_job_is_caught(name):
+    d = load(RELEASE)
+    assert violations(d) == []
+    LOCAL_MUTATIONS[name](d)
+    assert violations(d), name
+
+
+def test_the_local_only_job_has_no_package_write_and_no_publish_step():
+    local = jobs(load(RELEASE))["build-local"]
+    assert local["permissions"] == {"contents": "read", "security-events": "write"}
+    assert steps_of(local), "collected nothing"
+    for s in steps_of(local):
+        assert not str(s.get("uses", "")).startswith(PUBLISH_ONLY_USES), s.get("name")
+        assert "secrets." not in json.dumps(s)
+    build = jobs(load(RELEASE))["build"]
+    assert build["permissions"]["packages"] == "write"
+    merge_needs = jobs(load(RELEASE))["merge"]["needs"]
+    assert "build" in merge_needs and "build-local" not in merge_needs
+
+
+# The checks are one copy of text in two jobs; this holds them identical so they cannot drift.
+SHARED_STEPS = (
+    "Egress canary (EX-0001)",
+    "Image metadata",
+    "Require a non-root user",
+    "Check the image",
+    "Probe with a read-only root filesystem",
+    "Scan the image with Trivy",
+    "Upload Trivy results to the Security tab",
+)
+
+
+@pytest.mark.parametrize("name", SHARED_STEPS)
+def test_the_check_steps_are_identical_in_the_publishing_and_the_local_job(name):
+    assert step("build", name) == step("build-local", name)
+
+
+def test_the_egress_policy_check_is_identical_in_both_build_jobs():
+    first = [jobs(load(RELEASE))[j]["steps"][0] for j in ("build", "build-local")]
+    assert first[0]["name"] == "Validate the egress policy inputs (EX-0001)" and first[0] == first[1]
+
+
+def test_the_setup_steps_are_identical_in_both_build_jobs():
+    prefixes = (
+        "step-security/harden-runner@",
+        "actions/checkout@",
+        "docker/setup-qemu-action@",
+        "docker/setup-buildx-action@",
+    )
+
+    def uses_of(job):
+        return [s for s in steps_of(jobs(load(RELEASE))[job]) if str(s.get("uses", "")).startswith(prefixes)]
+
+    assert uses_of("build") == uses_of("build-local") and len(uses_of("build")) == 4
+
+
 def test_a_new_ungated_step_in_the_merge_job_is_caught():
     d = load(RELEASE)
     d["jobs"]["merge"]["steps"].append({"name": "Push something else", "run": "docker push x"})
@@ -186,9 +284,12 @@ def evaluate(cond: str | None, publish: bool) -> bool:
 
 
 def builds(doc: dict, publish: bool) -> list[str]:
+    """Build-push steps that would run on a leg, over both build jobs, given the publish decision."""
     return [
         s["name"]
-        for s in steps_of(jobs(doc)["build"])
+        for job in ("build", "build-local")
+        if evaluate(jobs(doc)[job].get("if"), publish)
+        for s in steps_of(jobs(doc)[job])
         if str(s.get("uses", "")).startswith("docker/build-push-action@") and evaluate(s.get("if"), publish)
     ]
 
@@ -221,7 +322,7 @@ def test_a_publishing_leg_tests_the_pushed_image_and_a_non_publishing_leg_the_lo
 
 def test_the_guard_for_two_builds_bites():
     doc = load(RELEASE)
-    del step("build", "Build for this platform and load it", doc)["if"]
+    del doc["jobs"]["build-local"]["if"]
     assert len(builds(doc, True)) == 2
     assert violations(doc)
 
@@ -496,11 +597,13 @@ def test_the_index_is_staged_under_a_run_scoped_tag_and_promoted_by_digest():
         assert s["env"][f"D{n}"] == f"${{{{ needs.build.outputs.d{n} }}}}"
 
 
-# A stateful stub registry. It keeps manifests by digest and tags by reference in a JSON file, and models these
-# transitions: `create --tag T src...` resolves each source, makes an index of the sources (a single index source is
-# copied unchanged, as the buildx documentation describes), and then moves every named tag; inspect reads that state.
-# `hooks` simulate another writer moving a tag right after the Nth `create`. `drops_last` and `adds_extra` simulate a
-# misbehaving create. What it cannot model is the real registry and the real buildx output format.
+# A stateful stub registry with one manifest store per registry host. `create --tag T src...` resolves each source
+# in its own host, copies a source from another host into the destination host (what buildx was observed to do in a
+# production run: "copying <digest> from ghcr.io/... to docker.io/..."; `strict` models the stricter reading of the
+# documentation, where a source must already exist in the destination registry and create fails), builds an index
+# from the sources (a single index source is copied unchanged), and moves every named tag. `hooks` simulate another
+# writer moving a tag after the Nth create; `drops_last` / `adds_extra` (optionally for one `flaw_host`) simulate a
+# misbehaving create. What it cannot model is a real registry and the real buildx output format.
 STUB = r"""#!/usr/bin/env python3
 import hashlib, json, sys
 STATE = %(state)r
@@ -513,15 +616,30 @@ def save():
     json.dump(db, open(STATE, "w"))
 
 
+def host(ref):
+    return ref.split("/")[0]
+
+
+def store(h):
+    return db["hosts"].setdefault(h, {})
+
+
 def resolve(ref):
+    h = host(ref)
     if "@" in ref:
         d = ref.split("@", 1)[1]
-        if d not in db["manifests"]:
-            sys.exit(1)
-        return d
-    if ref not in db["tags"]:
+    else:
+        d = db["tags"].get(ref)
+    if d is None or d not in store(h):
         sys.exit(1)
-    return db["tags"][ref]
+    return d
+
+
+def copy(d, src, dst):
+    m = store(src)[d]
+    for c in m.get("manifests", []):
+        copy(c["digest"], src, dst)
+    store(dst)[d] = m
 
 
 if a[:3] == ["buildx", "imagetools", "inspect"]:
@@ -529,7 +647,7 @@ if a[:3] == ["buildx", "imagetools", "inspect"]:
     fmt = a[a.index("--format") + 1] if "--format" in a else ""
     ref = [x for x in a[3:] if not x.startswith("--") and x != fmt][0]
     d = resolve(ref)
-    m = db["manifests"][d]
+    m = store(host(ref))[d]
     if raw:
         print(json.dumps(m))
     elif fmt == "{{.Manifest.Digest}}":
@@ -547,18 +665,35 @@ elif a[:3] == ["buildx", "imagetools", "create"]:
     open(%(creates)r, "a").write(" ".join(a) + "\n")
     tags = [a[i + 1] for i, x in enumerate(a) if x == "--tag"]
     srcs = [x for i, x in enumerate(a[3:], 3) if x != "--tag" and a[i - 1] != "--tag"]
-    digs = [resolve(s) for s in srcs]
-    if len(digs) == 1 and "manifests" in db["manifests"][digs[0]]:
+    dst = host(tags[0])
+    if any(host(t) != dst for t in tags):
+        sys.exit(1)
+    digs = []
+    for s in srcs:
+        d = resolve(s)
+        if host(s) != dst:
+            if db.get("strict"):
+                print("source manifest must exist in the destination registry", file=sys.stderr)
+                sys.exit(1)
+            copy(d, host(s), dst)
+        digs.append(d)
+    if len(digs) == 1 and "manifests" in store(dst)[digs[0]]:
         new = digs[0]
     else:
         kids = list(digs)
-        if db.get("drops_last"):
-            kids = kids[:-1]
-        if db.get("adds_extra"):
-            kids.append(db["adds_extra"])
+        if db.get("reverse_host") == dst:
+            kids.reverse()
+        if db.get("flaw_host") in (None, dst):
+            if db.get("drops_last"):
+                kids = kids[:-1]
+            if db.get("adds_extra"):
+                kids.append(db["adds_extra"])
+        for k in kids:
+            if k not in store(dst):
+                copy(k, "ghcr.io", dst)
         idx = {"schemaVersion": 2, "manifests": [{"digest": k, "platform": db["platform_of"][k]} for k in kids]}
         new = "sha256:" + hashlib.sha256(json.dumps(idx, sort_keys=True).encode()).hexdigest()
-        db["manifests"][new] = idx
+        store(dst)[new] = idx
     for t in tags:
         db["tags"][t] = new
     db["creates"] = db.get("creates", 0) + 1
@@ -567,7 +702,7 @@ elif a[:3] == ["buildx", "imagetools", "create"]:
             db["tags"][h["tag"]] = h["digest"]
     save()
 elif a[0] == "pull":
-    if a[-1].split("@", 1)[-1] not in db["manifests"]:
+    if a[-1].split("@", 1)[-1] not in store(host(a[-1])):
         sys.exit(1)
 elif a[0] == "tag":
     pass
@@ -595,11 +730,18 @@ ARM_NOVAR = {"os": "linux", "architecture": "arm64"}
 STAGE = f"{GHCR}:stage-deadbeef-7-1"
 TAG1 = "ghcr.io/owner/img:1.2.3"
 TAGL = "ghcr.io/owner/img:latest"
+HUB = "docker.io/user/img"
+HSTAGE = f"{HUB}:stage-deadbeef-7-1"
+HTAG1 = f"{HUB}:1.2.3"
+HTAGL = f"{HUB}:latest"
 
 
-def make_db(**over):
+def make_db(manifests=None, **over):
     db = {
-        "manifests": {DIGEST_A: SINGLE_A, DIGEST_B: SINGLE_B, DIGEST_IDX: MULTI},
+        "hosts": {
+            "ghcr.io": manifests or {DIGEST_A: SINGLE_A, DIGEST_B: SINGLE_B, DIGEST_IDX: MULTI},
+            "docker.io": {},
+        },
         "configs": {DIGEST_A: AMD, DIGEST_B: ARM},
         "platform_of": {DIGEST_A: "linux/amd64", DIGEST_B: "linux/arm64", DIGEST_IDX: "linux/amd64"},
         "tags": {},
@@ -701,10 +843,11 @@ MATRIX = json.dumps(
 )
 
 
-def index_env(**over):
+def index_env(hub: bool = False, **over):
     base = {
         "GHCR": GHCR,
-        "TAGS": f"{TAG1}\n{TAGL}",
+        "HUB": HUB if hub else "",
+        "TAGS": f"{TAG1}\n{TAGL}" + (f"\n{HTAG1}\n{HTAGL}" if hub else ""),
         "MATRIX": MATRIX,
         "SHA": "deadbeef",
         "RUN_ID": "7",
@@ -720,9 +863,9 @@ def index_env(**over):
 INDEX_SCRIPT = step("merge", "Create the multi-arch index")["run"]
 
 
-def run_index(tmp_path, db=None, script=None, **over):
+def run_index(tmp_path, db=None, script=None, hub=False, **over):
     docker = stub(db or make_db(), tmp_path)
-    return run_script(script or INDEX_SCRIPT, tmp_path, index_env(**over), docker)
+    return run_script(script or INDEX_SCRIPT, tmp_path, index_env(hub=hub, **over), docker)
 
 
 def create_calls(tmp_path):
@@ -743,13 +886,51 @@ def test_the_index_is_created_from_digests_and_creation_causes_the_verified_stat
         f"buildx imagetools create --tag {TAGL} {GHCR}@{digest}",
     ]
     assert state["tags"] == {STAGE: digest, TAG1: digest, TAGL: digest}
-    assert [c["digest"] for c in state["manifests"][digest]["manifests"]] == [DIGEST_A, DIGEST_B]
+    assert [c["digest"] for c in state["hosts"]["ghcr.io"][digest]["manifests"]] == [DIGEST_A, DIGEST_B]
+    assert state["hosts"]["docker.io"] == {}, "Docker Hub off: nothing touches it"
+    assert not [c for c in (tmp_path / "docker.log").read_text().splitlines() if "docker.io" in c]
     # the staged tag is read only after it was created, and the final tags are read after their creates
     order = (tmp_path / "docker.log").read_text().splitlines()
     first_inspect = next(i for i, c in enumerate(order) if "inspect" in c and STAGE in c)
     assert order.index(stage_create) < first_inspect
     last_create = max(i for i, c in enumerate(order) if "imagetools create" in c)
     assert any("inspect" in c and TAG1 in c for c in order[last_create:])
+
+
+def test_with_docker_hub_each_registry_gets_its_own_verified_index(tmp_path):
+    code, out, log = run_index(tmp_path, hub=True)
+    assert code == 0, log
+    state = registry_state(tmp_path)
+    digest = out["digest"]
+    assert create_calls(tmp_path) == [
+        f"buildx imagetools create --tag {STAGE} {GHCR}@{DIGEST_A} {GHCR}@{DIGEST_B}",
+        f"buildx imagetools create --tag {TAG1} {GHCR}@{digest}",
+        f"buildx imagetools create --tag {TAGL} {GHCR}@{digest}",
+        f"buildx imagetools create --tag {HSTAGE} {GHCR}@{DIGEST_A} {GHCR}@{DIGEST_B}",
+        f"buildx imagetools create --tag {HTAG1} {HUB}@{digest}",
+        f"buildx imagetools create --tag {HTAGL} {HUB}@{digest}",
+    ]
+    hub = state["hosts"]["docker.io"]
+    assert digest in hub and DIGEST_A in hub and DIGEST_B in hub, "the Docker Hub repository holds its own copies"
+    assert state["tags"][HTAG1] == state["tags"][HTAGL] == state["tags"][HSTAGE] == digest
+
+
+def test_a_registry_that_requires_sources_to_exist_locally_fails_closed_for_docker_hub_only(tmp_path):
+    strict = make_db(strict=True)
+    on = tmp_path / "on"
+    on.mkdir()
+    code, out, _ = run_index(on, strict, hub=True)
+    assert code != 0 and "digest" not in out
+    off = tmp_path / "off"
+    off.mkdir()
+    assert run_index(off, strict, hub=False)[0] == 0
+
+
+def test_docker_hub_digests_are_verified_on_their_own_and_must_match(tmp_path):
+    # a Docker Hub index that differs from the GHCR one is refused, not assumed equal
+    differ = make_db(adds_extra=DIGEST_IDX, flaw_host="docker.io")
+    code, out, log = run_index(tmp_path, differ, hub=True)
+    assert code != 0 and "digest" not in out
 
 
 BAD_SLOTS = [
@@ -761,9 +942,10 @@ BAD_SLOTS = [
 ]
 
 
+@pytest.mark.parametrize("hub", [False, True])
 @pytest.mark.parametrize("over", BAD_SLOTS)
-def test_a_bad_slot_is_refused_before_anything_is_created(tmp_path, over):
-    code, out, _ = run_index(tmp_path, **over)
+def test_a_bad_slot_is_refused_before_anything_is_created(tmp_path, over, hub):
+    code, out, _ = run_index(tmp_path, hub=hub, **over)
     assert code != 0 and "digest" not in out and create_calls(tmp_path) == []
 
 
@@ -785,52 +967,75 @@ HOSTILE = {
     "stage tag replaced": {"hooks": [{"after_create": 1, "tag": STAGE, "digest": DIGEST_A}]},
     "final tag replaced": {"hooks": [{"after_create": 2, "tag": TAG1, "digest": DIGEST_B}]},
     "last tag replaced": {"hooks": [{"after_create": 3, "tag": TAGL, "digest": DIGEST_B}]},
+    "hub digest differs": {"reverse_host": "docker.io"},  # same children, other order: a different index digest
+}
+HOSTILE_HUB = {
+    "hub drops a platform": {"drops_last": True, "flaw_host": "docker.io"},
+    "hub adds a manifest": {"adds_extra": DIGEST_IDX, "flaw_host": "docker.io"},
+    "hub stage tag replaced": {"hooks": [{"after_create": 4, "tag": HSTAGE, "digest": DIGEST_A}]},
+    "hub final tag replaced": {"hooks": [{"after_create": 5, "tag": HTAG1, "digest": DIGEST_B}]},
+    "hub last tag replaced": {"hooks": [{"after_create": 6, "tag": HTAGL, "digest": DIGEST_B}]},
 }
 
 
-@pytest.mark.parametrize("name", list(HOSTILE))
+@pytest.mark.parametrize("name", [n for n in HOSTILE if n != "hub digest differs"])
 def test_a_wrong_index_or_a_replaced_tag_stops_the_job_before_the_digest_is_published(tmp_path, name):
     code, out, _ = run_index(tmp_path, make_db(**HOSTILE[name]))
     assert code != 0 and "digest" not in out
 
 
-def mutated_index_scripts() -> dict[str, tuple[str, str | None]]:
-    """name -> (weakened script, the HOSTILE case that only that guard stops, or None if a plain run must fail)."""
+@pytest.mark.parametrize("name", list(HOSTILE_HUB))
+def test_the_same_holds_for_docker_hub(tmp_path, name):
+    code, out, _ = run_index(tmp_path, make_db(**HOSTILE_HUB[name]), hub=True)
+    assert code != 0 and "digest" not in out
+
+
+def mutated_index_scripts() -> dict[str, tuple[str, str | None, bool]]:
+    """name -> (weakened script, the hostile case only that guard stops or None, Docker Hub enabled)."""
     s = INDEX_SCRIPT
     stage_create = 'docker buildx imagetools create --tag "$staging" "${sources[@]}"'
-    promote = 'docker buildx imagetools create --tag "$tag" "${GHCR}@${digest}"'
-    verify = '[ "$(docker buildx imagetools inspect "$tag" --format \'{{.Manifest.Digest}}\')" = "$digest" ]'
-    assert stage_create in s and promote in s and verify in s
+    promote = 'docker buildx imagetools create --tag "$tag" "${repo}@${digest}"'
+    verify = '[ "$(docker buildx imagetools inspect "$tag" --format \'{{.Manifest.Digest}}\')" = "$first_digest" ]'
+    registries = 'registries+=("$HUB")'
+    same = '[ "$digest" = "$first_digest" ]'
+    for needle in (stage_create, promote, verify, registries, same):
+        assert needle in s, needle
     swapped = 'docker buildx imagetools create --tag "$tag" "${sources[0]}"'
     out = {
-        "no staging create": (s.replace(stage_create, "true"), None),
-        "no promotion": (s.replace(promote, "true"), None),
-        "promote from the first source": (s.replace(promote, swapped), None),
-        "no final tag check": (s.replace(verify, "true"), "final tag replaced"),
-        "no content binding": (s.replace('[ "$got" = "$want_set" ]', "true"), "adds a manifest"),
+        "no staging create": (s.replace(stage_create, "true"), None, False),
+        "no promotion": (s.replace(promote, "true"), None, False),
+        "promote from the first source": (s.replace(promote, swapped), None, False),
+        "no hub registry": (s.replace(registries, "true"), None, True),
+        "no final tag check": (s.replace(verify, "true"), "final tag replaced", False),
+        "no content binding": (s.replace('[ "$got" = "$want_set" ]', "true"), "adds a manifest", False),
+        "no cross-registry equality (nor final check)": (
+            s.replace(same, "true").replace(verify, "true"),
+            "hub digest differs",
+            True,
+        ),
     }
-    for name, (mutated, _) in out.items():
+    for name, (mutated, _, _) in out.items():
         assert mutated != s, name
     return out
 
 
 @pytest.mark.parametrize("name", list(mutated_index_scripts()))
 def test_removing_or_redirecting_a_step_of_the_index_script_is_caught(tmp_path, name):
-    mutated, hostile = mutated_index_scripts()[name]
+    mutated, hostile, hub = mutated_index_scripts()[name]
     real = tmp_path / "real"
     real.mkdir()
-    assert run_index(real)[0] == 0
+    assert run_index(real, hub=hub)[0] == 0
     weak = tmp_path / "weak"
     weak.mkdir()
     if hostile is None:
-        code, out, _ = run_index(weak, script=mutated)
+        code, out, _ = run_index(weak, script=mutated, hub=hub)
         assert code != 0 and "digest" not in out
     else:
         # only this guard stops the hostile registry: the real script refuses, the weakened one publishes
         refused = tmp_path / "refused"
         refused.mkdir()
-        assert run_index(refused, make_db(**HOSTILE[hostile]))[0] != 0
-        code, out, _ = run_index(weak, make_db(**HOSTILE[hostile]), script=mutated)
+        assert run_index(refused, make_db(**HOSTILE[hostile]), hub=hub)[0] != 0
+        code, out, _ = run_index(weak, make_db(**HOSTILE[hostile]), script=mutated, hub=hub)
         assert code == 0 and "digest" in out
 
 
@@ -840,22 +1045,27 @@ RECHECKS = ("Re-check the final tags before signing", "Re-check the final tags a
 
 
 def recheck_env(**over):
-    return {"TAGS": f"{TAG1}\n{TAGL}", "DIGEST": DIGEST_IDX, **over}
+    return {"TAGS": f"{TAG1}\n{TAGL}\n{HTAG1}", "DIGEST": DIGEST_IDX, **over}
 
 
 @pytest.mark.parametrize("name", RECHECKS)
 def test_the_recheck_passes_only_when_every_final_tag_resolves_to_the_digest(tmp_path, name):
     script = step("merge", name)["run"]
+    base = {TAG1: DIGEST_IDX, TAGL: DIGEST_IDX, HTAG1: DIGEST_IDX}
     cases = [
-        ({TAG1: DIGEST_IDX, TAGL: DIGEST_IDX}, True),
-        ({TAG1: DIGEST_IDX, TAGL: DIGEST_A}, False),  # the second tag moved
-        ({TAG1: DIGEST_A, TAGL: DIGEST_IDX}, False),  # the first tag moved
-        ({TAG1: DIGEST_IDX}, False),  # a tag is gone
+        (base, True),
+        ({**base, TAGL: DIGEST_A}, False),  # the second tag moved
+        ({**base, TAG1: DIGEST_A}, False),  # the first tag moved
+        ({**base, HTAG1: DIGEST_A}, False),  # the Docker Hub tag moved
+        ({TAG1: DIGEST_IDX, TAGL: DIGEST_IDX}, False),  # a tag is gone
     ]
     for n, (tags, ok) in enumerate(cases):
         sub = tmp_path / str(n)
         sub.mkdir()
-        code, _, out = run_script(script, sub, recheck_env(), stub(make_db(tags=tags), sub))
+        db = make_db(tags=tags)
+        db["hosts"]["docker.io"] = {DIGEST_IDX: MULTI, DIGEST_A: SINGLE_A}
+        db["hosts"]["ghcr.io"][DIGEST_IDX] = MULTI
+        code, _, out = run_script(script, sub, recheck_env(), stub(db, sub))
         assert (code == 0) == ok, out
         assert ok or "::error" in out
 
@@ -873,9 +1083,10 @@ def test_the_recheck_steps_are_the_same_script_before_signing_and_after_attestat
 def test_the_documentation_states_what_the_final_tag_check_does_not_guarantee():
     text = (WORKFLOWS.parent.parent / "README.md").read_text()
     assert "does not make a tag immutable" in text and "deploy by digest" in text
+    assert "only the gated login step uses" not in text, "every action in a job can read the job token"
 
 
-# --- duplicate platforms and the token ---------------------------------------
+# --- the platform list, duplicates ---------------------------------------------
 
 
 def run_plan(tmp_path, platforms: str):
@@ -887,7 +1098,6 @@ def run_plan(tmp_path, platforms: str):
     "platforms",
     [
         "linux/amd64,linux/amd64",
-        " linux/amd64 , linux/amd64",
         "linux/arm64,linux/arm64/v8",
         "linux/arm64/v8,linux/arm64",
         "linux/arm,linux/arm/v7",
@@ -901,6 +1111,43 @@ def test_a_duplicate_platform_is_refused_by_the_plan(tmp_path, platforms):
 
 
 @pytest.mark.parametrize(
+    "platforms",
+    [
+        "lin ux/am d64",
+        "linux/amd64,,linux/arm64",
+        "linux/amd64,",
+        ",linux/amd64",
+        " linux/amd64",
+        "linux/amd64 ",
+        "linux/amd64, linux/arm64",
+        "linux/amd64 ,linux/arm64",
+        " linux/amd64 , linux/amd64",
+        "linux/amd64\tlinux/arm64",
+        "linux/amd64\n",
+        "linux/amd64,\nlinux/arm64",
+        "linux/amd\n64",
+        "Linux/amd64",
+        "linux/AMD64",
+        "windows/amd64",
+        "linux",
+        "linux/",
+        "linux/amd64/",
+        "linux/amd64/8",
+        "linux/amd64/v",
+        "linux/amd64/v8/x",
+        "linux/amd64;linux/arm64",
+        "linux/amd64,linux/arm64,,",
+        ",",
+        "",
+        " ",
+    ],
+)
+def test_a_malformed_platform_list_is_an_error_not_repaired(tmp_path, platforms):
+    code, out, log = run_plan(tmp_path, platforms)
+    assert code != 0 and "matrix" not in out and "::error title=platforms" in log
+
+
+@pytest.mark.parametrize(
     "platforms", ["linux/amd64", "linux/amd64,linux/arm64", "linux/arm/v6,linux/arm/v7", "linux/arm64,linux/arm/v7"]
 )
 def test_distinct_platforms_are_planned_with_distinct_temporary_tags(tmp_path, platforms):
@@ -911,18 +1158,10 @@ def test_distinct_platforms_are_planned_with_distinct_temporary_tags(tmp_path, p
     assert [m["idx"] for m in matrix] == list(range(len(matrix)))
 
 
-def test_the_package_token_is_used_only_by_gated_steps():
-    """GitHub does not allow an expression in a job's `permissions:` (the context-availability table in
-    https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#context-availability has no entry for
-    it), so the build job keeps `packages: write`; what is checked here is that only gated steps can use it."""
-    build = jobs(load(RELEASE))["build"]
-    assert build["permissions"]["packages"] == "write"
-    users = [s for s in steps_of(build) if "GITHUB_TOKEN" in json.dumps(s) or "github.token" in json.dumps(s)]
-    assert users, "collected nothing"
-    for s in users:
-        assert terms_ok(str(s.get("if", ""))), s.get("name")
-    text = RELEASE.read_text()
-    assert "# The permission cannot depend on the publish decision" in text
+def test_nine_platforms_are_refused(tmp_path):
+    nine = ",".join(f"linux/arm/v{n}" for n in range(1, 10))
+    code, out, log = run_plan(tmp_path, nine)
+    assert code != 0 and "matrix" not in out
 
 
 def test_the_signing_steps_use_only_the_validated_index_digest():

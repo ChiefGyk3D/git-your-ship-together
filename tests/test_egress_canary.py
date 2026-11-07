@@ -674,6 +674,10 @@ KEPT_BLOCK = {
     ("artifact-release.yml", "publish"),  # contents: write, id-token, attestations
     ("container-release.yml", "plan"),  # its outputs choose the runners and the image name of the privileged build
     ("container-release.yml", "build"),  # packages: write
+    (
+        "container-release.yml",
+        "build-local",
+    ),  # runs the caller's Dockerfile and test command; keeps the operator's egress policy as `build` does
     ("container-release.yml", "merge"),  # packages: write, id-token, Doppler
     ("dast.yml", "scan"),  # its SARIF artifact is uploaded verbatim by the job that holds security-events: write
     ("dependabot-auto-merge.yml", "auto-merge"),  # contents and pull-requests: write

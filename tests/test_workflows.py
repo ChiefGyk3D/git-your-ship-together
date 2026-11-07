@@ -228,6 +228,11 @@ ALLOWED_WRITES = {
     ("python-docker-release.yml", "release", "attestations"),  # forwarded
     # SARIF uploads to the Security tab.
     ("container-release.yml", "build", "security-events"),
+    (
+        "container-release.yml",
+        "build-local",
+        "security-events",
+    ),  # the same SARIF upload, on a run that does not publish
     ("python-docker-release.yml", "release", "security-events"),  # forwarded
     # The package release: the GitHub release is created and its assets
     # uploaded with the job's own token, with provenance recorded for every
@@ -948,7 +953,7 @@ def test_a_publishing_build_never_reads_the_actions_cache():
     """The cache is writable from any pull request; a poisoned layer in a signed release is unrecoverable."""
     push = release_steps("build")["Build and push this platform's image"]["with"]
     assert "cache-from" not in push and "cache-to" not in push
-    local = release_steps("build")["Build for this platform and load it"]["with"]
+    local = release_steps("build-local")["Build for this platform and load it"]["with"]
     assert "!inputs.push" in local["cache-from"], "the local build may use the cache only when not publishing"
     assert "!inputs.push" in local["cache-to"]
     assert all("cache" not in key for step in release_steps("merge").values() for key in step.get("with", {}))
@@ -970,7 +975,7 @@ def test_the_release_builds_each_platform_natively_and_merges_only_when_publishi
     assert merge["if"] == f"{PUBLISH_GATE} && github.event_name != 'pull_request'", (
         "merge publishes only when told and never on a pull request"
     )
-    load_step = release_steps("build")["Build for this platform and load it"]["with"]
+    load_step = release_steps("build-local")["Build for this platform and load it"]["with"]
     assert load_step["platforms"] == "${{ matrix.platform }}" and load_step["load"] is True
     assert triggers(doc)["workflow_call"]["outputs"]["digest"]["value"] == "${{ jobs.merge.outputs.digest }}"
 

@@ -422,14 +422,15 @@ jobs:
           # falls back to an amd64 runner with QEMU.
           matrix='[]'
           seen=""
+          # Exactly comma-separated linux/<arch>[/v<N>] entries: no spaces, no
+          # empty entries, nothing is repaired.
+          platforms_re='^linux/[a-z0-9]+(/v[0-9]+)?(,linux/[a-z0-9]+(/v[0-9]+)?)*$'
+          if ! [[ $PLATFORMS =~ $platforms_re ]]; then
+            echo "::error title=platforms::platforms must be comma-separated linux/<arch> or linux/<arch>/v<N> entries with no spaces and no empty entries"
+            exit 1
+          fi
           IFS=',' read -r -a platforms <<< "$PLATFORMS"
           for platform in "${platforms[@]}"; do
-            platform="$(printf '%s' "$platform" | tr -d '[:space:]')"
-            [ -n "$platform" ] || continue
-            if ! printf '%s' "$platform" | grep -Eq '^linux/[a-z0-9]+(/v[0-9]+)?$'; then
-              echo "::error title=platforms::'$platform' is not a linux/<arch> platform"
-              exit 1
-            fi
             # One image per platform: a repeat (after default variants are
             # applied) would share a temporary tag and make the index ambiguous.
             IFS=/ read -r _ parch pvar <<< "$platform"
@@ -634,22 +635,23 @@ jobs:
           read -r -a args <<< "$ARGS"
           "$HADOLINT" "${args[@]}" "$DOCKERFILE"
 
-  # One job per platform, on a runner of that architecture: build, check and
-  # scan the image where it runs. When publishing, the same job pushes the
-  # platform image under a temporary tag, `<sha>-<run id>-<attempt>-<arch>`,
-  # and hands its digest to `merge`, which merges by digest, not by tag.
+  # One job per platform, on a runner of that architecture, for a run that
+  # publishes: build once, push under a temporary tag
+  # (`<sha>-<run id>-<attempt>-<arch>`), pull that image back by digest and run
+  # every check against it, then hand the digest to `merge`, which merges by
+  # digest, not by tag. A run that does not publish uses `build-local`.
   build:
     name: Build, test, scan (${{ matrix.platform }})
     needs: [plan, dockerfile-lint]
     # A skipped lint (hadolint: false) must not skip the build; a failed or
     # cancelled one must.
-    if: ${{ !cancelled() && needs.plan.result == 'success' && (needs.dockerfile-lint.result == 'success' || needs.dockerfile-lint.result == 'skipped') }}
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.publish == 'true' && (needs.dockerfile-lint.result == 'success' || needs.dockerfile-lint.result == 'skipped') }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
-    # The permission cannot depend on the publish decision: GitHub offers no
-    # expression context for a job's `permissions:` (see the context availability
-    # table in the GitHub contexts documentation). Only the gated login step uses
-    # the token, and a test holds that.
+    # This job runs only when publishing and is the only build job with
+    # `packages: write`: every action in a job can read the job token, and a
+    # job's permissions cannot depend on an expression, so a run that does not
+    # publish uses `build-local` instead.
     permissions:
       contents: read
       packages: write  # push the per-platform image under its temporary tag
@@ -803,23 +805,6 @@ jobs:
           images: ${{ needs.plan.outputs.ghcr }}
           tags: ${{ inputs.tags }}
 
-      - name: Build for this platform and load it
-        if: needs.plan.outputs.publish != 'true'
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: ${{ inputs.context }}
-          file: ${{ inputs.dockerfile }}
-          platforms: ${{ matrix.platform }}
-          push: false
-          load: true
-          tags: release-candidate:local
-          labels: ${{ steps.meta.outputs.labels }}
-          # The Actions cache is writable by anyone who can open a pull
-          # request; a publishing build must not read it. One scope per
-          # platform so the architectures do not overwrite each other.
-          cache-from: ${{ !inputs.push && (inputs.egress-policy == 'audit' && 'audit' || 'block') == 'block' && format('type=gha,scope={0}', matrix.arch) || '' }}
-          cache-to: ${{ !inputs.push && (inputs.egress-policy == 'audit' && 'audit' || 'block') == 'block' && format('type=gha,mode=max,scope={0}', matrix.arch) || '' }}
-
       - name: Build and push this platform's image
         if: needs.plan.outputs.publish == 'true'
         id: push
@@ -837,9 +822,6 @@ jobs:
           # manifests would duplicate them and add unknown/unknown entries.
           provenance: false
           sbom: false
-
-  # Joins the per-platform images into one multi-arch index under the real
-  # tags, then signs, attests and records provenance for that index.
 
       - name: Pull and verify the pushed image
         id: pushed
@@ -950,6 +932,227 @@ jobs:
           echo "d${IDX}=${PLATFORM} ${DIGEST}" >> "$GITHUB_OUTPUT"
           echo "recorded ${PLATFORM} ${DIGEST}"
 
+
+  # The same checks for a run that does not publish: one local build that is the
+  # one tested, with no package write permission and no login. A publishing run
+  # uses `build`.
+  build-local:
+    name: Build, test, scan, local (${{ matrix.platform }})
+    needs: [plan, dockerfile-lint]
+    # A skipped lint (hadolint: false) must not skip the build; a failed or
+    # cancelled one must.
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.publish != 'true' && (needs.dockerfile-lint.result == 'success' || needs.dockerfile-lint.result == 'skipped') }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+      security-events: write  # Trivy SARIF upload
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - name: Validate the egress policy inputs (EX-0001)
+        timeout-minutes: 1
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        env:
+          POLICY_EGRESS_POLICY: ${{ inputs.egress-policy }}
+          POLICY_EGRESS_POLICY_SECRETLESS: ${{ inputs.egress-policy-secretless }}
+        run: |
+          set -u
+          bad=0
+          check() {
+            if [ "$2" = set ] && [ "$3" != audit ] && [ "$3" != block ]; then
+              echo "::error title=egress policy::the $1 input must be exactly 'audit' or 'block' (its value is ${#3} characters long)"
+              bad=1
+            fi
+          }
+          check egress-policy "${POLICY_EGRESS_POLICY+set}" "${POLICY_EGRESS_POLICY-}"
+          check egress-policy-secretless "${POLICY_EGRESS_POLICY_SECRETLESS+set}" "${POLICY_EGRESS_POLICY_SECRETLESS-}"
+          check distro-egress-policy "${POLICY_DISTRO_EGRESS_POLICY+set}" "${POLICY_DISTRO_EGRESS_POLICY-}"
+          check semgrep-egress-policy "${POLICY_SEMGREP_EGRESS_POLICY+set}" "${POLICY_SEMGREP_EGRESS_POLICY-}"
+          exit "$bad"
+
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: ${{ inputs.egress-policy == 'audit' && 'audit' || 'block' }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
+          # The agent may only stop reporting to StepSecurity in block mode.
+          disable-telemetry: ${{ (inputs.egress-policy == 'audit' && 'audit' || 'block') == 'block' }}
+
+      - name: Egress canary (EX-0001)
+        if: ${{ runner.os == 'Linux' && ((inputs.egress-policy == 'audit' && 'audit' || 'block') == 'block') }}
+        timeout-minutes: 2
+        shell: bash
+        # The workspace root exists before checkout; a job default working-directory may not.
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -u
+          NAMES="github.com api.github.com results-receiver.actions.githubusercontent.com"
+          PORT=443
+          canary_resolve() { timeout 5 getent ahostsv4 "$1" 2>/dev/null | awk '$2 == "STREAM" { print $1 }'; }
+          canary_probe() { timeout 3 bash -c "exec 3<>\"/dev/tcp/\$0/\$1\"" "$1" "$PORT" 2>/dev/null; }
+          canary_reach() {
+            local i
+            for i in 1 2 3 4; do
+              canary_probe "$1" && return 0
+              [ "$i" -lt 4 ] && sleep 1
+            done
+            return 1
+          }
+          canary_show() { local n=$1; shift; echo "+ $*"; { timeout 10 "$@" 2>&1 || true; } | head -n "$n" || true; }
+          canary_diag() {
+            local name
+            echo "::group::egress canary diagnostics (EX-0001, for the GitHub Support ticket)"
+            canary_show 5 uname -srmo
+            canary_show 20 cat /etc/resolv.conf
+            canary_show 20 bash -c "resolvectl status 2>/dev/null | grep -E '^ *(Current DNS Server|DNS Servers?|DNS Domain):'"
+            canary_show 20 bash -c "ss -lun | grep ':53 '"
+            for name in $NAMES pipelines.actions.githubusercontent.com; do
+              canary_show 20 getent ahostsv4 "$name"
+              canary_show 5 curl -sS -o /dev/null -w '%{http_code} %{remote_ip} %{time_connect}\n' --max-time 8 "https://$name"
+            done
+            echo "::endgroup::"
+          }
+          canary_main() {
+            local tmp name addr n=0 bad
+            tmp=$(mktemp -d) || return 1
+            for _ in 1 2 3; do
+              for name in $NAMES; do canary_resolve "$name" >>"$tmp/res.$name" & done
+              wait
+              sleep 1
+            done
+            for name in $NAMES; do
+              if [ -s "$tmp/res.$name" ]; then sort -u "$tmp/res.$name"; else echo "-"; fi | sed "s|^|$name |" >>"$tmp/pairs"
+            done
+            while read -r name addr; do
+              n=$((n + 1))
+              ( { [ "$addr" != "-" ] && canary_reach "$addr"; } || echo "$name $addr" >"$tmp/bad.$n" ) </dev/null &
+            done <"$tmp/pairs"
+            wait
+            bad=$(cat "$tmp"/bad.* 2>/dev/null | sort || true)
+            rm -rf "$tmp"
+            if [ -z "$bad" ]; then
+              echo "egress canary: all $n addresses of $NAMES accept TCP $PORT"
+              return 0
+            fi
+            echo "::error title=egress canary::egress broken on this runner (known westus2 DNS issue, EX-0001): rerun the job"
+            echo "unreachable addresses (name address; '-' means the name did not resolve):"
+            printf '%s\n' "$bad"
+            canary_diag
+            echo "EX-0001 egress canary failed, unreachable: $(printf '%s' "$bad" | tr '\n' ';')" >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
+            return 1
+          }
+          set -m
+          canary_main &
+          main=$!
+          (sleep 90; kill -TERM -- "-$main"; sleep 2; kill -KILL -- "-$main") >/dev/null 2>&1 &
+          dog=$!
+          wait "$main" && rc=0 || rc=$?
+          kill -TERM -- "-$dog" >/dev/null 2>&1 || true
+          if kill -0 -- "-$main" >/dev/null 2>&1; then
+            kill -TERM -- "-$main" >/dev/null 2>&1 || true
+            sleep 1
+            kill -KILL -- "-$main" >/dev/null 2>&1 || true
+          fi
+          if [ "$rc" -eq 143 ] || [ "$rc" -eq 137 ]; then
+            echo "::error title=egress canary::the canary hit its 90 s deadline (EX-0001): rerun the job"
+            rc=124
+          fi
+          exit "$rc"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Only a platform with no native runner needs emulation.
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+        if: matrix.platform != 'linux/amd64' && matrix.platform != 'linux/arm64'
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Image metadata
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ needs.plan.outputs.ghcr }}
+          tags: ${{ inputs.tags }}
+
+      - name: Build for this platform and load it
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ${{ inputs.context }}
+          file: ${{ inputs.dockerfile }}
+          platforms: ${{ matrix.platform }}
+          push: false
+          load: true
+          tags: release-candidate:local
+          labels: ${{ steps.meta.outputs.labels }}
+          # The Actions cache is writable by anyone who can open a pull
+          # request; a publishing build must not read it. One scope per
+          # platform so the architectures do not overwrite each other.
+          cache-from: ${{ !inputs.push && (inputs.egress-policy == 'audit' && 'audit' || 'block') == 'block' && format('type=gha,scope={0}', matrix.arch) || '' }}
+          cache-to: ${{ !inputs.push && (inputs.egress-policy == 'audit' && 'audit' || 'block') == 'block' && format('type=gha,mode=max,scope={0}', matrix.arch) || '' }}
+
+      - name: Require a non-root user
+        if: inputs.require-non-root
+        run: |
+          set -euo pipefail
+          if ! uid="$(docker run --rm --entrypoint id release-candidate:local -u)"; then
+            echo "::error title=non-root::could not run \`id -u\` in the image; add a USER instruction, or set require-non-root: false for an image with no id binary"
+            exit 1
+          fi
+          if [ "$uid" = "0" ]; then
+            echo "::error title=non-root::the image runs as root (uid 0); add a USER instruction to the Dockerfile, or set require-non-root: false"
+            exit 1
+          fi
+          echo "the image runs as uid $uid"
+
+      - name: Check the image
+        if: inputs.docker-test-command != ''
+        env:
+          IMAGE: release-candidate:local
+          COMMAND: ${{ inputs.docker-test-command }}
+        run: bash -eo pipefail -c "$COMMAND"
+
+      - name: Probe with a read-only root filesystem
+        if: inputs.probe-read-only
+        env:
+          PROBE_COMMAND: ${{ inputs.probe-command }}
+        run: |
+          set -euo pipefail
+          if [ -z "$PROBE_COMMAND" ]; then
+            echo "::error title=probe-read-only::probe-command is empty; give it the arguments that make the image exit on its own, such as --version"
+            exit 1
+          fi
+          read -r -a args <<< "$PROBE_COMMAND"
+          if ! docker run --rm --read-only --tmpfs /tmp release-candidate:local "${args[@]}"; then
+            echo "::error title=probe-read-only::the image fails with a read-only root filesystem; it writes outside /tmp. Point its writable paths at a tmpfs or a volume, or leave probe-read-only off"
+            exit 1
+          fi
+
+      - name: Scan the image with Trivy
+        if: inputs.trivy
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: release-candidate:local
+          format: sarif
+          output: trivy-results.sarif
+          severity: ${{ inputs.trivy-severity }}
+          exit-code: ${{ inputs.trivy-exit-code }}
+          ignore-unfixed: ${{ inputs.trivy-ignore-unfixed }}
+          trivyignores: ${{ inputs.trivyignores }}
+
+      - name: Upload Trivy results to the Security tab
+        if: inputs.trivy && always() && hashFiles('trivy-results.sarif') != ''
+        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          sarif_file: trivy-results.sarif
+          category: trivy-image-${{ matrix.arch }}
+
+  # Joins the per-platform images into one multi-arch index under the real
+  # tags, then signs, attests and records provenance for that index.
   merge:
     name: Publish, sign
     # Never on a pull request, whatever the caller passes: this job holds the
@@ -1271,6 +1474,7 @@ jobs:
         if: needs.plan.outputs.publish == 'true'
         env:
           GHCR: ${{ steps.names.outputs.ghcr }}
+          HUB: ${{ steps.names.outputs.dockerhub }}
           TAGS: ${{ steps.meta.outputs.tags }}
           MATRIX: ${{ needs.plan.outputs.matrix }}
           SHA: ${{ github.sha }}
@@ -1330,27 +1534,37 @@ jobs:
             sources+=("${GHCR}@${digest}")
             digests+=("$digest")
           done
-          # Stage the index under a tag of this run only, and learn its digest.
-          staging="${GHCR}:stage-${SHA}-${RUN_ID}-${RUN_ATTEMPT}"
-          docker buildx imagetools create --tag "$staging" "${sources[@]}"
-          digest="$(docker buildx imagetools inspect "$staging" --format '{{.Manifest.Digest}}')"
-          [[ "$digest" =~ $digest_re ]] || fail "the staged index has no valid digest"
-          # The staged index must hold exactly the digests that passed.
-          got="$(docker buildx imagetools inspect --raw "${GHCR}@${digest}" | jq -c '[.manifests[]?.digest] | sort')"
-          want_set="$(printf '%s\n' "${digests[@]}" | jq -R . | jq -sc 'sort')"
-          [ "$got" = "$want_set" ] || fail "the staged index does not hold exactly the recorded platform digests"
-          # Promote that exact digest to the final tags, and require each tag to resolve to it.
-          tags=()
+          # Each registry gets its own index, staged under a tag of this run
+          # only, checked against the recorded platform digests, and promoted
+          # by that digest. A source held by another registry is copied by
+          # buildx. The digests are compared, not assumed equal.
+          registries=("$GHCR")
+          if [ -n "$HUB" ]; then registries+=("$HUB"); fi
+          first_digest=""
+          for repo in "${registries[@]}"; do
+            staging="${repo}:stage-${SHA}-${RUN_ID}-${RUN_ATTEMPT}"
+            docker buildx imagetools create --tag "$staging" "${sources[@]}"
+            digest="$(docker buildx imagetools inspect "$staging" --format '{{.Manifest.Digest}}')"
+            [[ "$digest" =~ $digest_re ]] || fail "the staged index in $repo has no valid digest"
+            # The staged index must hold exactly the digests that passed.
+            got="$(docker buildx imagetools inspect --raw "${repo}@${digest}" | jq -c '[.manifests[]?.digest] | sort')"
+            want_set="$(printf '%s\n' "${digests[@]}" | jq -R . | jq -sc 'sort')"
+            [ "$got" = "$want_set" ] || fail "the staged index in $repo does not hold exactly the recorded platform digests"
+            if [ -z "$first_digest" ]; then first_digest="$digest"; fi
+            [ "$digest" = "$first_digest" ] || fail "the index digest in $repo ($digest) differs from the one in $GHCR ($first_digest)"
+            # Promote that exact digest to this registry's final tags.
+            while IFS= read -r tag; do
+              case "$tag" in "${repo}:"*) ;; *) continue ;; esac
+              docker buildx imagetools create --tag "$tag" "${repo}@${digest}"
+            done <<< "$TAGS"
+          done
+          # Every final tag, in every registry, must resolve to the digest.
           while IFS= read -r tag; do
             [ -n "$tag" ] || continue
-            tags+=("$tag")
-            docker buildx imagetools create --tag "$tag" "${GHCR}@${digest}"
+            [ "$(docker buildx imagetools inspect "$tag" --format '{{.Manifest.Digest}}')" = "$first_digest" ] || fail "$tag does not resolve to the staged index"
           done <<< "$TAGS"
-          for tag in "${tags[@]}"; do
-            [ "$(docker buildx imagetools inspect "$tag" --format '{{.Manifest.Digest}}')" = "$digest" ] || fail "$tag does not resolve to the staged index"
-          done
-          echo "digest=$digest" >> "$GITHUB_OUTPUT"
-          echo "index digest: $digest"
+          echo "digest=$first_digest" >> "$GITHUB_OUTPUT"
+          echo "index digest: $first_digest"
 
       - name: Re-check the final tags before signing
         if: needs.plan.outputs.publish == 'true'

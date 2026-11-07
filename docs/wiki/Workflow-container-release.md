@@ -15,8 +15,9 @@ tested natively, so the arm64 image the test runs against is the arm64 image tha
 |---|---|---|
 | `plan` | `contents: read` | Works out the per-platform build matrix and the lower-cased GHCR image name |
 | `dockerfile-lint` | `contents: read` | hadolint, pinned version and per-architecture sha256, cached and hash-checked on disk |
-| `build` (per platform) | `contents: read`, `packages: write`, `security-events: write` | Builds and tests on a native runner (`ubuntu-24.04-arm` for arm64); non-root check; optional read-only probe; Trivy scan to SARIF. When publishing, pushes a temporary `<sha>-<run id>-<attempt>-<arch>` tag and records its digest |
-| `merge` | `contents: read`, `packages: write`, `id-token: write`, `attestations: write` | Stages the index from the recorded digests under a tag of this run, checks its digest and contents, promotes that exact digest to the real tags, then signs, attaches the SBOM and records provenance. Only after a push, never on a pull request |
+| `build` (per platform, publishing runs only) | `contents: read`, `packages: write`, `security-events: write` | Builds once on a native runner (`ubuntu-24.04-arm` for arm64), pushes under a temporary `<sha>-<run id>-<attempt>-<arch>` tag, pulls it back by digest and runs the non-root check, the optional read-only probe and the Trivy scan (SARIF) on that image; records its digest |
+| `build-local` (per platform, runs that do not publish) | `contents: read`, `security-events: write` | The same checks on one local build. No package write, no login, no push |
+| `merge` | `contents: read`, `packages: write`, `id-token: write`, `attestations: write` | Stages an index per registry from the recorded digests (GHCR, and Docker Hub when enabled) under a tag of this run, checks each one's digest and contents and that the digests agree, promotes that exact digest to the real tags, then signs, attaches the SBOM and records provenance. Only after a push, never on a pull request |
 
 The build job pushes only its own temporary platform tags; the signing identity exists only in `merge`.
 
