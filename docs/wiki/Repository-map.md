@@ -65,6 +65,8 @@ publish).
 | `container-release.yml` | [Release](Which-workflow-do-I-need.md) | Build, test, scan, push multi-arch, sign, SBOM, provenance |
 | `python-docker-release.yml` | [Release](Which-workflow-do-I-need.md) | Old name of the above; forwards everything |
 | `verify-published.yml` | [Release](Which-workflow-do-I-need.md) | Verify a published image from outside |
+| `vendored-drift.yml` | [Automation](Which-workflow-do-I-need.md) | Fail when a vendored file or its generated output no longer matches its lock |
+| `base-image-digest.yml` | [Release](Which-workflow-do-I-need.md) | Scheduled: fail when a pinned base-image digest has a fixable finding its tag's current digest fixes |
 | `python-package-release.yml` | [Release](Which-workflow-do-I-need.md) | Build, check, publish to the GitHub release (PyPI via a direct pypa publish step in the caller's own job) |
 | `artifact-release.yml` | [Release](Which-workflow-do-I-need.md) | Build any file, sign it, attach it to the release |
 | `security.yml` | [Security](Workflow-security.md) | CodeQL, gitleaks, audit, dependency review, Semgrep, Snyk, Scorecard |
@@ -107,6 +109,8 @@ publish).
 | `.githooks/pre-commit` | The gitleaks hook on staged changes, same pin as `security.yml`; copied byte for byte by `new-repo.sh` |
 | `scripts/new-repo.sh` | Adopt or start a repository: writes callers, opens the PR, applies settings |
 | `scripts/wait-ci.sh` | The CI watcher: pinned head SHA, exit codes 0 to 6, optional pinned squash merge ([wait-ci](Action-wait-ci.md)) |
+| `scripts/check_vendored_drift.py` | The drift check `vendored-drift.yml` inlines byte for byte; also runnable locally |
+| `scripts/base_image_digest.py` | The pin reader and report comparison `base-image-digest.yml` inlines byte for byte |
 | `scripts/doppler-ci-set.sh` | Set one Doppler secret without the value touching a command line |
 | `.github/requirements/` | `pip-audit` and `semgrep`: the one-line `.in` and the hash lock `security.yml` carries inline |
 | `scripts/tool_locks.py` | Resolves those locks (`--relock`) and copies them into `security.yml`; `--check` fails on a difference |

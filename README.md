@@ -60,7 +60,7 @@ Read in this order. Each one is short.
 
 ## What is in the repository
 
-Eighteen reusable workflows and one composite action:
+Twenty reusable workflows and one composite action:
 
 | File | What it does |
 |---|---|
@@ -72,6 +72,8 @@ Eighteen reusable workflows and one composite action:
 | `.github/workflows/container-release.yml` | Build, test, Trivy-scan, then publish multi-arch to GHCR (and Docker Hub), sign with cosign, attach a syft SBOM, record SLSA provenance. Builds whatever the Dockerfile builds |
 | `.github/workflows/python-docker-release.yml` | The old name of the above: a thin caller that forwards every input, the secret and the outputs through a `./` reference at its own commit, so an existing pin keeps working. New callers use `container-release.yml` |
 | `.github/workflows/verify-published.yml` | Consumer-side verification of a published image (cosign signature, SPDX SBOM attestation and build provenance verified from outside, then each platform pulled and checked) or of a GitHub release's assets (checksums, provenance, SBOMs). Read-only, no secret, no token beyond the default one |
+| `.github/workflows/vendored-drift.yml` | Opt-in drift check for a file vendored from another repository: each lock file (path, source repository, commit, sha256) must match the file's hash, and an optional generator run with `--check` must agree. Read-only, no secret |
+| `.github/workflows/base-image-digest.yml` | Opt-in scheduled check of a Dockerfile's `FROM image:tag@sha256:...` pins: resolves today's digest of each tag and fails when the pinned digest has a fixable HIGH or CRITICAL finding (Trivy, container-release.yml's flags) that the current digest does not. Read-only, no secret, no issue write |
 | `.github/workflows/python-package-release.yml` | Build the sdist and wheel, `twine check`, refuse a tag that disagrees with the packaged version, smoke-test from the wheel, then publish to the GitHub release with SHA256SUMS and build provenance; PyPI is published from a job in the caller's own workflow with a download step and the pypa publish action as direct steps (Trusted Publishing cannot use a reusable workflow). No secret anywhere |
 | `.github/workflows/artifact-release.yml` | For a file rather than an image (a `.deb`, a firmware binary, a bundle): build it with a command, then publish it to the GitHub release with SHA256SUMS, a keyless cosign signature bundle per file and build provenance. No secret anywhere |
 | `.github/workflows/docs-pages.yml` | Build a static documentation site with a command you supply (MkDocs strict by default) on every pull request; upload it and deploy it to GitHub Pages from the default branch only. The two Pages writes sit on the deploy job alone |
@@ -1183,6 +1185,106 @@ Inputs of `verify-published.yml`:
 | `trivy-version`, `trivy-sha256` | `0.76.1`, its hash | The one pinned Trivy binary; change both together |
 | `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `block`, the measured list, empty | harden-runner; the list covers the GHCR pull, Sigstore, and GitHub's attestation store |
 | `egress-policy-secretless` | `block` | harden-runner policy for the jobs that hold no stored secret, no OIDC token and no write-scoped token, and whose output no privileged job consumes; exactly `audit` or `block`. Security exception EX-0001 is closed (2026-11-02), see [Known CI platform issue: westus2 (EX-0001)](#known-ci-platform-issue-westus2-ex-0001). `audit` opts out if the defect recurs |
+| `timeout-minutes` | `20` | Job timeout |
+
+### Vendored-file drift check
+
+`vendored-drift.yml` is for a file copied from another repository (design tokens, a schema, a shared configuration) that
+must not change except by a deliberate re-vendor. Each vendored file has a lock file in your repository:
+
+```json
+{
+  "vendored": "vendor/brand/tokens.css",
+  "sha256": "<64 lowercase hex characters>",
+  "source": {"repo": "owner/name", "path": "dist/tokens.css", "commit": "<40 hex characters>"}
+}
+```
+
+The job fails when a lock is malformed (exact keys, a real commit id, paths that stay inside the repository, no duplicate
+keys), when the vendored file is not a regular file inside the repository, when its SHA-256 differs from the pin, or, with
+`generator-command`, when that command with `--check` appended exits non-zero (the generated output is stale). No lock file
+is a failure, not a pass. The command is split like a shell would split it but run without one, from the repository root,
+with only `PATH`, `HOME`, `LANG`, `LC_ALL` and `TMPDIR` in its environment. The script is `scripts/check_vendored_drift.py`,
+inlined in the workflow byte for byte, so you can also vendor it and run it locally.
+
+```yaml
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  drift:
+    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/vendored-drift.yml@<sha> # vX.Y.Z
+    permissions:
+      contents: read
+    with:
+      lock-files: vendor/brand/tokens.lock.json
+      generator-command: python3 scripts/generate_tokens.py
+```
+
+Inputs of `vendored-drift.yml`:
+
+| Input | Default | Meaning |
+|---|---|---|
+| `lock-files` | empty | Newline-separated lock file paths; at least one is required |
+| `generator-command` | empty | Optional; run with `--check` appended, no shell, from the repository root |
+| `install-command` | empty | Optional shell run first, for what the generator needs |
+| `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `block`, GitHub only, empty | harden-runner; add the package index an `install-command` reaches to the extra list |
+| `egress-policy-secretless` | `block` | harden-runner policy for this job, which holds no secret; exactly `audit` or `block` |
+| `timeout-minutes` | `10` | Job timeout |
+
+### Base image digest check
+
+`base-image-digest.yml` answers a question a digest pin hides: has the tag been republished with a fix? A pinned
+`FROM image:tag@sha256:...` is reproducible and frozen, and a new advisory is otherwise found when a release scan fails at tag
+time. On a schedule, for each external base image the file pins by digest, the job resolves today's digest of the tag; if it
+differs, it scans the pinned and the current digest with Trivy (the pinned binary of `verify-published.yml`; severities, the
+unfixed filter and the ignore file are the `trivy-severity`, `trivy-ignore-unfixed` and `trivyignores` of
+`container-release.yml`) and fails when the pinned digest has a fixable finding that the current one does not. A finding both
+share, or one with no fix, does not fail. The findings and the line to change go to the job summary. A `FROM` that is not
+pinned by digest, names no tag, or uses a variable no `ARG` before the first `FROM` sets fails the job, and so does a file
+with no pinned external image: the check never passes with nothing checked.
+
+It fails the scheduled run instead of opening an issue, so it holds `contents: read` and nothing else; a caller that wants an
+issue adds a job with `needs:` and `if: failure()`. It scans public registries only, one platform, and compares by advisory
+ID and package.
+
+```yaml
+on:
+  schedule:
+    - cron: "23 5 * * 1"   # weekly; choose your own minute
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  base-image:
+    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/base-image-digest.yml@<sha> # vX.Y.Z
+    permissions:
+      contents: read
+    with:
+      dockerfile: Containerfile
+```
+
+Inputs of `base-image-digest.yml`:
+
+| Input | Default | Meaning |
+|---|---|---|
+| `dockerfile` | `Dockerfile` | Path of the Dockerfile or Containerfile |
+| `allow-unpinned` | `false` | Skip a `FROM` without a digest instead of failing; one pinned image must still be found |
+| `platform` | `linux/amd64` | Platform whose image is scanned |
+| `trivy-severity` | `CRITICAL,HIGH` | Same input and default as in `container-release.yml` |
+| `trivy-ignore-unfixed` | `true` | Same input and default as in `container-release.yml` |
+| `trivyignores` | empty | Path to a `.trivyignore`, as in `container-release.yml` |
+| `exit-code` | `1` | `0` reports in the job summary without failing |
+| `trivy-version`, `trivy-sha256` | `0.76.1`, its hash | The Trivy pin, the same as `verify-published.yml`; change both together |
+| `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `block`, the measured list, empty | harden-runner; add the registry of a base image that is not on Docker Hub or GHCR |
+| `egress-policy-secretless` | `block` | harden-runner policy for this job, which holds no secret; exactly `audit` or `block` |
 | `timeout-minutes` | `20` | Job timeout |
 
 ### Python package release
