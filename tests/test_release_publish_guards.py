@@ -386,7 +386,8 @@ case "$1" in
       if [ "$STUB_TAMPER_MODE" = delete ]; then
         jq --arg n "$STUB_TAMPER" '.assets |= map(select(.name != $n))' "$state" | jq '{assets: .assets}'
       else
-        jq --arg n "$STUB_TAMPER" '.assets |= map(if .name == $n then .digest = "sha256:dead" else . end)' "$state" | jq '{assets: .assets}'
+        jq --arg n "$STUB_TAMPER" '.assets |= map(if .name == $n then .digest = "sha256:dead" else . end)' \
+          "$state" | jq '{assets: .assets}'
       fi
       exit 0
     fi
@@ -399,7 +400,8 @@ case "$1" in
         for a in "${@:3}"; do
           if [ -f "$a" ]; then
             d="sha256:$(sha256sum "$a" | cut -d' ' -f1)"
-            jq --arg n "$(basename "$a")" --arg d "$d" '.assets += [{name: $n, digest: $d}] | .exists = true' "$state" > "$state.new"
+            jq --arg n "$(basename "$a")" --arg d "$d" \
+              '.assets += [{name: $n, digest: $d}] | .exists = true' "$state" > "$state.new"
             mv "$state.new" "$state"
           fi
         done
