@@ -404,7 +404,8 @@ case "$1" in
           exit 1
         fi
         # The embedded assets array is truncated at 30, like the documented default page size.
-        body=$(jq -c '{id: 7, draft: false, tag_name: "v1.0.0", assets: (.assets | .[:30])}' "$state")
+        body=$(jq -c '{id: 7, draft: false, tag_name: "v1.0.0", assets: (.assets | .[:30])}
+                       + (if has("prerelease") then {prerelease: .prerelease} else {} end)' "$state")
         reply "HTTP/2.0 200 OK" "$body"
         ;;
       repos/o/r/releases/7/assets*)
@@ -454,12 +455,26 @@ case "$1" in
             # GitHub renames what it does not keep as is: other characters become periods, and leading
             # and trailing periods are dropped (docs: "Upload a release asset", Notes).
             uploaded=$(basename "$a" | LC_ALL=C sed -E 's/[^A-Za-z0-9._-]/./g; s/^\.+//; s/\.+$//')
+            # asset names are unique case-insensitively (modeled on the 422 an upload of a taken name gets)
+            lower=$(printf '%s' "$uploaded" | LC_ALL=C tr 'A-Z' 'a-z')
+            taken=$(jq -r --arg l "$lower" '[.assets[] | select((.name | ascii_downcase) == $l)] | length' "$state")
+            if [ "$taken" != 0 ]; then
+              echo "gh: Validation Failed: already_exists (HTTP 422)" >&2
+              exit 1
+            fi
             jq --arg n "$uploaded" --arg d "$d" \
               '.assets += [{name: $n, digest: $d, state: "uploaded"}] | .exists = true' "$state" > "$state.new"
             mv "$state.new" "$state"
           fi
         done
         jq '.exists = true' "$state" > "$state.new"; mv "$state.new" "$state"
+        if [ "$2" = create ]; then
+          case " $* " in
+            *" --prerelease "*) jq '.prerelease = true' "$state" > "$state.new" ;;
+            *) jq '.prerelease = false' "$state" > "$state.new" ;;
+          esac
+          mv "$state.new" "$state"
+        fi
         ;;
       *) echo "unexpected gh call: $*" >&2; exit 99 ;;
     esac
@@ -486,6 +501,7 @@ def sandbox(tmp_path):
 
 
 ABSENT = object()  # drop the key from a remote asset
+DEFAULT = object()  # derive the value from the tag
 
 
 def run_upload(
@@ -500,6 +516,7 @@ def run_upload(
     overrides=None,
     dupes=(),
     tag="v1.0.0",
+    prerelease=DEFAULT,
 ):
     """remote: None for no release, else {asset name: digest or None}."""
     tmp, work = sandbox
@@ -508,15 +525,14 @@ def run_upload(
     for fname, content in files.items():
         (asset_dir / fname).write_bytes(content)
     state = tmp / "state.json"
-    state.write_text(
-        json.dumps(
-            {
-                "exists": remote is not None,
-                "draft": draft,
-                "assets": remote_assets(remote, overrides, dupes),
-            }
-        )
-    )
+    release_state = {
+        "exists": remote is not None,
+        "draft": draft,
+        "assets": remote_assets(remote, overrides, dupes),
+    }
+    if prerelease is not ABSENT:
+        release_state["prerelease"] = ("-" in tag.split("+")[0]) if prerelease is DEFAULT else prerelease
+    state.write_text(json.dumps(release_state))
     log, count = tmp / "gh.log", tmp / "count"
     log.write_text("")
     count.write_text("0")
@@ -1085,4 +1101,75 @@ def test_a_hidden_file_is_rejected_not_skipped(sandbox, name, job, dirname, hidd
 @pytest.mark.parametrize(("name", "job", "dirname"), CASES, ids=IDS)
 def test_a_directory_of_only_hidden_files_fails(sandbox, name, job, dirname):
     result, calls, _ = run_upload(sandbox, name, job, dirname, {".only": b"H"})
+    text = result.stdout + result.stderr
     assert result.returncode != 0 and calls == []
+    assert ".only" in text and "naming policy" in text
+
+
+# --- round 7: case-insensitive name collisions, prerelease state of an existing release ---------------------
+
+
+@pytest.mark.parametrize(("name", "job", "dirname"), CASES, ids=IDS)
+@pytest.mark.parametrize(
+    "pair",
+    [("A.whl", "a.whl"), ("Package-1.0.TAR.gz", "package-1.0.tar.GZ"), ("SHA256SUMS", "Sha256sums")],
+)
+def test_names_that_differ_only_in_case_are_refused_before_any_gh_call(sandbox, name, job, dirname, pair):
+    first, second = pair
+    result, calls, _ = run_upload(sandbox, name, job, dirname, {first: b"1", second: b"2", "other.bin": b"3"})
+    text = result.stdout + result.stderr
+    assert result.returncode != 0 and calls == []
+    assert first in text and second in text and "letter case" in text and "naming policy" in text
+
+
+@pytest.mark.parametrize(("name", "job", "dirname"), CASES, ids=IDS)
+def test_the_stub_really_strands_a_case_collision(sandbox, name, job, dirname):
+    """Control for the test above: without the guard, the first file would be uploaded and the second rejected."""
+    tmp, work = sandbox
+    bin_dir = tmp / "bin"
+    (work / "x").mkdir(exist_ok=True)
+    for n in ("A.whl", "a.whl"):
+        (work / "x" / n).write_bytes(n.encode())
+    (tmp / "state.json").write_text(json.dumps({"exists": True, "draft": False, "assets": []}))
+    env = {"PATH": f"{bin_dir}:{os.environ['PATH']}", "STUB_LOG": str(tmp / "l"), "STUB_STATE": str(tmp / "state.json")}
+    first = subprocess.run(["gh", "release", "upload", "v1", "x/A.whl"], env=env, cwd=work, capture_output=True)
+    second = subprocess.run(["gh", "release", "upload", "v1", "x/a.whl"], env=env, cwd=work, capture_output=True)
+    assert first.returncode == 0 and second.returncode != 0
+
+
+def release_with(sandbox, name, job, dirname, tag, prerelease):
+    return run_upload(
+        sandbox,
+        name,
+        job,
+        dirname,
+        {"a.whl": b"A"},
+        remote={"a.whl": digest(b"A")},
+        tag=tag,
+        prerelease=prerelease,
+    )
+
+
+@pytest.mark.parametrize(("name", "job", "dirname"), CASES, ids=IDS)
+@pytest.mark.parametrize(("tag", "marked"), [("v1.2.3-rc.1", True), ("v1.2.3", False), ("v1.2.3+build-1", False)])
+def test_an_existing_release_marked_as_the_tag_implies_is_accepted(sandbox, name, job, dirname, tag, marked):
+    result, calls, _ = release_with(sandbox, name, job, dirname, tag, marked)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert writes(calls) == []
+
+
+@pytest.mark.parametrize(("name", "job", "dirname"), CASES, ids=IDS)
+@pytest.mark.parametrize(("tag", "marked"), [("v1.2.3-rc.1", False), ("v1.2.3", True), ("v1.2.3+build.1", True)])
+def test_an_existing_release_with_the_wrong_prerelease_flag_stops_the_run(sandbox, name, job, dirname, tag, marked):
+    result, calls, _ = release_with(sandbox, name, job, dirname, tag, marked)
+    text = result.stdout + result.stderr
+    assert result.returncode != 0 and "prerelease" in text and "Burn this version" in text
+    assert writes(calls) == []
+
+
+@pytest.mark.parametrize(("name", "job", "dirname"), CASES, ids=IDS)
+@pytest.mark.parametrize("value", ["true", "false", None, 1, 0, [], {}, ABSENT], ids=repr)
+def test_a_non_boolean_prerelease_value_stops_the_run(sandbox, name, job, dirname, value):
+    result, calls, _ = release_with(sandbox, name, job, dirname, "v1.2.3", value)
+    assert result.returncode != 0 and "not a boolean" in result.stdout + result.stderr
+    assert writes(calls) == []

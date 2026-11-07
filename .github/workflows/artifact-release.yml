@@ -575,6 +575,24 @@ jobs:
           if [ "$bad_names" -ne 0 ]; then
             exit 1
           fi
+          # Also policy: names that differ only in letter case (compared in the
+          # C locale) are refused, because one of them could be rejected by the
+          # release after the other was already uploaded. GitHub's exact rule
+          # for case is not verified here.
+          declare -A lower_seen=()
+          for f in "${files[@]}"; do
+            asset=${f##*/}
+            key=$(printf '%s' "$asset" | LC_ALL=C tr 'A-Z' 'a-z')
+            if [ -n "${lower_seen[$key]:-}" ]; then
+              echo "::error title=release asset name::$asset and ${lower_seen[$key]} differ only in letter case, which the asset naming policy refuses"
+              bad_names=1
+            else
+              lower_seen[$key]=$asset
+            fi
+          done
+          if [ "$bad_names" -ne 0 ]; then
+            exit 1
+          fi
           err=$(mktemp)
           declare -A local_names=()
           for f in "${files[@]}"; do local_names["${f##*/}"]=1; done
@@ -624,6 +642,17 @@ jobs:
             fi
             if ! assets=$(jq -ce 'select(type == "array" and all(.[]; type == "array")) | add // [] | select(all(.[]; type == "object" and (.name | type) == "string"))' <<< "$pages" 2> /dev/null); then
               echo "::error title=release lookup::the asset listing for release $TAG is not a list of assets"
+              exit 1
+            fi
+            expected_pre=false
+            if [[ "${TAG%%+*}" == *-* ]]; then expected_pre=true; fi
+            release_pre=$(jq -r 'if (.prerelease | type) == "boolean" then (.prerelease | tostring) else "invalid" end' <<< "$body")
+            if [ "$release_pre" = "invalid" ]; then
+              echo "::error title=release lookup::the prerelease field of release $TAG is not a boolean"
+              exit 1
+            fi
+            if [ "$release_pre" != "$expected_pre" ]; then
+              echo "::error title=release $TAG::the release has prerelease=$release_pre but the tag implies prerelease=$expected_pre. Burn this version and publish a new one."
               exit 1
             fi
             found=1
