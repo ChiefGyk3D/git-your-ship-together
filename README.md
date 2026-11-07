@@ -1023,6 +1023,33 @@ signed or attested from a pull request, and a test holds that order. With
 other run builds and scans only, with a warning annotation and a step summary
 that name the inputs to set.
 
+**BREAKING CHANGE: publishing is now an allow-list.** A caller that sets
+`push: true` publishes only for a push of a `vMAJOR.MINOR.PATCH` tag (SemVer
+2.0.0 pre-release and build parts allowed) unless it opts back in. A refused run
+does not fail: it builds and scans, and prints a `publish skipped` warning
+annotation and a job summary that name the reason and the inputs to set. Other
+changes in the same release:
+
+- the build is split into `build` (publishing runs only, `packages: write`) and
+  `build-local` (runs that do not publish, no package write), so the per-platform
+  job names a branch protection rule might require can show as skipped;
+- each enabled registry gets its own index, built from the verified platform
+  digests and promoted by digest;
+- the `platforms` input is validated as written (no spaces, no empty entries) and
+  a platform listed twice is refused;
+- the tag check uses the SemVer 2.0.0 grammar (`v1`, `v1.2` and `vnot-a-release`
+  no longer publish);
+- `allowed-publish-events` is validated, not normalized.
+
+Required caller changes. `penguin-overlord` and `solarstorm_scout` publish from
+pushes to `main`, a weekly schedule and manual runs (`push: ${{ github.event_name
+!= 'pull_request' }}`), so each adds `allowed-publish-events:
+push,schedule,workflow_dispatch` and `require-tag-ref: false` when it re-pins.
+A caller that releases only from `v*.*.*` tag pushes changes nothing.
+`hypeman` calls `python-package-release.yml`, not this workflow, and publishes on
+a `release` event; it needs that workflow's publish inputs instead (see its
+release notes), not these two.
+
 **Migrating a caller that published from branches, schedules or manual runs.**
 A caller with `push: ${{ github.event_name != 'pull_request' }}` that publishes
 on a push to `main`, a weekly schedule or `workflow_dispatch` (the shape of
@@ -1070,8 +1097,13 @@ permissions; the called workflow can only narrow them.
 
 **Docker Hub.** With `dockerhub: true` and credentials, `merge` builds a
 separate index in each registry from the same verified GHCR platform digests
-(buildx copies the manifests across registries, as the previous version of this
-workflow also relied on), checks each registry's index against the recorded
+(buildx copies the manifests across registries; the previous version of this
+workflow relied on it too, and it is observed behavior in production:
+`ChiefGyk3D/Stream-Daemon` workflow run 41512180852, 2026-11-02, succeeded with
+`dockerhub` enabled and logged `copying sha256:... from ghcr.io/... to docker.io/...`
+before signing one digest in both registries. Docker's documentation says sources
+must already exist in the destination registry, so this stays a documented risk:
+if buildx ever enforces that, the Docker Hub step fails before anything is signed), checks each registry's index against the recorded
 digests, requires the two index digests to be equal, promotes that digest to the
 registry's tags, and signs and attests it. The build jobs never hold Docker Hub
 credentials. A temporary `stage-...` tag is left in each registry.

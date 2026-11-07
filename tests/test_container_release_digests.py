@@ -463,6 +463,83 @@ def test_a_refused_publish_is_loud_and_names_the_inputs(tmp_path):
     assert "::warning" not in out
 
 
+REFUSAL_REASONS = [
+    ({"EVENT": "schedule", "REF": "refs/heads/main"}, "is not in allowed-publish-events"),
+    ({"EVENT": "workflow_dispatch", "REF": "refs/heads/main"}, "is not in allowed-publish-events"),
+    ({"EVENT": "push", "REF": "refs/heads/main"}, "is not a vMAJOR.MINOR.PATCH release tag"),
+    ({"EVENT": "push", "REF": "refs/tags/v1.2"}, "is not a vMAJOR.MINOR.PATCH release tag"),
+    ({"EVENT": "pull_request", "REF": "refs/pull/1/merge"}, "pull requests never publish"),
+    ({"EVENT": "pull_request_target", "REF": "refs/heads/main"}, "pull requests never publish"),
+]
+
+
+@pytest.mark.parametrize("env,reason", REFUSAL_REASONS, ids=lambda v: case_id(v) if isinstance(v, dict) else v[:20])
+def test_a_push_true_caller_in_a_refused_context_gets_a_prominent_warning_and_does_not_publish(tmp_path, env, reason):
+    code, publish, out = decide(tmp_path, **env)
+    assert code == 0 and publish == "false"
+    assert "::warning title=publish skipped::" in out, "an annotation, not a log line"
+    assert "::error" not in out, "a warning, not a failure"
+    summary = (tmp_path / "summary").read_text()
+    for text in (out, summary):
+        assert reason in text
+        assert "allowed-publish-events" in text and "require-tag-ref" in text
+    assert "### Publish skipped" in summary and "did NOT publish" in summary
+    assert f"event '{env['EVENT']}'" in summary and f"ref '{env['REF']}'" in summary
+
+
+def test_the_allowed_direction_publishes_and_says_nothing_about_a_skip(tmp_path):
+    code, publish, out = decide(tmp_path, EVENT="push", REF="refs/tags/v1.2.3")
+    assert code == 0 and publish == "true"
+    assert "publish skipped" not in out and "::warning" not in out
+    summary = tmp_path / "summary"
+    assert not summary.exists() or summary.read_text() == ""
+    # the widened inputs of the migration note publish from a branch, schedule and manual run
+    for event in ("push", "schedule", "workflow_dispatch"):
+        sub = tmp_path / event
+        sub.mkdir()
+        code, publish, out = decide(
+            sub,
+            EVENT=event,
+            REF="refs/heads/main",
+            ALLOWED_EVENTS="push,schedule,workflow_dispatch",
+            REQUIRE_TAG="false",
+        )
+        assert publish == "true" and "publish skipped" not in out
+
+
+def test_a_refused_run_skips_the_publishing_jobs_and_runs_only_the_local_build():
+    doc = load(RELEASE)
+    ran = {
+        publish: [j for j in ("build", "build-local", "merge") if evaluate(jobs(doc)[j].get("if"), publish)]
+        for publish in (True, False)
+    }
+    assert ran == {True: ["build", "merge"], False: ["build-local"]}
+
+
+def test_the_breaking_change_is_documented_with_the_caller_inputs():
+    root = WORKFLOWS.parent.parent
+    for doc in (root / "README.md", root / "docs" / "wiki" / "Workflow-container-release.md"):
+        text = doc.read_text()
+        assert "BREAKING" in text, doc.name
+        for needle in (
+            "allowed-publish-events",
+            "require-tag-ref: false",
+            "penguin-overlord",
+            "solarstorm_scout",
+            "hypeman",
+            "vMAJOR.MINOR.PATCH",
+        ):
+            assert needle in text, (doc.name, needle)
+
+
+def test_the_docker_hub_cross_registry_copy_is_documented_as_observed_behavior():
+    root = WORKFLOWS.parent.parent
+    for doc in (root / "README.md", root / "docs" / "wiki" / "Workflow-container-release.md"):
+        text = doc.read_text()
+        assert "41512180852" in text and "observed" in text and "Stream-Daemon" in text, doc.name
+    assert "41512180852" in Path(__file__).read_text(), "the stub documents where its default comes from"
+
+
 @pytest.mark.parametrize(
     "value",
     [
@@ -523,12 +600,12 @@ def any_refused_case_publishes(tmp_path_factory, script: str) -> bool:
 
 def weakened_scripts() -> dict[str, str]:
     s = step("plan", "Decide whether to publish")["run"]
-    pr = 'pull_request | pull_request_target | "") ;;'
+    pr = 'pull_request | pull_request_target | "")'
     assert pr in s
     start = s.index("is_semver_release_tag() {")
     end = s.index("\n}\n", start) + 3
     out = {
-        "no pull_request refusal": s.replace(pr, '"") ;;'),
+        "no pull_request refusal": s.replace(pr, '"")'),
         "tag check always passes": s[:start] + "is_semver_release_tag() { return 0; }\n" + s[end:],
         "tag check ignored": s.replace('"$REQUIRE_TAG" != "false"', '"$REQUIRE_TAG" = "never"'),
         "any event allowed": s.replace('*",$EVENT,"*)', "*)"),
@@ -604,6 +681,12 @@ def test_the_index_is_staged_under_a_run_scoped_tag_and_promoted_by_digest():
 # from the sources (a single index source is copied unchanged), and moves every named tag. `hooks` simulate another
 # writer moving a tag after the Nth create; `drops_last` / `adds_extra` (optionally for one `flaw_host`) simulate a
 # misbehaving create. What it cannot model is a real registry and the real buildx output format.
+# DEFAULT: cross-registry copy is allowed. That is observed behavior of the original workflow in production:
+# ChiefGyk3D/Stream-Daemon run 41512180852 (2026-11-02, success, dockerhub enabled) shows buildx logging
+# `copying sha256:... from ghcr.io/... to docker.io/...` and publishing one index digest to both registries.
+# `strict` stays as a documented risk: the Docker documentation says sources must already exist in the
+# destination registry; if a future buildx enforced that, the Docker Hub path fails closed (see the
+# strict-mode test) before anything is signed.
 STUB = r"""#!/usr/bin/env python3
 import hashlib, json, sys
 STATE = %(state)r

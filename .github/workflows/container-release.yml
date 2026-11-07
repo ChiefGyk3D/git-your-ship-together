@@ -386,21 +386,26 @@ jobs:
             done
           done
           ok=false
+          reason=""
           case "$EVENT" in
-            pull_request | pull_request_target | "") ;;
-            *) case ",$ALLOWED_EVENTS," in ",*,") ok=true ;; *",$EVENT,"*) ok=true ;; esac ;;
+            pull_request | pull_request_target | "") reason="pull requests never publish (event '$EVENT')" ;;
+            *)
+              case ",$ALLOWED_EVENTS," in ",*,") ok=true ;; *",$EVENT,"*) ok=true ;; esac
+              if [ "$ok" != true ]; then reason="event '$EVENT' is not in allowed-publish-events ('$ALLOWED_EVENTS')"; fi
+              ;;
           esac
           if [ "$ok" = true ] && [ "$REQUIRE_TAG" != "false" ] && ! is_semver_release_tag "$REF"; then
             ok=false
+            reason="ref '$REF' is not a vMAJOR.MINOR.PATCH release tag (require-tag-ref is true)"
           fi
           publish=false
           if [ "$PUSH" = "true" ]; then
             if [ "$ok" = true ]; then
               publish=true
             else
-              msg="push is true but this run will NOT publish: event '$EVENT' on ref '$REF' is not allowed. Publishing needs the event in allowed-publish-events (now '$ALLOWED_EVENTS') and, while require-tag-ref is true, a vMAJOR.MINOR.PATCH tag ref. To publish from branches, schedules or manual runs, set allowed-publish-events (for example push,schedule,workflow_dispatch) and require-tag-ref: false in the caller. This run builds and scans only."
+              msg="push is true but this run did NOT publish: $reason. (event '$EVENT', ref '$REF'.) Publishing needs the event in allowed-publish-events and, while require-tag-ref is true, a vMAJOR.MINOR.PATCH tag ref. To publish from branches, schedules or manual runs, set allowed-publish-events (for example push,schedule,workflow_dispatch) and require-tag-ref: false in the caller. This run only built and scanned."
               echo "::warning title=publish skipped::$msg"
-              { echo "### Publish skipped"; echo; echo "$msg"; } >> "$GITHUB_STEP_SUMMARY"
+              { echo "### Publish skipped: this run did NOT publish"; echo; echo "$msg"; } >> "$GITHUB_STEP_SUMMARY"
             fi
           fi
           echo "publish=$publish" >> "$GITHUB_OUTPUT"
