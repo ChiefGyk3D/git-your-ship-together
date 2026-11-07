@@ -5,9 +5,14 @@ name what a caller sees after that.
 
 ## Unreleased
 
+Nothing yet.
+
+## v1.30.0 (2026-11-06)
+
 ### New: opt-in `vendored-drift.yml` and `base-image-digest.yml` (issue #296)
 
-Two new reusable workflows. Nothing existing changes: a caller sees them only by adding a job that calls one.
+Two new reusable workflows. Both are opt-in and existing callers are unchanged: a caller sees them only after it re-pins
+(re-pinning downstream repositories is separate work) and adds a job that calls one.
 
 - **`vendored-drift.yml`.** For a file vendored from another repository. Each lock file (path, source repository, commit,
   SHA-256) must match the vendored file's hash, and an optional generator run with `--check` must agree. No lock file is a
