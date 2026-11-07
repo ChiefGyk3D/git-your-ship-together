@@ -960,7 +960,7 @@ on:
   pull_request:
     branches: [main]
   schedule:
-    - cron: '0 5 * * 1'   # weekly rebuild of `latest`, so base-image fixes ship between commits
+    - cron: '0 5 * * 1'   # weekly build and scan; it publishes only if the caller allows it, see below
   workflow_dispatch:
 
 permissions:
@@ -980,6 +980,10 @@ jobs:
     with:
       dockerfile: Docker/Dockerfile
       push: ${{ github.event_name != 'pull_request' }}
+      # Publishing is allowed by default only for a push of a vMAJOR.MINOR.PATCH tag. To publish
+      # from main, the weekly schedule and manual runs as well, add both lines:
+      #   allowed-publish-events: push,schedule,workflow_dispatch
+      #   require-tag-ref: false
       dockerhub: true
       docker-test-command: docker run --rm "$IMAGE" python -c "import stream_daemon"
       egress-policy: block
@@ -1007,12 +1011,106 @@ on `ubuntu-24.04-arm`, `linux/amd64` on `ubuntu-24.04`. `docker-test-command`
 and the Trivy scan therefore run against the real arm64 image, not an emulated
 one. QEMU is set up only for a platform with no native runner. When
 publishing, each platform job pushes its image under a temporary tag
-`ghcr.io/<owner>/<repo>:<sha>-<arch>` (for example `<sha>-linux-arm64`), and a
-`merge` job joins them into the index under the real tags. The temporary tags
+`ghcr.io/<owner>/<repo>:<sha>-<run id>-<attempt>-<arch>` and records the digest of
+that push; a `merge` job checks each digest is an image of its platform and joins
+the digests (not the tags) into the index under the real tags. The temporary tags
 stay in GHCR beside the index; delete them when you no longer need them.
 
 On a pull request it builds, tests and scans and stops. Nothing is pushed,
-signed or attested from a pull request, and a test holds that order.
+signed or attested from a pull request, and a test holds that order. With
+`push: true` the workflow publishes only for the events in
+`allowed-publish-events` (default `push`) on a `vMAJOR.MINOR.PATCH` tag ref; any
+other run builds and scans only, with a warning annotation and a step summary
+that name the inputs to set.
+
+**BREAKING CHANGE: publishing is now an allow-list.** A caller that sets
+`push: true` publishes only for a push of a `vMAJOR.MINOR.PATCH` tag (SemVer
+2.0.0 pre-release and build parts allowed) unless it opts back in. A refused run
+does not fail: it builds and scans, and prints a `publish skipped` warning
+annotation and a job summary that name the reason and the inputs to set. Other
+changes in the same release:
+
+- the build is split into `build` (publishing runs only, `packages: write`) and
+  `build-local` (runs that do not publish, no package write), so the per-platform
+  job names a branch protection rule might require can show as skipped;
+- each enabled registry gets its own index, built from the verified platform
+  digests and promoted by digest;
+- the `platforms` input is validated as written (no spaces, no empty entries) and
+  a platform listed twice is refused;
+- the tag check uses the SemVer 2.0.0 grammar (`v1`, `v1.2` and `vnot-a-release`
+  no longer publish);
+- `allowed-publish-events` is validated, not normalized.
+
+Required caller changes. `penguin-overlord` and `solarstorm_scout` publish from
+pushes to `main`, a weekly schedule and manual runs (`push: ${{ github.event_name
+!= 'pull_request' }}`), so each adds `allowed-publish-events:
+push,schedule,workflow_dispatch` and `require-tag-ref: false` when it re-pins.
+A caller that releases only from `v*.*.*` tag pushes changes nothing.
+`hypeman` calls `python-package-release.yml`, not this workflow, and publishes on
+a `release` event; it needs that workflow's publish inputs instead (see its
+release notes), not these two.
+
+**Migrating a caller that published from branches, schedules or manual runs.**
+A caller with `push: ${{ github.event_name != 'pull_request' }}` that publishes
+on a push to `main`, a weekly schedule or `workflow_dispatch` (the shape of
+`penguin-overlord` and `solarstorm_scout`) stops publishing after it re-pins to
+this version, until it sets both inputs it needs:
+
+```yaml
+    with:
+      push: ${{ github.event_name != 'pull_request' }}
+      allowed-publish-events: push,schedule,workflow_dispatch   # the events it publishes from
+      require-tag-ref: false                                    # also publish from branches
+```
+
+`allowed-publish-events: "*"` allows every event except pull requests. A caller
+that publishes only from `v*.*.*` tag pushes needs no change.
+
+When publishing, each leg builds once, pushes that build under the temporary
+tag, pulls it back by digest and runs the non-root check, the probe and the Trivy
+scan against it; `merge` receives exactly the digest that passed. The index is
+staged under a tag of this run, its digest and contents are checked against the
+recorded digests, and only that digest is promoted to the final tags, signed and
+attested. The Trivy scan and checks therefore run after the image is pushed under
+its temporary tag; a failing check fails the job before `merge` runs.
+
+What the final-tag checks prove, and what they do not. After promotion, and
+again just before signing and after attestation, `merge` reads each final tag
+and requires it to resolve to the staged digest. That shows each tag pointed
+at the digest at the moment it was read. It does not make a tag immutable, it
+does not make the tags change together, and it cannot stop another writer with
+registry access from moving a tag afterwards. Signatures, the SBOM and the
+provenance attach to the digest, so consumers should deploy by digest or verify
+the signature of the digest they pull; serialize releases of one image with a
+`concurrency` group in the caller if two runs may publish the same tags.
+
+**Two build jobs.** Every action in a job can read the job's `GITHUB_TOKEN`
+([Use GITHUB_TOKEN for authentication](https://docs.github.com/en/actions/tutorials/authenticate-with-github_token)),
+and a job's `permissions:` cannot depend on an expression, so the work is split
+by a job-level `if`
+([Control the execution of jobs](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-jobs-with-conditions)).
+`build` runs only when the run publishes and holds `packages: write`.
+`build-local` runs when it does not, with `contents: read` and the SARIF upload
+permission only, no login and no push. The checks are the same text in both
+jobs, and a test holds them identical. The caller still grants the union of the
+permissions; the called workflow can only narrow them.
+
+**Docker Hub.** With `dockerhub: true` and credentials, `merge` builds a
+separate index in each registry from the same verified GHCR platform digests
+(buildx copies the manifests across registries; the previous version of this
+workflow relied on it too, and it is observed behavior in production:
+`ChiefGyk3D/Stream-Daemon` workflow run 41512180852, 2026-11-02, succeeded with
+`dockerhub` enabled and logged `copying sha256:... from ghcr.io/... to docker.io/...`
+before signing one digest in both registries. Docker's documentation says sources
+must already exist in the destination registry, so this stays a documented risk:
+if buildx ever enforces that, the Docker Hub step fails before anything is signed), checks each registry's index against the recorded
+digests, requires the two index digests to be equal, promotes that digest to the
+registry's tags, and signs and attests it. The build jobs never hold Docker Hub
+credentials. A temporary `stage-...` tag is left in each registry.
+
+Platforms are `linux/<arch>` or `linux/<arch>/v<N>` entries separated by commas,
+with no spaces and no empty entries (anything else fails the plan job), each
+platform once (`linux/arm64` and `linux/arm64/v8` are the same platform).
 
 Verify a published image:
 
@@ -1075,6 +1173,8 @@ Inputs of `container-release.yml`:
 | `egress-policy-secretless` | `block` | harden-runner policy for the jobs that hold no stored secret, no OIDC token and no write-scoped token, and whose output no privileged job consumes; exactly `audit` or `block`. Security exception EX-0001 is closed (2026-11-02), see [Known CI platform issue: westus2 (EX-0001)](#known-ci-platform-issue-westus2-ex-0001). `audit` opts out if the defect recurs |
 | `doppler-project`, `doppler-config`, `doppler-identity-id` | empty | See [Doppler setup](#doppler-setup) |
 | `doppler-trusted-refs-only` | `true` | Fetch CI secrets only on the default branch, a version tag (vN.N.N) or a schedule; never on a pull request. See [Doppler setup](#doppler-setup) |
+| `allowed-publish-events` | `push` | Events from which `push: true` may publish, sign and attest: `*`, or lowercase event names separated by commas with no spaces, no empty or repeated entries (anything else fails the plan job). `*` allows every event except `pull_request` and `pull_request_target`, which never publish |
+| `require-tag-ref` | `true` | Publish only from a `refs/tags/vMAJOR.MINOR.PATCH` ref, with optional SemVer 2.0.0 pre-release and build parts (no leading zeroes, no empty identifiers); `v1`, `v1.2` and `vnot-a-release` do not publish. With `allowed-publish-events: "*"` and `require-tag-ref: false` the earlier behavior (any non-pull-request ref) is restored |
 | `timeout-minutes` | `60` | Timeout of each platform's build job; a platform built under QEMU is slow |
 
 Outputs: `digest` and `image` (`ghcr.io/...@sha256:...`) of the published

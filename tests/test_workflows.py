@@ -228,6 +228,11 @@ ALLOWED_WRITES = {
     ("python-docker-release.yml", "release", "attestations"),  # forwarded
     # SARIF uploads to the Security tab.
     ("container-release.yml", "build", "security-events"),
+    (
+        "container-release.yml",
+        "build-local",
+        "security-events",
+    ),  # the same SARIF upload, on a run that does not publish
     ("python-docker-release.yml", "release", "security-events"),  # forwarded
     # The package release: the GitHub release is created and its assets
     # uploaded with the job's own token, with provenance recorded for every
@@ -914,6 +919,10 @@ def test_the_fixture_package_never_publishes():
     assert jobs(doc)["fixture-package"]["with"]["publish"] is False
 
 
+# The plan job decides once (push input, allowed event, v* tag ref); pushing and signing follow that decision.
+PUBLISH_GATE = "needs.plan.outputs.publish == 'true'"
+
+
 def release_steps(job_name: str) -> dict:
     doc = load(WORKFLOWS / "container-release.yml")
     return {s.get("name"): s for s in steps_of(jobs(doc)[job_name])}
@@ -929,12 +938,14 @@ def test_release_signs_attests_and_records_provenance_only_after_a_push():
     )
     for name in gated:
         assert name in steps, f"merge step {name!r} is missing"
-        assert str(steps[name].get("if", "")).startswith("inputs.push"), f"{name!r} must be gated on inputs.push"
+        assert str(steps[name].get("if", "")).startswith(PUBLISH_GATE), (
+            f"{name!r} must be gated on the plan's publish decision"
+        )
     push = release_steps("build")["Build and push this platform's image"]
     assert push["with"]["provenance"] is False and push["with"]["sbom"] is False, (
         "BuildKit attestations would duplicate the explicit cosign/syft artefacts"
     )
-    assert push["if"] == "inputs.push"
+    assert push["if"] == PUBLISH_GATE
     assert not set(gated) & set(release_steps("build")), "the build job must not sign or attest"
 
 
@@ -942,7 +953,7 @@ def test_a_publishing_build_never_reads_the_actions_cache():
     """The cache is writable from any pull request; a poisoned layer in a signed release is unrecoverable."""
     push = release_steps("build")["Build and push this platform's image"]["with"]
     assert "cache-from" not in push and "cache-to" not in push
-    local = release_steps("build")["Build for this platform and load it"]["with"]
+    local = release_steps("build-local")["Build for this platform and load it"]["with"]
     assert "!inputs.push" in local["cache-from"], "the local build may use the cache only when not publishing"
     assert "!inputs.push" in local["cache-to"]
     assert all("cache" not in key for step in release_steps("merge").values() for key in step.get("with", {}))
@@ -961,10 +972,10 @@ def test_the_release_builds_each_platform_natively_and_merges_only_when_publishi
     assert "linux/arm64) runner=ubuntu-24.04-arm" in plan
     needs = merge["needs"] if isinstance(merge["needs"], list) else [merge["needs"]]
     assert "build" in needs
-    assert merge["if"] == "inputs.push && github.event_name != 'pull_request'", (
+    assert merge["if"] == f"{PUBLISH_GATE} && github.event_name != 'pull_request'", (
         "merge publishes only when told and never on a pull request"
     )
-    load_step = release_steps("build")["Build for this platform and load it"]["with"]
+    load_step = release_steps("build-local")["Build for this platform and load it"]["with"]
     assert load_step["platforms"] == "${{ matrix.platform }}" and load_step["load"] is True
     assert triggers(doc)["workflow_call"]["outputs"]["digest"]["value"] == "${{ jobs.merge.outputs.digest }}"
 

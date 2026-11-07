@@ -155,6 +155,14 @@ on:
         description: Fetch CI secrets only on the default branch, a version tag (vN.N.N) or a schedule; never on a pull request or another branch. `false` restores fetching on every same-repository run.
         type: boolean
         default: true
+      allowed-publish-events:
+        description: Comma-separated event names (`github.event_name`) from which `push` may publish. Default `push`. `*` allows every event except `pull_request` and `pull_request_target`, which never publish. Together with `require-tag-ref` this is the allow-list for pushing, signing and attesting.
+        type: string
+        default: push
+      require-tag-ref:
+        description: Publish only from a `refs/tags/v*` ref. `false` also allows other refs, for a caller that publishes from a branch on purpose.
+        type: boolean
+        default: true
       timeout-minutes:
         description: Job timeout. Multi-arch builds that compile native code need a generous one.
         type: number
@@ -220,4 +228,6 @@ jobs:
       doppler-config: ${{ inputs.doppler-config }}
       doppler-identity-id: ${{ inputs.doppler-identity-id }}
       doppler-trusted-refs-only: ${{ inputs.doppler-trusted-refs-only }}
+      allowed-publish-events: ${{ inputs.allowed-publish-events }}
+      require-tag-ref: ${{ inputs.require-tag-ref }}
       timeout-minutes: ${{ inputs.timeout-minutes }}

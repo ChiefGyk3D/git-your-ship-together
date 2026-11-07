@@ -67,10 +67,16 @@ def test_the_lint_job_is_gated_on_its_input_and_can_be_made_advisory():
 
 
 def test_the_non_root_check_follows_the_load_build_and_is_gated_on_its_input():
-    names = [s.get("name") for s in steps_of(jobs(load(RELEASE))["build"])]
     step = build_steps()["Require a non-root user"]
     assert step["if"] == "inputs.require-non-root"
-    assert names.index("Build for this platform and load it") < names.index("Require a non-root user")
+    # the checks follow the image under test in both jobs: the local build, or the pushed image pulled back by digest
+    for job, first in (
+        ("build-local", "Build for this platform and load it"),
+        ("build", "Pull and verify the pushed image"),
+    ):
+        names = [s.get("name") for s in steps_of(jobs(load(RELEASE))[job])]
+        assert names.index(first) < names.index("Require a non-root user"), job
+    names = [s.get("name") for s in steps_of(jobs(load(RELEASE))["build"])]
     assert names.index("Require a non-root user") < names.index("Check the image")
     assert "--entrypoint id" in step["run"] and "-u" in step["run"] and "USER" in step["run"]
     assert triggers(load(RELEASE))["workflow_call"]["inputs"]["require-non-root"]["default"] is True
