@@ -556,34 +556,64 @@ jobs:
             exit 1
           fi
           err=$(mktemp)
+          declare -A local_names=()
+          for f in "${files[@]}"; do local_names["${f##*/}"]=1; done
 
-          # One lookup that tells "no such release" (HTTP 404) from every other
-          # failure; anything but a 404 or a well-formed release stops the run.
+          # Read the release for this tag. The HTTP status comes from the
+          # status line of `gh api --include`, never from message text: 200 is
+          # a published release, 404 means none (then drafts are checked),
+          # anything else, or no status line at all, stops the run. The assets
+          # are read from their own paginated endpoint, not the embedded array.
+          status_re='^[Hh][Tt][Tt][Pp]/[0-9.]+[[:space:]]+([0-9]{3})([[:space:]].*)?$'
           fetch_release() {
-            if release=$(gh api "repos/$GH_REPO/releases/tags/$TAG" 2> "$err"); then
-              if ! jq -e '.assets | type == "array"' <<< "$release" > /dev/null 2>&1; then
-                echo "::error title=release lookup::the release response for $TAG is not a release object"
+            local out first status="" body
+            out=$(gh api --include "repos/$GH_REPO/releases/tags/$TAG" 2> "$err") || true
+            first=${out%%$'\n'*}
+            first=${first%$'\r'}
+            if [[ "$first" =~ $status_re ]]; then status=${BASH_REMATCH[1]}; fi
+            if [ "$status" = "404" ]; then
+              if ! pages=$(gh api --paginate --slurp "repos/$GH_REPO/releases?per_page=100" 2> "$err"); then
+                echo "::error title=release lookup::could not list releases to look for a draft of $TAG: $(tr '\n' ' ' < "$err")"
                 exit 1
               fi
-              found=1
-            elif grep -q 'HTTP 404' "$err"; then
+              if jq -e --arg t "$TAG" '[.[][] | select(.tag_name == $t)] | length > 0' <<< "$pages" > /dev/null 2>&1; then
+                echo "::error title=release $TAG::a draft release for $TAG exists. A draft is not completed automatically: publish or delete it, or burn this version and publish a new one."
+                exit 1
+              fi
               found=0
-              release=""
-            else
-              echo "::error title=release lookup::could not read release $TAG: $(tr '\n' ' ' < "$err")"
+              assets="[]"
+              return 0
+            fi
+            if [ "$status" != "200" ]; then
+              echo "::error title=release lookup::could not read release $TAG (HTTP status ${status:-none}): $(tr '\n' ' ' < "$err")"
               exit 1
             fi
+            body=$(sed '1,/^\r\{0,1\}$/d' <<< "$out")
+            if ! release_id=$(jq -er 'select(.draft == false) | .id | select(type == "number")' <<< "$body" 2> /dev/null); then
+              echo "::error title=release lookup::the response for $TAG is not a published release object"
+              exit 1
+            fi
+            if ! pages=$(gh api --paginate --slurp "repos/$GH_REPO/releases/$release_id/assets?per_page=100" 2> "$err"); then
+              echo "::error title=release lookup::could not list the assets of release $TAG: $(tr '\n' ' ' < "$err")"
+              exit 1
+            fi
+            if ! assets=$(jq -ce '[.[][]] | select(all(.[]; (.name | type) == "string"))' <<< "$pages" 2> /dev/null); then
+              echo "::error title=release lookup::the asset listing for release $TAG is not a list of assets"
+              exit 1
+            fi
+            found=1
           }
 
-          # Each local file is absent from the release, identical to the asset
-          # of the same name there (sha256), or a difference. Sets missing and differ.
+          # The release must hold exactly the files built here: each one
+          # absent or identical (sha256), and no asset that was not built here.
+          # Sets missing and differ.
           compare_assets() {
             missing=()
             differ=0
             for f in "${files[@]}"; do
               asset=${f##*/}
               want="sha256:$(sha256sum "$f" | cut -d' ' -f1)"
-              have=$(jq -r --arg n "$asset" '[.assets[] | select(.name == $n)] | if length == 0 then "absent" else (.[0].digest // "unknown") end' <<< "$release")
+              have=$(jq -r --arg n "$asset" '[.[] | select(.name == $n)] | if length == 0 then "absent" else (.[0].digest // "unknown") end' <<< "$assets")
               if [ "$have" = "absent" ]; then
                 missing+=("$f")
               elif [ "$have" = "unknown" ]; then
@@ -596,6 +626,12 @@ jobs:
                 differ=1
               fi
             done
+            while IFS= read -r remote_name; do
+              if [ -z "${local_names[$remote_name]:-}" ]; then
+                echo "::error title=release asset::$remote_name is on release $TAG but is not part of this build"
+                differ=1
+              fi
+            done < <(jq -r '.[].name' <<< "$assets")
           }
 
           fetch_release
@@ -633,4 +669,4 @@ jobs:
             echo "::error title=release $TAG::the release does not hold exactly this build's assets after the upload (${#missing[@]} missing, differing: $differ). Burn this version and publish a new one."
             exit 1
           fi
-          echo "release $TAG verified: every asset present with the identical digest"
+          echo "release $TAG verified: exactly this build's assets, each with the identical digest"

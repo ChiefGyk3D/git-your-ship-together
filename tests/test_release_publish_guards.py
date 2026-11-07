@@ -369,29 +369,70 @@ def test_a_loosened_semver_pattern_would_be_caught(tmp_path, name, job, _d):
 STUB = r"""#!/usr/bin/env bash
 echo "$*" >> "$STUB_LOG"
 state="$STUB_STATE"
+reply() {  # status line, then a header, a blank line and the body, as `gh api --include` prints them
+  printf '%s\r\nContent-Type: application/json\r\n\r\n%s\n' "$1" "$2"
+}
 case "$1" in
   api)
-    n=$(cat "$STUB_COUNT" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$STUB_COUNT"
-    case "${STUB_API_MODE:-ok}" in
-      401) echo "gh: Bad credentials (HTTP 401)" >&2; exit 1 ;;
-      403) echo "gh: Resource not accessible by integration (HTTP 403)" >&2; exit 1 ;;
-      429) echo "gh: rate limit exceeded (HTTP 429)" >&2; exit 1 ;;
-      500) echo "gh: Server Error (HTTP 500)" >&2; exit 1 ;;
-      network) echo "error connecting to api.github.com" >&2; exit 1 ;;
-      malformed) echo "<html>not json"; exit 0 ;;
-      noassets) echo '{"id": 1}'; exit 0 ;;
+    include=0; paginate=0; slurp=0; path=""
+    for a in "${@:2}"; do
+      case "$a" in
+        -i|--include) include=1 ;;
+        --paginate) paginate=1 ;;
+        --slurp) slurp=1 ;;
+        repos/*) path="$a" ;;
+      esac
+    done
+    case "$path" in
+      repos/o/r/releases/tags/v1.0.0)
+        [ "$include" = 1 ] || { echo "the tag lookup must use --include" >&2; exit 98; }
+        case "${STUB_API_MODE:-ok}" in
+          401) reply "HTTP/2.0 401 Unauthorized" '{"message":"Bad credentials"}'
+               echo "gh: Bad credentials (HTTP 401)" >&2; exit 1 ;;
+          403) reply "HTTP/2.0 403 Forbidden" '{"message":"x"}'; echo "gh: x (HTTP 403)" >&2; exit 1 ;;
+          429) reply "HTTP/2.0 429 Too Many Requests" '{"message":"x"}'; echo "gh: x (HTTP 429)" >&2; exit 1 ;;
+          500) reply "HTTP/2.0 500 Internal Server Error" "${STUB_BODY_TEXT:-{\"message\":\"x\"}}"
+               echo "${STUB_STDERR_TEXT:-gh: x (HTTP 500)}" >&2; exit 1 ;;
+          badstatus) reply "${STUB_STATUS_LINE}" '{"message":"x"}'; echo "gh: x (HTTP 404)" >&2; exit 1 ;;
+          network) echo "error connecting to api.github.com" >&2; exit 1 ;;
+          malformed) reply "HTTP/2.0 200 OK" "<html>not json"; exit 0 ;;
+          noid) reply "HTTP/2.0 200 OK" '{"draft": false, "assets": []}'; exit 0 ;;
+        esac
+        if [ "$(jq -r .exists "$state")" != true ] || [ "$(jq -r '.draft // false' "$state")" = true ]; then
+          reply "${STUB_404_LINE:-HTTP/2.0 404 Not Found}" '{"message":"Not Found"}'
+          echo "gh: Not Found (HTTP 404)" >&2
+          exit 1
+        fi
+        # The embedded assets array is truncated at 30, like the documented default page size.
+        body=$(jq -c '{id: 7, draft: false, tag_name: "v1.0.0", assets: (.assets | .[:30])}' "$state")
+        reply "HTTP/2.0 200 OK" "$body"
+        ;;
+      repos/o/r/releases/7/assets*)
+        [ "$paginate" = 1 ] && [ "$slurp" = 1 ] || { echo "assets must be read with --paginate --slurp" >&2; exit 98; }
+        n=$(cat "$STUB_COUNT" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$STUB_COUNT"
+        [ "${STUB_ASSETS_MODE:-ok}" = ok ] || { echo "gh: x (HTTP ${STUB_ASSETS_MODE})" >&2; exit 1; }
+        view="$state"
+        if [ -n "${STUB_TAMPER:-}" ] && [ "$n" -ge "${STUB_TAMPER_FROM:-2}" ]; then
+          case "$STUB_TAMPER_MODE" in
+            delete) jq --arg n "$STUB_TAMPER" '.assets |= map(select(.name != $n))' "$state" > "$state.view" ;;
+            add) jq --arg n "$STUB_TAMPER" '.assets += [{name: $n, digest: "sha256:beef"}]' "$state" > "$state.view" ;;
+            *) jq --arg n "$STUB_TAMPER" \
+                 '.assets |= map(if .name == $n then .digest = "sha256:dead" else . end)' "$state" > "$state.view" ;;
+          esac
+          view="$state.view"
+        fi
+        jq -c --argjson size "${STUB_PAGE_SIZE:-100}" \
+          '[.assets as $a | range(0; ($a | length); $size) as $i | $a[$i:$i + $size]]
+           | if length == 0 then [[]] else . end' "$view"
+        ;;
+      repos/o/r/releases?per_page=100)
+        [ "$paginate" = 1 ] && [ "$slurp" = 1 ] || { echo "releases need --paginate --slurp" >&2; exit 98; }
+        [ "${STUB_LIST_MODE:-ok}" = ok ] || { echo "gh: x (HTTP ${STUB_LIST_MODE})" >&2; exit 1; }
+        jq -c '[[ (if .draft == true then {tag_name: "v1.0.0", draft: true} else empty end),
+                  {tag_name: "v0.9.0", draft: false} ]]' "$state"
+        ;;
+      *) echo "unexpected gh api call: $*" >&2; exit 99 ;;
     esac
-    if [ "$(jq -r .exists "$state")" != true ]; then echo "gh: Not Found (HTTP 404)" >&2; exit 1; fi
-    if [ -n "${STUB_TAMPER:-}" ] && [ "$n" -ge "${STUB_TAMPER_FROM:-2}" ]; then
-      if [ "$STUB_TAMPER_MODE" = delete ]; then
-        jq --arg n "$STUB_TAMPER" '.assets |= map(select(.name != $n))' "$state" | jq '{assets: .assets}'
-      else
-        jq --arg n "$STUB_TAMPER" '.assets |= map(if .name == $n then .digest = "sha256:dead" else . end)' \
-          "$state" | jq '{assets: .assets}'
-      fi
-      exit 0
-    fi
-    jq '{assets: .assets}' "$state"
     ;;
   release)
     case "$2" in
@@ -431,7 +472,7 @@ def sandbox(tmp_path):
     return tmp_path, work
 
 
-def run_upload(sandbox, name, job, dirname, files, remote=None, extra_env=None):
+def run_upload(sandbox, name, job, dirname, files, remote=None, extra_env=None, draft=False):
     """remote: None for no release, else {asset name: digest or None}."""
     tmp, work = sandbox
     asset_dir = work / dirname
@@ -441,7 +482,11 @@ def run_upload(sandbox, name, job, dirname, files, remote=None, extra_env=None):
     state = tmp / "state.json"
     state.write_text(
         json.dumps(
-            {"exists": remote is not None, "assets": [{"name": n, "digest": d} for n, d in (remote or {}).items()]}
+            {
+                "exists": remote is not None,
+                "draft": draft,
+                "assets": [{"name": n, "digest": d} for n, d in (remote or {}).items()],
+            }
         )
     )
     log, count = tmp / "gh.log", tmp / "count"
@@ -476,7 +521,7 @@ def test_new_release_is_created_then_rechecked(sandbox, name, job, dirname):
     result, calls, api_calls = run_upload(sandbox, name, job, dirname, {"a.whl": b"A", "SHA256SUMS": b"S"})
     assert result.returncode == 0, result.stdout + result.stderr
     assert [c for c in calls if c.startswith("release create v1.0.0")]
-    assert api_calls >= 2, "the asset set must be re-read after the create"
+    assert api_calls >= 1, "the asset set must be read after the create (the first lookup found no release)"
     assert not any("--clobber" in c for c in calls)
 
 
@@ -531,7 +576,7 @@ def test_a_failing_upload_fails_the_step(sandbox, name, job, dirname):
 
 
 @pytest.mark.parametrize(("name", "job", "dirname"), CASES, ids=IDS)
-@pytest.mark.parametrize("mode", ["401", "403", "429", "500", "network", "malformed", "noassets"])
+@pytest.mark.parametrize("mode", ["401", "403", "429", "500", "network", "malformed", "noid"])
 def test_lookup_failures_other_than_404_stop_the_run(sandbox, name, job, dirname, mode):
     result, calls, _ = run_upload(sandbox, name, job, dirname, {"a.whl": b"A"}, extra_env={"STUB_API_MODE": mode})
     assert result.returncode != 0, result.stdout
@@ -620,3 +665,145 @@ def test_the_docs_scanner_bites():
     assert release_event_callers_without_allow_list(
         sample.replace("    with:\n", "    with:\n      allowed-publish-events: push\n")
     )
+
+
+# --- round 3: exact asset set, pagination, status parsing, drafts -------------------------------------------
+
+
+@pytest.mark.parametrize(("name", "job", "dirname"), CASES, ids=IDS)
+def test_an_extra_remote_asset_is_a_mixed_state(sandbox, name, job, dirname):
+    result, calls, _ = run_upload(
+        sandbox,
+        name,
+        job,
+        dirname,
+        {"a.whl": b"A"},
+        remote={"a.whl": digest(b"A"), "unrelated.bin": digest(b"other")},
+    )
+    text = result.stdout + result.stderr
+    assert result.returncode != 0 and "unrelated.bin" in text and "Burn this version and publish a new one" in text
+    assert writes(calls) == []
+
+
+@pytest.mark.parametrize(("name", "job", "dirname"), CASES, ids=IDS)
+def test_an_extra_asset_that_appears_during_the_run_is_caught(sandbox, name, job, dirname):
+    result, _, _ = run_upload(
+        sandbox,
+        name,
+        job,
+        dirname,
+        {"a.whl": b"A", "b.tar.gz": b"B"},
+        remote={"a.whl": digest(b"A")},
+        extra_env={"STUB_TAMPER": "injected.bin", "STUB_TAMPER_MODE": "add"},
+    )
+    assert result.returncode != 0 and "injected.bin" in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(("name", "job", "dirname"), CASES, ids=IDS)
+@pytest.mark.parametrize("page_size", ["100", "7"])
+def test_more_than_one_page_and_more_than_thirty_assets_are_all_seen(sandbox, name, job, dirname, page_size):
+    files = {f"f{i:03d}.bin": f"content {i}".encode() for i in range(75)}
+    remote = {n: digest(c) for n, c in files.items()}
+    # the file past the embedded 30 and past the first pages is already there; nothing may be uploaded
+    result, calls, reads = run_upload(
+        sandbox, name, job, dirname, files, remote=remote, extra_env={"STUB_PAGE_SIZE": page_size}
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert writes(calls) == [] and reads >= 2
+
+
+@pytest.mark.parametrize(("name", "job", "dirname"), CASES, ids=IDS)
+def test_a_differing_asset_beyond_the_first_page_is_found(sandbox, name, job, dirname):
+    files = {f"f{i:03d}.bin": f"content {i}".encode() for i in range(75)}
+    remote = {n: digest(c) for n, c in files.items()}
+    remote["f074.bin"] = "sha256:" + "1" * 64
+    result, calls, _ = run_upload(sandbox, name, job, dirname, files, remote=remote, extra_env={"STUB_PAGE_SIZE": "10"})
+    assert result.returncode != 0 and "f074.bin" in result.stdout + result.stderr
+    assert writes(calls) == []
+
+
+@pytest.mark.parametrize(("name", "job", "dirname"), CASES, ids=IDS)
+def test_an_asset_listing_failure_stops_the_run(sandbox, name, job, dirname):
+    result, calls, _ = run_upload(
+        sandbox,
+        name,
+        job,
+        dirname,
+        {"a.whl": b"A"},
+        remote={"a.whl": digest(b"A")},
+        extra_env={"STUB_ASSETS_MODE": "502"},
+    )
+    assert result.returncode != 0 and writes(calls) == []
+
+
+@pytest.mark.parametrize(("name", "job", "dirname"), CASES, ids=IDS)
+@pytest.mark.parametrize(
+    "line",
+    [
+        "HTTP/2.0 404 Not Found",
+        "HTTP/1.1 404 Not Found",
+        "HTTP/2 404",
+        "http/2.0 404 NOT FOUND",
+        "HTTP/2.0   404   Not  Found  extra words (HTTP 500)",
+    ],
+)
+def test_a_404_status_line_in_any_common_shape_means_absent(sandbox, name, job, dirname, line):
+    result, calls, _ = run_upload(sandbox, name, job, dirname, {"a.whl": b"A"}, extra_env={"STUB_404_LINE": line})
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert any(c.startswith("release create") for c in calls)
+
+
+@pytest.mark.parametrize(("name", "job", "dirname"), CASES, ids=IDS)
+@pytest.mark.parametrize(
+    "line",
+    [
+        "HTTP/2.0 4040 Not Found",
+        "HTTP/2.0 404x",
+        "Status: 404 Not Found",
+        "XTTP/2.0 404",
+        "404",
+        "",
+        "HTTP/2.0 40 Not Found",
+    ],
+)
+def test_anything_but_a_clean_404_status_line_stops_the_run(sandbox, name, job, dirname, line):
+    result, calls, _ = run_upload(
+        sandbox,
+        name,
+        job,
+        dirname,
+        {"a.whl": b"A"},
+        extra_env={"STUB_API_MODE": "badstatus", "STUB_STATUS_LINE": line},
+    )
+    assert result.returncode != 0 and writes(calls) == []
+
+
+@pytest.mark.parametrize(("name", "job", "dirname"), CASES, ids=IDS)
+def test_text_that_says_404_beside_a_500_status_is_not_absence(sandbox, name, job, dirname):
+    result, calls, _ = run_upload(
+        sandbox,
+        name,
+        job,
+        dirname,
+        {"a.whl": b"A"},
+        extra_env={
+            "STUB_API_MODE": "500",
+            "STUB_BODY_TEXT": '{"message":"upstream said Not Found (HTTP 404)"}',
+            "STUB_STDERR_TEXT": 'gh: upstream request "HTTP 404" failed (HTTP 500)',
+        },
+    )
+    assert result.returncode != 0 and writes(calls) == []
+
+
+@pytest.mark.parametrize(("name", "job", "dirname"), CASES, ids=IDS)
+def test_a_draft_release_for_the_tag_stops_the_run(sandbox, name, job, dirname):
+    result, calls, _ = run_upload(sandbox, name, job, dirname, {"a.whl": b"A"}, draft=True)
+    text = result.stdout + result.stderr
+    assert result.returncode != 0 and "draft" in text.lower() and "publish or delete" in text
+    assert writes(calls) == []
+
+
+@pytest.mark.parametrize(("name", "job", "dirname"), CASES, ids=IDS)
+def test_a_failing_draft_listing_stops_the_run(sandbox, name, job, dirname):
+    result, calls, _ = run_upload(sandbox, name, job, dirname, {"a.whl": b"A"}, extra_env={"STUB_LIST_MODE": "500"})
+    assert result.returncode != 0 and writes(calls) == []

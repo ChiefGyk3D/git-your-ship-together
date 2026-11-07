@@ -1369,7 +1369,7 @@ release for the tag, creating it from the notes when it does not exist and
 completing it when it does (a caller that triggers on `release: published`
 sets `allowed-publish-events: push,release`). An existing release is never
 rewritten: each asset must be absent or already there with the identical
-sha256 digest, or the run fails naming the asset and the version is burned. The set is read again after the upload and re-checked; concurrent writers to one release are unsupported.
+sha256 digest, or the run fails naming the asset and the version is burned. The set is read again after the upload and re-checked against exactly the built files (an extra asset fails the run); the asset listing is paginated; a lookup that is not a clean 404 stops the run; a draft release for the tag fails the run until it is published or deleted; concurrent writers to one release are unsupported.
 Publication needs an allowed event and a `refs/tags/v<semver>` (SemVer 2.0.0: no leading zeroes, no empty identifiers) ref.
 Nothing needs a secret.
 
@@ -1472,7 +1472,7 @@ file, signs every file with cosign (keyless, a `<file>.sigstore.json` bundle
 beside it), and attaches all of it to the release for the tag, creating it
 from the notes or completing it when it exists: every asset must be absent or
 already there with the identical sha256 digest, never replaced (a differing
-asset fails the run and the version is burned; the set is read again after the upload and re-checked, a lookup failing for any reason but 404 stops the run, and concurrent writers to one release are unsupported). Publication needs an allowed
+asset fails the run and the version is burned; the set is read again after the upload and re-checked against exactly the built files, so an extra asset also fails; the asset listing is paginated; a lookup that is not a clean 404 stops the run; a draft release for the tag fails the run until it is published or deleted; and concurrent writers to one release are unsupported). Publication needs an allowed
 event (`allowed-publish-events`, default `push`) and a
 `refs/tags/v<semver>` (SemVer 2.0.0: no leading zeroes, no empty identifiers) ref. Verify a download with
 `cosign verify-blob --bundle <file>.sigstore.json <file>` against this
