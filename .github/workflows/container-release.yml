@@ -202,6 +202,14 @@ on:
         description: Fetch CI secrets only on the default branch, a version tag (vN.N.N) or a schedule; never on a pull request or another branch. `false` restores fetching on every same-repository run.
         type: boolean
         default: true
+      allowed-publish-events:
+        description: Comma-separated event names (`github.event_name`) from which `push` may publish. Default `push`. `*` allows every event except `pull_request` and `pull_request_target`, which never publish. Together with `require-tag-ref` this is the allow-list for pushing, signing and attesting.
+        type: string
+        default: push
+      require-tag-ref:
+        description: Publish only from a `refs/tags/v*` ref. `false` also allows other refs, for a caller that publishes from a branch on purpose.
+        type: boolean
+        default: true
       timeout-minutes:
         description: Job timeout. Multi-arch builds that compile native code need a generous one.
         type: number
@@ -233,6 +241,7 @@ jobs:
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
       ghcr: ${{ steps.plan.outputs.ghcr }}
+      publish: ${{ steps.publish.outputs.publish }}
     steps:
       - name: Validate the egress policy inputs (EX-0001)
         timeout-minutes: 1
@@ -344,6 +353,49 @@ jobs:
           fi
           exit "$rc"
 
+      - name: Decide whether to publish
+        id: publish
+        env:
+          PUSH: ${{ inputs.push }}
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          ALLOWED_EVENTS: ${{ inputs.allowed-publish-events }}
+          REQUIRE_TAG: ${{ inputs.require-tag-ref }}
+        run: |
+          set -euo pipefail
+          set -f
+          shopt -u nocasematch nocaseglob
+          # Pushing, signing and attesting follow this one decision: the
+          # `push` input, an allowed event, and (by default) a v* tag ref.
+          ok=true
+          case "$EVENT" in
+            pull_request | pull_request_target | "") ok=false ;;
+          esac
+          if [ "$ok" = true ]; then
+            ok=false
+            IFS=',' read -r -a allowed <<< "$ALLOWED_EVENTS"
+            for item in ${allowed[@]+"${allowed[@]}"}; do
+              item="$(printf '%s' "$item" | tr -d '[:space:]')"
+              if [ "$item" = "*" ] || [ "$item" = "$EVENT" ]; then ok=true; fi
+            done
+          fi
+          if [ "$ok" = true ] && [ "$REQUIRE_TAG" != "false" ]; then
+            case "$REF" in
+              refs/tags/v?*) ;;
+              *) ok=false ;;
+            esac
+          fi
+          publish=false
+          if [ "$PUSH" = "true" ]; then
+            if [ "$ok" = true ]; then
+              publish=true
+            else
+              echo "::warning title=publish::push is true but event '$EVENT' on ref '$REF' is not allowed to publish (allowed-publish-events, require-tag-ref); building and scanning only"
+            fi
+          fi
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+          echo "publish: $publish"
+
       - name: Plan the matrix
         id: plan
         env:
@@ -372,8 +424,13 @@ jobs:
               *) runner=ubuntu-24.04 ;;
             esac
             matrix="$(jq -c --arg platform "$platform" --arg arch "${platform//\//-}" --arg runner "$runner" \
-              '. + [{platform: $platform, arch: $arch, runner: $runner}]' <<< "$matrix")"
+              '. + [{platform: $platform, arch: $arch, runner: $runner, idx: length}]' <<< "$matrix")"
           done
+          count="$(jq 'length' <<< "$matrix")"
+          if [ "$count" -gt 8 ]; then
+            echo "::error title=platforms::at most 8 platforms are supported"
+            exit 1
+          fi
           if [ "$matrix" = "[]" ]; then
             echo "::error title=platforms::no platform given"
             exit 1
@@ -556,7 +613,8 @@ jobs:
 
   # One job per platform, on a runner of that architecture: build, check and
   # scan the image where it runs. When publishing, the same job pushes the
-  # platform image under a temporary tag, `<sha>-<arch>`, for `merge`.
+  # platform image under a temporary tag, `<sha>-<run id>-<attempt>-<arch>`,
+  # and hands its digest to `merge`, which merges by digest, not by tag.
   build:
     name: Build, test, scan (${{ matrix.platform }})
     needs: [plan, dockerfile-lint]
@@ -569,6 +627,15 @@ jobs:
       contents: read
       packages: write  # push the per-platform image under its temporary tag
       security-events: write  # Trivy SARIF upload
+    outputs:
+      d0: ${{ steps.record.outputs.d0 }}
+      d1: ${{ steps.record.outputs.d1 }}
+      d2: ${{ steps.record.outputs.d2 }}
+      d3: ${{ steps.record.outputs.d3 }}
+      d4: ${{ steps.record.outputs.d4 }}
+      d5: ${{ steps.record.outputs.d5 }}
+      d6: ${{ steps.record.outputs.d6 }}
+      d7: ${{ steps.record.outputs.d7 }}
     strategy:
       fail-fast: false
       matrix:
@@ -695,7 +762,7 @@ jobs:
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Log in to GHCR
-        if: inputs.push
+        if: needs.plan.outputs.publish == 'true'
         uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
@@ -782,7 +849,7 @@ jobs:
           category: trivy-image-${{ matrix.arch }}
 
       - name: Build and push this platform's image
-        if: inputs.push
+        if: needs.plan.outputs.publish == 'true'
         id: push
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
@@ -790,7 +857,7 @@ jobs:
           file: ${{ inputs.dockerfile }}
           platforms: ${{ matrix.platform }}
           push: true
-          tags: ${{ needs.plan.outputs.ghcr }}:${{ github.sha }}-${{ matrix.arch }}
+          tags: ${{ needs.plan.outputs.ghcr }}:${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.arch }}
           labels: ${{ steps.meta.outputs.labels }}
           # No cache here: a publishing build never reads the Actions cache.
           # Signing, the SBOM and provenance are produced by `merge` as
@@ -801,11 +868,37 @@ jobs:
 
   # Joins the per-platform images into one multi-arch index under the real
   # tags, then signs, attests and records provenance for that index.
+
+      - name: Record this platform's digest
+        id: record
+        if: needs.plan.outputs.publish == 'true'
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+          PLATFORM: ${{ matrix.platform }}
+          IDX: ${{ matrix.idx }}
+          GHCR: ${{ needs.plan.outputs.ghcr }}
+        run: |
+          set -euo pipefail
+          shopt -u nocasematch
+          [[ "$IDX" =~ ^[0-7]$ ]] || { echo "::error title=digest::bad platform index"; exit 1; }
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error title=digest::the push of $PLATFORM produced no valid digest"; exit 1; }
+          # The digest must be an image of this platform, whatever the tag says.
+          config="$(docker buildx imagetools inspect "${GHCR}@${DIGEST}" --format '{{json .Image}}')"
+          actual="$(jq -r '(if has("architecture") then . else (to_entries | first | .value) end) | "\(.os)/\(.architecture)\(if .variant then "/" + .variant else "" end)"' <<< "$config")"
+          want="$PLATFORM"
+          if [ "$(awk -F/ '{print NF}' <<< "$want")" -eq 2 ]; then actual="$(cut -d/ -f1-2 <<< "$actual")"; fi
+          if [ "$actual" != "$want" ]; then
+            echo "::error title=digest::${GHCR}@${DIGEST} is $actual, expected $want"
+            exit 1
+          fi
+          echo "d${IDX}=${PLATFORM} ${DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "recorded ${PLATFORM} ${DIGEST}"
+
   merge:
     name: Publish, sign
     # Never on a pull request, whatever the caller passes: this job holds the
     # tokens that sign and attest.
-    if: inputs.push && github.event_name != 'pull_request'
+    if: needs.plan.outputs.publish == 'true' && github.event_name != 'pull_request'
     needs: [plan, build]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -931,7 +1024,7 @@ jobs:
       # --- Doppler (same steps as .github/actions/doppler-secrets) ---------
       - name: Decide how to authenticate to Doppler
         id: doppler
-        if: inputs.push && inputs.dockerhub
+        if: needs.plan.outputs.publish == 'true' && inputs.dockerhub
         env:
           IDENTITY_ID: ${{ inputs.doppler-identity-id }}
           TOKEN: ${{ secrets.DOPPLER_TOKEN }}
@@ -1059,7 +1152,7 @@ jobs:
           IMAGE_NAME: ${{ inputs.image-name }}
           DOCKERHUB: ${{ inputs.dockerhub }}
           DOCKERHUB_REPOSITORY: ${{ inputs.dockerhub-repository }}
-          PUSH: ${{ inputs.push }}
+          PUSH: ${{ needs.plan.outputs.publish }}
           UNTRUSTED_TAG: ${{ steps.doppler.outputs.untrusted-tag }}
           REF: ${{ github.ref }}
         run: |
@@ -1095,7 +1188,7 @@ jobs:
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Log in to GHCR
-        if: inputs.push
+        if: needs.plan.outputs.publish == 'true'
         uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
@@ -1103,7 +1196,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Log in to Docker Hub
-        if: inputs.push && steps.names.outputs.dockerhub != ''
+        if: needs.plan.outputs.publish == 'true' && steps.names.outputs.dockerhub != ''
         uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: docker.io
@@ -1119,23 +1212,52 @@ jobs:
 
       - name: Create the multi-arch index
         id: index
+        if: needs.plan.outputs.publish == 'true'
         env:
           GHCR: ${{ steps.names.outputs.ghcr }}
           TAGS: ${{ steps.meta.outputs.tags }}
-          PLATFORMS: ${{ inputs.platforms }}
-          SHA: ${{ github.sha }}
+          MATRIX: ${{ needs.plan.outputs.matrix }}
+          D0: ${{ needs.build.outputs.d0 }}
+          D1: ${{ needs.build.outputs.d1 }}
+          D2: ${{ needs.build.outputs.d2 }}
+          D3: ${{ needs.build.outputs.d3 }}
+          D4: ${{ needs.build.outputs.d4 }}
+          D5: ${{ needs.build.outputs.d5 }}
+          D6: ${{ needs.build.outputs.d6 }}
+          D7: ${{ needs.build.outputs.d7 }}
         run: |
           set -euo pipefail
+          shopt -u nocasematch
           args=()
           while IFS= read -r tag; do
             [ -n "$tag" ] && args+=(--tag "$tag")
           done <<< "$TAGS"
+          # The index is made from the digests the build jobs pushed, one per
+          # planned platform, each checked to be an image of that platform.
+          slots=("$D0" "$D1" "$D2" "$D3" "$D4" "$D5" "$D6" "$D7")
+          count="$(jq 'length' <<< "$MATRIX")"
           sources=()
-          IFS=',' read -r -a platforms <<< "$PLATFORMS"
-          for platform in "${platforms[@]}"; do
-            platform="$(printf '%s' "$platform" | tr -d '[:space:]')"
-            [ -n "$platform" ] || continue
-            sources+=("${GHCR}:${SHA}-${platform//\//-}")
+          for i in 0 1 2 3 4 5 6 7; do
+            value="${slots[$i]}"
+            if [ "$i" -ge "$count" ]; then
+              [ -z "$value" ] || { echo "::error title=digest::unexpected digest in slot $i"; exit 1; }
+              continue
+            fi
+            want="$(jq -r --argjson i "$i" '.[] | select(.idx == $i) | .platform' <<< "$MATRIX")"
+            platform="${value%% *}"
+            digest="${value#* }"
+            if [ -z "$value" ] || [ "$platform" != "$want" ] || ! [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "::error title=digest::no valid digest was recorded for $want"
+              exit 1
+            fi
+            config="$(docker buildx imagetools inspect "${GHCR}@${digest}" --format '{{json .Image}}')"
+            actual="$(jq -r '(if has("architecture") then . else (to_entries | first | .value) end) | "\(.os)/\(.architecture)\(if .variant then "/" + .variant else "" end)"' <<< "$config")"
+            if [ "$(awk -F/ '{print NF}' <<< "$want")" -eq 2 ]; then actual="$(cut -d/ -f1-2 <<< "$actual")"; fi
+            if [ "$actual" != "$want" ]; then
+              echo "::error title=digest::${GHCR}@${digest} is $actual, expected $want"
+              exit 1
+            fi
+            sources+=("${GHCR}@${digest}")
           done
           docker buildx imagetools create "${args[@]}" "${sources[@]}"
           first="$(head -n 1 <<< "$TAGS")"
@@ -1144,11 +1266,11 @@ jobs:
           echo "index digest: $digest"
 
       - name: Install cosign
-        if: inputs.push && (inputs.sign || inputs.sbom)
+        if: needs.plan.outputs.publish == 'true' && (inputs.sign || inputs.sbom)
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
       - name: Sign the image (keyless)
-        if: inputs.push && inputs.sign
+        if: needs.plan.outputs.publish == 'true' && inputs.sign
         env:
           GHCR: ${{ steps.names.outputs.ghcr }}
           DOCKERHUB: ${{ steps.names.outputs.dockerhub }}
@@ -1161,7 +1283,7 @@ jobs:
           done
 
       - name: Generate the SBOM with syft
-        if: inputs.push && inputs.sbom
+        if: needs.plan.outputs.publish == 'true' && inputs.sbom
         uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
         with:
           image: ${{ steps.names.outputs.ghcr }}@${{ steps.index.outputs.digest }}
@@ -1174,7 +1296,7 @@ jobs:
           upload-release-assets: false
 
       - name: Attach the SBOM as a cosign attestation
-        if: inputs.push && inputs.sbom
+        if: needs.plan.outputs.publish == 'true' && inputs.sbom
         env:
           GHCR: ${{ steps.names.outputs.ghcr }}
           DOCKERHUB: ${{ steps.names.outputs.dockerhub }}
@@ -1187,7 +1309,7 @@ jobs:
           done
 
       - name: Record build provenance
-        if: inputs.push && inputs.provenance
+        if: needs.plan.outputs.publish == 'true' && inputs.provenance
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-name: ${{ steps.names.outputs.ghcr }}
@@ -1195,7 +1317,7 @@ jobs:
           push-to-registry: true
 
       - name: Summary
-        if: inputs.push
+        if: needs.plan.outputs.publish == 'true'
         env:
           GHCR: ${{ steps.names.outputs.ghcr }}
           DIGEST: ${{ steps.index.outputs.digest }}

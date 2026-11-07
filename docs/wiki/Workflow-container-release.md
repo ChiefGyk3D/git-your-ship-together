@@ -15,8 +15,8 @@ tested natively, so the arm64 image the test runs against is the arm64 image tha
 |---|---|---|
 | `plan` | `contents: read` | Works out the per-platform build matrix and the lower-cased GHCR image name |
 | `dockerfile-lint` | `contents: read` | hadolint, pinned version and per-architecture sha256, cached and hash-checked on disk |
-| `build` (per platform) | `contents: read`, `packages: write`, `security-events: write` | Builds and tests on a native runner (`ubuntu-24.04-arm` for arm64); non-root check; optional read-only probe; Trivy scan to SARIF. When publishing, pushes a temporary `<sha>-<arch>` tag |
-| `merge` | `contents: read`, `packages: write`, `id-token: write`, `attestations: write` | Joins the platform images into the index under the real tags, then signs, attaches the SBOM and records provenance. Only after a push, never on a pull request |
+| `build` (per platform) | `contents: read`, `packages: write`, `security-events: write` | Builds and tests on a native runner (`ubuntu-24.04-arm` for arm64); non-root check; optional read-only probe; Trivy scan to SARIF. When publishing, pushes a temporary `<sha>-<run id>-<attempt>-<arch>` tag and records its digest |
+| `merge` | `contents: read`, `packages: write`, `id-token: write`, `attestations: write` | Joins the platform images, by recorded digest, into the index under the real tags, then signs, attaches the SBOM and records provenance. Only after a push, never on a pull request |
 
 The build job pushes only its own temporary platform tags; the signing identity exists only in `merge`.
 
