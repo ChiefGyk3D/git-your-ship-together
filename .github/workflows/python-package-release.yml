@@ -826,7 +826,7 @@ jobs:
           declare -A lower_seen=()
           for f in "${files[@]}"; do
             asset=${f##*/}
-            key=$(printf '%s' "$asset" | LC_ALL=C tr 'A-Z' 'a-z')
+            key=$(printf '%s' "$asset" | LC_ALL=C tr '[:upper:]' '[:lower:]')
             if [ -n "${lower_seen[$key]:-}" ]; then
               echo "::error title=release asset name::$asset and ${lower_seen[$key]} differ only in letter case, which the asset naming policy refuses"
               bad_names=1
