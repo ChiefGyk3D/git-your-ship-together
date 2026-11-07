@@ -49,7 +49,12 @@ BUILD_UNGATED = {
     "Scan the image with Trivy",
     "Upload Trivy results to the Security tab",
 }
-BUILD_UNGATED_USES = ("step-security/harden-runner@", "actions/checkout@", "docker/setup-qemu-action@", "docker/setup-buildx-action@")
+BUILD_UNGATED_USES = (
+    "step-security/harden-runner@",
+    "actions/checkout@",
+    "docker/setup-qemu-action@",
+    "docker/setup-buildx-action@",
+)
 MERGE_UNGATED = {
     "Validate the egress policy inputs (EX-0001)",
     "Egress canary (EX-0001)",
@@ -199,9 +204,19 @@ def test_a_publishing_leg_tests_the_pushed_image_and_a_non_publishing_leg_the_lo
     assert builds(doc, False) == ["Build for this platform and load it"]
     names = [s.get("name") for s in steps_of(jobs(doc)["build"])]
     push, pull = names.index("Build and push this platform's image"), names.index("Pull and verify the pushed image")
-    checks = [names.index(n) for n in ("Require a non-root user", "Check the image", "Probe with a read-only root filesystem", "Scan the image with Trivy")]
+    checks = [
+        names.index(n)
+        for n in (
+            "Require a non-root user",
+            "Check the image",
+            "Probe with a read-only root filesystem",
+            "Scan the image with Trivy",
+        )
+    ]
     assert push < pull < min(checks), "every check runs against the image pulled back by digest"
-    assert names.index("Record this platform's digest") > max(checks), "only a digest that passed the checks is handed on"
+    assert names.index("Record this platform's digest") > max(checks), (
+        "only a digest that passed the checks is handed on"
+    )
 
 
 def test_the_guard_for_two_builds_bites():
@@ -238,7 +253,9 @@ BASE = {"PUSH": "true", "EVENT": "push", "REF": "refs/tags/v1.2.3", "ALLOWED_EVE
 
 
 def decide(tmp_path, script: str | None = None, **env):
-    code, written, out = run_script(script or step("plan", "Decide whether to publish")["run"], tmp_path, {**BASE, **env})
+    code, written, out = run_script(
+        script or step("plan", "Decide whether to publish")["run"], tmp_path, {**BASE, **env}
+    )
     return code, written.get("publish"), out
 
 
@@ -347,15 +364,39 @@ def test_a_refused_publish_is_loud_and_names_the_inputs(tmp_path):
 
 @pytest.mark.parametrize(
     "value",
-    ["p u s h", " push", "push ", "push, release", "push,", ",push", "push,,release", "Push", "PUSH", "push\nrelease",
-     "pu\nsh", "push;", "push-x", "push1", "*,push", "push,*", "**", "?", "", "push,push", "pu*", "push\t"],
+    [
+        "p u s h",
+        " push",
+        "push ",
+        "push, release",
+        "push,",
+        ",push",
+        "push,,release",
+        "Push",
+        "PUSH",
+        "push\nrelease",
+        "pu\nsh",
+        "push;",
+        "push-x",
+        "push1",
+        "*,push",
+        "push,*",
+        "**",
+        "?",
+        "",
+        "push,push",
+        "pu*",
+        "push\t",
+    ],
 )
 def test_a_malformed_event_list_is_an_error_not_normalized(tmp_path, value):
     code, publish, out = decide(tmp_path, ALLOWED_EVENTS=value)
     assert code != 0 and publish is None and "allowed-publish-events" in out
 
 
-@pytest.mark.parametrize("value", ["push", "push,release", "workflow_dispatch,schedule,push", "*", "repository_dispatch"])
+@pytest.mark.parametrize(
+    "value", ["push", "push,release", "workflow_dispatch,schedule,push", "*", "repository_dispatch"]
+)
 def test_a_well_formed_event_list_is_accepted(tmp_path, value):
     assert decide(tmp_path, ALLOWED_EVENTS=value)[0] == 0
 
@@ -461,8 +502,8 @@ def stub(db: dict, tmp_path: Path) -> str:
     return f"""#!/usr/bin/env python3
 import json, sys
 a = sys.argv[1:]
-db = json.load(open({str(tmp_path / 'registry.json')!r}))
-log = open({str(tmp_path / 'docker.log')!r}, "a")
+db = json.load(open({str(tmp_path / "registry.json")!r}))
+log = open({str(tmp_path / "docker.log")!r}, "a")
 log.write(" ".join(a) + "\\n")
 if a[:3] == ["buildx", "imagetools", "inspect"]:
     ref = a[3] if a[3] != "--raw" else a[4]
@@ -481,7 +522,7 @@ if a[:3] == ["buildx", "imagetools", "inspect"]:
     else:
         sys.exit(3)
 elif a[:3] == ["buildx", "imagetools", "create"]:
-    open({str(tmp_path / 'create.log')!r}, "a").write(" ".join(a) + "\\n")
+    open({str(tmp_path / "create.log")!r}, "a").write(" ".join(a) + "\\n")
     if db.get("create_fails"):
         sys.exit(1)
     tags = [a[i + 1] for i, x in enumerate(a) if x == "--tag"]
@@ -550,7 +591,9 @@ def test_the_pushed_image_is_pulled_by_digest_and_becomes_the_image_under_test(t
 )
 def test_a_missing_malformed_mismatched_or_multi_platform_digest_is_refused(tmp_path, env, db):
     docker = stub(good_db(**db), tmp_path)
-    code, out, _ = run_script(step("build", "Pull and verify the pushed image")["run"], tmp_path, pull_env(**env), docker)
+    code, out, _ = run_script(
+        step("build", "Pull and verify the pushed image")["run"], tmp_path, pull_env(**env), docker
+    )
     assert code != 0
     log = tmp_path / "docker.log"
     calls = log.read_text().splitlines() if log.exists() else []
@@ -656,15 +699,44 @@ def test_the_index_is_staged_from_digests_then_the_exact_digest_is_promoted(tmp_
         ({"D2": f"linux/arm64 {DIGEST_B}"}, {}),  # an extra slot
         ({"D1": "linux/arm64 sha256:xyz"}, {}),
         ({}, {"raw": {f"{GHCR}@{DIGEST_B}": INDEX}}),  # one source is itself an index
-        ({}, {"image": {f"{GHCR}@{DIGEST_A}": AMD, f"{GHCR}@{DIGEST_B}": {"os": "linux", "architecture": "arm", "variant": "v6"}}}),
+        (
+            {},
+            {
+                "image": {
+                    f"{GHCR}@{DIGEST_A}": AMD,
+                    f"{GHCR}@{DIGEST_B}": {"os": "linux", "architecture": "arm", "variant": "v6"},
+                }
+            },
+        ),
         ({}, {"tag": {STAGE: "not-a-digest"}}),
         ({}, {"tag": {STAGE: DIGEST_IDX.upper().replace("SHA256", "sha256")}}),
         ({}, {"tag": {STAGE: DIGEST_A}}),  # the staged tag now points at a single image, not the index
-        ({}, {"raw": {f"{GHCR}@{DIGEST_A}": SINGLE, f"{GHCR}@{DIGEST_B}": SINGLE,
-                      f"{GHCR}@{DIGEST_IDX}": {"manifests": [{"digest": DIGEST_A}]}}}),  # index lacks a platform
-        ({}, {"raw": {f"{GHCR}@{DIGEST_A}": SINGLE, f"{GHCR}@{DIGEST_B}": SINGLE,
-                      f"{GHCR}@{DIGEST_IDX}": {"manifests": [{"digest": DIGEST_A}, {"digest": DIGEST_B}, {"digest": "sha256:" + "d" * 64}]}}}),  # extra
-        ({}, {"tag": {STAGE: DIGEST_IDX, TAG1: DIGEST_B, TAGL: DIGEST_IDX}}),  # a final tag does not resolve to the index
+        (
+            {},
+            {
+                "raw": {
+                    f"{GHCR}@{DIGEST_A}": SINGLE,
+                    f"{GHCR}@{DIGEST_B}": SINGLE,
+                    f"{GHCR}@{DIGEST_IDX}": {"manifests": [{"digest": DIGEST_A}]},
+                }
+            },
+        ),  # index lacks a platform
+        (
+            {},
+            {
+                "raw": {
+                    f"{GHCR}@{DIGEST_A}": SINGLE,
+                    f"{GHCR}@{DIGEST_B}": SINGLE,
+                    f"{GHCR}@{DIGEST_IDX}": {
+                        "manifests": [{"digest": DIGEST_A}, {"digest": DIGEST_B}, {"digest": "sha256:" + "d" * 64}]
+                    },
+                }
+            },
+        ),  # extra
+        (
+            {},
+            {"tag": {STAGE: DIGEST_IDX, TAG1: DIGEST_B, TAGL: DIGEST_IDX}},
+        ),  # a final tag does not resolve to the index
     ],
 )
 def test_the_index_step_refuses_and_signs_nothing_after_a_bad_input(tmp_path, over, db):
@@ -676,7 +748,10 @@ def test_the_index_step_refuses_and_signs_nothing_after_a_bad_input(tmp_path, ov
 
 
 def test_no_final_tag_is_touched_before_every_check_has_passed(tmp_path):
-    code, _, _ = run_index(tmp_path, good_db(raw={f"{GHCR}@{DIGEST_A}": SINGLE, f"{GHCR}@{DIGEST_B}": INDEX, f"{GHCR}@{DIGEST_IDX}": INDEX}))
+    code, _, _ = run_index(
+        tmp_path,
+        good_db(raw={f"{GHCR}@{DIGEST_A}": SINGLE, f"{GHCR}@{DIGEST_B}": INDEX, f"{GHCR}@{DIGEST_IDX}": INDEX}),
+    )
     assert code != 0 and create_calls(tmp_path) == []
 
 
@@ -684,15 +759,19 @@ def test_the_signing_steps_use_only_the_validated_index_digest():
     doc = load(RELEASE)
     for name in ("Sign the image (keyless)", "Attach the SBOM as a cosign attestation"):
         assert step("merge", name, doc)["env"]["DIGEST"] == "${{ steps.index.outputs.digest }}"
-    assert step("merge", "Generate the SBOM with syft", doc)["with"]["image"].endswith("@${{ steps.index.outputs.digest }}")
-    assert step("merge", "Record build provenance", doc)["with"]["subject-digest"] == "${{ steps.index.outputs.digest }}"
+    assert step("merge", "Generate the SBOM with syft", doc)["with"]["image"].endswith(
+        "@${{ steps.index.outputs.digest }}"
+    )
+    assert (
+        step("merge", "Record build provenance", doc)["with"]["subject-digest"] == "${{ steps.index.outputs.digest }}"
+    )
     for s in steps_of(jobs(doc)["merge"]):
         assert "imagetools inspect" not in (s.get("run") or "") or s.get("name") == "Create the multi-arch index"
 
 
 def test_the_plan_numbers_the_platforms_and_bounds_them():
     run = step("plan", "Plan the matrix")["run"]
-    assert "idx: length" in run and '-gt 8' in run
+    assert "idx: length" in run and "-gt 8" in run
 
 
 def test_release_tag_function_is_a_small_named_function():
