@@ -78,6 +78,17 @@ latest_tag() {
   printf '%s\n' "$tag"
 }
 
+# check_names DIR: refuse any workflow or action path (below DIR) outside [A-Za-z0-9._/-]. Run in the main shell
+# before anything else reads the files, because a file name is data and must never become part of a program.
+check_names() {
+  local dir=$1 f rel
+  for f in "$dir"/.github/workflows/* "$dir"/.github/actions/*/*; do
+    [ -e "$f" ] || [ -L "$f" ] || continue
+    rel=${f#"$dir"/}
+    [[ $rel =~ ^[A-Za-z0-9._/-]+$ ]] || die 3 "refusing a workflow path with characters outside A-Za-z0-9._/-: $(printf '%q' "$rel")"
+  done
+}
+
 # files_of DIR: the workflow and action files, one per line; a symlink is reported and left out.
 files_of() {
   local dir=$1 f
@@ -95,7 +106,7 @@ files_of() {
 non_canonical() {
   local f
   while IFS= read -r f; do
-    { grep -nE "$REF_ERE" "$f" || true; } | { grep -vE "$PIN_ERE" || true; } | sed "s|^|$f:|"
+    { grep -nE "$REF_ERE" "$f" || true; } | { grep -vE "$PIN_ERE" || true; } | F="$f" awk '{ print ENVIRON["F"] ":" $0 }'
   done < <(files_of "$1")
 }
 
@@ -104,7 +115,8 @@ pins() {
   local f
   while IFS= read -r f; do
     { grep -nE "^[[:space:]]*(-[[:space:]]+)?$PIN_ERE" "$f" || true; } \
-      | sed -E "s|^([0-9]+):.*@([0-9a-f]{40})[[:space:]]+#[[:space:]]*(v[0-9]+\.[0-9]+\.[0-9]+).*\$|$f\t\1\t\2\t\3|"
+      | sed -E 's|^([0-9]+):.*@([0-9a-f]{40})[[:space:]]+#[[:space:]]*(v[0-9]+\.[0-9]+\.[0-9]+).*$|\1\t\2\t\3|' \
+      | F="$f" awk -F'\t' '{ print ENVIRON["F"] "\t" $1 "\t" $2 "\t" $3 }'
   done < <(files_of "$1")
 }
 
@@ -123,6 +135,7 @@ cmd_status() {
   tag_info "$latest"
   for dir in "$@"; do
     [ -d "$dir/.github" ] || die 64 "not a repository with a .github directory: $dir"
+  check_names "$dir"
     if [ -n "$(non_canonical "$dir")" ]; then
       echo "$dir: references to $SRC that are not canonical pins:"
       non_canonical "$dir" | sed 's/^/  /'
@@ -204,6 +217,7 @@ cmd_apply() {
   done
   [ -n "$dir" ] || usage
   [ -d "$dir/.github" ] || die 64 "not a repository with a .github directory: $dir"
+  check_names "$dir"
   [ -n "$to" ] || to=$(latest_tag)
   mktmp list
   rewrite "$dir" "$to" "$dry" "$list"
@@ -232,6 +246,7 @@ cmd_pr() {
   done
   [ -n "$dir" ] || usage
   [ -d "$dir/.github" ] || die 64 "not a repository with a .github directory: $dir"
+  check_names "$dir"
   [ -n "$to" ] || to=$(latest_tag)
   tag_info "$to"
   branch="repin/gyst-$to"

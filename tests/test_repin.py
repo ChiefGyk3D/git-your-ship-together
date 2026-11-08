@@ -440,3 +440,20 @@ def test_the_pin_only_check_stops_a_rewrite_that_changed_anything_else(env):
     p = run(env, "apply", root)
     assert p.returncode == 4, p.stdout + p.stderr
     assert (root / ".github/workflows/ci.yml").read_text() == text
+
+
+@pytest.mark.parametrize("sub", ["status", "apply", "pr"])
+@pytest.mark.parametrize(
+    "name",
+    ["a|b&c\\d e.yml", "x$(touch PWNED).yml", "line\nbreak.yml", "semi;colon.yml", "bad`id`.yml"],
+    ids=["pipe-amp-backslash-space", "command-substitution", "newline", "semicolon", "backtick"],
+)
+def test_a_hostile_workflow_file_name_is_refused_and_nothing_is_executed_or_written(env, sub, name):
+    good = wf()
+    root = make_caller(env, {"ok.yml": good, name: wf()})
+    p = run(env, sub, root)
+    assert p.returncode == 3, p.stdout + p.stderr
+    assert "refusing a workflow path" in p.stderr
+    assert (root / ".github/workflows/ok.yml").read_text() == good
+    assert (root / ".github/workflows" / name).read_text() == wf()
+    assert not list(env["tmp"].rglob("PWNED")) and not list(Path.cwd().glob("PWNED"))
