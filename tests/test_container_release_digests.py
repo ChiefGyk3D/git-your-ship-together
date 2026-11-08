@@ -507,7 +507,9 @@ FIX_CASES = [
 ]
 
 
-@pytest.mark.parametrize("env,names_events,names_tag", FIX_CASES, ids=lambda v: case_id(v) if isinstance(v, dict) else str(v))
+@pytest.mark.parametrize(
+    "env,names_events,names_tag", FIX_CASES, ids=lambda v: case_id(v) if isinstance(v, dict) else str(v)
+)
 def test_the_refusal_notice_names_only_the_inputs_that_apply(tmp_path, env, names_events, names_tag):
     code, publish, out = decide(tmp_path, **env)
     assert code == 0 and publish == "false"
