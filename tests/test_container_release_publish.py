@@ -130,11 +130,18 @@ DOCKER_STUB = (
 GH_STUB = (
     "#!/bin/bash\n"
     'echo "gh $*" >> "$STUB/calls"\n'
+    # Answers may change from one call to the next: gh.tags.N / gh.out.N answer the Nth
+    # lookup of the release tags / the branch head; without one the plain file answers.
     'case " $* " in *matching-refs*)\n'
-    '  [ -f "$STUB/gh.tags.rc" ] && { echo "gh: Not Found (HTTP 404)" >&2; exit "$(cat "$STUB/gh.tags.rc")"; }\n'
-    '  [ -f "$STUB/gh.tags" ] && cat "$STUB/gh.tags"; exit 0;;\n'
+    '  n=$(grep -c "^gh api.*matching-refs" "$STUB/calls")\n'
+    '  f="$STUB/gh.tags"; [ -f "$f.$n" ] && f="$f.$n"\n'
+    '  r="$STUB/gh.tags.rc"; [ -f "$r.$n" ] && r="$r.$n"\n'
+    '  [ -f "$r" ] && { echo "gh: Not Found (HTTP 404)" >&2; exit "$(cat "$r")"; }\n'
+    '  [ -f "$f" ] && cat "$f"; exit 0;;\n'
     "esac\n"
-    '[ -f "$STUB/gh.out" ] && cat "$STUB/gh.out"\n'
+    'n=$(grep -c "^gh api.*commits" "$STUB/calls")\n'
+    'f="$STUB/gh.out"; [ -f "$f.$n" ] && f="$f.$n"\n'
+    '[ -f "$f" ] && cat "$f"\n'
     '[ -f "$STUB/gh.rc" ] && exit "$(cat "$STUB/gh.rc")"\n'
     "exit 0\n"
 )
@@ -437,7 +444,14 @@ def inspect(ref):
             print(ref.split("@")[1])
             return
     elif ref in reg["tags"]:
-        print(reg["tags"][ref])
+        value = reg["tags"][ref]
+        # Another publisher acts right after this read answered: the interleaving a
+        # check-then-write has to survive.
+        move = reg.get("after_inspect", {}).get(ref, {}).get(str(k))
+        if move:
+            reg["tags"][move["tag"]] = move["digest"]
+            save()
+        print(value)
         return
     print("ERROR: %s: not found" % ref, file=sys.stderr)
     sys.exit(1)
@@ -467,6 +481,9 @@ elif args[:3] == ["buildx", "imagetools", "create"]:
     hijack = reg.get("hijack", {}).get(tag)
     if hijack and n == 1:
         reg["tags"][hijack["tag"]] = hijack["digest"]
+    # The world moves on after this write: files (a new branch head, a new release) appear.
+    for name, text in reg.get("after_create", {}).get(tag, {}).get(str(n), {}).items():
+        open(os.path.join(os.environ["STUB"], name), "w").write(text)
     save()
     if n in reg.get("commit_error", {}).get(tag, []):
         print("ERROR: connection closed after the write", file=sys.stderr)
@@ -942,11 +959,10 @@ def test_no_loop_word_splits_the_image_names():
 def test_one_publish_per_destination_at_a_time_whatever_the_ref_and_never_cancelled():
     merge = jobs(load(RELEASE))["merge"]
     group = merge["concurrency"]["group"]
-    assert "needs.plan.outputs.ghcr" in group
+    assert "needs.plan.outputs.serialize" in group
     for event_data in ("github.ref", "github.sha", "github.head_ref", "github.event", "github.workflow"):
         assert event_data not in group, f"{event_data}: runs for different refs must queue, not race"
     assert "github." not in group, "the key is the destination image only, from caller inputs and the plan"
-    assert "inputs.dockerhub" in group and "inputs.dockerhub-repository" in group
     assert merge["concurrency"]["cancel-in-progress"] is False
 
 
@@ -1014,7 +1030,8 @@ def test_a_run_at_the_branch_head_moves_every_tag(tmp_path, stub):
     done = publish_on_branch(tmp_path, stub, SHA)
     assert done.returncode == 0, done.stdout + done.stderr
     assert create_order(stub) == [G_SHA, G_MAIN, G_LATEST]
-    assert calls(stub, "gh api") == [f"gh api repos/{REPO}/commits/main --jq .sha"]
+    head = f"gh api repos/{REPO}/commits/main --jq .sha"
+    assert calls(stub, "gh api") == [head] * 3, "once at the start, then right before main and before latest"
 
 
 def test_a_stale_run_publishes_only_the_immutable_tag_and_does_not_fail(tmp_path, stub):
@@ -1127,3 +1144,178 @@ def test_the_publish_step_has_the_api_env_and_the_job_can_read_contents():
     assert env["REPOSITORY"] == "${{ github.repository }}" and env["GH_TOKEN"] == "${{ github.token }}"
     assert env["HUB"] == "${{ steps.names.outputs.dockerhub }}"
     assert jobs(load(RELEASE))["merge"]["permissions"]["contents"] == "read"
+
+
+# --- the rollback restores only a tag that still holds this run's digest, read twice ------------
+
+
+def test_a_tag_moved_between_the_rollback_check_and_the_restore_write_is_not_overwritten(tmp_path, stub):
+    # latest fails to write, so the rollback runs. Its first read of main sees this run's digest;
+    # another publisher moves main right after that read answered. The restore must re-read, see it and not write.
+    registry(
+        tmp_path,
+        stub,
+        fail_create={G_LATEST: [1]},
+        after_inspect={G_MAIN: {"3": {"tag": G_MAIN, "digest": THIRD}}},
+    )
+    done = publish(tmp_path, stub)
+    assert done.returncode != 0
+    state = reg_state(stub)["tags"]
+    assert state[G_MAIN] == THIRD, "the other publisher's digest survives"
+    assert create_order(stub).count(G_MAIN) == 1, "no restore write was made for the moved tag"
+    assert state[G_SHA] == OLD, "a tag that did not move is still restored"
+    assert "::error title=rollback failed" in done.stdout
+    line = next(x for x in done.stdout.splitlines() if "rollback failed" in x)
+    assert G_MAIN in line and f"holds {THIRD}" in line and "nothing was written" in line
+
+
+def test_the_restore_reads_the_tag_again_immediately_before_it_writes(tmp_path, stub):
+    registry(tmp_path, stub, fail_create={G_LATEST: [1]})
+    done = publish(tmp_path, stub)
+    assert done.returncode != 0
+    seq = [c for c in calls(stub, "docker") if G_SHA in c and "imagetools" in c]
+    kinds = ["create" if " create " in c else "inspect" for c in seq]
+    last_write = len(kinds) - 1 - kinds[::-1].index("create")
+    first_write = kinds.index("create")
+    between = kinds[first_write + 1 : last_write]
+    assert last_write > first_write and between == ["inspect"] * 3, "read-back, rollback check, re-read, then the write"
+
+
+def test_the_restore_documents_what_the_registry_cannot_guarantee():
+    flat = WORKFLOW_TEXT.replace("\n          # ", " ")
+    assert "no conditional write" in flat and "window" in flat
+
+
+# --- the serialization key covers the concrete destination --------------------------------------
+
+
+def plan_group(tmp_path: Path, **env: str) -> str:
+    plan = [s for s in steps_of(jobs(load(RELEASE))["plan"]) if s.get("name") == "Plan the matrix"]
+    assert len(plan) == 1
+    out = tmp_path / f"plan-out-{len(list(tmp_path.glob('plan-out-*')))}"
+    base = {"PATH": os.environ["PATH"], "PLATFORMS": "linux/amd64", "GITHUB_OUTPUT": str(out)}
+    done = subprocess.run(
+        ["bash", "-c", plan[0]["run"]], env={**base, **env}, capture_output=True, text=True, timeout=TIMEOUT
+    )
+    assert done.returncode == 0, done.stdout + done.stderr
+    lines = [x for x in out.read_text().splitlines() if x.startswith("serialize=")]
+    assert len(lines) == 1, out.read_text()
+    return lines[0].removeprefix("serialize=")
+
+
+def hub(repository: str, image: str = "", on: str = "true", hub_repository: str = "") -> dict:
+    return {
+        "REPOSITORY": repository,
+        "IMAGE_NAME": image,
+        "DOCKERHUB": on,
+        "DOCKERHUB_REPOSITORY": hub_repository,
+    }
+
+
+def test_the_publish_group_is_the_plan_destination_key_and_nothing_else():
+    merge = jobs(load(RELEASE))["merge"]
+    group = merge["concurrency"]["group"]
+    assert "needs.plan.outputs.serialize" in group
+    assert "inputs." not in group and "github." not in group
+    plan = [s for s in steps_of(jobs(load(RELEASE))["plan"]) if s.get("name") == "Plan the matrix"][0]
+    assert plan["env"]["DOCKERHUB"] == "${{ inputs.dockerhub }}"
+    assert plan["env"]["DOCKERHUB_REPOSITORY"] == "${{ inputs.dockerhub-repository }}"
+    assert jobs(load(RELEASE))["plan"]["outputs"]["serialize"] == "${{ steps.plan.outputs.serialize }}"
+
+
+def test_two_callers_that_resolve_to_one_hub_destination_share_a_group(tmp_path):
+    a = plan_group(tmp_path, **hub("owner/app-a", image="ghcr-a", hub_repository="shared"))
+    b = plan_group(tmp_path, **hub("owner/app-b", image="ghcr-b", hub_repository="shared"))
+    assert a == b, "different GHCR images, one Docker Hub repository: one queue"
+
+
+def test_a_defaulted_hub_repository_resolves_like_the_explicit_one(tmp_path):
+    defaulted = plan_group(tmp_path, **hub("one/Svc", image="x"))
+    explicit = plan_group(tmp_path, **hub("two/other", image="y", hub_repository="svc"))
+    assert defaulted == explicit
+
+
+def test_different_destinations_do_not_share_a_group(tmp_path):
+    base = plan_group(tmp_path, **hub("o/a", hub_repository="one"))
+    assert plan_group(tmp_path, **hub("o/a", hub_repository="two")) != base
+    ghcr_a = plan_group(tmp_path, **hub("o/a", on="false"))
+    ghcr_b = plan_group(tmp_path, **hub("o/b", on="false"))
+    assert ghcr_a != ghcr_b and ghcr_a != base
+    assert plan_group(tmp_path, **hub("o/a", on="false", hub_repository="ignored")) == ghcr_a
+
+
+# --- the newest-ref check is repeated right before each mutable tag write --------------------------
+
+BRANCH_SEQ = f"{G_SHA}\n{G_MAIN}\n{G_LATEST}"
+
+
+def test_a_branch_that_moves_after_the_first_check_stops_the_moving_tags(tmp_path, stub):
+    registry(tmp_path, stub)
+    (stub / "gh.out.1").write_text(SHA + "\n")
+    (stub / "gh.out.2").write_text("f" * 40 + "\n")
+    done = publish(tmp_path, stub, tags=BRANCH_TAGS, REF="refs/heads/main")
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert create_order(stub) == [G_SHA], "only the immutable tag was written; main and latest were not"
+    assert "::warning title=stale run" in done.stdout
+    assert reg_state(stub)["tags"][G_MAIN] == OLD and reg_state(stub)["tags"][G_LATEST] == OLD
+
+
+def test_a_branch_that_moves_between_two_moving_tags_rolls_back_the_one_already_moved(tmp_path, stub):
+    registry(
+        tmp_path,
+        stub,
+        after_create={G_MAIN: {"1": {"gh.out.3": "f" * 40 + "\n"}}},
+    )
+    (stub / "gh.out").write_text(SHA + "\n")
+    done = publish(tmp_path, stub, tags=BRANCH_TAGS, REF="refs/heads/main")
+    assert done.returncode != 0
+    state = reg_state(stub)["tags"]
+    assert state[G_LATEST] == OLD, "latest was never written"
+    assert state[G_MAIN] == OLD, "main moved while the run was still newest, then was put back"
+    assert "no longer the head" in done.stdout
+
+
+def test_a_branch_head_that_cannot_be_read_before_a_moving_write_fails_and_writes_nothing_more(tmp_path, stub):
+    registry(tmp_path, stub)
+    (stub / "gh.out.1").write_text(SHA + "\n")
+    (stub / "gh.out.2").write_text("not-a-sha\n")
+    done = publish(tmp_path, stub, tags=BRANCH_TAGS, REF="refs/heads/main")
+    assert done.returncode != 0 and "could not read the head of main before writing" in done.stdout
+    assert G_MAIN not in create_order(stub) and G_LATEST not in create_order(stub)
+
+
+def test_a_newer_release_that_appears_after_the_first_check_keeps_latest_where_it_is(tmp_path, stub):
+    registry(tmp_path, stub, tags={})
+    (stub / "gh.tags.1").write_text("refs/tags/v1.9.0\n")
+    (stub / "gh.tags.2").write_text("refs/tags/v1.9.0\nrefs/tags/v2.0.0\n")
+    done = publish(tmp_path, stub, tags=RELEASE_TAGS, REF="refs/tags/v1.9.0")
+    assert done.returncode == 0, done.stdout + done.stderr
+    order = create_order(stub)
+    assert f"{R}:latest" not in order and f"{R}:1" not in order and f"{R}:1.9" not in order
+    assert f"{R}:1.9.0" in order and f"{R}:sha-1234567" in order
+    assert "v2.0.0 is newer" in done.stdout
+
+
+def test_a_newer_release_that_appears_between_two_moving_writes_stops_the_rest(tmp_path, stub):
+    registry(
+        tmp_path,
+        stub,
+        tags={},
+        after_create={f"{R}:1.9": {"1": {"gh.tags.3": "refs/tags/v1.9.0\nrefs/tags/v2.0.0\n"}}},
+    )
+    (stub / "gh.tags").write_text("refs/tags/v1.9.0\n")
+    done = publish(tmp_path, stub, tags=RELEASE_TAGS, REF="refs/tags/v1.9.0")
+    assert done.returncode != 0
+    order = create_order(stub)
+    assert f"{R}:latest" not in order, "latest, the last write, was refused"
+    assert "v2.0.0 is newer" in done.stdout
+
+
+def test_the_release_list_that_cannot_be_read_before_a_moving_write_fails_and_writes_nothing_more(tmp_path, stub):
+    registry(tmp_path, stub, tags={})
+    (stub / "gh.tags").write_text("refs/tags/v1.9.0\n")
+    (stub / "gh.tags.rc.2").write_text("1")
+    done = publish(tmp_path, stub, tags=RELEASE_TAGS, REF="refs/tags/v1.9.0")
+    assert done.returncode != 0 and "could not read the release tags" in done.stdout
+    order = create_order(stub)
+    assert f"{R}:1.9" not in order and f"{R}:latest" not in order

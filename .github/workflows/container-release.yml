@@ -269,6 +269,7 @@ jobs:
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
       ghcr: ${{ steps.plan.outputs.ghcr }}
+      serialize: ${{ steps.plan.outputs.serialize }}
       publish: ${{ steps.publish.outputs.publish }}
     steps:
       - name: Validate the egress policy inputs (EX-0001)
@@ -480,12 +481,26 @@ jobs:
           PLATFORMS: ${{ inputs.platforms }}
           REPOSITORY: ${{ github.repository }}
           IMAGE_NAME: ${{ inputs.image-name }}
+          DOCKERHUB: ${{ inputs.dockerhub }}
+          DOCKERHUB_REPOSITORY: ${{ inputs.dockerhub-repository }}
         run: |
           set -euo pipefail
           repo_name="${REPOSITORY#*/}"
           repo_name="$(printf '%s' "$repo_name" | tr '[:upper:]' '[:lower:]')"
           owner="$(printf '%s' "${REPOSITORY%%/*}" | tr '[:upper:]' '[:lower:]')"
           echo "ghcr=ghcr.io/${owner}/${IMAGE_NAME:-$repo_name}" >> "$GITHUB_OUTPUT"
+          # The publish queue is per concrete destination. With Docker Hub on,
+          # the destination is the Hub repository: its namespace comes from the
+          # Doppler credentials, which are not known before the job starts, so
+          # the key is the Hub repository name (resolved as the merge job
+          # resolves it) and callers that share a Hub repository share a queue
+          # whatever their GHCR image. With Docker Hub off it is the GHCR image.
+          if [ "${DOCKERHUB:-}" = "true" ]; then
+            hub_repo="$(printf '%s' "${DOCKERHUB_REPOSITORY:-$repo_name}" | tr '[:upper:]' '[:lower:]')"
+            echo "serialize=hub-${hub_repo}" >> "$GITHUB_OUTPUT"
+          else
+            echo "serialize=ghcr-${owner}/${IMAGE_NAME:-$repo_name}" >> "$GITHUB_OUTPUT"
+          fi
           # arm64 and amd64 build natively on their own runner; anything else
           # falls back to an amd64 runner with QEMU.
           matrix='[]'
@@ -1263,17 +1278,20 @@ jobs:
     # tokens that sign and attest.
     if: needs.plan.outputs.publish == 'true' && github.event_name != 'pull_request'
     needs: [plan, build]
-    # One publish per destination image at a time, whatever the ref, and a
-    # running one is never cancelled halfway through signing. The key is the
-    # destination (the GHCR image, and the Docker Hub repository when it is
-    # on), both caller inputs, never event data. The group serializes runs in
-    # the order they reach this job, not in commit order; the "Publish the
-    # release tags" step keeps a stale run from moving a branch's tags and an
-    # older release from moving the mutable tags. GitHub keeps one pending run
+    # One publish per destination at a time, whatever the ref, and a running
+    # one is never cancelled halfway through signing. The key comes from the
+    # plan: the Docker Hub repository when Hub is on (callers that share a Hub
+    # repository share a queue, whatever their GHCR image), otherwise the GHCR
+    # image. Both are caller inputs, never event data. A job has one group, so
+    # with Hub on, two callers that share a GHCR image but not a Hub repository
+    # are not queued behind each other. The group serializes runs in the order
+    # they reach this job, not in commit order; the "Publish the release tags"
+    # step re-checks the ref before each moving tag, so a stale run does not
+    # move a branch's tags nor an older release the mutable tags. GitHub keeps one pending run
     # per group, so a pending run is replaced by a newer pending run of the
     # same destination; re-run the replaced one.
     concurrency:
-      group: container-release-${{ needs.plan.outputs.ghcr }}-${{ inputs.dockerhub && format('hub-{0}', inputs.dockerhub-repository) || 'ghcr' }}
+      group: container-release-${{ needs.plan.outputs.serialize }}
       cancel-in-progress: false
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -2047,7 +2065,10 @@ jobs:
           # release; a tag ref that is not a SemVer release has no order, so
           # it publishes only its own tag name and the sha- tags. Everything
           # skipped is announced. If the head or the tag list cannot be read,
-          # nothing is moved and the job fails.
+          # nothing is moved and the job fails. The check is repeated right
+          # before every write of a mutable tag (see the write loop), so a ref
+          # that moves during the registry work stops the rest of the moving
+          # tags instead of being judged once, at the start.
           publish_tags=("${release_tags[@]}")
           keep_immutable() {
             local kept=() tag name
@@ -2057,14 +2078,73 @@ jobs:
             done
             publish_tags=("${kept[@]}")
           }
+          ref_name=""
+          version=""
+          ordered_release=0
+          case "$REF" in
+            refs/tags/*)
+              ref_name="${REF#refs/tags/}"
+              version="${ref_name#v}"
+              if [[ "$version" =~ $semver_re ]] && [ "$ref_name" != "$version" ]; then ordered_release=1; fi ;;
+          esac
+          # A moving tag is anything but a sha- tag and, on a tag ref, the
+          # run's own version and tag name.
+          is_mutable() {
+            local name="${1##*:}"
+            case "$name" in sha-*) return 1 ;; esac
+            if [ -n "$ref_name" ]; then
+              case "$name" in "${version%%+*}" | "v${version%%+*}" | "$ref_name") return 1 ;; esac
+            fi
+            return 0
+          }
+          # Is this run still the newest? Returns 0 when it is, 2 when it is
+          # not (NEWER names what is newer), 1 when that could not be read
+          # (ORDER_TITLE and ORDER_MSG say why). Reads the live state every time.
+          NEWER=""
+          ORDER_TITLE=""
+          ORDER_MSG=""
+          check_newest() {
+            local existing
+            NEWER=""
+            case "$REF" in
+              refs/heads/*)
+                if ! registry_retry gh api "repos/${REPOSITORY}/commits/${REF#refs/heads/}" --jq .sha \
+                  || ! [[ "$REG_OUT" =~ ^[0-9a-f]{40}$ ]]; then
+                  ORDER_TITLE="branch head"
+                  ORDER_MSG="could not read the head of ${REF#refs/heads/}"
+                  return 1
+                fi
+                if [ "$REG_OUT" != "$WORKFLOW_SHA" ]; then
+                  NEWER="$REG_OUT"
+                  return 2
+                fi ;;
+              refs/tags/*)
+                if [ "$ordered_release" = 1 ]; then
+                  if ! registry_retry gh api --paginate "repos/${REPOSITORY}/git/matching-refs/tags/v" --jq '.[].ref'; then
+                    ORDER_TITLE="release order"
+                    ORDER_MSG="could not read the release tags of ${REPOSITORY}"
+                    return 1
+                  fi
+                  while IFS= read -r existing; do
+                    existing="${existing#refs/tags/v}"
+                    [[ "$existing" =~ $semver_re ]] || continue
+                    # A stable release is ordered against stable releases only.
+                    if [[ "$version" != *-* && "$existing" == *-* ]]; then continue; fi
+                    if [ "$(semver_cmp "$existing" "$version")" = "1" ]; then NEWER="$existing"; return 2; fi
+                  done <<< "$REG_OUT"
+                fi ;;
+            esac
+            return 0
+          }
+          check_rc=0
+          check_newest || check_rc=$?
+          if [ "$check_rc" -eq 1 ]; then
+            echo "::error title=${ORDER_TITLE}::${ORDER_MSG}; the release tags were not moved"
+            exit 1
+          fi
           case "$REF" in
             refs/heads/*)
-              if ! registry_retry gh api "repos/${REPOSITORY}/commits/${REF#refs/heads/}" --jq .sha \
-                || ! [[ "$REG_OUT" =~ ^[0-9a-f]{40}$ ]]; then
-                echo "::error title=branch head::could not read the head of ${REF#refs/heads/}; the release tags were not moved"
-                exit 1
-              fi
-              if [ "$REG_OUT" != "$WORKFLOW_SHA" ]; then
+              if [ "$check_rc" -eq 2 ]; then
                 publish_tags=()
                 for tag in "${release_tags[@]}"; do
                   case "${tag##*:}" in sha-*) publish_tags+=("$tag") ;; esac
@@ -2072,24 +2152,10 @@ jobs:
                 echo "::warning title=stale run::${WORKFLOW_SHA} is no longer the head of ${REF#refs/heads/}; only the immutable sha- tags are published, the moving tags were not moved"
               fi ;;
             refs/tags/*)
-              ref_name="${REF#refs/tags/}"
-              version="${ref_name#v}"
-              if [[ "$version" =~ $semver_re ]] && [ "$ref_name" != "$version" ]; then
-                if ! registry_retry gh api --paginate "repos/${REPOSITORY}/git/matching-refs/tags/v" --jq '.[].ref'; then
-                  echo "::error title=release order::could not read the release tags of ${REPOSITORY}; the release tags were not moved"
-                  exit 1
-                fi
-                newer=""
-                while IFS= read -r existing; do
-                  existing="${existing#refs/tags/v}"
-                  [[ "$existing" =~ $semver_re ]] || continue
-                  # A stable release is ordered against stable releases only.
-                  if [[ "$version" != *-* && "$existing" == *-* ]]; then continue; fi
-                  if [ "$(semver_cmp "$existing" "$version")" = "1" ]; then newer="$existing"; break; fi
-                done <<< "$REG_OUT"
-                if [ -n "$newer" ]; then
+              if [ "$ordered_release" = 1 ]; then
+                if [ "$check_rc" -eq 2 ]; then
                   keep_immutable "${version%%+*}" "$ref_name"
-                  echo "::notice title=older release::v${newer} is newer than ${ref_name}; only the version and sha- tags are published, the moving tags (latest and the like) were not moved"
+                  echo "::notice title=older release::v${NEWER} is newer than ${ref_name}; only the version and sha- tags are published, the moving tags (latest and the like) were not moved"
                 fi
               else
                 keep_immutable "${version%%+*}" "$ref_name"
@@ -2165,8 +2231,29 @@ jobs:
 
           touched=()
           problem=""
+          stale=0
+          moving_written=0
           for tag in "${ordered[@]}"; do
             repo="${tag%:*}"
+            if is_mutable "$tag"; then
+              # The ref may have moved since the start: ask again, right before
+              # this write, and refuse it if this run is no longer the newest.
+              check_rc=0
+              check_newest || check_rc=$?
+              if [ "$check_rc" -eq 1 ]; then
+                problem="${ORDER_MSG} before writing ${tag}, so it was not written"
+                break
+              elif [ "$check_rc" -eq 2 ]; then
+                stale=1
+                if [ "$ordered_release" = 1 ]; then
+                  problem="v${NEWER} is newer than ${ref_name}, so ${tag} was not written"
+                else
+                  problem="${WORKFLOW_SHA} is no longer the head of ${REF#refs/heads/}, so ${tag} was not written"
+                fi
+                break
+              fi
+              moving_written=1
+            fi
             touched+=("$tag")
             write_rc=0
             registry_retry docker buildx imagetools create --tag "$tag" "${repo}@${DIGEST}" || write_rc=$?
@@ -2186,6 +2273,13 @@ jobs:
             fi
             echo "published ${tag} -> ${DIGEST}"
           done
+          if [ "$stale" = 1 ] && [ "$moving_written" = 0 ] && [ "$problem" != "${problem#*, so }" ]; then
+            # The ref moved on before any moving tag was written: only the
+            # immutable tags went out, exactly as for a run that was stale at
+            # the start. Not a failure.
+            echo "::warning title=stale run::${problem}; only the immutable tags were published, the moving tags were not moved"
+            exit 0
+          fi
           if [ -z "$problem" ]; then
             # A second read of every tag: one that moved while the others were
             # written is a failure too.
@@ -2222,6 +2316,17 @@ jobs:
             if [ "$cur" = "$want" ]; then continue; fi
             if [ "$cur" != "$DIGEST" ]; then
               failed+=("${tag} holds ${cur}, this run promoted ${DIGEST}, the recorded previous digest is ${want}; a concurrent change prevented a safe restore and nothing was written")
+              continue
+            fi
+            # The registry has no conditional write (no compare-and-swap on a
+            # tag), so the check above and the write below cannot be one atomic
+            # step. The window is cut to the one read between them: read the tag
+            # again and write only if it still holds this run's digest. A change
+            # inside that last window cannot be detected here; it is caught by
+            # the read-back after the write, which fails the step loudly.
+            again="$(read_digest "$tag")" || again="unreadable"
+            if [ "$again" != "$DIGEST" ]; then
+              failed+=("${tag} holds ${again}, this run promoted ${DIGEST}, the recorded previous digest is ${want}; it changed between the check and the restore (a concurrent change) and nothing was written")
               continue
             fi
             restore_rc=0
