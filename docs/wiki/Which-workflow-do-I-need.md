@@ -29,6 +29,7 @@ the workflow's YAML so it cannot drift; the README is the authority.
 | One `CI green` over several workflows side by side | `ci-gate.yml` | [ci-gate](Workflow-ci-gate.md) |
 | A file vendored from another repository that must not drift (opt-in) | `vendored-drift.yml` | [vendored-drift](Workflow-vendored-drift.md) |
 | A Dockerfile whose base image is pinned by digest and should be rechecked on a schedule (opt-in) | `base-image-digest.yml` | [base-image-digest](Workflow-base-image-digest.md) |
+| Pins of these workflows kept current by a pin-only pull request on a schedule (opt-in, needs a GitHub App) | `repin.yml` | [repin](Workflow-repin.md) |
 | Agent skills or MCP tool definitions (optional, advisory static scan) | `agent-scan.yml` | [agent-scan](Workflow-agent-scan.md) |
 
 Not a workflow, but a tool: to wait for a commit's CI and merge exactly that commit, use the `wait-ci` action or script ([wait-ci](Action-wait-ci.md)). To move a repository to the newest GYST release, use `scripts/repin.sh` ([repin](Script-repin.md)).
@@ -49,6 +50,7 @@ from its own caller job, and requires every gate. See
 | `container-release.yml` | Yes, after a push only | Docker Hub credentials, if used | Builds and scans only | GHCR (and Docker Hub) |
 | `verify-published.yml` | No (`packages: read`; the rescan adds nothing) | No | n/a (scheduled) | No |
 | `vendored-drift.yml` | No | No | Yes | No |
+| `repin.yml` | No (the job token is `contents: read`; a GitHub App token does the writes) | The App private key, as a caller secret | Reports only | No, opens a pull request and never merges |
 | `parallel-ci.yml` | No (`contents: read` only) | No | Yes | No |
 | `ci-gate.yml` | No | No | Yes | No |
 | `base-image-digest.yml` | No (`contents: read` only) | No | n/a (scheduled) | No |

@@ -68,6 +68,7 @@ publish).
 | `parallel-ci.yml` | [CI](Workflow-parallel-ci.md) | One build, checks as parallel jobs sharing it, path rules that fail closed, `CI green` |
 | `ci-gate.yml` | [CI](Workflow-ci-gate.md) | `CI green` over the jobs a caller hands it |
 | `vendored-drift.yml` | [Automation](Which-workflow-do-I-need.md) | Fail when a vendored file or its generated output no longer matches its lock |
+| `repin.yml` | [Automation](Which-workflow-do-I-need.md) | Scheduled: open one pin-only pull request when a caller's GYST pins are behind the latest release ([repin](Workflow-repin.md)) |
 | `base-image-digest.yml` | [Release](Which-workflow-do-I-need.md) | Scheduled: fail when a pinned base-image digest has a fixable finding its tag's current digest fixes |
 | `python-package-release.yml` | [Release](Which-workflow-do-I-need.md) | Build, check, publish to the GitHub release (PyPI via a direct pypa publish step in the caller's own job) |
 | `artifact-release.yml` | [Release](Which-workflow-do-I-need.md) | Build any file, sign it, attach it to the release |

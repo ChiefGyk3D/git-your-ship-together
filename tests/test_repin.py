@@ -38,6 +38,19 @@ if a[:1] == ["api"]:
     if path.endswith("/releases/latest"):
         print(sc["latest"])
         sys.exit(0)
+    if "/contents/" in path:
+        fpath = path.split("/contents/", 1)[1]
+        ref = a[a.index("-f") + 1].split("=", 1)[1]
+        docs = sc.get("contents", {})
+        key = fpath + "@" + ref
+        if key in docs:
+            sys.stdout.write(docs[key])
+            sys.exit(0)
+        if sc.get("contents_default") is not None and "@" + ref not in sc.get("contents_missing", []):
+            sys.stdout.write(sc["contents_default"])
+            sys.exit(0)
+        sys.stderr.write("gh: Not Found (HTTP 404)\n")
+        sys.exit(1)
     tag = path.rsplit("/commits/", 1)[-1]
     info = sc["tags"].get(tag)
     if info is None:
@@ -66,6 +79,9 @@ TAGS = {
     "v1.30.0": {"sha": NEW, "date": "2026-11-05T12:00:00Z"},
 }
 NOW = "2026-11-08T12:00:00Z"
+DEFAULT_DEF = (
+    "on:\n  workflow_call:\n    inputs:\n      python-version:\n        type: string\n        default: '3.12'\n"
+)
 
 
 def wf(sha=OLD, ver="v1.28.0", extra=""):
@@ -96,7 +112,9 @@ def env(tmp_path):
     fake.write_text(FAKE_GH)
     fake.chmod(0o755)
     scenario = tmp_path / "scenario.json"
-    scenario.write_text(json.dumps({"latest": "v1.30.0", "tags": TAGS, "open_prs": {}}))
+    scenario.write_text(
+        json.dumps({"latest": "v1.30.0", "tags": TAGS, "open_prs": {}, "contents_default": DEFAULT_DEF})
+    )
     calls = tmp_path / "calls.log"
     calls.write_text("")
     e = {
@@ -457,3 +475,193 @@ def test_a_hostile_workflow_file_name_is_refused_and_nothing_is_executed_or_writ
     assert (root / ".github/workflows/ok.yml").read_text() == good
     assert (root / ".github/workflows" / name).read_text() == wf()
     assert not list(env["tmp"].rglob("PWNED")) and not list(Path.cwd().glob("PWNED"))
+
+
+# --- the input check ----------------------------------------------------------------------------------------
+
+
+def defn(*inputs):
+    """A workflow_call header; each input is (name, type, default, required) or a raw YAML block."""
+    out = "name: x\non:\n  workflow_call:\n    inputs:\n"
+    for item in inputs:
+        if isinstance(item, str):
+            out += item
+            continue
+        name, ty, df, rq = item
+        out += f"      {name}:\n        description: d\n"
+        if ty:
+            out += f"        type: {ty}\n"
+        if rq:
+            out += "        required: true\n"
+        if df is not None:
+            out += f"        default: {df}\n"
+    return out + "permissions: {}\njobs: {}\n"
+
+
+PYV = ("python-version", "string", '"3.12"', False)
+PATH = ".github/workflows/python-ci.yml"
+
+
+def set_defs(ctx, old, new):
+    set_scenario(ctx, contents={f"{PATH}@{OLD}": old, f"{PATH}@{NEW}": new})
+
+
+def apply_inputs(ctx, old, new, *flags, files=None):
+    set_defs(ctx, old, new)
+    root = make_caller(ctx, files or {"ci.yml": wf()})
+    return root, run(ctx, "apply", *flags, root)
+
+
+def test_an_unchanged_input_set_is_accepted(env):
+    root, p = apply_inputs(env, defn(PYV), defn(PYV))
+    assert p.returncode == 0, p.stderr
+    assert f"@{NEW}" in (root / ".github/workflows/ci.yml").read_text()
+
+
+def test_an_input_the_caller_sets_that_the_release_dropped_is_refused_and_named(env):
+    root, p = apply_inputs(env, defn(PYV), defn(("other", "string", '""', False)))
+    assert p.returncode == 5, p.stderr
+    assert "python-version" in p.stderr and "no longer declares" in p.stderr
+    assert f"@{OLD}" in (root / ".github/workflows/ci.yml").read_text()
+
+
+def test_an_input_the_caller_sets_that_changed_type_is_refused(env):
+    _, p = apply_inputs(env, defn(PYV), defn(("python-version", "number", "3.12", False)))
+    assert p.returncode == 5
+    assert "changed type from 'string' to 'number'" in p.stderr
+
+
+def test_a_new_required_input_the_caller_does_not_set_is_refused(env):
+    _, p = apply_inputs(env, defn(PYV), defn(PYV, ("token-name", "string", None, True)))
+    assert p.returncode == 5
+    assert "adds the required input token-name" in p.stderr
+
+
+def test_a_new_optional_input_and_a_new_required_input_with_a_default_are_accepted(env):
+    new = defn(PYV, ("extra", "boolean", "false", False), ("mode", "string", '"a"', True))
+    _, p = apply_inputs(env, defn(PYV), new)
+    assert p.returncode == 0, p.stderr
+
+
+def test_a_changed_default_is_accepted_for_a_set_input_and_noted_for_an_unset_one(env, tmp_path):
+    old = defn(PYV, ("lint", "boolean", "true", False))
+    new = defn(("python-version", "string", '"3.13"', False), ("lint", "boolean", "false", False))
+    root, p = apply_inputs(env, old, new)
+    assert p.returncode == 0, p.stderr
+
+
+def test_the_allow_flag_lets_a_refused_change_through_and_says_so(env):
+    root, p = apply_inputs(env, defn(PYV), defn(("other", "string", '""', False)), "--allow-input-changes")
+    assert p.returncode == 0, p.stderr
+    assert "no longer declares" in p.stderr and "allowed" in p.stderr
+    assert f"@{NEW}" in (root / ".github/workflows/ci.yml").read_text()
+
+
+def test_a_definition_that_cannot_be_read_is_refused_not_skipped(env):
+    set_scenario(env, contents_default=None)
+    root = make_caller(env, {"ci.yml": wf()})
+    p = run(env, "apply", root)
+    assert p.returncode == 5
+    assert "cannot read" in p.stderr
+    assert f"@{OLD}" in (root / ".github/workflows/ci.yml").read_text()
+
+
+def test_a_block_scalar_default_and_quoted_values_are_compared(env):
+    old = defn("      cmd:\n        type: string\n        default: |\n          a\n          b\n")
+    new = defn("      cmd:\n        type: number\n        default: |\n          a\n")
+    text = wf(extra='\n      cmd: "x"')
+    _, p = apply_inputs(env, old, new, files={"ci.yml": text})
+    assert p.returncode == 5 and "cmd changed type" in p.stderr
+
+
+def test_with_keys_belong_to_the_pin_that_owns_them(env):
+    """Two jobs: one sets python-version, the other sets nothing; only the first may trip the check."""
+    second = f"  second:\n    uses: {SRC}/.github/workflows/python-ci.yml@{OLD} # v1.28.0\n"
+    _, p = apply_inputs(env, defn(PYV), defn(("other", "string", '""', False)), files={"ci.yml": wf() + second})
+    assert p.returncode == 5
+    assert p.stderr.count("no longer declares") == 1  # only the job that sets it
+
+
+def test_a_composite_action_pin_is_compared_by_its_action_file(env):
+    key = f".github/actions/wait-ci/action.yml@{OLD}"
+    new_key = f".github/actions/wait-ci/action.yml@{NEW}"
+    set_scenario(
+        env,
+        contents={
+            key: "inputs:\n  repo:\n    type: string\n    default: x\n",
+            new_key: "inputs:\n  other:\n    default: x\n",
+        },
+    )
+    use = f"{SRC}/.github/actions/wait-ci@{OLD} # v1.28.0"
+    text = f"jobs:\n  w:\n    steps:\n      - uses: {use}\n        with:\n          repo: a/b\n"
+    root = make_caller(env, {"ci.yml": text})
+    p = run(env, "apply", root)
+    assert p.returncode == 5 and "repo" in p.stderr
+
+
+def test_the_pr_body_carries_the_allowed_note(env, clone):
+    root, _ = clone
+    set_defs(env, defn(PYV), defn(("other", "string", '""', False)))
+    p = run(env, "pr", "--allow-input-changes", root)
+    assert p.returncode == 0, p.stderr
+    assert "allowed by the operator" in Path(str(env["calls"]) + ".body").read_text()
+
+
+# --- the scheduled workflow ---------------------------------------------------------------------------------
+
+WORKFLOW = REPO / ".github" / "workflows" / "repin.yml"
+
+
+def workflow_steps():
+    return yaml.safe_load(WORKFLOW.read_text())["jobs"]["repin"]["steps"]
+
+
+def step_named(prefix):
+    found = [s for s in workflow_steps() if str(s.get("name", "")).startswith(prefix)]
+    assert len(found) == 1, prefix
+    return found[0]
+
+
+def test_the_workflow_inlines_the_script_byte_for_byte():
+    run = step_named("Write the re-pin script")["run"]
+    head = "cat > \"$RUNNER_TEMP/repin.sh\" <<'REPIN_SH'\n"
+    assert run.startswith(head) and run.endswith("\nREPIN_SH\n")
+    assert run[len(head) : -len("REPIN_SH\n")] == SCRIPT.read_text()
+
+
+def test_the_job_token_stays_read_only_and_every_write_is_the_apps_with_three_named_permissions():
+    doc = yaml.safe_load(WORKFLOW.read_text())
+    assert doc["permissions"] == {"contents": "read"}
+    assert doc["jobs"]["repin"]["permissions"] == {"contents": "read"}
+    app = step_named("Mint a one-hour installation token")
+    granted = {k: v for k, v in app["with"].items() if k.startswith("permission-")}
+    assert granted == {
+        "permission-contents": "write",
+        "permission-pull-requests": "write",
+        "permission-workflows": "write",
+    }
+    assert app["with"]["repositories"] == "${{ github.event.repository.name }}", "limited to the calling repository"
+    secrets = (doc.get(True) or doc["on"])["workflow_call"]["secrets"]
+    assert list(secrets) == ["APP_PRIVATE_KEY"] and secrets["APP_PRIVATE_KEY"]["required"] is False
+
+
+def test_a_pull_request_is_opened_only_when_the_decision_step_says_so():
+    decide = step_named("Decide whether")["run"]
+    for must in ('"$EVENT" != "schedule"', '"$EVENT" != "workflow_dispatch"', "refs/heads/$DEFAULT_BRANCH", "DRY_RUN"):
+        assert must in decide
+    assert step_named("Mint a one-hour")["if"] == "steps.mode.outputs.open == 'true'"
+    assert step_named("Open the pin-only")["if"] == "steps.mode.outputs.open == 'true'"
+    assert step_named("Report where")["if"] == "steps.mode.outputs.open != 'true'"
+
+
+def test_the_workflow_never_merges_and_hands_git_no_credential_in_a_url_or_header():
+    text = WORKFLOW.read_text()
+    code = "\n".join(
+        line for line in text.splitlines() if not line.lstrip().startswith("#") and not line.startswith("          ")
+    )
+    for forbidden in ("gh pr merge", "--auto", "wait-ci", "--merge", "extraheader", "x-access-token"):
+        assert forbidden not in code, forbidden
+    script = SCRIPT.read_text()
+    assert "pr merge" not in script and "--auto" not in script
+    run = step_named("Open the pin-only")["run"]
+    assert "GIT_ASKPASS" in run and "https://" not in run.replace("$SERVER_URL", "")

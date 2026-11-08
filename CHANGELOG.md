@@ -24,6 +24,16 @@ Fork pull requests: a caller that passes this input on `pull_request` events let
 Why: a package's docstring text can match a secret rule when nothing is a credential; the installed `anthropic` SDK trips
 `gcp-service-account` (11 CRITICAL findings on Boon-Tube-Daemon's image, no fixed version). Source: Trivy secret scanning docs, "Allow Rules".
 
+### New: `repin.yml`, scheduled pin-only re-pin (issue #334)
+
+Opt-in, new file: a caller sees nothing until it adds a job that calls it. It runs `scripts/repin.sh` (inlined byte for byte) on
+the caller's schedule and, when the caller's pins of these workflows are behind the latest release, opens ONE pull request that
+changes the pin SHA and the `# vX.Y.Z` comment and nothing else. It never merges, and it stops without a pull request, naming
+them, when the release drops or retypes an input the caller sets or adds a required input it does not set. `repin.sh` gains
+that input check (exit 5, `--allow-input-changes` to override). Opening the pull request takes a GitHub App token limited to the
+calling repository (Contents, Pull requests, Workflows: write); the job's own token stays `contents: read`, and with no App the
+run only reports. Inputs: `client-id`, `dry-run`, the egress trio, `timeout-minutes`; secret: `APP_PRIVATE_KEY` (optional).
+
 ## v1.33.0 (2026-11-08)
 
 ### New: `parallel-ci.yml` and `ci-gate.yml` (issue #330)

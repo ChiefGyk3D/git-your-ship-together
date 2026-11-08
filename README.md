@@ -73,6 +73,7 @@ Twenty-three reusable workflows and six composite actions:
 | `.github/workflows/python-docker-release.yml` | The old name of the above: a thin caller that forwards every input, the secret and the outputs through a `./` reference at its own commit, so an existing pin keeps working. New callers use `container-release.yml` |
 | `.github/workflows/verify-published.yml` | Consumer-side verification of a published image (cosign signature, SPDX SBOM attestation and build provenance verified from outside, then each platform pulled and checked) or of a GitHub release's assets (checksums, provenance, SBOMs). Read-only, no secret, no token beyond the default one |
 | `.github/workflows/vendored-drift.yml` | Opt-in drift check for a file vendored from another repository: each lock file (path, source repository, commit, sha256) must match the file's hash, and an optional generator run with `--check` must agree. Read-only, no secret |
+| `.github/workflows/repin.yml` | Opt-in scheduled re-pin: when a caller's pins of these workflows are behind the latest release, opens ONE pin-only pull request (SHA and `# vX.Y.Z` comment only), refuses and names it when the release changes an input the caller uses, never merges. Needs a GitHub App (Contents, Pull requests, Workflows: write); without one it reports only. See [Scheduled re-pin](#scheduled-re-pin) |
 | `.github/workflows/base-image-digest.yml` | Opt-in scheduled check of a Dockerfile's `FROM image:tag@sha256:...` pins: resolves today's digest of each tag and fails when the pinned digest has a fixable HIGH or CRITICAL finding (Trivy, container-release.yml's flags) that the current digest does not. Read-only, no secret, no issue write |
 | `.github/workflows/parallel-ci.yml` | One build, then caller-supplied checks as separate jobs that share it: a matrix over a `jobs` list, each leg downloading the one-day build artifact, with path rules that skip checks a change cannot affect (failing closed: a push, a schedule, an unmatched path or an unreadable diff runs everything), pip and tool-download caches keyed on pin files, and one `CI green` gate that counts only deliberate skips as passed. Holds no token |
 | `.github/workflows/ci-gate.yml` | The gate on its own: `CI green` over the jobs a caller hands it (`parallel-ci.yml`, `bash-ci.yml`, `security.yml`, a job of its own), red on anything that failed, was cancelled or was skipped without being named. Holds no token |
@@ -1295,6 +1296,48 @@ Inputs of `verify-published.yml`:
 | `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `block`, the measured list, empty | harden-runner; the list covers the GHCR pull, Sigstore, and GitHub's attestation store |
 | `egress-policy-secretless` | `block` | harden-runner policy for the jobs that hold no stored secret, no OIDC token and no write-scoped token, and whose output no privileged job consumes; exactly `audit` or `block`. Security exception EX-0001 is closed (2026-11-02), see [Known CI platform issue: westus2 (EX-0001)](#known-ci-platform-issue-westus2-ex-0001). `audit` opts out if the defect recurs |
 | `timeout-minutes` | `20` | Job timeout |
+
+### Scheduled re-pin
+
+`repin.yml` keeps a caller's pins current. On a schedule it runs `scripts/repin.sh` (inlined byte for byte) and, when any
+`uses: ChiefGyk3D/git-your-ship-together/...@<sha> # vX.Y.Z` pin is behind the latest release, opens ONE pull request that
+changes the SHA and the version comment of every pin and nothing else, with the release and changelog links in the body. It
+never merges. It stops without a pull request, and fails the job naming them, when the new release drops or retypes an input
+the caller sets or adds a required input it does not set. Writing a branch that changes workflow files takes a GitHub App
+installation token (the job token cannot hold the `workflows` permission, and a pull request it opened would start no checks):
+Contents, Pull requests and Workflows set to write, limited to the calling repository, minted at the start of the job. Without
+the App, on a pull request, off the default branch, or with `dry-run: true`, it only reports. No personal access token is accepted.
+
+```yaml
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  repin:
+    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/repin.yml@<sha> # vX.Y.Z
+    permissions:
+      contents: read
+    with:
+      client-id: ${{ vars.REPIN_APP_CLIENT_ID }}
+    secrets:
+      APP_PRIVATE_KEY: ${{ secrets.REPIN_APP_PRIVATE_KEY }}
+```
+
+Inputs of `repin.yml`:
+
+| Input | Default | Meaning |
+|---|---|---|
+| `client-id` | empty | The App's Client ID (an identifier); empty makes the run report only |
+| `dry-run` | `false` | Report and open nothing |
+| `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `block`, GitHub only, empty | harden-runner |
+| `timeout-minutes` | `10` | Job timeout |
+
+The secret is `APP_PRIVATE_KEY` (optional). The same tool by hand, and a Dependabot template with a GYST group, are in the
+[repin wiki page](docs/wiki/Script-repin.md).
 
 ### Vendored-file drift check
 

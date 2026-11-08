@@ -3,7 +3,7 @@
 **What it does.** Moves a repository's pins of this repository's reusable workflows to a release. A caller pins
 `uses: ChiefGyk3D/git-your-ship-together/.github/workflows/<name>.yml@<40-hex sha> # vX.Y.Z`; a release reaches it only when it
 re-pins. `scripts/repin.sh` rewrites the SHA and the version comment, in every workflow and composite action of the repository,
-and can open the pull request. It never merges. It is a script, not a reusable workflow.
+and can open the pull request. It never merges. It is a script; the scheduled form is the reusable workflow [repin](Workflow-repin.md), which runs it.
 
 **Why it exists.** A re-pin is mechanical, the maintainer's rule is that a GYST release moves every caller, and doing it by hand
 cost five pull requests in eight days on one repository (issue #310).
@@ -32,7 +32,12 @@ access to this public repository is enough) and GNU `date` and `sed`.
 - **The release comes from the API only.** The tag must be `vMAJOR.MINOR.PATCH` and the commit 40 hex characters.
 - **One pull request, idempotent.** Branch `repin/gyst-<tag>`; if a pull request from that branch is already open, nothing is
   done. The working tree must be clean.
+- **Inputs are not changed under you.** If the new release drops or retypes an input the caller sets, or adds a required input
+  (no default) it does not set, the run stops with exit 5 and names them; `--allow-input-changes` overrides, and says so in the
+  pull request. A definition it cannot read is a stop. A changed default of an input the caller does not set is a note in the
+  pull request.
 - **A symlinked workflow file is reported and skipped.**
+- **A workflow path outside `A-Za-z0-9._/-` is refused** before anything is read.
 
 ## Dependabot
 

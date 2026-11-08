@@ -688,6 +688,7 @@ KEPT_BLOCK = {
     ("docs-pages.yml", "deploy"),  # pages: write, id-token
     ("lory-audit.yml", "audit"),  # LORY_PIPELINE_TOKEN, a third-party bearer token
     ("project-sync.yml", "sync"),  # id-token, Doppler, a GitHub App token
+    ("repin.yml", "repin"),  # a GitHub App token that can push workflow files and open pull requests
     ("python-ci.yml", "coverage"),  # id-token, Doppler, the Codecov upload
     ("python-package-release.yml", "build"),  # builds the distribution that is published
     ("python-package-release.yml", "github-release"),  # contents: write, id-token, attestations
@@ -720,6 +721,7 @@ MUST_STAY_BLOCK = {
     ("docs-pages.yml", "deploy"),  # pages: write, id-token
     ("wiki-publish.yml", "publish"),  # contents: write
     ("project-sync.yml", "sync"),  # GitHub App token, Doppler
+    ("repin.yml", "repin"),  # GitHub App token with contents, pull-requests and workflows write
     ("verify-published.yml", "verify"),  # the job token goes to gh attestation verify
     ("verify-published.yml", "verify-release"),  # the job token goes to gh release download
 }
