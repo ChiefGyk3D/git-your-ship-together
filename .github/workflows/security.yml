@@ -784,6 +784,65 @@ jobs:
             echo "config_source=$config_source"
           } >> "$GITHUB_OUTPUT"
 
+      # A narrowed pull request also scans the tree, and a tree scan has no
+      # commit: it matches an ignore entry of the form `file:rule:line`, never
+      # the `commit:file:rule:line` form gitleaks writes for a history finding
+      # (issue #336). Say which entries cannot match there. Information only:
+      # it changes no scan argument, no ignore file and no exit code, because
+      # rewriting an old review into a tree entry could hide a new finding on a
+      # reused line. The file read is the one the scans use (on a pull request,
+      # the base commit's copy placed by the step above). Only line numbers,
+      # file names and rule ids are printed, never a commit and never a matched
+      # value; a name with an odd byte is not printed at all, control bytes are
+      # dropped before matching and the list is capped, so the log cannot be
+      # used to inject a workflow command.
+      - name: Report commit-bound .gitleaksignore entries
+        timeout-minutes: 1
+        env:
+          TREE_SCAN: ${{ steps.scope.outputs.tree }}
+        run: |
+          set -euo pipefail
+          [ "${TREE_SCAN-}" = true ] || exit 0
+          export LC_ALL=C
+          file="${GITHUB_WORKSPACE:-$PWD}/.gitleaksignore"
+          if [ ! -f "$file" ] || [ -L "$file" ]; then
+            exit 0
+          fi
+          nl='
+          '
+          commit_re='^[0-9a-f]{7,64}:(.+):([^:]+):[0-9]+$'
+          safe_re='^[A-Za-z0-9_./-]+$'
+          total=0
+          lineno=0
+          listed=""
+          while IFS= read -r entry || [ -n "$entry" ]; do
+            lineno=$((lineno + 1))
+            entry=${entry//[[:cntrl:]]/}
+            [[ "$entry" =~ $commit_re ]] || continue
+            total=$((total + 1))
+            if [ "$total" -le 50 ]; then
+              path=${BASH_REMATCH[1]}
+              rule=${BASH_REMATCH[2]}
+              [[ "$path" =~ $safe_re ]] || path="(a name with an odd byte)"
+              [[ "$rule" =~ $safe_re ]] || rule="(a rule with an odd byte)"
+              listed="${listed}  line ${lineno}: ${path} (${rule})${nl}"
+            fi
+          done < "$file"
+          [ "$total" -gt 0 ] || exit 0
+          msg="$total commit-bound .gitleaksignore entries cannot match in the tree scan that a pull request now gets with gitleaks-scope pr-commits, so the findings they were written for fail the scan again. Replace each with its path-and-rule form (the entry without its leading commit id), or allowlist the path and rule in .gitleaks.toml with a reason, or set gitleaks-scope: all-refs. Entries (names only):"
+          echo "::warning title=gitleaks::$msg"
+          printf '%s' "$listed"
+          if [ "$total" -gt 50 ]; then
+            echo "  ... and $((total - 50)) more"
+          fi
+          if [ -n "${GITHUB_STEP_SUMMARY-}" ]; then
+            {
+              echo "### gitleaks: $total commit-bound .gitleaksignore entries do not match in the tree scan"
+              echo
+              printf '%s\n' "$listed"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       # The gitleaks binary is MIT and needs no licence; gitleaks-action
       # demands one under an organisation (#90). The release and its hash are
       # the `gitleaks-version` and `gitleaks-sha256` inputs. To bump: `gh release view -R gitleaks/gitleaks --json

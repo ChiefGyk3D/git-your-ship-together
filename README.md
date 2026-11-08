@@ -2200,6 +2200,29 @@ Inputs of `security.yml`:
 | `doppler-trusted-refs-only` | `true` | Fetch CI secrets only on the default branch, a version tag (vN.N.N) or a schedule; never on a pull request. See [Doppler setup](#doppler-setup) |
 | `timeout-minutes` | `15` | Per-job timeout |
 
+#### Migrating `.gitleaksignore` entries (`gitleaks-scope: pr-commits`)
+
+Since v1.29.0 a pull request gets a history scan of its own commits plus a scan of the checked-out tree. A tree scan has no
+commit, so it matches only the path-and-rule form of an ignore entry, `file:rule:line`. The form gitleaks writes for a
+history finding, `commit:file:rule:line`, is commit-bound: it still hides the finding in the history scan, but the tree scan
+reports the same file again, so a finding that was reviewed and ignored fails the pull request. A rebase or a squash also
+changes the commit id, so a commit-bound entry stops matching in the history scan too. The default does not hide anything: the
+scan is as strict as before, and what changed is which entries can match.
+
+When the base commit's `.gitleaksignore` holds such entries, the job writes a warning and a step summary that name each by
+line number, file and rule id (never the commit and never a matched value). To migrate, pick one:
+
+- **Drop the commit id** from the entry: `file:rule:line` hides that finding in the history scan and in the tree scan, and
+  survives a rebase or a squash. It is bound to the line, so it stops matching when the line moves.
+- **Allowlist the path and rule** in `.gitleaks.toml` with a reason (read from the base commit on a pull request, so a pull
+  request cannot add its own): a `[[allowlists]]` entry with `description`, `targetRules` and `paths`. It matches by path and
+  rule, so it keeps matching when the line moves and hides nothing in another file or under another rule.
+- **Keep the old scope**: `gitleaks-scope: all-refs` scans every ref and no tree, so commit-bound entries match as before.
+  It also brings back the failure caused by a key on any unmerged branch.
+
+The job never rewrites the entries itself: turning an old commit-bound review into a path-and-line entry could hide a new
+finding that later lands on a reused line.
+
 Only one job in `security.yml` is Python-shaped, and only by default: the
 dependency audit runs pip-audit when `pip-audit-requirements` names a file
 and whatever `audit-command` names otherwise, or both. CodeQL, gitleaks,
