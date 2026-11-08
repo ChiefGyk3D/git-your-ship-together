@@ -5,6 +5,10 @@ name what a caller sees after that.
 
 ## Unreleased
 
+Nothing yet.
+
+## v1.32.0 (2026-11-08)
+
 ### New: opt-in CI speed-ups, `test-matrix`, `xdist` and the docs-only fast path (issue #331)
 
 All opt-in; a caller that sets nothing sees no change after it re-pins (re-pinning downstream repositories is separate work).
