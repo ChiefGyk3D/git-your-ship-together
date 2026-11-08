@@ -85,7 +85,6 @@ DOPPLER = [
         "base-image-digest.yml",
         "parallel-ci.yml",
         "ci-gate.yml",
-        "repin.yml",
     )
 ]
 # The language CI workflows: each ends in the `CI green` gate branch protection requires.
@@ -144,7 +143,7 @@ def all_steps(path: Path):
 
 def test_there_is_something_to_check():
     assert len(REUSABLE) == 24, "expected the twenty-four callable workflows"
-    assert len(DOPPLER) == 5, "expected five of them to fetch CI secrets"
+    assert len(DOPPLER) == 6, "expected six of them to fetch CI secrets"
     assert [p.name for p in LANGUAGE_CI] == [
         "arduino-ci.yml",
         "bash-ci.yml",
@@ -232,6 +231,7 @@ ALLOWED_WRITES = {
     ("security.yml", "snyk", "id-token"),
     ("security.yml", "scorecard", "id-token"),
     ("project-sync.yml", "sync", "id-token"),  # the project token comes from Doppler over OIDC
+    ("repin.yml", "repin", "id-token"),  # the re-pin App key comes from Doppler over OIDC
     # Publishing the image, its signature, SBOM attestation and provenance.
     ("container-release.yml", "build", "packages"),  # the per-platform temporary tag
     ("container-release.yml", "merge", "packages"),
@@ -326,6 +326,7 @@ ALLOWED_WRITES = {
     ("ci.yml", "fixture-pages", "pages"),
     ("ci.yml", "fixture-pages", "id-token"),
     ("ci.yml", "fixture-project-sync", "id-token"),
+    ("ci.yml", "fixture-repin", "id-token"),  # what a caller grants for the Doppler fetch
     ("ci.yml", "fixture-wiki", "contents"),
 }
 
@@ -489,6 +490,7 @@ def test_the_inlined_doppler_script_matches_the_composite_action():
         "container-release.yml": [composite[0]],
         "security.yml": [composite[0]],
         "project-sync.yml": [composite[0]],
+        "repin.yml": [composite[0]],
     }, "an inlined Doppler script differs from .github/actions/doppler-secrets/action.yml"
 
 
@@ -557,6 +559,9 @@ PR_ID_TOKEN_EXCEPTIONS = {
     # (ChiefGyk3D/scrum-around-and-find-out) over the event payload, read as data
     # (tests/test_project_sync_wrapper.py pins the call).
     ("project-sync.yml", "sync"),
+    # Runs only from a schedule or a manual run on the default branch (its decide step opens nothing from any
+    # other event), and the Doppler step refuses a pull request; the id-token is for the Doppler fetch of the App key.
+    ("repin.yml", "repin"),
 }
 
 

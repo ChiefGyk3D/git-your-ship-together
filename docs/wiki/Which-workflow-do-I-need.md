@@ -50,7 +50,7 @@ from its own caller job, and requires every gate. See
 | `container-release.yml` | Yes, after a push only | Docker Hub credentials, if used | Builds and scans only | GHCR (and Docker Hub) |
 | `verify-published.yml` | No (`packages: read`; the rescan adds nothing) | No | n/a (scheduled) | No |
 | `vendored-drift.yml` | No | No | Yes | No |
-| `repin.yml` | No (the job token is `contents: read`; a GitHub App token does the writes) | The App private key, as a caller secret | Reports only | No, opens a pull request and never merges |
+| `repin.yml` | Only for that fetch (`id-token: write`; the job token is `contents: read`; a GitHub App token does the writes) | The App private key, fetched from the secret store over OIDC (`doppler-project`, `doppler-config`, `doppler-identity-id`) | Reports only | No, opens a pull request and never merges |
 | `parallel-ci.yml` | No (`contents: read` only) | No | Yes | No |
 | `ci-gate.yml` | No | No | Yes | No |
 | `base-image-digest.yml` | No (`contents: read` only) | No | n/a (scheduled) | No |

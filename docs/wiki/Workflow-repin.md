@@ -25,7 +25,9 @@ calling repository and to three permissions, each with its reason in the workflo
 | Workflows: write | the branch changes files under `.github/workflows/` |
 
 The job's own token stays `contents: read`. The App's Client ID is passed as `client-id` (a repository variable, an identifier)
-and its private key as the `APP_PRIVATE_KEY` secret. No personal access token is accepted. The token reaches git through an
+and its private key is fetched from Doppler at run time over the job's OIDC identity (the Doppler secret `REPIN_APP_PRIVATE_KEY`, the same
+steps as [project-sync](Workflow-project-sync.md)), never a GitHub secret. The job holds `id-token: write` for that fetch and nothing else
+beyond `contents: read`. No personal access token is accepted. The token reaches git through an
 askpass helper that reads it from the environment, never a URL, a header or the repository's config.
 
 Without the App, on a pull request, off the default branch, or with `dry-run: true`, the job **reports only**: it prints where
@@ -33,7 +35,8 @@ each pin stands (the same output as `repin.sh status`) and succeeds.
 
 ## Adopting it
 
-Create the App (Contents, Pull requests and Workflows: Read and write, nothing else), install it on the repository, then add:
+Create the App (Contents, Pull requests and Workflows: Read and write, nothing else), install it on the repository, store its private
+key in Doppler as `REPIN_APP_PRIVATE_KEY`, create a Doppler Service Account Identity trusted for the repository, then add:
 
 ```yaml
 on:
@@ -48,10 +51,12 @@ jobs:
     uses: ChiefGyk3D/git-your-ship-together/.github/workflows/repin.yml@<sha> # vX.Y.Z
     permissions:
       contents: read
+      id-token: write        # the Doppler OIDC fetch of the App key
     with:
       client-id: ${{ vars.REPIN_APP_CLIENT_ID }}
-    secrets:
-      APP_PRIVATE_KEY: ${{ secrets.REPIN_APP_PRIVATE_KEY }}
+      doppler-project: <doppler project>
+      doppler-config: <doppler config>
+      doppler-identity-id: ${{ vars.REPIN_DOPPLER_IDENTITY_ID }}
 ```
 
 Run it once with `dry-run: true` to see the report. A pin-only pull request that is green may be merged by the maintainer; this
@@ -67,8 +72,8 @@ release, adjust the caller by hand.
 
 ## How it is tested
 
-`tests/test_repin.py` holds the inlined copy identical to the script, the three permissions and their repository scope, the
-decision step (schedule or manual run, default branch, App configured, not a dry run), and that nothing in the workflow merges.
+`tests/test_repin.py` holds the inlined copy identical to the script, the three permissions and their repository scope, that the App
+key is never a GitHub secret, the decision step (schedule or manual run, default branch, App configured, not a dry run), and that nothing in the workflow merges.
 `.github/workflows/ci.yml` runs it from this repository's own ref in report-only mode.
 
 ## What it refuses to do

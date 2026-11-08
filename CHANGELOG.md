@@ -13,6 +13,24 @@ version comment (checked before anything is written), refusing a non-canonical r
 one pull request on `repin/gyst-<tag>` without merging. `examples/dependabot-gyst.yml` is a `dependabot.yml` template with a group
 for GYST references and a 2-day cooldown. See the [repin wiki page](docs/wiki/Script-repin.md).
 
+### Fixed: the `ci-gate` composite action could not be loaded by a runner (issue #331)
+
+**The `.github/actions/ci-gate` composite action in v1.32.0 and v1.33.0 is unusable.** (It is not the reusable workflow
+`ci-gate.yml`, which is unaffected.) A job that used the action failed in Set up job with `Unrecognized named-value:
+needs` (`TemplateValidationException`, `action.yml` line 12). The cause was the `needs` input's description, which quoted
+`${{ toJSON(needs) }}`: a runner evaluates expressions in an action's metadata when it loads the manifest, and the `needs`
+context does not exist there. Both tags stay as published. **Use v1.33.1.** Callers that already pass `needs` as an
+input (`needs: ${{ toJSON(needs) }}` in their own `with:`) change nothing but the pin; the input name and its meaning are the
+same. The input has no default, and the action now fails with a plain message when it is empty, not JSON, or not a non-empty
+JSON object.
+
+`classify-changes` was checked for the same mistake and has none.
+
+How it is kept from happening again: `tests/test_action_manifests.py` refuses an unavailable context in any expression of any
+action manifest (and any expression in a description), and GYST's own `CI green` now needs two jobs that run the local
+`ci-gate` and `classify-changes` actions on a real runner. The cases that must fail (a failed job, an unnamed skip, a missing
+input) stay in `tests/test_docs_only_fast_path.py`, against the script the action calls.
+
 ### New: `container-release.yml` `skip-secret-scan-in-site-packages` (issue #327)
 
 Opt-in, default `false`: a caller that sets nothing sees no change after it re-pins, and the Trivy step is byte for byte what it was.
@@ -32,7 +50,10 @@ changes the pin SHA and the `# vX.Y.Z` comment and nothing else. It never merges
 them, when the release drops or retypes an input the caller sets or adds a required input it does not set. `repin.sh` gains
 that input check (exit 5, `--allow-input-changes` to override). Opening the pull request takes a GitHub App token limited to the
 calling repository (Contents, Pull requests, Workflows: write); the job's own token stays `contents: read`, and with no App the
-run only reports. Inputs: `client-id`, `dry-run`, the egress trio, `timeout-minutes`; secret: `APP_PRIVATE_KEY` (optional).
+run only reports. The App's private key is never a GitHub secret: it is fetched at run time over the job's OIDC
+identity (the secret `REPIN_APP_PRIVATE_KEY`, the same steps as `project-sync.yml`), so the caller grants `id-token: write`.
+Inputs: `client-id`, `dry-run`, `doppler-project`, `doppler-config`, `doppler-identity-id`, `doppler-trusted-refs-only`, the egress
+trio (the default allow-list adds `api.doppler.com:443`), `timeout-minutes`; secret: `DOPPLER_TOKEN` (optional fallback, leave unset).
 
 ## v1.33.0 (2026-11-08)
 

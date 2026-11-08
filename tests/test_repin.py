@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -632,7 +633,7 @@ def test_the_workflow_inlines_the_script_byte_for_byte():
 def test_the_job_token_stays_read_only_and_every_write_is_the_apps_with_three_named_permissions():
     doc = yaml.safe_load(WORKFLOW.read_text())
     assert doc["permissions"] == {"contents": "read"}
-    assert doc["jobs"]["repin"]["permissions"] == {"contents": "read"}
+    assert doc["jobs"]["repin"]["permissions"] == {"contents": "read", "id-token": "write"}, "id-token is for the Doppler fetch"
     app = step_named("Mint a one-hour installation token")
     granted = {k: v for k, v in app["with"].items() if k.startswith("permission-")}
     assert granted == {
@@ -641,8 +642,23 @@ def test_the_job_token_stays_read_only_and_every_write_is_the_apps_with_three_na
         "permission-workflows": "write",
     }
     assert app["with"]["repositories"] == "${{ github.event.repository.name }}", "limited to the calling repository"
-    secrets = (doc.get(True) or doc["on"])["workflow_call"]["secrets"]
-    assert list(secrets) == ["APP_PRIVATE_KEY"] and secrets["APP_PRIVATE_KEY"]["required"] is False
+    assert app["with"]["private-key"] == "${{ env.REPIN_APP_PRIVATE_KEY }}", "the key comes from the Doppler fetch"
+
+
+def test_the_app_key_is_never_a_github_secret():
+    """Credentials come through Doppler. The only secret the workflow may declare or read is the optional Doppler
+    Service Token fallback, which a caller leaves unset; the App private key is not a workflow_call secret."""
+    text = WORKFLOW.read_text()
+    secrets = (yaml.safe_load(text).get(True) or yaml.safe_load(text)["on"])["workflow_call"]["secrets"]
+    assert list(secrets) == ["DOPPLER_TOKEN"] and secrets["DOPPLER_TOKEN"]["required"] is False
+    used = set(re.findall(r"secrets\.([A-Za-z0-9_]+)", text))
+    assert used == {"DOPPLER_TOKEN"}, used
+    assert "secrets.APP_PRIVATE_KEY" not in text and "\n      APP_PRIVATE_KEY:" not in text
+    assert step_named("Fetch CI secrets from Doppler (OIDC)")["with"]["inject-env-vars"] is True
+    # The key is never on a command line or echoed: no script body names it, and the token step takes it as an input.
+    for step in workflow_steps():
+        assert "REPIN_APP_PRIVATE_KEY" not in str(step.get("run", "")), step.get("name")
+    assert "REPIN_APP_PRIVATE_KEY" in str(step_named("Mint a one-hour")["with"])
 
 
 def test_a_pull_request_is_opened_only_when_the_decision_step_says_so():

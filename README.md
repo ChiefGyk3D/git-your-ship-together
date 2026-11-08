@@ -73,10 +73,10 @@ Twenty-three reusable workflows and six composite actions:
 | `.github/workflows/python-docker-release.yml` | The old name of the above: a thin caller that forwards every input, the secret and the outputs through a `./` reference at its own commit, so an existing pin keeps working. New callers use `container-release.yml` |
 | `.github/workflows/verify-published.yml` | Consumer-side verification of a published image (cosign signature, SPDX SBOM attestation and build provenance verified from outside, then each platform pulled and checked) or of a GitHub release's assets (checksums, provenance, SBOMs). Read-only, no secret, no token beyond the default one |
 | `.github/workflows/vendored-drift.yml` | Opt-in drift check for a file vendored from another repository: each lock file (path, source repository, commit, sha256) must match the file's hash, and an optional generator run with `--check` must agree. Read-only, no secret |
-| `.github/workflows/repin.yml` | Opt-in scheduled re-pin: when a caller's pins of these workflows are behind the latest release, opens ONE pin-only pull request (SHA and `# vX.Y.Z` comment only), refuses and names it when the release changes an input the caller uses, never merges. Needs a GitHub App (Contents, Pull requests, Workflows: write); without one it reports only. See [Scheduled re-pin](#scheduled-re-pin) |
+| `.github/workflows/repin.yml` | Opt-in scheduled re-pin: when a caller's pins of these workflows are behind the latest release, opens ONE pin-only pull request (SHA and `# vX.Y.Z` comment only), refuses and names it when the release changes an input the caller uses, never merges. Needs a GitHub App (Contents, Pull requests, Workflows: write) whose private key is fetched from Doppler; without one it reports only. See [Scheduled re-pin](#scheduled-re-pin) |
 | `.github/workflows/base-image-digest.yml` | Opt-in scheduled check of a Dockerfile's `FROM image:tag@sha256:...` pins: resolves today's digest of each tag and fails when the pinned digest has a fixable HIGH or CRITICAL finding (Trivy, container-release.yml's flags) that the current digest does not. Read-only, no secret, no issue write |
 | `.github/workflows/parallel-ci.yml` | One build, then caller-supplied checks as separate jobs that share it: a matrix over a `jobs` list, each leg downloading the one-day build artifact, with path rules that skip checks a change cannot affect (failing closed: a push, a schedule, an unmatched path or an unreadable diff runs everything), pip and tool-download caches keyed on pin files, and one `CI green` gate that counts only deliberate skips as passed. Holds no token |
-| `.github/workflows/ci-gate.yml` | The gate on its own: `CI green` over the jobs a caller hands it (`parallel-ci.yml`, `bash-ci.yml`, `security.yml`, a job of its own), red on anything that failed, was cancelled or was skipped without being named. Holds no token |
+| `.github/workflows/ci-gate.yml` | The gate on its own: `CI green` over the jobs a caller hands it (`parallel-ci.yml`, `bash-ci.yml`, `security.yml`, a job of its own), red on anything that failed, was cancelled or was skipped without being named. Holds no token. A reusable workflow called as a job, not the composite action `.github/actions/ci-gate` below |
 | `.github/workflows/python-package-release.yml` | Build the sdist and wheel, `twine check`, refuse a tag that disagrees with the packaged version, smoke-test from the wheel, then publish to the GitHub release with SHA256SUMS and build provenance; PyPI is published from a job in the caller's own workflow with a download step and the pypa publish action as direct steps (Trusted Publishing cannot use a reusable workflow). No secret anywhere |
 | `.github/workflows/artifact-release.yml` | For a file rather than an image (a `.deb`, a firmware binary, a bundle): build it with a command, then publish it to the GitHub release with SHA256SUMS, a keyless cosign signature bundle per file and build provenance. No secret anywhere |
 | `.github/workflows/docs-pages.yml` | Build a static documentation site with a command you supply (MkDocs strict by default) on every pull request; upload it and deploy it to GitHub Pages from the default branch only. The two Pages writes sit on the deploy job alone |
@@ -92,7 +92,7 @@ Twenty-three reusable workflows and six composite actions:
 | `.github/actions/egress-canary` | Fails a job fast when any address of `github.com`, `api.github.com` or the Actions results receiver is unreachable under harden-runner `block` (security exception EX-0001). The workflows inline a copy of it; this is the source |
 | `.github/actions/wait-ci` | Pins a commit and waits for its required check (`CI green` by default, exact name) to pass, then optionally squash-merges exactly that commit with `--match-head-commit`. Also requires every other check run on that commit to be complete and not red, and waits while one is open (an optional `allow-red` list records a named exception, `require-check` names late workflows, and a green is believed only after two identical reads one interval apart). Exit codes: 0 green, 1 gate red, 2 timeout, 3 hung, 4 head moved, 5 queued, 6 another check red. Wraps `scripts/wait-ci.sh`; a monitor's tool, not a step of the run it waits on. See [wait-ci](docs/wiki/Action-wait-ci.md) |
 | `.github/actions/classify-changes` | Says whether a pull request changes only paths the caller calls docs only (`docs/**`, `tests/**`, `*.md`), from the changed-file list the API returns, never from the checkout. Output `docs-only=true` only when every path matches, none is under `.github/` or the caller's never-skip list, the head has not moved and the count matches the event's; anything unconfirmed is `false`, so the job runs. Wraps `scripts/classify_changes.py`. See [Docs-only fast path and parallel CI](docs/wiki/Docs-only-fast-path.md) |
-| `.github/actions/ci-gate` | The body of a caller's own `CI green` job: every needed job must be `success`, and the one exception is a named job `skipped` while the classify-changes job succeeded with `docs-only=true`. A skip for any other reason, a failure, a cancellation or a job missing from `needs` fails. Wraps `scripts/ci_gate.py`. See [Docs-only fast path and parallel CI](docs/wiki/Docs-only-fast-path.md) |
+| `.github/actions/ci-gate` | The body of a caller's own `CI green` job: every needed job must be `success`, and the one exception is a named job `skipped` while the classify-changes job succeeded with `docs-only=true`. A skip for any other reason, a failure, a cancellation or a job missing from `needs` fails. The caller passes `needs: ${{ toJSON(needs) }}` as an input (it has no default, and an empty or non-JSON value fails); v1.32.0's and v1.33.0's copies cannot be loaded by a runner, use v1.33.1 or later. A composite action called as a step, not the reusable workflow `ci-gate.yml` above. Wraps `scripts/ci_gate.py`. See [Docs-only fast path and parallel CI](docs/wiki/Docs-only-fast-path.md) |
 | `.github/actions/egress-policy-check` | Fails a job unless every egress policy input is exactly `audit` or `block`. The workflows inline a copy of it; this is the source |
 
 This repository's own pipeline, which runs the workflows against a real
@@ -1306,7 +1306,9 @@ never merges. It stops without a pull request, and fails the job naming them, wh
 the caller sets or adds a required input it does not set. Writing a branch that changes workflow files takes a GitHub App
 installation token (the job token cannot hold the `workflows` permission, and a pull request it opened would start no checks):
 Contents, Pull requests and Workflows set to write, limited to the calling repository, minted at the start of the job. Without
-the App, on a pull request, off the default branch, or with `dry-run: true`, it only reports. No personal access token is accepted.
+the App, on a pull request, off the default branch, or with `dry-run: true`, it only reports. The App's private key is never a
+GitHub secret: the job fetches it from Doppler at run time over its own OIDC identity (the Doppler secret `REPIN_APP_PRIVATE_KEY`,
+same steps as `project-sync.yml`). No personal access token is accepted.
 
 ```yaml
 on:
@@ -1321,10 +1323,12 @@ jobs:
     uses: ChiefGyk3D/git-your-ship-together/.github/workflows/repin.yml@<sha> # vX.Y.Z
     permissions:
       contents: read
+      id-token: write        # the Doppler OIDC fetch of the App key
     with:
       client-id: ${{ vars.REPIN_APP_CLIENT_ID }}
-    secrets:
-      APP_PRIVATE_KEY: ${{ secrets.REPIN_APP_PRIVATE_KEY }}
+      doppler-project: <doppler project>
+      doppler-config: <doppler config>
+      doppler-identity-id: ${{ vars.REPIN_DOPPLER_IDENTITY_ID }}
 ```
 
 Inputs of `repin.yml`:
@@ -1333,10 +1337,13 @@ Inputs of `repin.yml`:
 |---|---|---|
 | `client-id` | empty | The App's Client ID (an identifier); empty makes the run report only |
 | `dry-run` | `false` | Report and open nothing |
-| `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `block`, GitHub only, empty | harden-runner |
+| `doppler-project`, `doppler-config` | empty | Where the Doppler secret `REPIN_APP_PRIVATE_KEY` (the App's private key) lives; empty makes the run report only |
+| `doppler-identity-id` | empty | Doppler Service Account Identity UUID for OIDC |
+| `doppler-trusted-refs-only` | `true` | Fetch the key only on the default branch, a version tag or a schedule |
+| `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `block`, Doppler and GitHub only, empty | harden-runner |
 | `timeout-minutes` | `10` | Job timeout |
 
-The secret is `APP_PRIVATE_KEY` (optional). The same tool by hand, and a Dependabot template with a GYST group, are in the
+The optional secret `DOPPLER_TOKEN` is a fallback for a caller without OIDC; leave it unset, the key is never a GitHub secret. The same tool by hand, and a Dependabot template with a GYST group, are in the
 [repin wiki page](docs/wiki/Script-repin.md).
 
 ### Vendored-file drift check
@@ -3216,6 +3223,7 @@ The tests are the contract, one file per thing they hold still:
 | File | Holds |
 |---|---|
 | `tests/test_parallel_ci.py` | `parallel-ci.yml`: the planning script run over ordinary and hostile inputs (the path rules fail closed on a push, a missing or empty diff, an unmatched path, an odd byte in a name; every invalid `jobs`, `areas`, path, artifact name, retention and pin file is refused with a passing twin), the `changes` step run under bash in a real repository with a real merge commit (a rename out of a code path counts as code), the build and check steps run under bash (a setup that exits early cannot pass, PATH changes stay in the step), and the YAML: no `continue-on-error`, no expression in a `run:`, nothing written to `$GITHUB_PATH` or `$GITHUB_ENV`, a one-day artifact named with the run attempt, caches off in audit and keyed on pins |
+| `tests/test_action_manifests.py` | Every expression in every `.github/actions/*/action.yml` uses a context that location can see (none over `needs`, `jobs` or `secrets`, none in a description); the checker is refused on the v1.32.0 `ci-gate` manifest |
 | `tests/test_ci_gate.py` | `scripts/parallel_ci_gate.py` and the gates of `parallel-ci.yml` and `ci-gate.yml`: success only for `success`, a skip only when named, red on failure, cancellation, an unknown result, no jobs, unreadable input or a deliberate skip that names no job; the inlined copies are byte for byte the script |
 | `tests/test_workflows.py` | SHA pins with version comments; no reference to this repository by branch; no `pull_request_target`; the write-permission allow-list; per-job permissions and timeouts; harden-runner first in every job; `persist-credentials: false` on every checkout; no untrusted interpolation; the inlined Doppler script identical to the composite action and gated on the decide step; no OIDC token on a job a pull request can run, and none on the test job; every input declared, defaulted, used and documented here; `CI green` needing every other job; signing and attestation only after a push; no Actions cache on a publishing build; the allow-list defaults one sorted line; every reusable workflow run against the fixture from this repository at the pull request's ref, never publishing |
 | `tests/test_doppler_gate.py` | The decide script, run under bash for the push, schedule, dispatch, pull request and non-PR events and the ref shapes listed there: trusted refs fetch, untrusted refs get a notice and never fail, a fork's `pull_request` never fetches (`pull_request_target` with the gate off is pinned as it is), a refused tag fails a job that asked for a secret, the Service Token path is gated the same way |

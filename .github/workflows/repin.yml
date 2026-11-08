@@ -9,14 +9,17 @@
 # The credential. A pull request that changes `.github/workflows/` needs the `workflows` permission, which the
 # job's own GITHUB_TOKEN can never hold, and a pull request opened with GITHUB_TOKEN starts no checks. So opening
 # one takes a GitHub App installation token, minted at the start of the job by actions/create-github-app-token,
-# limited to the calling repository and to three permissions, valid an hour and revoked when the job ends. No
-# personal access token is accepted. Without the App (`client-id` or `APP_PRIVATE_KEY` empty), or off the default
-# branch, or on any event other than `schedule` and `workflow_dispatch`, or with `dry-run: true`, the job opens
+# limited to the calling repository and to three permissions, valid an hour and revoked when the job ends. The App's
+# private key is never a GitHub secret: the job fetches it from Doppler at run time over its own OIDC identity (the
+# same steps as project-sync.yml), as the Doppler secret REPIN_APP_PRIVATE_KEY, and it reaches the token step only as
+# a step input, never a command line, and is never echoed. No personal access token is accepted. Without the App
+# (`client-id` empty or no key fetched), or off the default branch, or on any event other than `schedule` and `workflow_dispatch`, or with `dry-run: true`, the job opens
 # nothing: it prints where each pin stands and succeeds.
 #
 # Owner setup (nothing here can do it for the owner): create a GitHub App with Repository permissions Contents,
 # Pull requests and Workflows set to Read and write and nothing else, install it on the repositories that call
-# this, and give the caller the App's Client ID (a variable) and its private key (a secret).
+# this, store its private key in Doppler as REPIN_APP_PRIVATE_KEY (a Doppler Service Account Identity trusted for the
+# calling repository reads it over OIDC), and give the caller the App's Client ID and the Doppler identity as variables.
 #
 # Call it from a small workflow of its own:
 #
@@ -32,10 +35,12 @@
 #       uses: ChiefGyk3D/git-your-ship-together/.github/workflows/repin.yml@<sha> # vX.Y.Z
 #       permissions:
 #         contents: read
+#         id-token: write        # the Doppler OIDC fetch of the App key
 #       with:
 #         client-id: ${{ vars.REPIN_APP_CLIENT_ID }}
-#       secrets:
-#         APP_PRIVATE_KEY: ${{ secrets.REPIN_APP_PRIVATE_KEY }}
+#         doppler-project: <doppler project>
+#         doppler-config: <doppler config>
+#         doppler-identity-id: ${{ vars.REPIN_DOPPLER_IDENTITY_ID }}
 
 name: Scheduled re-pin (reusable)
 
@@ -55,20 +60,36 @@ on:
         type: string
         default: block
       allowed-endpoints:
-        description: harden-runner allow-list for `block`, space-separated host:port entries. The GitHub API and git over HTTPS are all this job reaches.
+        description: harden-runner allow-list for `block`, space-separated host:port entries. Doppler, the GitHub API and git over HTTPS are all this job reaches.
         type: string
-        default: "api.github.com:443 github.com:443"
+        default: "api.doppler.com:443 api.github.com:443 github.com:443"
       extra-allowed-endpoints:
         description: Appended to `allowed-endpoints`. Same format.
         type: string
         default: ""
+      doppler-project:
+        description: Doppler project slug holding REPIN_APP_PRIVATE_KEY, the private key of the GitHub App named by `client-id`. Empty makes the run report only.
+        type: string
+        default: ""
+      doppler-config:
+        description: Doppler config slug holding REPIN_APP_PRIVATE_KEY.
+        type: string
+        default: ""
+      doppler-identity-id:
+        description: Doppler Service Account Identity UUID for OIDC.
+        type: string
+        default: ""
+      doppler-trusted-refs-only:
+        description: Fetch the key only on the default branch, a version tag (vN.N.N) or a schedule. Leave `true`; this job opens a pull request only from a schedule or a manual run on the default branch anyway.
+        type: boolean
+        default: true
       timeout-minutes:
         description: Job timeout.
         type: number
         default: 10
     secrets:
-      APP_PRIVATE_KEY:
-        description: The private key of the GitHub App named by `client-id`. Without it the run reports only.
+      DOPPLER_TOKEN:
+        description: Doppler Service Token fallback when OIDC is not configured. Leave unset; the key is fetched over OIDC.
         required: false
 
 permissions:
@@ -81,6 +102,7 @@ jobs:
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read  # check out the caller's repository; every write is done with the App token, which this job's token never holds
+      id-token: write  # Doppler OIDC for the App private key
     steps:
       - name: Validate the egress policy inputs (EX-0001)
         timeout-minutes: 1
@@ -195,11 +217,135 @@ jobs:
         with:
           persist-credentials: false
 
+      # --- Doppler (same steps as .github/actions/doppler-secrets) ---------
+      - name: Decide how to authenticate to Doppler
+        id: doppler
+        if: inputs.doppler-project != ''
+        env:
+          IDENTITY_ID: ${{ inputs.doppler-identity-id }}
+          TOKEN: ${{ secrets.DOPPLER_TOKEN }}
+          PROJECT: ${{ inputs.doppler-project }}
+          CONFIG: ${{ inputs.doppler-config }}
+          REQUIRED: "false"
+          TRUSTED_ONLY: ${{ inputs.doppler-trusted-refs-only }}
+          IS_FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          mode=none
+          skip=""
+          untrusted_tag=false
+          # A trusted run is one only a push by someone with write access, a manual
+          # dispatch by such a person, or the schedule can produce, on the default
+          # branch or a version tag (vN.N.N). The event must be on this allow-list:
+          # any other event (issue_comment, workflow_run, an event added later) is
+          # refused when the gate is on, because the ref alone does not say who
+          # triggered it. A pull request is never trusted, whichever repository its
+          # head is in. For a version tag the job also checks, when it can, that the
+          # tagged commit is in the default branch's history (see the README).
+          trusted=false
+          # An inherited BASHOPTS must not make a comparison below case-insensitive.
+          shopt -u nocasematch nocaseglob
+          # The gate is parsed strictly: true or false in any casing, and anything else
+          # stops the job. A typo must never switch the gate off.
+          case "${TRUSTED_ONLY,,}" in
+            true) TRUSTED_ONLY=true ;;
+            false) TRUSTED_ONLY=false ;;
+            *)
+              echo "::error title=Doppler::trusted-refs-only must be true or false"
+              exit 1 ;;
+          esac
+          case "$EVENT" in
+            schedule) trusted=true ;;
+            push|workflow_dispatch)
+              if [ -n "$DEFAULT_BRANCH" ] && [ "$REF" = "refs/heads/$DEFAULT_BRANCH" ]; then
+                trusted=true
+              elif [[ "$REF" =~ ^refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                trusted=true
+                # Best effort: refuse a tag only on a clean "not an ancestor" answer from a
+                # complete history. No checkout, a shallow clone, a missing remote ref or any
+                # git error cannot show where the tag points, so the name rule stands and a
+                # notice says the tag was not verified.
+                if [ "$TRUSTED_ONLY" = "true" ]; then
+                  verdict=unknown
+                  if [ -n "$DEFAULT_BRANCH" ] && [ -n "${GITHUB_WORKSPACE:-}" ] && [ -n "${GITHUB_SHA:-}" ] \
+                    && git -C "$GITHUB_WORKSPACE" rev-parse --verify --quiet "refs/remotes/origin/$DEFAULT_BRANCH^{commit}" >/dev/null 2>&1 \
+                    && git -C "$GITHUB_WORKSPACE" rev-parse --verify --quiet "$GITHUB_SHA^{commit}" >/dev/null 2>&1 \
+                    && [ "$(git -C "$GITHUB_WORKSPACE" rev-parse --is-shallow-repository 2>/dev/null)" = "false" ]; then
+                    rc=0
+                    git -C "$GITHUB_WORKSPACE" merge-base --is-ancestor "$GITHUB_SHA" "refs/remotes/origin/$DEFAULT_BRANCH" >/dev/null 2>&1 || rc=$?
+                    case "$rc" in
+                      0) verdict=in ;;
+                      1) verdict=out ;;
+                    esac
+                  fi
+                  case "$verdict" in
+                    out) trusted=false ;;
+                    unknown) echo "::notice title=Doppler::tag $REF not verified against the default branch history (no checkout, incomplete history or git error); only its name was checked" ;;
+                  esac
+                fi
+              fi ;;
+            *) trusted=false ;;
+          esac
+          if [ "$IS_FORK" = "true" ]; then
+            # A fork's pull request has no id-token and must never receive a
+            # secret. Silent skip is correct here, whatever `required` says.
+            skip="pull request from a fork"
+          elif [ "$TRUSTED_ONLY" = "true" ] && [ "$trusted" != "true" ]; then
+            skip="$EVENT on $REF is not a push or dispatch on the default branch or a version tag (vN.N.N, in the default branch history), or a schedule (trusted-refs-only)"
+            # A tag this rule refused is reported, so a job that was asked for a
+            # secret-backed feature can fail instead of skipping it quietly.
+            case "$REF" in refs/tags/*) untrusted_tag=true ;; esac
+          elif [ -n "$IDENTITY_ID" ]; then
+            mode=oidc
+          elif [ -n "$TOKEN" ]; then
+            mode=token
+          fi
+          if [ -n "$skip" ]; then
+            echo "::notice title=Doppler::$skip - no secrets are fetched"
+          fi
+          if [ "$mode" != "none" ] && { [ -z "$PROJECT" ] || [ -z "$CONFIG" ]; }; then
+            echo "::error title=Doppler::project and config are required when authenticating"
+            exit 1
+          fi
+          if [ "$mode" = "none" ] && [ -z "$skip" ]; then
+            if [ "$REQUIRED" = "true" ]; then
+              echo "::error title=Doppler::no identity-id and no DOPPLER_TOKEN; this job needs one (see README, 'Doppler setup')"
+              exit 1
+            fi
+            echo "::notice title=Doppler::not configured (no identity-id, no DOPPLER_TOKEN) - continuing without CI secrets"
+          fi
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo "untrusted-tag=$untrusted_tag" >> "$GITHUB_OUTPUT"
+          echo "Doppler auth mode: $mode"
+
+      - name: Fetch CI secrets from Doppler (OIDC)
+        if: steps.doppler.outputs.mode == 'oidc'
+        uses: dopplerhq/secrets-fetch-action@451892f16195f9ac360e1a5bcbf0b5fd0e957534 # v2.0.0
+        with:
+          auth-method: oidc
+          doppler-identity-id: ${{ inputs.doppler-identity-id }}
+          doppler-project: ${{ inputs.doppler-project }}
+          doppler-config: ${{ inputs.doppler-config }}
+          inject-env-vars: true
+
+      - name: Fetch CI secrets from Doppler (Service Token)
+        if: steps.doppler.outputs.mode == 'token'
+        uses: dopplerhq/secrets-fetch-action@451892f16195f9ac360e1a5bcbf0b5fd0e957534 # v2.0.0
+        with:
+          doppler-token: ${{ secrets.DOPPLER_TOKEN }}
+          doppler-project: ${{ inputs.doppler-project }}
+          doppler-config: ${{ inputs.doppler-config }}
+          inject-env-vars: true
+      # ---------------------------------------------------------------------
+
       - name: Decide whether this run may open a pull request
         id: mode
         env:
           CLIENT_ID: ${{ inputs.client-id }}
-          KEY_SET: ${{ secrets.APP_PRIVATE_KEY != '' }}
+          KEY_SET: ${{ env.REPIN_APP_PRIVATE_KEY != '' }}
           DRY_RUN: ${{ inputs.dry-run }}
           EVENT: ${{ github.event_name }}
           REF: ${{ github.ref }}
@@ -209,7 +355,7 @@ jobs:
           open=false
           reason=""
           if [ "$DRY_RUN" = "true" ]; then reason="dry-run is set"
-          elif [ -z "$CLIENT_ID" ] || [ "$KEY_SET" != "true" ]; then reason="the GitHub App (client-id and APP_PRIVATE_KEY) is not configured"
+          elif [ -z "$CLIENT_ID" ] || [ "$KEY_SET" != "true" ]; then reason="the GitHub App (client-id, and its private key from Doppler) is not configured"
           elif [ "$EVENT" != "schedule" ] && [ "$EVENT" != "workflow_dispatch" ]; then reason="a pull request is opened only from a schedule or a manual run, not from $EVENT"
           elif [ -z "$DEFAULT_BRANCH" ] || [ "$REF" != "refs/heads/$DEFAULT_BRANCH" ]; then reason="a pull request is opened only from the default branch"
           else open=true
@@ -225,7 +371,7 @@ jobs:
         uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
           client-id: ${{ inputs.client-id }}
-          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          private-key: ${{ env.REPIN_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
           repositories: ${{ github.event.repository.name }}
           permission-contents: write  # push the branch repin/gyst-<tag>
