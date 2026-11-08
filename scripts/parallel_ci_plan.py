@@ -18,7 +18,7 @@ Environment:
     PLAN_CACHE_TOOL_PATH       optional directory of one cached tool download
     PLAN_CACHE_TOOL_KEY_FILES  JSON list of pin files whose hash keys that cache
     PLAN_EVENT                 github.event_name
-    PLAN_REF                   github.ref
+    PLAN_BASE_REF              github.base_ref: the branch a pull request targets (empty on other events)
     PLAN_DEFAULT_BRANCH        the repository's default branch
     RUNNER_TEMP                absolute path, for RUNNER_TEMP/ output paths
 
@@ -28,8 +28,9 @@ Usage:
 --changed is the NUL-separated output of `git diff --no-renames --name-only -z`. Passing it means the diff
 worked; leaving it out means it did not (or the event is not a pull request).
 
-Selecting jobs fails CLOSED: every job runs unless the event is a pull request that does not target the
-default branch's own ref, the diff is present and non-empty, every changed path is plain text, and every
+Selecting jobs fails CLOSED: every job runs unless the event is a pull request that targets the
+default branch (github.base_ref equals it), the diff is present and non-empty, every changed path is plain
+text, and every
 changed path matches one of the caller's area rules. A path that matches none, a path with a control character
 or invalid UTF-8, an empty diff, no diff, a push (to any branch), a schedule, a manual run: all run everything.
 A job with no `areas` runs whatever changed. Invalid inputs are an error, not a fail-closed run: the exit code
@@ -231,12 +232,12 @@ def read_changed(path: Path) -> list[str] | None:
 
 
 def changed_areas(
-    event: str, ref: str, default_branch: str, changed: list[str] | None, areas: dict[str, list[str]]
+    event: str, base_ref: str, default_branch: str, changed: list[str] | None, areas: dict[str, list[str]]
 ) -> set[str] | None:
     """The areas the change touches, or None for "run everything"."""
     if event != "pull_request":
         return None
-    if not BRANCH.fullmatch(default_branch) or ref == f"refs/heads/{default_branch}":
+    if not BRANCH.fullmatch(default_branch) or not BRANCH.fullmatch(base_ref) or base_ref != default_branch:
         return None
     if changed is None:
         return None
@@ -307,7 +308,7 @@ def plan(env: dict[str, str], changed_file: Path | None) -> dict[str, str]:
 
     changed = read_changed(changed_file) if changed_file else None
     found = changed_areas(
-        env.get("PLAN_EVENT", ""), env.get("PLAN_REF", ""), env.get("PLAN_DEFAULT_BRANCH", ""), changed, areas
+        env.get("PLAN_EVENT", ""), env.get("PLAN_BASE_REF", ""), env.get("PLAN_DEFAULT_BRANCH", ""), changed, areas
     )
     selected = [job for job in jobs if runs(job, found)]
     skipped = [str(job["name"]) for job in jobs if not runs(job, found)]

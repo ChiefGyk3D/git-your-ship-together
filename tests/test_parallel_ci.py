@@ -46,7 +46,7 @@ def base_env(**over):
         "PLAN_CACHE_TOOL_PATH": "",
         "PLAN_CACHE_TOOL_KEY_FILES": "[]",
         "PLAN_EVENT": "pull_request",
-        "PLAN_REF": "refs/pull/7/merge",
+        "PLAN_BASE_REF": "main",
         "PLAN_DEFAULT_BRANCH": "main",
     }
     env.update({k: v if isinstance(v, str) else json.dumps(v) for k, v in over.items()})
@@ -107,18 +107,35 @@ def test_the_first_matching_area_wins(tmp_path):
 
 @pytest.mark.parametrize("event", ["push", "schedule", "workflow_dispatch", "merge_group", "pull_request_target", ""])
 def test_every_event_but_a_pull_request_runs_everything(tmp_path, event):
-    code, _, out = plan(tmp_path, [b"README.md"], PLAN_EVENT=event, PLAN_REF="refs/heads/feature")
+    code, _, out = plan(tmp_path, [b"README.md"], PLAN_EVENT=event, PLAN_BASE_REF="")
     assert code == 0
     assert names(out) == ["always", "code only", "docs only"] and out["everything"] == "true" and out["areas"] == ""
 
 
 def test_a_push_to_the_default_branch_runs_everything_whatever_the_diff_says(tmp_path):
-    _, _, out = plan(tmp_path, [b"README.md"], PLAN_EVENT="push", PLAN_REF="refs/heads/main")
+    _, _, out = plan(tmp_path, [b"README.md"], PLAN_EVENT="push", PLAN_BASE_REF="")
     assert out["everything"] == "true" and out["count"] == "3"
 
 
-def test_a_pull_request_ref_that_is_the_default_branch_runs_everything(tmp_path):
-    _, _, out = plan(tmp_path, [b"README.md"], PLAN_REF="refs/heads/main")
+def test_a_pull_request_to_the_default_branch_narrows(tmp_path):
+    _, _, out = plan(tmp_path, [b"README.md"], PLAN_BASE_REF="main")
+    assert out["everything"] == "false" and out["areas"] == "docs"
+
+
+@pytest.mark.parametrize("base", ["develop", "release/1.0", "", "main2", "Main", "ma in", "main\nx"])
+def test_a_pull_request_to_any_other_branch_or_an_unknown_one_runs_everything(tmp_path, base):
+    _, _, out = plan(tmp_path, [b"README.md"], PLAN_BASE_REF=base)
+    assert out["everything"] == "true" and out["count"] == "3"
+
+
+@pytest.mark.parametrize("default", ["", "bad name", "x" * 201])
+def test_an_unusable_default_branch_runs_everything(tmp_path, default):
+    _, _, out = plan(tmp_path, [b"README.md"], PLAN_DEFAULT_BRANCH=default, PLAN_BASE_REF=default)
+    assert out["everything"] == "true"
+
+
+def test_a_tag_run_runs_everything(tmp_path):
+    _, _, out = plan(tmp_path, [b"README.md"], PLAN_EVENT="push", PLAN_BASE_REF="")
     assert out["everything"] == "true"
 
 
@@ -214,7 +231,7 @@ def plan_step() -> str:
     return next(s["run"] for s in steps if s.get("id") == "plan")
 
 
-def run_step(repo: Path, event: str, ref: str = "refs/pull/7/merge", **over):
+def run_step(repo: Path, event: str, base: str = "main", **over):
     out = repo / ".out"
     out.write_text("")
     script = repo / ".step.sh"
@@ -226,7 +243,7 @@ def run_step(repo: Path, event: str, ref: str = "refs/pull/7/merge", **over):
         "HOME": str(repo),
         "GITHUB_OUTPUT": str(out),
         "RUNNER_TEMP": str(temp),
-        **base_env(PLAN_EVENT=event, PLAN_REF=ref, **over),
+        **base_env(PLAN_EVENT=event, PLAN_BASE_REF=base, **over),
     }
     done = subprocess.run(
         ["bash", "-eo", "pipefail", str(script)], cwd=repo, env=env, capture_output=True, text=True, timeout=60
@@ -299,7 +316,7 @@ def test_the_step_runs_everything_when_there_is_no_merge_commit(merge_repo):
 
 def test_the_step_takes_no_diff_for_a_push(merge_repo):
     merge_change(merge_repo, lambda r: (r / "docs" / "guide.md").write_text("# edited\n"))
-    done, out = run_step(merge_repo, "push", ref="refs/heads/main")
+    done, out = run_step(merge_repo, "push", base="")
     assert done.returncode == 0 and out["everything"] == "true" and out["count"] == "3"
     assert "unavailable" not in done.stdout
 
