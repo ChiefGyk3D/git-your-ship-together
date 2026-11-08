@@ -9,6 +9,24 @@ name what a caller sees after that.
 
 When `push: true` is refused, the warning annotation and job summary now follow the failed predicate instead of always naming both inputs: a pull-request event says no input can enable publishing; an event outside the allow-list names `allowed-publish-events`; a ref that is not a release tag names `require-tag-ref: false`; both failing names both. Message text only: the publish decision, outputs and inputs are unchanged.
 
+### Fixed: the `ci-gate` composite action could not be loaded by a runner (issue #331)
+
+**The `.github/actions/ci-gate` composite action in v1.32.0 and v1.33.0 is unusable.** (It is not the reusable workflow
+`ci-gate.yml`, which is unaffected.) A job that used the action failed in Set up job with `Unrecognized named-value:
+needs` (`TemplateValidationException`, `action.yml` line 12). The cause was the `needs` input's description, which quoted
+`${{ toJSON(needs) }}`: a runner evaluates expressions in an action's metadata when it loads the manifest, and the `needs`
+context does not exist there. Both tags stay as published. **Use v1.33.1.** Callers that already pass `needs` as an
+input (`needs: ${{ toJSON(needs) }}` in their own `with:`) change nothing but the pin; the input name and its meaning are the
+same. The input has no default, and the action now fails with a plain message when it is empty, not JSON, or not a non-empty
+JSON object.
+
+`classify-changes` was checked for the same mistake and has none.
+
+How it is kept from happening again: `tests/test_action_manifests.py` refuses an unavailable context in any expression of any
+action manifest (and any expression in a description), and GYST's own `CI green` now needs two jobs that run the local
+`ci-gate` and `classify-changes` actions on a real runner. The cases that must fail (a failed job, an unnamed skip, a missing
+input) stay in `tests/test_docs_only_fast_path.py`, against the script the action calls.
+
 ### New: `container-release.yml` `skip-secret-scan-in-site-packages` (issue #327)
 
 Opt-in, default `false`: a caller that sets nothing sees no change after it re-pins, and the Trivy step is byte for byte what it was.
