@@ -1065,8 +1065,8 @@ jobs:
                 --hash=sha256:a352e7e428770286cc899e2542b6cdaedb2b4953ff269a210103ec58f6198a61
             filelock==4.1.0 ; python_full_version < '3.11' \
                 --hash=sha256:2ce9818e3e2d8f284c1a964414447ef148d42a5fd5e2a477a7118e574b293ec1
-            filelock==4.2.4 ; python_full_version >= '3.11' \
-                --hash=sha256:301241438c57936ef93f4243a94f2559022268bfcf9b375a9a72eb0f8db8358e
+            filelock==4.2.7 ; python_full_version >= '3.11' \
+                --hash=sha256:d08972bbca2b8767ee552aff877b091dd111ffb1d22de7de885766ea7d719d5e
             idna==3.20 \
                 --hash=sha256:ab7ae7122974553370f0bdb919e1a960b2cd1bc1ef0276416d896db81c14582c
             license-expression==30.4.4 \
@@ -1090,8 +1090,8 @@ jobs:
                 --hash=sha256:31a85c2717bc41dd818f3c62908685ff9eebcb68588213745b14a6ee9e7df7c9
             packaging==26.3 \
                 --hash=sha256:d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c
-            pip==26.2.2 \
-                --hash=sha256:fd7f4dfa8190e014013b9f08f3e973f4e4c26ffd179a204895533a7254813a70
+            pip==26.3 \
+                --hash=sha256:f3b60b20ffaadd4415ed7957212a38ac63fa4c5fa375bd0f4a797777940fad13
             pip-api==0.0.35 \
                 --hash=sha256:66990d0da25378555cbb538db79384bab92d4617c6350dfd7a2126ba2a3a9894
             pip-audit==2.10.1 \
@@ -1100,8 +1100,8 @@ jobs:
                 --hash=sha256:4659bc2a667783e7a15d190f6fccf8b2486685b6dba4c19c3876314769c57526
             platformdirs==4.12.4 ; python_full_version < '3.11' \
                 --hash=sha256:78bfb9db2a8471ed7eebe3c3c932da413911042994e699b384fbb4493fa872d7
-            platformdirs==4.14.0 ; python_full_version >= '3.11' \
-                --hash=sha256:1dadfc59a8a5d7565b3d9270ae8fa71c065595352c4277b41c11ee6c222c4b91
+            platformdirs==4.14.3 ; python_full_version >= '3.11' \
+                --hash=sha256:cba2d05fe5e18b26b1fa6f376b8e6234c012abe1f8696c486fface7d0054e931
             py-serializable==2.1.0 \
                 --hash=sha256:b56d5d686b5a03ba4f4db5e769dc32336e142fc3bd4d68a8c25579ebb0a67304
             pygments==2.21.0 \
