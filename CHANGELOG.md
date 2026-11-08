@@ -7,6 +7,46 @@ name what a caller sees after that.
 
 Nothing yet.
 
+## v1.31.0 (2026-11-07)
+
+### Changed (BREAKING default for publishing callers): `container-release.yml` publishes only from a SemVer tag push (issues #325, #327, pull request #328)
+
+Callers pick this up when they re-pin (callers pin a commit; re-pinning downstream repositories is separate work).
+
+- **Breaking default.** With `push: true`, `container-release.yml` now publishes only for a push of a `vMAJOR.MINOR.PATCH` tag
+  (SemVer 2.0.0 pre-release and build parts allowed). Any other run with `push: true` builds and scans only, prints a
+  `publish skipped` warning annotation and writes a job summary naming the reason and the inputs to set.
+- **New inputs.** `allowed-publish-events` (default `push`; `*` or a comma-separated list of lowercase event names, no spaces;
+  validated) and `require-tag-ref` (default `true`).
+- **What a caller must do.** A caller that publishes from main, a schedule or a manual run adds
+  `allowed-publish-events: push,schedule,workflow_dispatch` and `require-tag-ref: false`. Without them its next run on those
+  events builds and scans but does not publish. A caller that publishes only from tag pushes changes nothing.
+- **Build split.** The build is split into `build` (publishing; `packages: write`) and `build-local` (no publish permission).
+- **Per-registry indexes.** Each registry gets its own multi-platform index, built from digests that are verified first.
+- **Strict `platforms`.** The list is validated as written and a repeated platform is refused. The tag check uses the SemVer
+  2.0.0 grammar, so `v1`, `v1.2` and `vnot-a-release` do not publish.
+
+### Changed: release workflows are stricter about publishing and assets (issues #325, #327, pull request #326)
+
+Applies to `artifact-release.yml` and `python-package-release.yml` (and the `python-docker-release.yml` name that forwards to
+them). Callers pick this up when they re-pin.
+
+- **Publish allow-list.** Publishing runs only for an event named in `allowed-publish-events` (default `push`) on a
+  `refs/tags/v<semver>` ref. A caller triggered by `release: published`, such as `hypeman` calling
+  `python-package-release.yml`, must set `allowed-publish-events: push,release`.
+- **Asset naming policy.** Every local file name must be ASCII letters, digits, `.`, `_` and `-`, starting and ending with a
+  letter or digit; checked before any release call. A build that produces another name (spaces, `+`, non-ASCII, a leading or
+  trailing `_` or `-`) must rename the file in its `build-command` before re-pinning.
+- **Hidden files refused.** Names beginning with `.` in the staging directory are rejected, no longer skipped.
+- **Case collisions refused.** Names that differ only in letter case are refused (a conservative policy).
+- **Prerelease tags create prereleases.** A new release for a SemVer prerelease tag (for example `v1.2.3-rc.1`) is created with
+  `--prerelease`. Earlier versions never set the flag.
+- **Existing release must match.** An existing release must carry the `prerelease` flag its tag implies, hold only assets that
+  are absent or identical by sha256, and hold exactly this build's files after the upload, or the run fails and the version is
+  burned. A draft release for the tag fails the run until it is published or deleted.
+- **Asset listing.** Read through the paginated listing, validated before use; every remote asset must be `uploaded` and no
+  name may repeat.
+
 ## v1.30.0 (2026-11-06)
 
 ### New: opt-in `vendored-drift.yml` and `base-image-digest.yml` (issue #296)
