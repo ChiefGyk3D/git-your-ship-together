@@ -166,6 +166,14 @@ on:
         description: Skip advisories that have no fix in the distribution, so they do not block the gate.
         type: boolean
         default: true
+      skip-secret-scan-in-site-packages:
+        description: >-
+          Suppress ALL Trivy secret findings (every secret rule, not one rule id) from files under three image roots only: usr/lib[64], usr/local/lib[64] and opt/venv/lib, each pythonX.Y/site-packages.
+          Reason: a package's docstring text can match a secret rule (the anthropic SDK's text about an API enum value matches
+          gcp-service-account) when nothing is a credential and no fixed version exists. Trivy still reads those files (this is not a performance boundary) and only secret findings are affected: the
+          vulnerability scan, severity, ignore-unfixed and exit code are unchanged. A real secret shipped inside a dependency under those roots will NOT be detected (a supply-chain tradeoff); secrets at every other path are still found.
+        type: boolean
+        default: false
       trivyignores:
         description: Path to the caller's .trivyignore file, relative to the repository. Empty means none. Every entry needs a reason and a review date.
         type: string
@@ -901,6 +909,24 @@ jobs:
             exit 1
           fi
 
+      - name: Suppress Trivy secret findings under installed Python package roots
+        if: inputs.trivy && inputs.skip-secret-scan-in-site-packages
+        run: |
+          # One global allow rule with a path only: Trivy still reads these files and detects secrets in them
+          # but drops those findings, for a Python site-packages directory of one of three image roots
+          # (usr/lib, usr/local/lib, opt/venv/lib; lib64 too), the path anchored at the image root with a
+          # numeric X.Y version. Trivy's vulnerability scanner reads the same packages as before.
+          # Nothing else is allowed, disabled or skipped. Trivy reads the file through its documented
+          # --secret-config flag, set here by its environment form.
+          CONFIG="$RUNNER_TEMP/trivy-secret.yaml"
+          cat > "$CONFIG" <<'EOF'
+          allow-rules:
+            - id: python-site-packages
+              description: Installed Python packages under the listed roots (see skip-secret-scan-in-site-packages)
+              path: ^(usr/(local/)?lib(64)?|opt/venv/lib)/python[0-9]+\.[0-9]+/site-packages/
+          EOF
+          echo "TRIVY_SECRET_CONFIG=$CONFIG" >> "$GITHUB_ENV"
+
       - name: Scan the image with Trivy
         if: inputs.trivy
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
@@ -1136,6 +1162,24 @@ jobs:
             echo "::error title=probe-read-only::the image fails with a read-only root filesystem; it writes outside /tmp. Point its writable paths at a tmpfs or a volume, or leave probe-read-only off"
             exit 1
           fi
+
+      - name: Suppress Trivy secret findings under installed Python package roots
+        if: inputs.trivy && inputs.skip-secret-scan-in-site-packages
+        run: |
+          # One global allow rule with a path only: Trivy still reads these files and detects secrets in them
+          # but drops those findings, for a Python site-packages directory of one of three image roots
+          # (usr/lib, usr/local/lib, opt/venv/lib; lib64 too), the path anchored at the image root with a
+          # numeric X.Y version. Trivy's vulnerability scanner reads the same packages as before.
+          # Nothing else is allowed, disabled or skipped. Trivy reads the file through its documented
+          # --secret-config flag, set here by its environment form.
+          CONFIG="$RUNNER_TEMP/trivy-secret.yaml"
+          cat > "$CONFIG" <<'EOF'
+          allow-rules:
+            - id: python-site-packages
+              description: Installed Python packages under the listed roots (see skip-secret-scan-in-site-packages)
+              path: ^(usr/(local/)?lib(64)?|opt/venv/lib)/python[0-9]+\.[0-9]+/site-packages/
+          EOF
+          echo "TRIVY_SECRET_CONFIG=$CONFIG" >> "$GITHUB_ENV"
 
       - name: Scan the image with Trivy
         if: inputs.trivy
