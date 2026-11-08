@@ -8,9 +8,10 @@ name what a caller sees after that.
 ### New: `container-release.yml` `skip-secret-scan-in-site-packages` (issue #327)
 
 Opt-in, default `false`: a caller that sets nothing sees no change after it re-pins, and the Trivy step is byte for byte what it was.
-Set to `true`, Trivy's **secret** scanner skips installed Python packages (any `lib/pythonX.Y/site-packages` directory in the image),
+Set to `true`, Trivy's **secret** scanner skips installed Python packages under a short fixed list of image roots (`usr/lib`, `usr/lib64`, `usr/local/lib`, `usr/local/lib64` and `opt/venv/lib`, each followed by `pythonX.Y/site-packages/` (numeric version), anchored at the image root),
 through one `allow-rules` path entry in a generated `trivy-secret.yaml` passed as `TRIVY_SECRET_CONFIG`. The vulnerability scan, `trivy-severity`,
-`trivy-ignore-unfixed` and `trivy-exit-code` are unchanged, and secrets elsewhere in the image are still found.
+`trivy-ignore-unfixed` and `trivy-exit-code` are unchanged, and every other path is still scanned. A genuine secret shipped by a
+dependency under those roots will **not** be detected (a supply-chain tradeoff).
 Why: a package's docstring text can match a secret rule when nothing is a credential; the installed `anthropic` SDK trips
 `gcp-service-account` (11 CRITICAL findings on Boon-Tube-Daemon's image, no fixed version). Source: Trivy secret scanning docs, "Allow Rules".
 

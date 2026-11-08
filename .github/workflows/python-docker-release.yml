@@ -121,10 +121,10 @@ on:
         default: true
       skip-secret-scan-in-site-packages:
         description: >-
-          Stop Trivy's SECRET scanner reading installed Python packages (any lib/pythonX.Y/site-packages directory in the image).
+          Stop Trivy's SECRET scanner reading installed Python packages under three image roots only: usr/lib[64], usr/local/lib[64] and opt/venv/lib, each pythonX.Y/site-packages.
           Reason: a package's docstring text can match a secret rule (the anthropic SDK's text about an API enum value matches
           gcp-service-account) when nothing is a credential and no fixed version exists. Only the secret scanner is affected: the
-          vulnerability scan, severity, ignore-unfixed and exit code are unchanged. Secrets elsewhere in the image are still found.
+          vulnerability scan, severity, ignore-unfixed and exit code are unchanged. A real secret shipped inside a dependency under those roots will NOT be detected (a supply-chain tradeoff); secrets at every other path are still found.
         type: boolean
         default: false
       trivyignores:

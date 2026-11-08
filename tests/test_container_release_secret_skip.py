@@ -10,6 +10,14 @@ a `trivy-secret.yaml` with a global `allow-rules` entry that has a `path` regex;
 documented `--secret-config` flag, through its environment form TRIVY_SECRET_CONFIG. trivy-action v0.36.0 has no
 input for it but does not clear the environment.
 
+What these tests prove: the generated YAML, the shape of the step, and (with Python's `re`, an approximation of Go's
+regexp for this simple pattern) which paths the allow rule covers. They do not run Trivy. Real Trivy consumption was
+checked by hand once (Trivy 0.76.2 and 0.70.0 on a throwaway image with fake secrets, with and without
+TRIVY_SECRET_CONFIG; see the pull request), not by this suite.
+
+The allow rule is path-wide, not limited to one rule id: Trivy documents per-rule `allow-rules` only inside a custom
+rule, and a custom rule with a built-in's id runs beside the built-in instead of replacing it (measured, Trivy 0.76.2).
+
 The structure checker is run on the real workflow and then on mutated copies, which it must refuse.
 """
 
@@ -23,6 +31,7 @@ import yaml
 from test_container_release_digests import RELEASE, run_script, step
 from test_workflows import jobs, load, steps_of, triggers
 
+REAL_PATH = r"^(usr/(local/)?lib(64)?|opt/venv/lib)/python[0-9]+\.[0-9]+/site-packages/"
 INPUT = "skip-secret-scan-in-site-packages"
 ALLOW = "Let Trivy's secret scanner skip installed Python packages"
 TRIVY = "Scan the image with Trivy"
@@ -41,8 +50,10 @@ CONDITION = f"inputs.trivy && inputs.{INPUT}"
 # Paths inside an image as Trivy reports them: no leading slash.
 SKIPPED = [
     "opt/venv/lib/python3.14/site-packages/anthropic/types/x.py",
+    "usr/lib/python3.12/site-packages/pkg/mod.py",
     "usr/local/lib/python3.12/site-packages/pkg/mod.py",
     "usr/lib64/python3.11/site-packages/pkg/mod.py",
+    "usr/local/lib64/python3.11/site-packages/pkg/mod.py",
 ]
 SCANNED = [
     "app/config.py",
@@ -51,6 +62,20 @@ SCANNED = [
     "usr/lib/python3/dist-packages/pkg/mod.py",
     "opt/venv/bin/activate",
     "home/user/site-packages.txt",
+    "home/app/lib/python3.12/site-packages/x.json",  # same shape under a path the caller or an attacker controls
+    "app/cache/lib/python3.12/site-packages/x.py",
+    "lib/python3.12/site-packages/x.py",  # not under one of the roots
+    "opt/lib/python3.12/site-packages/x.py",
+    "opt/other/lib/python3.12/site-packages/x.py",  # a different root
+    "srv/venv/lib/python3.12/site-packages/x.py",
+    "opt/venv/lib/python.../site-packages/x.py",  # malformed versions
+    "opt/venv/lib/python3./site-packages/x.py",
+    "opt/venv/lib/python3..12/site-packages/x.py",
+    "opt/venv/lib/python3.12.1/site-packages/x.py",
+    "opt/venv/lib/python3.12/dist-packages/x.py",
+    "opt/venv/lib/python3.12/site-packages-extra/x.py",
+    "opt/venv/lib/pythonX.Y/site-packages/x.py",
+    "/opt/venv/lib/python3.14/site-packages/x.py",  # Trivy matches image paths without a leading slash
 ]
 
 
@@ -150,11 +175,17 @@ def test_the_allow_step_writes_only_the_path_rule_and_exports_the_config_path(tm
 
 
 def test_config_checker_refuses_a_wider_rule():
-    good = "allow-rules:\n  - id: x\n    path: (^|/)lib(64)?/python[0-9.]+/site-packages/\n"
+    def cfg(path):
+        return f"allow-rules:\n  - id: x\n    path: {path}\n"
+
+    good = cfg(REAL_PATH)
     assert config_problems(good) == []
     for bad in (
-        "allow-rules:\n  - id: x\n    path: .*\n",
-        "allow-rules:\n  - id: x\n    path: site-packages\n",
+        cfg(".*"),
+        cfg("site-packages"),
+        cfg(r"(^|/)lib(64)?/python[0-9.]+/site-packages/"),
+        cfg(REAL_PATH.replace(r"[0-9]+\.[0-9]+", "[0-9.]+")),
+        cfg(REAL_PATH.removeprefix("^")),
         good + "disable-rules:\n  - gcp-service-account\n",
         good + "skip-patterns: []\n",
         "allow-rules:\n  - id: x\n    regex: .*\n",
@@ -191,7 +222,22 @@ def mutate_each():
     def wide_path(d):
         for j in JOBS:
             s = step(j, ALLOW, d)
-            s["run"] = s["run"].replace("(^|/)lib(64)?/python[0-9.]+/site-packages/", ".*")
+            s["run"] = s["run"].replace(REAL_PATH, ".*")
+
+    def loosen_anchor(d):
+        for j in JOBS:
+            s = step(j, ALLOW, d)
+            s["run"] = s["run"].replace(REAL_PATH, REAL_PATH.removeprefix("^"))
+
+    def loose_version(d):
+        for j in JOBS:
+            s = step(j, ALLOW, d)
+            s["run"] = s["run"].replace("[0-9]+\\.[0-9]+", "[0-9.]+")
+
+    def old_unanchored_path(d):
+        for j in JOBS:
+            s = step(j, ALLOW, d)
+            s["run"] = s["run"].replace(REAL_PATH, r"(^|/)lib(64)?/python[0-9.]+/site-packages/")
 
     def wrong_order(d):
         lst = jobs(d)["build"]["steps"]
@@ -206,7 +252,7 @@ def mutate_each():
 
     return [
         drop_condition, on_by_default, as_string, scanners, skip_dirs, weaker_severity, hard_ignore_unfixed, drift,
-        wide_path, wrong_order, expression, env_on_trivy,
+        wide_path, loosen_anchor, loose_version, old_unanchored_path, wrong_order, expression, env_on_trivy,
     ]  # fmt: skip
 
 
