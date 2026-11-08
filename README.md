@@ -1502,13 +1502,15 @@ jobs:
   ci:
     uses: ChiefGyk3D/git-your-ship-together/.github/workflows/parallel-ci.yml@<sha> # vX.Y.Z
     # ... as above
-  shell:
-    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/bash-ci.yml@<sha> # vX.Y.Z
+  drift:
+    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/vendored-drift.yml@<sha> # vX.Y.Z
     permissions:
       contents: read
+    with:
+      lock-files: vendor/tokens.lock.json
   gate:
     if: always()
-    needs: [ci, shell]
+    needs: [ci, drift]
     uses: ChiefGyk3D/git-your-ship-together/.github/workflows/ci-gate.yml@<sha> # vX.Y.Z
     permissions: {}
     with:
