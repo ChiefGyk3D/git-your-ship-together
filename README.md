@@ -288,6 +288,7 @@ Inputs of `python-ci.yml`:
 | `distro-egress-policy` | `block` | harden-runner policy for the `distro` job only; `audit` for a distribution whose mirrors are not on the list |
 | `distro-allowed-endpoints` | the measured list | The `distro` job's own allow-list, kept apart from `allowed-endpoints`: Docker Hub's image pull (registry, auth, CDN and the S3 blob host), the Debian, Ubuntu, Kali and Parrot mirrors, and PyPI. `extra-allowed-endpoints` is appended to it |
 | `distro-continue-on-error` | `false` | Let a failing distro run leave the gate green, for a suite that assumes a non-root user or a newer Python than the distribution ships. |
+| `pr-python-versions` | `""` (off) | JSON array of versions the `test` matrix runs on a pull request, e.g. `'["3.11", "3.15"]'` (oldest and newest). Empty runs `python-versions` on every event, so a caller that sets nothing sees no change. Push, schedule and dispatch always run the full `python-versions`; add a `schedule` trigger for a weekly full run. Entries must be in `python-versions`, and with `coverage-threshold` set `coverage-python-version` must be one of them (a bad value fails the job). `CI green` is unchanged |
 | `coverage-python-version` | `3.13` | The matrix leg that uploads coverage |
 | `install-command` | upgrade pip, `pip install -r requirements.txt` | Run before tests on every leg |
 | `test-command` | `pytest` | The test suite |
