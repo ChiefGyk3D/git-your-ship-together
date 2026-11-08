@@ -119,6 +119,7 @@ jobs:
       # pytest-cov is in the hash-locked fixture requirements; the XML it
       # writes feeds the threshold, measured at 76% and set a few points below.
       test-command: pytest fixture/tests --cov=fixture_app --cov-report=xml
+      xdist: true  # PYTEST_ADDOPTS=-n auto reaches this pytest; the distro job runs the command as written
       coverage-threshold: "70"
       typecheck-install-command: pip install mypy==2.4.1
       typecheck-command: mypy fixture/src
@@ -245,6 +246,7 @@ jobs:
     with:
       directories: fixture/tofu
       test: true
+      test-matrix: true  # one leg here; the matrix path runs against a real module
       policy-directories: fixture/policy
       workflow-lint: false
       egress-policy: block

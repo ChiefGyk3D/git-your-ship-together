@@ -1,0 +1,53 @@
+# Say whether a pull request changes only paths the caller calls "docs only", so a job can be left out on purpose.
+#
+# A thin wrapper: every rule lives in scripts/classify_changes.py, which this step calls by path from the
+# action's own checkout. Inputs reach it through env only. It reads the changed files from the API
+# (never from the checkout, which a pull request controls), and anything it cannot confirm is `false`:
+# not a pull request, a head that moved, a file count that disagrees with the event's, a list the API may
+# have cut short, a path under `.github/`, a path outside the patterns. Run it in its own job holding
+# `contents: read` and `pull-requests: read`, and give the skippable job `if: needs.classify.outputs.docs-only != 'true'`.
+# The caller's `CI green` job then reads the result with .github/actions/ci-gate. The rules and the threat
+# notes are in docs/wiki/Docs-only-fast-path.md; tests/test_docs_only_fast_path.py runs this script.
+name: Classify changes
+description: Output docs-only=true only when every path a pull request changes is on the caller's docs-only list.
+inputs:
+  docs-only-patterns:
+    description: Newline-separated globs for the paths that make a job unnecessary, for example `docs/**`, `tests/**`, `*.md`. Anchored at the repository root; `*` does not cross `/`, `**` does. A pattern that matches every path is refused. Empty means never docs only.
+    required: false
+    default: ""
+  never-skip-patterns:
+    description: Newline-separated globs that always run every job, in addition to `.github/**` (the workflows and actions that decide what runs, which are never docs only whatever the patterns say). Use it for the file that holds your own rule if it lives outside `.github/`.
+    required: false
+    default: ""
+  token:
+    description: Token for gh. It needs pull-requests read; a fork's pull request has that.
+    required: false
+    default: ${{ github.token }}
+outputs:
+  docs-only:
+    description: "`true` only when the event is a pull request whose changed files were read, confirmed, and all match docs-only-patterns and none is under `.github/` or never-skip-patterns; `false` otherwise."
+    value: ${{ steps.classify.outputs.docs-only }}
+  reason:
+    description: One line saying why, for the log.
+    value: ${{ steps.classify.outputs.reason }}
+  changed:
+    description: How many files the pull request changes (0 when not read).
+    value: ${{ steps.classify.outputs.changed }}
+runs:
+  using: composite
+  steps:
+    - name: Classify the changed files
+      id: classify
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        CC_EVENT_NAME: ${{ github.event_name }}
+        CC_REPO: ${{ github.repository }}
+        CC_PR: ${{ github.event.pull_request.number }}
+        CC_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        CC_CHANGED_FILES: ${{ github.event.pull_request.changed_files }}
+        CC_PATTERNS: ${{ inputs.docs-only-patterns }}
+        CC_NEVER_SKIP: ${{ inputs.never-skip-patterns }}
+      run: |
+        set -euo pipefail
+        exec python3 -I "$GITHUB_ACTION_PATH/../../../scripts/classify_changes.py"
