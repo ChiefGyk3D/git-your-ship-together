@@ -1,9 +1,11 @@
-"""container-release.yml `skip-secret-scan-in-site-packages`: an opt-in allow rule for Trivy's SECRET scanner.
+"""container-release.yml `skip-secret-scan-in-site-packages`: an opt-in allow rule for Trivy secret findings.
 
 Why it exists: Trivy's `gcp-service-account` rule matches docstring text inside the installed `anthropic` SDK under
 `<venv>/lib/python3.x/site-packages/`. The text is not a credential, the newest SDK version has it and no fixed
-version exists. The input lets a caller stop the secret scanner reading that directory. The vulnerability scanner,
-the severity, `ignore-unfixed` and the exit code are untouched, and nothing changes while the input is off.
+version exists. The input lets a caller suppress all Trivy secret findings from files under the listed roots (Trivy
+documents a global allow rule as detected-and-skipped, not as not-read: it is not a performance or I/O boundary).
+The vulnerability scanner, the severity, `ignore-unfixed` and the exit code are untouched, and nothing changes while
+the input is off.
 
 Mechanism (Trivy secret scanning docs, "Allow Rules", read 2026-11-07, https://trivy.dev/docs/latest/guide/scanner/secret/):
 a `trivy-secret.yaml` with a global `allow-rules` entry that has a `path` regex; the config path is passed with the
@@ -33,7 +35,7 @@ from test_workflows import jobs, load, steps_of, triggers
 
 REAL_PATH = r"^(usr/(local/)?lib(64)?|opt/venv/lib)/python[0-9]+\.[0-9]+/site-packages/"
 INPUT = "skip-secret-scan-in-site-packages"
-ALLOW = "Let Trivy's secret scanner skip installed Python packages"
+ALLOW = "Suppress Trivy secret findings under installed Python package roots"
 TRIVY = "Scan the image with Trivy"
 JOBS = ("build", "build-local")
 # The Trivy step as it is without the input: a change to it is a change for every caller.
@@ -95,6 +97,8 @@ def config_problems(text: str) -> list[str]:
     if "regex" in rule or "path" not in rule:
         return ["the allow rule must be a path rule only"]
     problems = []
+    if rule["path"] != REAL_PATH:
+        problems.append(f"path is not the documented pattern: {rule['path']!r}")
     for p in SKIPPED:
         if not re.search(rule["path"], p):
             problems.append(f"does not skip {p}")
@@ -186,6 +190,7 @@ def test_config_checker_refuses_a_wider_rule():
         cfg(r"(^|/)lib(64)?/python[0-9.]+/site-packages/"),
         cfg(REAL_PATH.replace(r"[0-9]+\.[0-9]+", "[0-9.]+")),
         cfg(REAL_PATH.removeprefix("^")),
+        cfg(REAL_PATH + "|^tmp/"),  # a path that still covers every corpus case but adds another root
         good + "disable-rules:\n  - gcp-service-account\n",
         good + "skip-patterns: []\n",
         "allow-rules:\n  - id: x\n    regex: .*\n",
@@ -224,6 +229,11 @@ def mutate_each():
             s = step(j, ALLOW, d)
             s["run"] = s["run"].replace(REAL_PATH, ".*")
 
+    def extra_alternation(d):
+        for j in JOBS:
+            s = step(j, ALLOW, d)
+            s["run"] = s["run"].replace(REAL_PATH, REAL_PATH + "|^tmp/")
+
     def loosen_anchor(d):
         for j in JOBS:
             s = step(j, ALLOW, d)
@@ -252,7 +262,8 @@ def mutate_each():
 
     return [
         drop_condition, on_by_default, as_string, scanners, skip_dirs, weaker_severity, hard_ignore_unfixed, drift,
-        wide_path, loosen_anchor, loose_version, old_unanchored_path, wrong_order, expression, env_on_trivy,
+        wide_path, extra_alternation, loosen_anchor, loose_version, old_unanchored_path, wrong_order, expression,
+        env_on_trivy,
     ]  # fmt: skip
 
 

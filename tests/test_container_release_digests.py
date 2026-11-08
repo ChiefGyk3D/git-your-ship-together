@@ -44,7 +44,7 @@ BUILD_UNGATED = {
     "Require a non-root user",
     "Check the image",
     "Probe with a read-only root filesystem",
-    "Let Trivy's secret scanner skip installed Python packages",
+    "Suppress Trivy secret findings under installed Python package roots",
     "Scan the image with Trivy",
     "Upload Trivy results to the Security tab",
 }
@@ -231,7 +231,7 @@ SHARED_STEPS = (
     "Require a non-root user",
     "Check the image",
     "Probe with a read-only root filesystem",
-    "Let Trivy's secret scanner skip installed Python packages",
+    "Suppress Trivy secret findings under installed Python package roots",
     "Scan the image with Trivy",
     "Upload Trivy results to the Security tab",
 )

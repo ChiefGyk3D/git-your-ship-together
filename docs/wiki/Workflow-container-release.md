@@ -73,13 +73,13 @@ jobs:
 - **Secret findings inside installed packages (2026-11-07).** Trivy's `gcp-service-account` rule matched docstring text about an
   API enum value in the installed `anthropic` SDK (11 CRITICAL findings under `/opt/venv/lib/python3.14/site-packages/anthropic/`
   on Boon-Tube-Daemon's image); the newest SDK has it and no fixed version exists. `skip-secret-scan-in-site-packages: true`
-  (default `false`) gives Trivy's secret scanner one `allow-rules` path entry, anchored at the image root, for `usr/lib`, `usr/lib64`, `usr/local/lib`, `usr/local/lib64` and `opt/venv/lib`, each followed by `pythonX.Y/site-packages/` (numeric version), anchored at the image root. The path is
+  (default `false`) makes Trivy drop all secret findings (every secret rule; it still reads the files, so this is not a performance boundary) for files matched by one `allow-rules` path entry, anchored at the image root, under `usr/lib`, `usr/lib64`, `usr/local/lib`, `usr/local/lib64` and `opt/venv/lib`, each followed by `pythonX.Y/site-packages/` (numeric version), anchored at the image root. The path is
   `^(usr/(local/)?lib(64)?|opt/venv/lib)/python[0-9]+\.[0-9]+/site-packages/`; Trivy matches image paths without a leading slash
   (measured with Trivy 0.76.2 and 0.70.0, the version trivy-action v0.36.0 installs by default). The config is passed through `TRIVY_SECRET_CONFIG` (the
   `--secret-config` flag; trivy-action has no input for it). The vulnerability scan, severity, `ignore-unfixed` and exit code are untouched.
   **Tradeoff:** a genuine secret shipped by a dependency under those roots will NOT be detected; secrets at every other path
   are still found. The rule is path-wide because Trivy documents per-rule allow rules only inside custom rules, and a custom rule
-  with a built-in's id runs beside the built-in instead of replacing it. Source: Trivy secret scanning docs, "Allow Rules", read 2026-11-07.
+  with a built-in's id runs beside the built-in instead of replacing it. Fork pull requests: a caller that passes this input on `pull_request` events lets an untrusted pull request's image weaken only its own secret detection; publishing is already gated off for pull requests. Source: Trivy secret scanning docs, "Allow Rules", read 2026-11-07.
 - **Trivy's setuptools finding may be pip's.** pip vendors its own setuptools and msgpack under `pip/_vendor`, so upgrading
   setuptools in the image clears nothing; `pip uninstall -y pip` as the last build step does.
 - **Temporary tags stay in GHCR** beside the index; delete them when you no longer need them.
