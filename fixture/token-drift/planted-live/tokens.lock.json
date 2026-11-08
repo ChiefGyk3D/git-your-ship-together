@@ -1,0 +1,9 @@
+{
+  "vendored": "fixture/token-drift/planted-live/source-copy.txt",
+  "sha256": "77a0470759adb7d0bfb5a24b73e525d43250e5cf0f59023d9147ff70ae370c3b",
+  "source": {
+    "repo": "ChiefGyk3D/git-your-ship-together",
+    "path": "LICENSE",
+    "commit": "13f7a13ee135b2f9c8eb68194f0078592374f8e4"
+  }
+}

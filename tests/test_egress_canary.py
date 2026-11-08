@@ -696,6 +696,7 @@ KEPT_BLOCK = {
     ("security.yml", "snyk"),  # id-token, Doppler, SNYK_TOKEN
     ("security.yml", "scorecard"),  # id-token
     ("tofu-ci.yml", "plan"),  # id-token, Doppler
+    ("token-drift.yml", "drift"),  # the job token goes to api.github.com for the live check; read-only, no secret
     ("verify-published.yml", "verify"),  # packages: read; gh attestation verify with the job token
     ("verify-published.yml", "verify-release"),  # gh release download and attestation verify with the job token
     ("wiki-publish.yml", "generate"),  # runs caller code; its artifact is pushed verbatim by `publish`

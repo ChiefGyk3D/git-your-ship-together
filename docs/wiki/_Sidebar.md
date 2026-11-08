@@ -59,6 +59,7 @@
 - [threat-model](Workflow-threat-model.md)
 - [lory-audit](Workflow-lory-audit.md)
 - [agent-scan](Workflow-agent-scan.md)
+- [token-drift](Workflow-token-drift.md)
 - [vendored-drift](Workflow-vendored-drift.md)
 - [repin](Workflow-repin.md)
 - [pin-comments](Workflow-pin-comments.md)

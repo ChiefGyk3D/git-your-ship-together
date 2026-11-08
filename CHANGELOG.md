@@ -5,6 +5,24 @@ name what a caller sees after that.
 
 ## Unreleased
 
+### New: opt-in `token-drift.yml` (issue #342)
+
+A new reusable workflow. Nothing existing changes: a caller sees it only by adding a job that calls it, after it re-pins.
+
+- **`token-drift.yml`.** For a file vendored from another repository whose upstream moves (two sites sharing brand tokens).
+  It reads the lock file `vendored-drift.yml` reads (`vendored`, `sha256`, `source.repo/path/commit`) and fails when the
+  lock is malformed or disagrees with the optional `vendored-path`, `source-repo` or `source-path` inputs, when the vendored
+  file is not a regular file inside the repository or its SHA-256 differs from the pin, and, with `check-live`, when the
+  source repository's file differs from the pin. The live check resolves `source-ref` (default branch when empty) to one
+  commit through `api.github.com`, fetches the file at exactly that commit and compares file hashes; the message names the
+  file, the commit and both hashes. The source must be public; the read-only job token goes to `api.github.com` only, a
+  redirect is refused and at most 16 MiB is read. Default egress `api.github.com:443 github.com:443`. `contents: read`, no
+  secret, inputs through the environment. `advisory` (default false) turns drift into a warning and the `drifted` output, for
+  the planted fixtures. Script: `scripts/check_token_drift.py`, inlined byte for byte and held identical by
+  `tests/test_token_drift.py`.
+- `ci.yml` calls it on `fixture/token-drift/` (a pin, a live check against this repository's `LICENSE`, two planted drifts) and
+  a `token drift control` job fails unless both planted jobs reported drift. All are in the `CI green` gate.
+
 ## v1.34.0 (2026-11-09)
 
 ### Changed: harden the CI green gate and the docs-only classification (issues #307, #325)

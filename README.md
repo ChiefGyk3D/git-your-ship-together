@@ -75,6 +75,7 @@ Twenty-four reusable workflows and six composite actions:
 | `.github/workflows/vendored-drift.yml` | Opt-in drift check for a file vendored from another repository: each lock file (path, source repository, commit, sha256) must match the file's hash, and an optional generator run with `--check` must agree. Read-only, no secret |
 | `.github/workflows/repin.yml` | Opt-in scheduled re-pin: when a caller's pins of these workflows are behind the latest release, opens ONE pin-only pull request (SHA and `# vX.Y.Z` comment only), refuses and names it when the release changes an input the caller uses, never merges. Needs a GitHub App (Contents, Pull requests, Workflows: write) whose private key is fetched from Doppler; without one it reports only. See [Scheduled re-pin](#scheduled-re-pin) |
 | `.github/workflows/pin-comments.yml` | Opt-in check that the `# vX.Y.Z` comment on each SHA-pinned `uses:` line names the pinned commit (GitHub API lookup, bounded; an unverifiable lookup fails unless `unverified: warn`). Script: `scripts/check_pin_comments.py`. |
+| `.github/workflows/token-drift.yml` | Opt-in check that a vendored file (brand tokens) still equals its pin, and with `check-live` that the pin still equals the source repository's file at one resolved commit (public source, `api.github.com` only). Read-only, no secret |
 | `.github/workflows/base-image-digest.yml` | Opt-in scheduled check of a Dockerfile's `FROM image:tag@sha256:...` pins: resolves today's digest of each tag and fails when the pinned digest has a fixable HIGH or CRITICAL finding (Trivy, container-release.yml's flags) that the current digest does not. Read-only, no secret, no issue write |
 | `.github/workflows/parallel-ci.yml` | One build, then caller-supplied checks as separate jobs that share it: a matrix over a `jobs` list, each leg downloading the one-day build artifact, with path rules that skip checks a change cannot affect (failing closed: a push, a schedule, an unmatched path or an unreadable diff runs everything), pip and tool-download caches keyed on pin files, and one `CI green` gate that counts only deliberate skips as passed. Holds no token |
 | `.github/workflows/ci-gate.yml` | The gate on its own: `CI green` over the jobs a caller hands it (`parallel-ci.yml`, `bash-ci.yml`, `security.yml`, a job of its own), red on anything that failed, was cancelled or was skipped without being named. Holds no token. A reusable workflow called as a job, not the composite action `.github/actions/ci-gate` below |
@@ -1456,6 +1457,59 @@ Inputs of `repin.yml`:
 
 The optional secret `DOPPLER_TOKEN` is a fallback for a caller without OIDC; leave it unset, the key is never a GitHub secret. The same tool by hand, and a Dependabot template with a GYST group, are in the
 [repin wiki page](docs/wiki/Script-repin.md).
+
+### Token drift check (the pin against its source)
+
+`token-drift.yml` is `vendored-drift.yml`'s sibling for a file that has an upstream that moves: two sites that share brand
+tokens, where one is the source and the other vendors a pinned copy. It reads the same lock file (`vendored`, `sha256`,
+`source` with `repo`, `path`, `commit`), so one lock serves both workflows; use `vendored-drift.yml` when a generator's output
+must also be checked.
+
+It fails when the lock is malformed or disagrees with the `vendored-path`, `source-repo` or `source-path` you state in the
+caller (an edit of the lock alone cannot retarget it), when the vendored file is not a regular file inside the repository or
+its SHA-256 differs from the pin, and, with `check-live: true`, when the source file differs from the pin. The live check
+resolves `source-ref` (empty means the default branch) to one commit through `api.github.com`, fetches the file at exactly
+that commit, and compares the file, not the commit id: the source may move on without touching the file. The message names
+the file, the commit and both hashes. A moving ref is allowed on purpose, since noticing that the source changed is the
+point; pin `source-ref` to a commit to check only that the lock tells the truth about its own commit. The source repository
+must be public (the job token cannot read another private one); the token goes to `api.github.com` only and a redirect is
+refused. Run the live check on a schedule and keep pull requests offline:
+
+```yaml
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 5 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  token-drift:
+    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/token-drift.yml@<sha> # vX.Y.Z
+    permissions:
+      contents: read
+    with:
+      lock-file: vendor/brand/tokens.lock.json
+      vendored-path: vendor/brand/tokens.json
+      source-repo: owner/name
+      source-path: brand/tokens.json
+      check-live: ${{ github.event_name == 'schedule' }}
+```
+
+Inputs of `token-drift.yml`:
+
+| Input | Default | Meaning |
+|---|---|---|
+| `lock-file` | empty | The lock file; required (empty fails) |
+| `vendored-path`, `source-repo`, `source-path` | empty | Optional values the lock must agree with |
+| `source-ref` | empty (default branch) | With `check-live`: branch, tag or commit, resolved to one commit; plain names only |
+| `check-live` | `false` | Also compare the pin with the source file |
+| `advisory` | `false` | Report drift as a warning and set the `drifted` output (for fixtures); malformed input still fails |
+| `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `block`, `api.github.com:443 github.com:443`, empty | harden-runner |
+| `timeout-minutes` | `10` | Job timeout |
 
 ### Vendored-file drift check
 
