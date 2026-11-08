@@ -31,7 +31,7 @@ the workflow's YAML so it cannot drift; the README is the authority.
 | A Dockerfile whose base image is pinned by digest and should be rechecked on a schedule (opt-in) | `base-image-digest.yml` | [base-image-digest](Workflow-base-image-digest.md) |
 | Agent skills or MCP tool definitions (optional, advisory static scan) | `agent-scan.yml` | [agent-scan](Workflow-agent-scan.md) |
 
-Not a workflow, but a tool: to wait for a commit's CI and merge exactly that commit, use the `wait-ci` action or script ([wait-ci](Action-wait-ci.md)).
+Not a workflow, but a tool: to wait for a commit's CI and merge exactly that commit, use the `wait-ci` action or script ([wait-ci](Action-wait-ci.md)). To move a repository to the newest GYST release, use `scripts/repin.sh` ([repin](Script-repin.md)).
 
 A repository with several languages calls **one CI workflow per language**, each
 from its own caller job, and requires every gate. See

@@ -5,6 +5,14 @@ name what a caller sees after that.
 
 ## Unreleased
 
+### New: `scripts/repin.sh` and `examples/dependabot-gyst.yml` (issue #310)
+
+Tooling only: no workflow changes, so a caller sees nothing after it re-pins. `scripts/repin.sh status|apply|pr` moves a
+repository's `uses: ChiefGyk3D/git-your-ship-together/...@<sha> # vX.Y.Z` pins to a release, changing only the SHA and the
+version comment (checked before anything is written), refusing a non-canonical reference or a downgrade, and, in `pr` mode, opening
+one pull request on `repin/gyst-<tag>` without merging. `examples/dependabot-gyst.yml` is a `dependabot.yml` template with a group
+for GYST references and a 2-day cooldown. See the [repin wiki page](docs/wiki/Script-repin.md).
+
 ### New: `container-release.yml` `skip-secret-scan-in-site-packages` (issue #327)
 
 Opt-in, default `false`: a caller that sets nothing sees no change after it re-pins, and the Trivy step is byte for byte what it was.

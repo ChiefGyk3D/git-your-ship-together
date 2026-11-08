@@ -1,0 +1,35 @@
+# Dependabot for a repository that calls the reusable workflows of ChiefGyk3D/git-your-ship-together.
+#
+# Copy this to .github/dependabot.yml (merge the github-actions entry into yours if you have one).
+# Dependabot reads each `uses: ...@<sha> # vX.Y.Z` line and moves the SHA and the comment together, so a
+# GYST release arrives as one pull request. Two things differ from a plain actions entry:
+#
+#   * The `gyst` group holds every reference to this repository, so all of a caller's workflows move in ONE
+#     pull request instead of one per file. The `actions` group takes every other action and leaves the GYST
+#     references to the first group (a dependency joins the first group whose patterns match it).
+#   * The cooldown is short (2 days). The default for third-party actions elsewhere is a week, because a
+#     malicious release is usually pulled within days; GYST releases are first-party and already merged
+#     through review and CI here, and the maintainer's rule is that a GYST bump moves every caller.
+#
+# scripts/repin.sh in that repository does the same mechanical re-pin by hand or from a schedule, and works
+# for a repository Dependabot does not cover; see docs/wiki/Script-repin.md.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 2
+    groups:
+      gyst:
+        patterns:
+          - "ChiefGyk3D/git-your-ship-together"
+          - "ChiefGyk3D/git-your-ship-together/*"
+      actions:
+        patterns: ["*"]
+        exclude-patterns:
+          - "ChiefGyk3D/git-your-ship-together"
+          - "ChiefGyk3D/git-your-ship-together/*"
+    labels: [dependencies, github-actions]

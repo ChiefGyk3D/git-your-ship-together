@@ -112,6 +112,8 @@ publish).
 | `.githooks/pre-commit` | The gitleaks hook on staged changes, same pin as `security.yml`; copied byte for byte by `new-repo.sh` |
 | `.githooks/pre-commit` | The gitleaks hook on staged changes, same pin as `security.yml`; copied byte for byte by `new-repo.sh` |
 | `scripts/new-repo.sh` | Adopt or start a repository: writes callers, opens the PR, applies settings |
+| `scripts/repin.sh` | Re-pins a repository's GYST references to a release, pin-only, optionally as a pull request ([repin](Script-repin.md)) |
+| `examples/dependabot-gyst.yml` | Dependabot template for a caller: a group for GYST references and a short cooldown ([repin](Script-repin.md)) |
 | `scripts/wait-ci.sh` | The CI watcher: pinned head SHA, exit codes 0 to 6, optional pinned squash merge ([wait-ci](Action-wait-ci.md)) |
 | `scripts/parallel_ci_plan.py` | The input validation and path rules `parallel-ci.yml` inlines byte for byte; also runnable locally |
 | `scripts/parallel_ci_gate.py` | The gate rule `parallel-ci.yml` and `ci-gate.yml` inline byte for byte |
