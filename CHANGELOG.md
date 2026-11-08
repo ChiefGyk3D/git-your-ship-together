@@ -5,6 +5,10 @@ name what a caller sees after that.
 
 ## Unreleased
 
+Nothing yet.
+
+## v1.33.0 (2026-11-08)
+
 ### New: `parallel-ci.yml` and `ci-gate.yml` (issue #330)
 
 Two new reusable workflows. Nothing existing changes: a caller sees them only by adding a job that calls one, after it
