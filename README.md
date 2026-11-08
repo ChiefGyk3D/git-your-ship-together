@@ -73,6 +73,7 @@ Twenty-three reusable workflows and six composite actions:
 | `.github/workflows/python-docker-release.yml` | The old name of the above: a thin caller that forwards every input, the secret and the outputs through a `./` reference at its own commit, so an existing pin keeps working. New callers use `container-release.yml` |
 | `.github/workflows/verify-published.yml` | Consumer-side verification of a published image (cosign signature, SPDX SBOM attestation and build provenance verified from outside, then each platform pulled and checked) or of a GitHub release's assets (checksums, provenance, SBOMs). Read-only, no secret, no token beyond the default one |
 | `.github/workflows/vendored-drift.yml` | Opt-in drift check for a file vendored from another repository: each lock file (path, source repository, commit, sha256) must match the file's hash, and an optional generator run with `--check` must agree. Read-only, no secret |
+| `.github/workflows/pin-comments.yml` | Opt-in check that the `# vX.Y.Z` comment on each SHA-pinned `uses:` line names the pinned commit (GitHub API lookup, bounded; an unverifiable lookup fails unless `unverified: warn`). Script: `scripts/check_pin_comments.py`. |
 | `.github/workflows/base-image-digest.yml` | Opt-in scheduled check of a Dockerfile's `FROM image:tag@sha256:...` pins: resolves today's digest of each tag and fails when the pinned digest has a fixable HIGH or CRITICAL finding (Trivy, container-release.yml's flags) that the current digest does not. Read-only, no secret, no issue write |
 | `.github/workflows/parallel-ci.yml` | One build, then caller-supplied checks as separate jobs that share it: a matrix over a `jobs` list, each leg downloading the one-day build artifact, with path rules that skip checks a change cannot affect (failing closed: a push, a schedule, an unmatched path or an unreadable diff runs everything), pip and tool-download caches keyed on pin files, and one `CI green` gate that counts only deliberate skips as passed. Holds no token |
 | `.github/workflows/ci-gate.yml` | The gate on its own: `CI green` over the jobs a caller hands it (`parallel-ci.yml`, `bash-ci.yml`, `security.yml`, a job of its own), red on anything that failed, was cancelled or was skipped without being named. Holds no token |
@@ -1343,6 +1344,35 @@ Inputs of `vendored-drift.yml`:
 | `install-command` | empty | Optional shell run first, for what the generator needs |
 | `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `block`, GitHub only, empty | harden-runner; add the package index an `install-command` reaches to the extra list |
 | `egress-policy-secretless` | `block` | harden-runner policy for this job, which holds no secret; exactly `audit` or `block` |
+| `timeout-minutes` | `10` | Job timeout |
+
+### Pin comment check
+
+`pin-comments.yml` checks that the `# vX.Y.Z` comment on every SHA-pinned `uses:` line (in `.github/workflows` and
+`.github/actions`) names the commit the line is pinned to. The job fails when a pinned line has no version comment, when the
+tag does not exist in that repository, or when it resolves to another commit. zizmor's `ref-version-mismatch` audit does the
+same only for callers that run zizmor. Tags are looked up through the GitHub API with the job's read-only token, once per
+repository and tag, with a 10 second limit per request and 200 lookups or 120 seconds in all. A lookup that cannot be
+completed (network error, timeout, rate limit, unreadable answer) is `UNVERIFIED` and fails the job too, so a flaky network
+never reads as green; `unverified: warn` prints those lines and passes, and a real mismatch still fails. No workflow file at
+all is a failure. The script is `scripts/check_pin_comments.py`, inlined in the workflow byte for byte, so you can also vendor
+it and run it locally.
+
+```yaml
+jobs:
+  pin-comments:
+    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/pin-comments.yml@<sha> # vX.Y.Z
+    permissions:
+      contents: read
+```
+
+Inputs of `pin-comments.yml`:
+
+| Input | Default | Meaning |
+|---|---|---|
+| `unverified` | `fail` | `fail` or `warn`: what a lookup that could not be completed does |
+| `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `block`, GitHub only, empty | harden-runner; the job holds the job token, so it follows `egress-policy` |
+| `egress-policy-secretless` | `block` | Validated but unused: this job holds the job token, so it follows `egress-policy` |
 | `timeout-minutes` | `10` | Job timeout |
 
 ### Base image digest check

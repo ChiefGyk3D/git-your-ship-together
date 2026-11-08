@@ -5,6 +5,14 @@ name what a caller sees after that.
 
 ## Unreleased
 
+### New: opt-in `pin-comments.yml` (issue #318)
+
+Checks that the `# vX.Y.Z` comment on every SHA-pinned `uses:` line (workflows and composite actions) names the commit it is
+pinned to: the comment must exist, the tag must exist, and it must resolve to the pin. Until now only zizmor's
+`ref-version-mismatch` checked this, and only for callers that run zizmor. A lookup that cannot be completed is `UNVERIFIED` and
+fails the job (input `unverified: warn` prints it and passes); lookups are bounded (10 s each, 200 and 120 s in all). Read-only;
+a caller that sets nothing sees no change. This repository's own CI now runs it. Script: `scripts/check_pin_comments.py`.
+
 ### New: `container-release.yml` `skip-secret-scan-in-site-packages` (issue #327)
 
 Opt-in, default `false`: a caller that sets nothing sees no change after it re-pins, and the Trivy step is byte for byte what it was.

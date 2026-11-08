@@ -390,6 +390,16 @@ jobs:
       lock-files: fixture/vendored/tokens.lock.json
       generator-command: python3 fixture/vendored/gen_tokens.py
 
+  # pin-comments.yml at this ref over this repository's own workflows: every `# vX.Y.Z` comment must name the
+  # commit it is pinned to. That the same check FAILS on a wrong comment, a missing one, a missing tag and an
+  # unverifiable lookup is proved by tests/test_pin_comments.py against a fake API; a deliberately failing job
+  # here would leave every run red.
+  fixture-pin-comments:
+    name: fixture pin comments
+    uses: ./.github/workflows/pin-comments.yml # zizmor: ignore[self-repository]
+    permissions:
+      contents: read
+
   # base-image-digest.yml at this ref over the fixture's Dockerfile, in block mode with the workflow's own
   # default list, so the registry and database hosts are measured here. exit-code "0" because a new advisory on
   # a Tuesday must not turn main red; that a fixable finding DOES fail the job is proved by
@@ -657,7 +667,7 @@ jobs:
   ci-green:
     name: CI green
     if: always()
-    needs: [actionlint, zizmor, test, fixture-ci, fixture-bash, fixture-fuzz, fixture-tofu, fixture-arduino, fixture-package, fixture-sbom, fixture-artifact, fixture-pages, fixture-wiki, fixture-release, fixture-verify, fixture-rescan, fixture-drift, fixture-base-image, fixture-parallel, fixture-gate, rescan-live, fixture-project-sync, fixture-dast, dast-live, fixture-threat-model, fixture-agent-scan, fixture-agent-scan-planted, agent-scan-control]
+    needs: [actionlint, zizmor, test, fixture-ci, fixture-bash, fixture-fuzz, fixture-tofu, fixture-arduino, fixture-package, fixture-sbom, fixture-artifact, fixture-pages, fixture-wiki, fixture-release, fixture-verify, fixture-rescan, fixture-drift, fixture-pin-comments, fixture-base-image, fixture-parallel, fixture-gate, rescan-live, fixture-project-sync, fixture-dast, dast-live, fixture-threat-model, fixture-agent-scan, fixture-agent-scan-planted, agent-scan-control]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}
