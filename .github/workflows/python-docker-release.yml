@@ -56,9 +56,11 @@ on:
         default: ^https://github\.com/ChiefGyk3D/git-your-ship-together/\.github/workflows/container-release\.yml@
       allow-unsigned-publish:
         description: >-
-          Let a push move the release tags with sign, sbom or provenance turned
-          off. Default false: a push with any of the three off fails before it
-          builds, so an unsigned image cannot reach latest by accident.
+          Let a publishing run move the release tags with sign, sbom or
+          provenance turned off. Default false: a run that would publish with
+          any of the three off fails before it builds, so an unsigned image
+          cannot reach latest by accident. A run that does not publish is not
+          affected.
         type: boolean
         default: false
       docker-test-command:
@@ -137,6 +139,14 @@ on:
         description: Skip advisories that have no fix in the distribution, so they do not block the gate.
         type: boolean
         default: true
+      skip-secret-scan-in-site-packages:
+        description: >-
+          Suppress ALL Trivy secret findings (every secret rule, not one rule id) from files under three image roots only: usr/lib[64], usr/local/lib[64] and opt/venv/lib, each pythonX.Y/site-packages.
+          Reason: a package's docstring text can match a secret rule (the anthropic SDK's text about an API enum value matches
+          gcp-service-account) when nothing is a credential and no fixed version exists. Trivy still reads those files (this is not a performance boundary) and only secret findings are affected: the
+          vulnerability scan, severity, ignore-unfixed and exit code are unchanged. A real secret shipped inside a dependency under those roots will NOT be detected (a supply-chain tradeoff); secrets at every other path are still found.
+        type: boolean
+        default: false
       trivyignores:
         description: Path to the caller's .trivyignore file, relative to the repository. Empty means none. Every entry needs a reason and a review date.
         type: string
@@ -171,6 +181,14 @@ on:
         default: ''
       doppler-trusted-refs-only:
         description: Fetch CI secrets only on the default branch, a version tag (vN.N.N) or a schedule; never on a pull request or another branch. `false` restores fetching on every same-repository run.
+        type: boolean
+        default: true
+      allowed-publish-events:
+        description: Comma-separated event names (`github.event_name`) from which `push` may publish. Default `push`. `*` allows every event except `pull_request` and `pull_request_target`, which never publish. Together with `require-tag-ref` this is the allow-list for pushing, signing and attesting.
+        type: string
+        default: push
+      require-tag-ref:
+        description: Publish only from a `refs/tags/v*` ref. `false` also allows other refs, for a caller that publishes from a branch on purpose.
         type: boolean
         default: true
       timeout-minutes:
@@ -231,6 +249,7 @@ jobs:
       trivy-severity: ${{ inputs.trivy-severity }}
       trivy-exit-code: ${{ inputs.trivy-exit-code }}
       trivy-ignore-unfixed: ${{ inputs.trivy-ignore-unfixed }}
+      skip-secret-scan-in-site-packages: ${{ inputs.skip-secret-scan-in-site-packages }}
       trivyignores: ${{ inputs.trivyignores }}
       egress-policy: ${{ inputs.egress-policy }}
       egress-policy-secretless: ${{ inputs.egress-policy-secretless }}
@@ -240,4 +259,6 @@ jobs:
       doppler-config: ${{ inputs.doppler-config }}
       doppler-identity-id: ${{ inputs.doppler-identity-id }}
       doppler-trusted-refs-only: ${{ inputs.doppler-trusted-refs-only }}
+      allowed-publish-events: ${{ inputs.allowed-publish-events }}
+      require-tag-ref: ${{ inputs.require-tag-ref }}
       timeout-minutes: ${{ inputs.timeout-minutes }}

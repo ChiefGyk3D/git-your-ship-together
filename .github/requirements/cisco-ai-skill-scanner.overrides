@@ -1,0 +1,4 @@
+# litellm (every release through 1.106.6) caps filelock<4.0, which holds filelock at 3.32.7 and
+# leaves it exposed to the advisories fixed in 4.2.1. Replaces that cap (security scan 2026-11-03).
+# Re-check on a skill-scanner or litellm bump: drop this once litellm allows filelock 4.
+filelock==4.2.7

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Hash-locked installs of the tools the workflows pip-install: pip-audit and Semgrep (security.yml), the
-Cisco AI Defense skill and MCP scanners (agent-scan.yml).
+Cisco AI Defense skill and MCP scanners (agent-scan.yml), pytest-xdist (python-ci.yml).
 
 A reusable workflow cannot check out its own commit, so each lock travels inside
 the workflow file, as the Atheris lock does in python-fuzz.yml. The source of
@@ -59,7 +59,12 @@ TOOLS = {
     "semgrep": ("security.yml", "Install Semgrep", 10),
     "cisco-ai-skill-scanner": ("agent-scan.yml", "Install skill-scanner", 11),
     "cisco-ai-mcp-scanner": ("agent-scan.yml", "Install mcp-scanner", 12),
+    # python-ci.yml `xdist`: pytest-xdist and execnet, both pure Python; pytest comes from the caller's own install.
+    "pytest-xdist": ("python-ci.yml", "Install pytest-xdist", 11),
 }
+# Packages a lock resolves but leaves out because the caller's own install provides them: pytest-xdist is a plugin,
+# and locking pytest here would replace the caller's pytest with ours under --no-deps.
+PROVIDED = {"pytest-xdist": {"pytest", "iniconfig", "packaging", "pluggy", "pygments"}}
 # The newest minor comes from .github/python-support.json (tool_locks.newest), the one list of supported Pythons.
 NEWEST_MINOR = python_support.minor(python_support.load()["tool_locks"]["newest"])
 HEADER = (
@@ -104,6 +109,8 @@ def relock(tool: str) -> str:
     out = [HEADER.format(tool=tool, oldest=oldest, newest=NEWEST_MINOR).rstrip("\n")]
     for block in blocks:
         name, version, marker = re.match(r"([A-Za-z0-9_.\-]+)==(\S+)( ;[^\\\n]*?)? *\\", block).groups()
+        if name.lower() in PROVIDED.get(tool, ()):
+            continue
         if marker and re.search(r"sys_platform == '(win32|darwin|cygwin)'", marker):
             continue  # installed on no runner this workflow uses
         hashes = re.findall(r"sha256:([0-9a-f]{64})", block)

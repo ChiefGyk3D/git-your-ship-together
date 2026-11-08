@@ -1,0 +1,443 @@
+# Reusable vendored-file drift check: a file copied from another repository (design tokens, a schema, a
+# shared config) must still be the bytes the lock pinned, and whatever is generated from it must still be
+# what the generator makes. Nothing is built or published; the job reads the caller's repository and fails.
+#
+# The lock is a JSON file per vendored file, in the caller's repository:
+#
+#   {
+#     "vendored": "vendor/brand/tokens.css",
+#     "sha256": "<64 lowercase hex characters>",
+#     "source": {"repo": "owner/name", "path": "dist/tokens.css", "commit": "<40 hex characters>"}
+#   }
+#
+# Three checks, each of which fails the job:
+#   1. every lock is well formed (exact keys, a real commit id, paths that stay inside the repository);
+#   2. each vendored file is a regular file inside the repository whose SHA-256 equals its pin;
+#   3. with `generator-command`, that command run with `--check` appended exits 0. It is split like a shell
+#      would split it but run without one, from the repository root, with a minimal environment.
+#
+# The checking script is scripts/check_vendored_drift.py in this repository, inlined below byte for byte
+# (a reusable workflow cannot name the commit it runs from, so it cannot read its own repository's files);
+# tests/test_vendored_drift.py holds the copy identical. A caller can vendor that file and run it locally.
+#
+# It is opt-in: nothing in an existing caller changes. Call it with:
+#
+#   on:
+#     pull_request:
+#     push:
+#       branches: [main]
+#
+#   jobs:
+#     drift:
+#       uses: ChiefGyk3D/git-your-ship-together/.github/workflows/vendored-drift.yml@<sha> # vX.Y.Z
+#       permissions:
+#         contents: read
+#       with:
+#         lock-files: vendor/brand/tokens.lock.json
+#         generator-command: python3 scripts/generate_tokens.py
+
+name: Vendored-file drift check (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      lock-files:
+        description: Newline-separated repository-relative paths of lock files (JSON with `vendored`, `sha256` and `source`). At least one is required; an empty list fails the job rather than passing with nothing checked.
+        type: string
+        default: ""
+      generator-command:
+        description: Optional command that regenerates what is derived from the vendored file and, with `--check` appended, exits non-zero when the committed output differs (for example `python3 scripts/generate_tokens.py`). Run without a shell, from the repository root, with only PATH, HOME, LANG, LC_ALL and TMPDIR in its environment. Empty skips it.
+        type: string
+        default: ""
+      install-command:
+        description: Optional shell run before the check, for what the generator needs (`pip install -r requirements.txt`). It runs with the job's network allow-list and no secret. Empty skips it.
+        type: string
+        default: ""
+      egress-policy:
+        description: harden-runner egress policy - `audit` logs outbound connections, `block` allows only `allowed-endpoints`. Jobs that hold no secret follow `egress-policy-secretless` instead (EX-0001).
+        type: string
+        default: block
+      egress-policy-secretless:
+        description: harden-runner egress policy for the jobs that hold no stored secret, no OIDC token and no write-scoped or publish-capable token (read-only contents, a SARIF upload at most), and whose output no privileged job consumes - exactly `audit` or `block`. Defaults to `block` since security exception EX-0001 (GitHub-hosted runners in westus2 broke harden-runner `block`) was closed on 2026-11-02 after harden-runner v2.22.3 passed on westus2; see docs/security/exceptions/. Every job still has the default read-only job token. Set `audit` to opt out if the defect recurs. Any other job follows `egress-policy`. Any other value fails the job.
+        type: string
+        default: block
+      allowed-endpoints:
+        description: harden-runner allow-list for `block`, space-separated host:port entries. The default is what the checkout needs; wildcards are not supported.
+        type: string
+        default: "api.github.com:443 github.com:443"
+      extra-allowed-endpoints:
+        description: Appended to `allowed-endpoints`, for hosts only the install command or the generator reaches (a package index, for example). Same format.
+        type: string
+        default: ""
+      timeout-minutes:
+        description: Job timeout.
+        type: number
+        default: 10
+
+permissions:
+  contents: read
+
+jobs:
+  drift:
+    name: Vendored files match their pins
+    runs-on: ubuntu-24.04
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read  # check out the caller's repository
+    steps:
+      - name: Validate the egress policy inputs (EX-0001)
+        timeout-minutes: 1
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        env:
+          POLICY_EGRESS_POLICY: ${{ inputs.egress-policy }}
+          POLICY_EGRESS_POLICY_SECRETLESS: ${{ inputs.egress-policy-secretless }}
+        run: |
+          set -u
+          bad=0
+          check() {
+            if [ "$2" = set ] && [ "$3" != audit ] && [ "$3" != block ]; then
+              echo "::error title=egress policy::the $1 input must be exactly 'audit' or 'block' (its value is ${#3} characters long)"
+              bad=1
+            fi
+          }
+          check egress-policy "${POLICY_EGRESS_POLICY+set}" "${POLICY_EGRESS_POLICY-}"
+          check egress-policy-secretless "${POLICY_EGRESS_POLICY_SECRETLESS+set}" "${POLICY_EGRESS_POLICY_SECRETLESS-}"
+          check distro-egress-policy "${POLICY_DISTRO_EGRESS_POLICY+set}" "${POLICY_DISTRO_EGRESS_POLICY-}"
+          check semgrep-egress-policy "${POLICY_SEMGREP_EGRESS_POLICY+set}" "${POLICY_SEMGREP_EGRESS_POLICY-}"
+          exit "$bad"
+
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: ${{ (inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block' }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
+          disable-sudo: true
+          # The agent may only stop reporting to StepSecurity in block mode.
+          disable-telemetry: ${{ ((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block') == 'block' }}
+
+      - name: Egress canary (EX-0001)
+        if: ${{ runner.os == 'Linux' && (((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block') == 'block') }}
+        timeout-minutes: 2
+        shell: bash
+        # The workspace root exists before checkout; a job default working-directory may not.
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -u
+          NAMES="github.com api.github.com results-receiver.actions.githubusercontent.com"
+          PORT=443
+          canary_resolve() { timeout 5 getent ahostsv4 "$1" 2>/dev/null | awk '$2 == "STREAM" { print $1 }'; }
+          canary_probe() { timeout 3 bash -c "exec 3<>\"/dev/tcp/\$0/\$1\"" "$1" "$PORT" 2>/dev/null; }
+          canary_reach() {
+            local i
+            for i in 1 2 3 4; do
+              canary_probe "$1" && return 0
+              [ "$i" -lt 4 ] && sleep 1
+            done
+            return 1
+          }
+          canary_show() { local n=$1; shift; echo "+ $*"; { timeout 10 "$@" 2>&1 || true; } | head -n "$n" || true; }
+          canary_diag() {
+            local name
+            echo "::group::egress canary diagnostics (EX-0001, for the GitHub Support ticket)"
+            canary_show 5 uname -srmo
+            canary_show 20 cat /etc/resolv.conf
+            canary_show 20 bash -c "resolvectl status 2>/dev/null | grep -E '^ *(Current DNS Server|DNS Servers?|DNS Domain):'"
+            canary_show 20 bash -c "ss -lun | grep ':53 '"
+            for name in $NAMES pipelines.actions.githubusercontent.com; do
+              canary_show 20 getent ahostsv4 "$name"
+              canary_show 5 curl -sS -o /dev/null -w '%{http_code} %{remote_ip} %{time_connect}\n' --max-time 8 "https://$name"
+            done
+            echo "::endgroup::"
+          }
+          canary_main() {
+            local tmp name addr n=0 bad
+            tmp=$(mktemp -d) || return 1
+            for _ in 1 2 3; do
+              for name in $NAMES; do canary_resolve "$name" >>"$tmp/res.$name" & done
+              wait
+              sleep 1
+            done
+            for name in $NAMES; do
+              if [ -s "$tmp/res.$name" ]; then sort -u "$tmp/res.$name"; else echo "-"; fi | sed "s|^|$name |" >>"$tmp/pairs"
+            done
+            while read -r name addr; do
+              n=$((n + 1))
+              ( { [ "$addr" != "-" ] && canary_reach "$addr"; } || echo "$name $addr" >"$tmp/bad.$n" ) </dev/null &
+            done <"$tmp/pairs"
+            wait
+            bad=$(cat "$tmp"/bad.* 2>/dev/null | sort || true)
+            rm -rf "$tmp"
+            if [ -z "$bad" ]; then
+              echo "egress canary: all $n addresses of $NAMES accept TCP $PORT"
+              return 0
+            fi
+            echo "::error title=egress canary::egress broken on this runner (known westus2 DNS issue, EX-0001): rerun the job"
+            echo "unreachable addresses (name address; '-' means the name did not resolve):"
+            printf '%s\n' "$bad"
+            canary_diag
+            echo "EX-0001 egress canary failed, unreachable: $(printf '%s' "$bad" | tr '\n' ';')" >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
+            return 1
+          }
+          set -m
+          canary_main &
+          main=$!
+          (sleep 90; kill -TERM -- "-$main"; sleep 2; kill -KILL -- "-$main") >/dev/null 2>&1 &
+          dog=$!
+          wait "$main" && rc=0 || rc=$?
+          kill -TERM -- "-$dog" >/dev/null 2>&1 || true
+          if kill -0 -- "-$main" >/dev/null 2>&1; then
+            kill -TERM -- "-$main" >/dev/null 2>&1 || true
+            sleep 1
+            kill -KILL -- "-$main" >/dev/null 2>&1 || true
+          fi
+          if [ "$rc" -eq 143 ] || [ "$rc" -eq 137 ]; then
+            echo "::error title=egress canary::the canary hit its 90 s deadline (EX-0001): rerun the job"
+            rc=124
+          fi
+          exit "$rc"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install what the generator needs
+        if: inputs.install-command != ''
+        env:
+          COMMAND: ${{ inputs.install-command }}
+        run: bash -c "$COMMAND"
+
+      - name: Check the pins and the generated files
+        env:
+          LOCKS: ${{ inputs.lock-files }}
+          GENERATOR: ${{ inputs.generator-command }}
+        run: |
+          set -euo pipefail
+          args=()
+          while IFS= read -r line; do
+            [ -n "${line//[[:space:]]/}" ] || continue
+            args+=(--lock "$line")
+          done < <(printf '%s\n' "$LOCKS" | tr -d '\r')
+          if [ -n "$GENERATOR" ]; then args+=(--generator-command "$GENERATOR"); fi
+          python3 -I - --root "$GITHUB_WORKSPACE" "${args[@]}" <<'PY'
+          #!/usr/bin/env python3
+          """Fail when a vendored file, its pin, or its generated outputs have drifted.
+
+          Generic on purpose: stdlib only, no repository-specific names. Generalized from a
+          design-token drift check; the workflow `vendored-drift.yml` carries a byte-identical
+          copy of this file (tests/test_vendored_drift.py holds the two together).
+
+          Usage:
+              python3 -I check_vendored_drift.py --lock vendor/x.lock.json [--lock ...]
+                  [--root DIR] [--generator-command "python3 scripts/gen.py"]
+
+          A lock file is one JSON object with exactly these keys:
+
+              vendored   path of the vendored file, relative to --root
+              sha256     the pinned SHA-256 of that file (64 lowercase hex characters)
+              source     {"repo": "owner/name", "path": "path/upstream", "commit": "<40 hex>"}
+
+          For every lock the checks are, in order: the lock is well formed; the vendored file is a
+          regular file inside the root; its SHA-256 equals the pin. Then, once, the optional
+          generator command runs from the root with `--check` appended and no shell; a non-zero
+          exit is drift. Every problem is printed (one `FAIL` line each); exit 1 if there is any,
+          2 on bad usage, else 0. Nothing is skipped silently: no lock at all is a failure.
+
+          The generator command is code the caller chose, run with the caller's own privileges.
+          Lock files and vendored files are data: nothing in them is executed, and values taken
+          from them are printed JSON-escaped so they cannot forge a log line or a workflow command.
+          """
+
+          from __future__ import annotations
+
+          import argparse
+          import hashlib
+          import json
+          import os
+          import re
+          import shlex
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          SHA256 = re.compile(r"[0-9a-f]{64}")
+          COMMIT = re.compile(r"[0-9a-f]{40}")
+          REPO = re.compile(r"[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}")
+          LOCK_KEYS = {"vendored", "sha256", "source"}
+          SOURCE_KEYS = {"repo", "path", "commit"}
+          MAX_LOCK_BYTES = 1 << 20
+          MAX_VENDORED_BYTES = 256 << 20
+          GENERATOR_TIMEOUT = 300
+          OUTPUT_LINES = 20
+          OUTPUT_COLUMNS = 200
+
+
+          def q(value: object) -> str:
+              """A value from a lock or a process, safe to print: JSON-escaped, one line, bounded."""
+              text = value if isinstance(value, str) else repr(value)
+              return json.dumps(text[:200], ensure_ascii=True)
+
+
+          def reject_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
+              out: dict[str, object] = {}
+              for key, value in pairs:
+                  if key in out:
+                      raise ValueError(f"duplicate key {key!r}")
+                  out[key] = value
+              return out
+
+
+          def relative(value: object) -> str | None:
+              """The path if it is a plain relative path with no `..`, no NUL and no backslash."""
+              if not isinstance(value, str) or not value or len(value) > 1000:
+                  return None
+              if "\x00" in value or "\\" in value or value.startswith("/"):
+                  return None
+              if any(part in ("", ".", "..") for part in value.split("/")):
+                  return None
+              return value
+
+
+          def inside(root: Path, value: object) -> Path | None:
+              """Resolve value under root, following symlinks; None if it is not a relative path that stays inside."""
+              rel = relative(value)
+              if rel is None:
+                  return None
+              try:
+                  path = (root / rel).resolve()
+              except (OSError, RuntimeError):
+                  return None
+              return path if path.is_relative_to(root.resolve()) else None
+
+
+          def sha256_of(path: Path) -> str:
+              digest = hashlib.sha256()
+              with path.open("rb") as handle:
+                  for chunk in iter(lambda: handle.read(1 << 20), b""):
+                      digest.update(chunk)
+              return digest.hexdigest()
+
+
+          def read_lock(path: Path) -> object:
+              if not path.is_file():
+                  raise ValueError("not a regular file")
+              if path.stat().st_size > MAX_LOCK_BYTES:
+                  raise ValueError(f"larger than {MAX_LOCK_BYTES} bytes")
+              return json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=reject_duplicates)
+
+
+          def check_lock(root: Path, lock_path: Path) -> list[str]:
+              name = q(str(lock_path))
+              try:
+                  lock = read_lock(lock_path)
+              except (OSError, ValueError, UnicodeDecodeError, RecursionError) as exc:
+                  return [f"{name}: cannot read the lock ({type(exc).__name__}: {q(str(exc))})"]
+              if not isinstance(lock, dict):
+                  return [f"{name}: the lock must be a JSON object"]
+
+              problems: list[str] = []
+              if set(lock) != LOCK_KEYS:
+                  problems.append(f"{name}: keys must be exactly {sorted(LOCK_KEYS)}, got {q(sorted(map(str, lock)))}")
+              pin = lock.get("sha256")
+              if not isinstance(pin, str) or not SHA256.fullmatch(pin):
+                  problems.append(f"{name}: sha256 must be 64 lowercase hex characters")
+              source = lock.get("source")
+              if not isinstance(source, dict) or set(source) != SOURCE_KEYS:
+                  problems.append(f"{name}: source must be an object with exactly repo, path and commit")
+              else:
+                  if not isinstance(source["repo"], str) or not REPO.fullmatch(source["repo"]):
+                      problems.append(f"{name}: source.repo must look like owner/name")
+                  if relative(source["path"]) is None:
+                      problems.append(f"{name}: source.path must be a plain relative path")
+                  if not isinstance(source["commit"], str) or not COMMIT.fullmatch(source["commit"]):
+                      problems.append(f"{name}: source.commit must be a 40-character lowercase hex commit id")
+
+              vendored = inside(root, lock.get("vendored"))
+              if vendored is None:
+                  problems.append(f"{name}: vendored must be a relative path that stays inside the root")
+              elif not vendored.is_file():  # a missing file, a directory, a FIFO or a device
+                  problems.append(f"{name}: vendored file {q(lock.get('vendored'))} is not a regular file")
+              elif vendored.stat().st_size > MAX_VENDORED_BYTES:
+                  problems.append(f"{name}: vendored file {q(lock.get('vendored'))} is larger than {MAX_VENDORED_BYTES} bytes")
+              elif isinstance(pin, str) and SHA256.fullmatch(pin):
+                  actual = sha256_of(vendored)
+                  if actual != pin:
+                      problems.append(f"hash mismatch: {q(lock.get('vendored'))} is {actual}, {name} pins {pin}")
+              return problems
+
+
+          def check_generator(root: Path, command: str) -> list[str]:
+              try:
+                  argv = shlex.split(command)
+              except ValueError as exc:
+                  return [f"generator command cannot be parsed ({q(str(exc))})"]
+              if not argv:
+                  return ["generator command is empty"]
+              env = {k: v for k, v in os.environ.items() if k in ("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR")}
+              try:
+                  done = subprocess.run(
+                      [*argv, "--check"],
+                      cwd=root,
+                      env=env,
+                      stdin=subprocess.DEVNULL,
+                      capture_output=True,
+                      text=True,
+                      errors="replace",
+                      timeout=GENERATOR_TIMEOUT,
+                      check=False,
+                  )
+              except subprocess.TimeoutExpired:
+                  return [f"generator --check did not finish in {GENERATOR_TIMEOUT} seconds"]
+              except OSError as exc:
+                  return [f"generator --check could not start ({type(exc).__name__}: {q(str(exc))})"]
+              if done.returncode == 0:
+                  return []
+              lines = (done.stdout + done.stderr).splitlines()[:OUTPUT_LINES]
+              # Prefixed, so no generator output line can begin with `::` and act as a workflow command.
+              detail = "".join(f"\n    | {line[:OUTPUT_COLUMNS]!r}" for line in lines)
+              return [f"drift: generator --check exited {done.returncode}{detail}"]
+
+
+          def run(root: Path, locks: list[Path], generator: str) -> list[str]:
+              if not locks:
+                  return ["no lock file given; there is nothing to check"]
+              problems: list[str] = []
+              seen: set[Path] = set()
+              for lock in locks:
+                  try:
+                      resolved = (root / lock).resolve()
+                  except (OSError, RuntimeError):
+                      resolved = None
+                  if resolved is None or not resolved.is_relative_to(root):
+                      problems.append(f"{q(str(lock))}: the lock must be a path that stays inside the root")
+                      continue
+                  if resolved in seen:
+                      problems.append(f"{q(str(lock))}: listed twice")
+                      continue
+                  seen.add(resolved)
+                  problems.extend(check_lock(root, resolved))
+              if generator:
+                  problems.extend(check_generator(root, generator))
+              return problems
+
+
+          def main(argv: list[str]) -> int:
+              parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n")[0])
+              parser.add_argument("--root", type=Path, default=Path.cwd())
+              parser.add_argument("--lock", type=Path, action="append", default=[])
+              parser.add_argument("--generator-command", default="")
+              args = parser.parse_args(argv)
+              root = args.root.resolve()
+              if not root.is_dir():
+                  parser.error(f"--root {str(args.root)!r} is not a directory")
+              problems = run(root, args.lock, args.generator_command)
+              for problem in problems:
+                  print(f"FAIL {problem}")
+              if problems:
+                  return 1
+              print(f"ok   {len(args.lock)} lock(s): pin{' and generator' if args.generator_command else ''} agree")
+              return 0
+
+
+          if __name__ == "__main__":
+              sys.exit(main(sys.argv[1:]))
+          PY

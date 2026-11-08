@@ -65,6 +65,10 @@ publish).
 | `container-release.yml` | [Release](Which-workflow-do-I-need.md) | Build, test, scan, push multi-arch, sign, SBOM, provenance |
 | `python-docker-release.yml` | [Release](Which-workflow-do-I-need.md) | Old name of the above; forwards everything |
 | `verify-published.yml` | [Release](Which-workflow-do-I-need.md) | Verify a published image from outside |
+| `parallel-ci.yml` | [CI](Workflow-parallel-ci.md) | One build, checks as parallel jobs sharing it, path rules that fail closed, `CI green` |
+| `ci-gate.yml` | [CI](Workflow-ci-gate.md) | `CI green` over the jobs a caller hands it |
+| `vendored-drift.yml` | [Automation](Which-workflow-do-I-need.md) | Fail when a vendored file or its generated output no longer matches its lock |
+| `base-image-digest.yml` | [Release](Which-workflow-do-I-need.md) | Scheduled: fail when a pinned base-image digest has a fixable finding its tag's current digest fixes |
 | `python-package-release.yml` | [Release](Which-workflow-do-I-need.md) | Build, check, publish to the GitHub release (PyPI via a direct pypa publish step in the caller's own job) |
 | `artifact-release.yml` | [Release](Which-workflow-do-I-need.md) | Build any file, sign it, attach it to the release |
 | `security.yml` | [Security](Workflow-security.md) | CodeQL, gitleaks, audit, dependency review, Semgrep, Snyk, Scorecard |
@@ -94,6 +98,8 @@ publish).
 | `.github/actions/doppler-secrets/` | Composite action: fetch a Doppler config as masked env vars, or (`export: outputs`) as one masked JSON output, optionally narrowed by `names`. The source of the inlined copies of its decide step |
 | `.github/actions/egress-canary/` | Composite action: fail fast when an address of the GitHub hosts is unreachable under harden-runner `block` (EX-0001). The source of the inlined copies |
 | `.github/actions/wait-ci/` | Composite action: pin a commit, wait for its required check and every other check on it, optionally squash-merge exactly that commit ([wait-ci](Action-wait-ci.md)). Wraps `scripts/wait-ci.sh` |
+| `.github/actions/classify-changes/` | Composite action: `docs-only=true` only when every path a pull request changes is on the caller's docs-only list, read from the API ([Docs-only fast path](Docs-only-fast-path.md)). Wraps `scripts/classify_changes.py` |
+| `.github/actions/ci-gate/` | Composite action: the body of a caller's `CI green`; a skip counts only for a named job when the classifier said docs only ([Docs-only fast path](Docs-only-fast-path.md)). Wraps `scripts/ci_gate.py` |
 | `.github/actions/egress-policy-check/` | Composite action: fail unless every egress policy input is exactly `audit` or `block`. The source of the inlined copies that precede each canary |
 | `examples/lory-audit-caller.yml` | Caller template for `lory-audit.yml`: a monthly cron plus `workflow_dispatch`, advisory, not a per-PR gate |
 | `docs/security/exceptions/` | Dated, time-boxed security exceptions; EX-0001 is the westus2 harden-runner one |
@@ -107,6 +113,11 @@ publish).
 | `.githooks/pre-commit` | The gitleaks hook on staged changes, same pin as `security.yml`; copied byte for byte by `new-repo.sh` |
 | `scripts/new-repo.sh` | Adopt or start a repository: writes callers, opens the PR, applies settings |
 | `scripts/wait-ci.sh` | The CI watcher: pinned head SHA, exit codes 0 to 6, optional pinned squash merge ([wait-ci](Action-wait-ci.md)) |
+| `scripts/parallel_ci_plan.py` | The input validation and path rules `parallel-ci.yml` inlines byte for byte; also runnable locally |
+| `scripts/parallel_ci_gate.py` | The gate rule `parallel-ci.yml` and `ci-gate.yml` inline byte for byte |
+| `scripts/classify_changes.py`, `scripts/ci_gate.py` | The logic behind the `classify-changes` and `ci-gate` actions ([Docs-only fast path](Docs-only-fast-path.md)) |
+| `scripts/check_vendored_drift.py` | The drift check `vendored-drift.yml` inlines byte for byte; also runnable locally |
+| `scripts/base_image_digest.py` | The pin reader and report comparison `base-image-digest.yml` inlines byte for byte |
 | `scripts/doppler-ci-set.sh` | Set one Doppler secret without the value touching a command line |
 | `.github/requirements/` | `pip-audit` and `semgrep`: the one-line `.in` and the hash lock `security.yml` carries inline |
 | `scripts/tool_locks.py` | Resolves those locks (`--relock`) and copies them into `security.yml`; `--check` fails on a difference |

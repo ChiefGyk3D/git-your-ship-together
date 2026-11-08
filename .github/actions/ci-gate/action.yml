@@ -1,0 +1,38 @@
+# The body of a caller's `CI green` job: every needed job succeeded, with deliberate skips counted.
+#
+# A thin wrapper: the rule lives in scripts/ci_gate.py. A job passes only when its result is `success`; the one
+# exception is a job named in `skippable-jobs` that is `skipped` while the classify-changes job (`classifier-job`)
+# succeeded with docs-only=true. A skip for any other reason, a failure, a cancellation, or a job missing from
+# `needs` fails. Use it in a job that has `if: always()`, lists every other job in `needs`, and holds no
+# permissions. tests/test_docs_only_fast_path.py runs this script.
+name: CI gate
+description: Fail unless every needed job succeeded; a skip counts only when the classifier ruled it deliberate.
+inputs:
+  needs:
+    description: "`${{ toJSON(needs) }}` of the calling job."
+    required: true
+  required-jobs:
+    description: Space-separated job ids that must appear in `needs`; one missing fails. Guards against a job being dropped from `needs:`. Empty skips the check.
+    required: false
+    default: ""
+  skippable-jobs:
+    description: Space-separated job ids that a docs-only change may leave out. Empty means no job may be skipped.
+    required: false
+    default: ""
+  classifier-job:
+    description: The job id of the job that ran classify-changes and exposes its `docs-only` output. Required with `skippable-jobs`, and it must be in `needs`.
+    required: false
+    default: ""
+runs:
+  using: composite
+  steps:
+    - name: Judge the needed jobs
+      shell: bash
+      env:
+        GATE_NEEDS: ${{ inputs.needs }}
+        GATE_REQUIRED: ${{ inputs.required-jobs }}
+        GATE_SKIPPABLE: ${{ inputs.skippable-jobs }}
+        GATE_CLASSIFIER: ${{ inputs.classifier-job }}
+      run: |
+        set -euo pipefail
+        exec python3 -I "$GITHUB_ACTION_PATH/../../../scripts/ci_gate.py"

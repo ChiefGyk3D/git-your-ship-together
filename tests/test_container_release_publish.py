@@ -78,10 +78,15 @@ def test_the_first_push_carries_no_release_tag():
     assert "TAGS" not in index.get("env", {}), "the real tags must not be pushed with the staging index"
     assert "steps.meta.outputs.tags" not in str(index)
     script = index["run"]
-    assert "${GHCR}:${SHA}" in script and "${DOCKERHUB}:${SHA}" in script, "staging tag on both registries"
+    assert "stage-${SHA}-${RUN_ID}-${RUN_ATTEMPT}" in script, "an immutable, run-scoped staging tag"
+    assert 'registries+=("$HUB")' in script, "staging tag on both registries"
     publish = step("Publish the release tags")
     assert publish["env"]["TAGS"] == "${{ steps.meta.outputs.tags }}"
-    assert "${GHCR}@${DIGEST}" in publish["run"], "tags are applied to the signed digest, not to a rebuilt image"
+    assert '"${repo}@${DIGEST}"' in publish["run"], "tags are applied to the signed digest, not to a rebuilt image"
+
+
+INDEX = "Create the multi-arch index"
+WORKFLOW_TEXT = RELEASE.read_text()
 
 
 def test_only_the_publish_step_pushes_real_tags():
@@ -125,6 +130,10 @@ DOCKER_STUB = (
 GH_STUB = (
     "#!/bin/bash\n"
     'echo "gh $*" >> "$STUB/calls"\n'
+    'case " $* " in *matching-refs*)\n'
+    '  [ -f "$STUB/gh.tags.rc" ] && { echo "gh: Not Found (HTTP 404)" >&2; exit "$(cat "$STUB/gh.tags.rc")"; }\n'
+    '  [ -f "$STUB/gh.tags" ] && cat "$STUB/gh.tags"; exit 0;;\n'
+    "esac\n"
     '[ -f "$STUB/gh.out" ] && cat "$STUB/gh.out"\n'
     '[ -f "$STUB/gh.rc" ] && exit "$(cat "$STUB/gh.rc")"\n'
     "exit 0\n"
@@ -167,6 +176,7 @@ def run_step(tmp_path: Path, name: str, stub: Path, **env: str) -> subprocess.Co
         "RUNNER_TEMP": str(runner_temp),
         "GITHUB_OUTPUT": str(tmp_path / "out"),
         "REKOR_BACKOFF_SECONDS": "0",
+        "REGISTRY_BACKOFF_SECONDS": "0",
         "GHCR": "ghcr.io/o/r",
         "DOCKERHUB": "docker.io/u/r",
         "DIGEST": DIGEST,
@@ -317,7 +327,7 @@ def test_the_steps_receive_the_constraints_from_the_workflow():
         assert env["WORKFLOW_SHA"] == "${{ github.sha }}"
 
 
-# --- the final verify and the tag move ---------------------------------------
+# --- the final verify -------------------------------------------------------
 
 
 VERIFY = "Verify the image before publishing the tags"
@@ -330,6 +340,7 @@ SIGNED = {
     "REF": "refs/tags/v1.0.0",
     "REPOSITORY": REPO,
     "GH_TOKEN": "stub",
+    "HUB": "docker.io/u/r",
 }
 
 
@@ -342,7 +353,6 @@ def test_the_final_verify_checks_signature_and_sbom_on_every_registry(tmp_path, 
         assert f"--certificate-identity-regexp {IDENTITY}" in line
         assert f"--certificate-github-workflow-repository {REPO}" in line
         assert f"--certificate-github-workflow-sha {SHA}" in line
-    assert f"--certificate-github-workflow-sha {SHA}" in line
 
 
 def test_a_failed_final_verify_fails_the_step_so_the_tags_never_move(tmp_path, stub):
@@ -357,174 +367,400 @@ def test_a_failed_final_verify_fails_the_step_so_the_tags_never_move(tmp_path, s
     )
 
 
-def test_the_tags_are_applied_to_the_signed_digest_and_checked(tmp_path, stub):
-    (stub / "inspect.default.out").write_text(DIGEST + "\n")
-    done = run_step(tmp_path, PUBLISH, stub, **SIGNED, TAGS="ghcr.io/o/r:latest\ndocker.io/u/r:latest")
+# --- the Rekor retry matcher covers every 5xx --------------------------------
+
+
+def rekor_error(status: int) -> str:
+    return f"Error: signing: [POST /api/v1/log/entries][{status}] createLogEntryDefault"
+
+
+@pytest.mark.parametrize("status", [408, 425, 429, 500, 501, 502, 503, 504, 507, 599])
+def test_every_documented_transient_status_is_retried(tmp_path, stub, status):
+    script(stub, "sign", "1", 1, rekor_error(status))
+    done = run_step(tmp_path, SIGN, stub)
     assert done.returncode == 0, done.stdout + done.stderr
-    create = calls(stub, "docker buildx imagetools create")
-    assert len(create) == 1
-    assert f"--tag ghcr.io/o/r:latest --tag docker.io/u/r:latest ghcr.io/o/r@{DIGEST}" in create[0]
+    assert len(calls(stub, "cosign sign")) == 3, "one retry for ghcr, then one call for Docker Hub"
 
 
-def test_a_tag_that_lands_on_another_digest_fails_the_job(tmp_path, stub):
-    (stub / "inspect.default.out").write_text("sha256:" + "cd" * 32 + "\n")
-    done = run_step(tmp_path, PUBLISH, stub, **SIGNED, TAGS="ghcr.io/o/r:latest")
+@pytest.mark.parametrize("status", [400, 401, 403, 404, 600])
+def test_other_statuses_are_not_retried(tmp_path, stub, status):
+    script(stub, "sign", "default", 1, rekor_error(status))
+    done = run_step(tmp_path, SIGN, stub)
+    assert done.returncode != 0
+    assert len(calls(stub, "cosign sign")) == 1
+
+
+def test_a_409_without_the_equivalent_entry_text_is_neither_retried_nor_verified(tmp_path, stub):
+    script(stub, "sign", "default", 1, rekor_error(409))
+    done = run_step(tmp_path, SIGN, stub)
+    assert done.returncode != 0
+    assert len(calls(stub, "cosign sign")) == 1 and calls(stub, "cosign verify ") == []
+
+
+def test_the_documented_retry_contract_matches_the_matcher():
+    text = (WORKFLOWS.parent.parent / "README.md").read_text() + (
+        WORKFLOWS.parent.parent / "docs" / "wiki" / "Workflow-container-release.md"
+    ).read_text()
+    assert "408, 425, 429 and every 5xx" in text
+
+
+# --- a fake registry for the tag step ----------------------------------------
+
+REGISTRY_STUB = r"""#!/usr/bin/env python3
+import json, os, sys
+path = os.path.join(os.environ["STUB"], "reg.json")
+reg = json.load(open(path))
+args = sys.argv[1:]
+open(os.path.join(os.environ["STUB"], "calls"), "a").write("docker " + " ".join(args) + "\n")
+
+
+def save():
+    json.dump(reg, open(path, "w"))
+
+
+TRANSIENT_ERR = "ERROR: unexpected status from request to the registry: 503 Service Unavailable"
+
+
+def inspect(ref):
+    k = reg.setdefault("inspects", {}).get(ref, 0) + 1
+    reg["inspects"][ref] = k
+    if k in reg.get("transient_inspect", {}).get(ref, []):
+        save()
+        print(TRANSIENT_ERR, file=sys.stderr)
+        sys.exit(1)
+    save()
+    if ref in reg.get("unreadable", []):
+        print("ERROR: unauthorized: authentication required", file=sys.stderr)
+        sys.exit(1)
+    if "@" in ref:
+        if ref in reg["known"]:
+            print(ref.split("@")[1])
+            return
+    elif ref in reg["tags"]:
+        print(reg["tags"][ref])
+        return
+    print("ERROR: %s: not found" % ref, file=sys.stderr)
+    sys.exit(1)
+
+
+if args[:3] == ["buildx", "imagetools", "inspect"]:
+    inspect(args[3])
+elif args[:3] == ["buildx", "imagetools", "create"]:
+    tag = args[args.index("--tag") + 1]
+    src = args[-1]
+    n = reg.setdefault("creates", {}).get(tag, 0) + 1
+    reg["creates"][tag] = n
+    if n in reg.get("fail_create", {}).get(tag, []):
+        save()
+        print("ERROR: denied: 403 Forbidden", file=sys.stderr)
+        sys.exit(1)
+    if n in reg.get("transient_create", {}).get(tag, []):
+        save()
+        print(TRANSIENT_ERR, file=sys.stderr)
+        sys.exit(1)
+    if src not in reg["known"]:
+        save()
+        print("ERROR: %s: not found" % src, file=sys.stderr)
+        sys.exit(1)
+    land = reg.get("wrong_landing", {}).get(tag, {}).get(str(n))
+    reg["tags"][tag] = land or src.split("@")[1]
+    hijack = reg.get("hijack", {}).get(tag)
+    if hijack and n == 1:
+        reg["tags"][hijack["tag"]] = hijack["digest"]
+    save()
+    if n in reg.get("commit_error", {}).get(tag, []):
+        print("ERROR: connection closed after the write", file=sys.stderr)
+        sys.exit(1)
+else:
+    sys.exit(2)
+"""
+
+OLD = "sha256:" + "0a" * 32
+WRONG = "sha256:" + "ee" * 32
+THIRD = "sha256:" + "dd" * 32
+G_SHA, G_MAIN, G_LATEST = "ghcr.io/o/r:sha-1234567", "ghcr.io/o/r:main", "ghcr.io/o/r:latest"
+H_LATEST = "docker.io/u/r:latest"
+ALL_TAGS = "\n".join([G_LATEST, G_MAIN, G_SHA, H_LATEST])
+
+
+def registry(tmp_path: Path, stub: Path, tags: dict | None = None, **inject) -> None:
+    """Install a fake registry as `docker`. Tags default to existing at OLD, so a failure has something to restore."""
+    path = tmp_path / "bin" / "docker"
+    path.write_text(REGISTRY_STUB)
+    path.chmod(path.stat().st_mode | stat.S_IEXEC)
+    known = [f"{r}@{d}" for r in ("ghcr.io/o/r", "docker.io/u/r") for d in (DIGEST, OLD)]
+    state = {"tags": {t: OLD for t in (G_SHA, G_MAIN, G_LATEST, H_LATEST)} if tags is None else tags, "known": known}
+    state.update(inject)
+    (stub / "reg.json").write_text(json.dumps(state))
+
+
+def reg_state(stub: Path) -> dict:
+    return json.loads((stub / "reg.json").read_text())
+
+
+def create_order(stub: Path) -> list[str]:
+    out = []
+    for line in calls(stub, "docker buildx imagetools create"):
+        words = line.split()
+        out.append(words[words.index("--tag") + 1])
+    return out
+
+
+def publish(tmp_path: Path, stub: Path, tags: str = ALL_TAGS, **env: str) -> subprocess.CompletedProcess:
+    return run_step(tmp_path, PUBLISH, stub, **{**SIGNED, "TAGS": tags, **env})
+
+
+def test_the_tags_move_one_at_a_time_from_their_own_registry_sha_first_and_latest_last(tmp_path, stub):
+    registry(tmp_path, stub)
+    done = publish(tmp_path, stub)
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert create_order(stub) == [G_SHA, G_MAIN, G_LATEST, H_LATEST]
+    creates = calls(stub, "docker buildx imagetools create")
+    assert creates[-1].endswith(f"--tag {H_LATEST} docker.io/u/r@{DIGEST}"), "a Hub tag comes from the Hub copy"
+    assert creates[0].endswith(f"--tag {G_SHA} ghcr.io/o/r@{DIGEST}")
+    assert set(reg_state(stub)["tags"].values()) == {DIGEST}
+
+
+def test_latest_is_written_after_every_other_tag_whatever_the_input_order(tmp_path, stub):
+    registry(tmp_path, stub)
+    tags = "\n".join([G_LATEST, H_LATEST, "ghcr.io/o/r:1.2.3", G_SHA, "ghcr.io/o/r:1"])
+    done = publish(tmp_path, stub, tags)
+    assert done.returncode == 0, done.stdout + done.stderr
+    order = create_order(stub)
+    assert order[0] == G_SHA and order[-2:] == [G_LATEST, H_LATEST]
+
+
+def test_absent_tags_are_new_and_publish_normally(tmp_path, stub):
+    registry(tmp_path, stub, tags={})
+    done = publish(tmp_path, stub)
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert len(reg_state(stub)["tags"]) == 4
+
+
+def test_failure_on_the_first_tag_leaves_every_tag_where_it_was(tmp_path, stub):
+    registry(tmp_path, stub, fail_create={G_SHA: [1]})
+    before = reg_state(stub)["tags"]
+    done = publish(tmp_path, stub)
     assert done.returncode != 0
     assert "::error" in done.stdout
+    assert reg_state(stub)["tags"] == before
+    assert create_order(stub) == [G_SHA], "nothing after the failed tag was written"
+
+
+def test_failure_on_a_later_tag_restores_the_earlier_tags(tmp_path, stub):
+    registry(tmp_path, stub, fail_create={G_LATEST: [1]})
+    before = reg_state(stub)["tags"]
+    done = publish(tmp_path, stub)
+    assert done.returncode != 0
+    assert reg_state(stub)["tags"] == before, "sha- and main moved and were put back on their old digest"
+    assert f"{G_SHA} -> {OLD}" in done.stdout and f"{G_MAIN} -> {OLD}" in done.stdout
+    assert "the tags this run moved were restored and read back" in done.stdout
+
+
+def test_a_tag_that_did_not_exist_cannot_be_deleted_and_is_named(tmp_path, stub):
+    old = {G_SHA: OLD, G_LATEST: OLD, H_LATEST: OLD}  # main is new
+    registry(tmp_path, stub, tags=old, fail_create={G_LATEST: [1]})
+    done = publish(tmp_path, stub)
+    assert done.returncode != 0
+    state = reg_state(stub)["tags"]
+    assert state[G_SHA] == OLD and state[G_LATEST] == OLD
+    assert state[G_MAIN] == DIGEST, "a new tag cannot be removed; it stays on the signed digest"
+    assert f"{G_MAIN} (new, now {DIGEST})" in done.stdout and "::warning title=new tags" in done.stdout
+
+
+def test_a_tag_that_lands_on_another_digest_fails_the_job_and_is_named_not_overwritten(tmp_path, stub):
+    registry(tmp_path, stub, wrong_landing={G_MAIN: {"1": WRONG}})
+    before = reg_state(stub)["tags"]
+    done = publish(tmp_path, stub)
+    assert done.returncode != 0
+    assert f"{G_MAIN} reads back as {WRONG}" in done.stdout
+    after = reg_state(stub)["tags"]
+    assert after[G_SHA] == before[G_SHA], "the tag this run moved and still holds is restored"
+    assert after[G_MAIN] == WRONG, "a digest this run did not promote is not overwritten"
+    assert f"{G_MAIN} holds {WRONG}" in done.stdout and "::error title=rollback failed" in done.stdout
+    assert G_LATEST not in create_order(stub), "the tags after the bad one were never written"
+
+
+def test_a_rollback_does_not_overwrite_a_tag_changed_by_another_publisher(tmp_path, stub):
+    # Every write and its own read-back pass. After latest is written, another writer moves the sha- tag.
+    registry(tmp_path, stub, hijack={G_LATEST: {"tag": G_SHA, "digest": THIRD}})
+    done = publish(tmp_path, stub, tags=f"{G_LATEST}\n{G_SHA}")
+    assert done.returncode != 0
+    assert f"{G_SHA} reads back as {THIRD} after the last write" in done.stdout
+    state = reg_state(stub)["tags"]
+    assert state[G_SHA] == THIRD, "the other writer's digest is left alone"
+    assert state[G_LATEST] == OLD, "the tag this run moved and still holds is restored"
+    assert "::error title=rollback failed" in done.stdout
+    # the failure names the tag, what it holds, what this run promoted and the recorded previous digest
+    line = next(x for x in done.stdout.splitlines() if "rollback failed" in x)
+    for part in (G_SHA, f"holds {THIRD}", f"promoted {DIGEST}", f"previous digest is {OLD}", "concurrent change"):
+        assert part in line, part
+    assert [c for c in create_order(stub) if c == G_SHA] == [G_SHA], "no restore write for the changed tag"
+
+
+def test_a_tag_already_back_on_its_previous_digest_is_not_written_again(tmp_path, stub):
+    registry(tmp_path, stub, hijack={G_LATEST: {"tag": G_SHA, "digest": OLD}})
+    done = publish(tmp_path, stub, tags=f"{G_LATEST}\n{G_SHA}")
+    assert done.returncode != 0
+    assert "could NOT be restored" not in done.stdout
+    assert "the tags this run moved were restored and read back" in done.stdout
+    state = reg_state(stub)["tags"]
+    assert state[G_SHA] == OLD and state[G_LATEST] == OLD
+    assert create_order(stub).count(G_SHA) == 1
+
+
+def test_a_failed_rollback_fails_loudly_and_names_every_tag_and_digest_left_behind(tmp_path, stub):
+    # latest fails to write; then the restore of the sha- tag and of main also fail
+    registry(
+        tmp_path,
+        stub,
+        fail_create={G_LATEST: [1], G_SHA: [2], G_MAIN: [2]},
+    )
+    done = publish(tmp_path, stub)
+    assert done.returncode != 0
+    assert "::error title=rollback failed" in done.stdout
+    assert f"{G_SHA} is {DIGEST}, was {OLD}" in done.stdout
+    assert f"{G_MAIN} is {DIGEST}, was {OLD}" in done.stdout
+    state = reg_state(stub)["tags"]
+    assert state[G_SHA] == DIGEST and state[G_MAIN] == DIGEST
+    assert "were restored and read back" not in done.stdout
+
+
+def test_a_restore_is_read_back_not_trusted(tmp_path, stub):
+    # the restore write is accepted but lands on the wrong digest: the read-back sees it
+    registry(tmp_path, stub, fail_create={G_LATEST: [1]}, wrong_landing={G_SHA: {"2": WRONG}})
+    done = publish(tmp_path, stub)
+    assert done.returncode != 0
+    assert f"{G_SHA} is {WRONG}, was {OLD}" in done.stdout and "::error title=rollback failed" in done.stdout
+
+
+def test_an_unreadable_tag_stops_the_run_before_anything_moves(tmp_path, stub):
+    registry(tmp_path, stub, unreadable=[G_MAIN])
+    done = publish(tmp_path, stub)
+    assert done.returncode != 0 and "could not read the current digest" in done.stdout
+    assert create_order(stub) == []
+
+
+def test_a_missing_staged_index_stops_the_run_before_anything_moves(tmp_path, stub):
+    registry(tmp_path, stub)
+    state = reg_state(stub)
+    state["known"] = [k for k in state["known"] if not k.startswith(f"docker.io/u/r@{DIGEST}")]
+    (stub / "reg.json").write_text(json.dumps(state))
+    done = publish(tmp_path, stub)
+    assert done.returncode != 0 and "staged index" in done.stdout
+    assert create_order(stub) == []
+
+
+def test_a_tag_outside_the_staged_registries_is_refused(tmp_path, stub):
+    registry(tmp_path, stub)
+    done = publish(tmp_path, stub, tags=f"{G_SHA}\nghcr.io/other/x:latest")
+    assert done.returncode != 0 and "not in a registry that holds the staged index" in done.stdout
+    assert create_order(stub) == []
+
+
+def test_the_tags_are_applied_to_the_signed_digest_and_checked(tmp_path, stub):
+    registry(tmp_path, stub)
+    done = publish(tmp_path, stub, tags=f"{G_LATEST}\n{H_LATEST}")
+    assert done.returncode == 0, done.stdout + done.stderr
+    state = reg_state(stub)["tags"]
+    assert state[G_LATEST] == state[H_LATEST] == DIGEST and state[G_SHA] == state[G_MAIN] == OLD, (
+        "only the named tags moved"
+    )
+    assert any(
+        line.startswith("docker buildx imagetools inspect") and G_LATEST in line for line in calls(stub, "docker")
+    )
 
 
 def test_no_tags_is_an_error(tmp_path, stub):
-    done = run_step(tmp_path, PUBLISH, stub, **SIGNED, TAGS="")
+    registry(tmp_path, stub)
+    done = publish(tmp_path, stub, tags="")
     assert done.returncode != 0
-    assert calls(stub, "docker buildx imagetools create") == []
+    assert create_order(stub) == []
 
 
-# --- the input -----------------------------------------------------------------
+def test_the_publish_step_states_the_bounded_guarantee_in_its_comment():
+    text = WORKFLOW_TEXT
+    flat = text.replace("\n      # ", " ")
+    assert "bounded, not atomic" in flat
+    assert "did not exist before cannot be deleted" in flat
+    assert "best effort" in flat and "is not verified again by this workflow" in flat
 
 
-def test_the_signer_identity_input_defaults_to_the_reusable_workflow_and_is_forwarded():
-    inputs = triggers(load(RELEASE))["workflow_call"]["inputs"]
-    default = inputs["signer-identity-regexp"]["default"]
-    assert default == IDENTITY, "must name this workflow file, not just the owner"
-    assert inputs["signer-identity-regexp"]["type"] == "string"
-    thin = jobs(load(WORKFLOWS / "python-docker-release.yml"))["release"]["with"]
-    assert thin["signer-identity-regexp"] == "${{ inputs.signer-identity-regexp }}"
+# --- registry calls are retried a bounded number of times -----------------------------
 
 
-# --- the index: built from digests, pushed under the staging tag only ----------
-
-INDEX = "Create the multi-arch index"
-AMD = "sha256:" + "11" * 32
-ARM = "sha256:" + "22" * 32
-INDEX_DIGEST = "sha256:" + "33" * 32
+def attempts(stub: Path, prefix: str, needle: str) -> int:
+    return len([c for c in calls(stub, prefix) if needle in c])
 
 
-def seed_digests(tmp_path: Path, stub: Path, amd: str = AMD, arm: str = ARM, listed: tuple[str, ...] | None = None):
-    base = tmp_path / "runner" / "image-digests"
-    for arch, digest in (("linux-amd64", amd), ("linux-arm64", arm)):
-        d = base / f"image-digest-{arch}"
-        d.mkdir(parents=True, exist_ok=True)
-        (d / "digest.txt").write_text(digest + "\n")
-    (stub / "meta.json").write_text(json.dumps({"containerimage.digest": INDEX_DIGEST}))
-    manifests = [{"digest": x} for x in (listed if listed is not None else (amd, arm))]
-    (stub / "raw.json").write_text(json.dumps({"manifests": manifests}))
-
-
-def run_index(tmp_path: Path, stub: Path, **env: str) -> subprocess.CompletedProcess:
-    runner = tmp_path / "runner"
-    runner.mkdir(exist_ok=True)
-    defaults = {
-        "PLATFORMS": "linux/amd64,linux/arm64",
-        "SHA": SHA,
-        "DIGESTS": str(runner / "image-digests"),
-        "META": str(runner / "index-metadata.json"),
-    }
-    return run_step(tmp_path, INDEX, stub, **{**defaults, **env})
-
-
-def test_the_index_is_built_from_digests_and_pushed_only_under_the_staging_tag(tmp_path, stub):
-    seed_digests(tmp_path, stub)
-    done = run_index(tmp_path, stub)
+def test_a_transient_failure_on_the_latest_write_is_retried(tmp_path, stub):
+    registry(tmp_path, stub, transient_create={G_LATEST: [1]})
+    done = publish(tmp_path, stub)
     assert done.returncode == 0, done.stdout + done.stderr
-    create = calls(stub, "docker buildx imagetools create")
-    assert len(create) == 1
-    words = create[0].split()
-    tag_values = [words[i + 1] for i, w in enumerate(words) if w == "--tag"]
-    assert sorted(tag_values) == sorted([f"ghcr.io/o/r:{SHA}", f"docker.io/u/r:{SHA}"])
-    sources = [w for w in words if w.startswith("ghcr.io/o/r@")]
-    assert sorted(sources) == sorted([f"ghcr.io/o/r@{AMD}", f"ghcr.io/o/r@{ARM}"])
-    assert "latest" not in create[0]
-    assert f"digest={INDEX_DIGEST}" in (tmp_path / "out").read_text()
+    assert create_order(stub).count(G_LATEST) == 2
+    assert reg_state(stub)["tags"][G_LATEST] == DIGEST
+    assert "::warning title=registry retry" in done.stderr
 
 
-def test_the_index_digest_comes_from_the_create_result_not_from_a_tag_lookup(tmp_path, stub):
-    seed_digests(tmp_path, stub)
-    (stub / "inspect.default.out").write_text("sha256:" + "ee" * 32 + "\n")  # what a tag lookup would answer
-    done = run_index(tmp_path, stub)
+def test_a_transient_failure_on_a_read_back_is_retried(tmp_path, stub):
+    # inspect #1 of latest is the pre-promotion read, #2 the read-back after its write
+    registry(tmp_path, stub, transient_inspect={G_LATEST: [2]})
+    done = publish(tmp_path, stub)
     assert done.returncode == 0, done.stdout + done.stderr
-    assert f"digest={INDEX_DIGEST}" in (tmp_path / "out").read_text()
-    assert not [c for c in calls(stub, "docker") if f":{SHA} " in c and " inspect " in c]
+    assert set(reg_state(stub)["tags"].values()) == {DIGEST}
 
 
-@pytest.mark.parametrize("bad", ["", "latest", "sha256:abc", "sha256:" + "G" * 64, '{"x":1}'])
-def test_an_unusable_index_digest_in_the_create_result_fails(tmp_path, stub, bad):
-    seed_digests(tmp_path, stub)
-    (stub / "meta.json").write_text(json.dumps({"containerimage.digest": bad}))
-    done = run_index(tmp_path, stub)
+def test_a_write_that_commits_but_returns_an_error_is_judged_by_its_read_back(tmp_path, stub):
+    registry(tmp_path, stub, commit_error={G_LATEST: [1]})
+    done = publish(tmp_path, stub)
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "returned an error but the tag reads back" in done.stdout
+    assert create_order(stub).count(G_LATEST) == 1, "an error that is not transient is not retried"
+    assert set(reg_state(stub)["tags"].values()) == {DIGEST}
+
+
+def test_a_failed_write_that_never_moved_the_tag_is_not_rolled_back(tmp_path, stub):
+    registry(tmp_path, stub, fail_create={G_LATEST: [1]})
+    done = publish(tmp_path, stub)
     assert done.returncode != 0
-    out = tmp_path / "out"
-    assert not out.exists() or "digest=" not in out.read_text()
+    assert "writing ghcr.io/o/r:latest failed and the tag did not move" in done.stdout
+    assert create_order(stub).count(G_LATEST) == 1, "no write to a tag that never moved"
 
 
-def test_an_index_that_lists_other_manifests_fails(tmp_path, stub):
-    seed_digests(tmp_path, stub, listed=(AMD, "sha256:" + "44" * 32))
-    done = run_index(tmp_path, stub)
+def test_a_transient_failure_during_the_rollback_is_retried(tmp_path, stub):
+    # latest fails for good; the restore of the sha- tag meets one transient failure first
+    registry(tmp_path, stub, fail_create={G_LATEST: [1]}, transient_create={G_SHA: [2]})
+    before = reg_state(stub)["tags"]
+    done = publish(tmp_path, stub)
     assert done.returncode != 0
-    assert "::error" in done.stdout
+    assert reg_state(stub)["tags"] == before
+    assert create_order(stub).count(G_SHA) == 3, "the write, the failed restore attempt, the retried restore"
 
 
-@pytest.mark.parametrize("bad", ["", "not-a-digest", "sha256:" + "1" * 63])
-def test_a_bad_recorded_platform_digest_fails_before_anything_is_pushed(tmp_path, stub, bad):
-    seed_digests(tmp_path, stub, arm=bad)
-    done = run_index(tmp_path, stub)
+def test_a_non_retryable_4xx_is_tried_once(tmp_path, stub):
+    registry(tmp_path, stub, fail_create={G_SHA: [1]})
+    done = publish(tmp_path, stub)
     assert done.returncode != 0
-    assert calls(stub, "docker buildx imagetools create") == []
+    assert create_order(stub).count(G_SHA) == 1
+    assert "::warning title=registry retry" not in done.stderr
 
 
-def test_a_missing_platform_digest_fails_before_anything_is_pushed(tmp_path, stub):
-    seed_digests(tmp_path, stub)
-    (tmp_path / "runner" / "image-digests" / "image-digest-linux-arm64" / "digest.txt").unlink()
-    done = run_index(tmp_path, stub)
+def test_retries_are_capped_at_four_attempts(tmp_path, stub):
+    registry(tmp_path, stub, transient_create={G_SHA: [1, 2, 3, 4, 5, 6]})
+    done = publish(tmp_path, stub)
     assert done.returncode != 0
-    assert calls(stub, "docker buildx imagetools create") == []
+    assert create_order(stub).count(G_SHA) == 4
 
 
-def test_the_build_hands_each_platform_digest_to_the_merge_job():
-    build = {s.get("name"): s for s in steps_of(jobs(load(RELEASE))["build"])}
-    record = build["Record this platform's image digest"]
-    assert record["env"]["DIGEST"] == "${{ steps.push.outputs.digest }}"
-    assert "sha256:[0-9a-f]{64}" in record["run"]
-    up = build["Hand the digest to the merge job"]
-    assert str(up["uses"]).startswith("actions/upload-artifact@")
-    assert up["with"]["name"] == "image-digest-${{ matrix.arch }}"
-    order = [s.get("name") for s in steps_of(jobs(load(RELEASE))["build"])]
-    assert order.index("Build and push this platform's image") < order.index(record["name"]) < order.index(up["name"])
-    fetch = step("Fetch the per-platform digests")
-    assert str(fetch["uses"]).startswith("actions/download-artifact@")
-    assert names().index(fetch["name"]) < names().index(INDEX)
+def function_text(script: str, name: str) -> str:
+    start = script.index(f"{name}() {{")
+    return script[start : script.index("\n}\n", start) + 3]
 
 
-def test_one_publish_per_destination_and_ref_at_a_time_and_never_cancelled():
-    merge = jobs(load(RELEASE))["merge"]
-    group = merge["concurrency"]["group"]
-    assert "needs.plan.outputs.ghcr" in group
-    assert "github.ref" in group
-    assert "github.sha" not in group, "runs of one ref must queue, not race, whatever their commit"
-    assert "inputs.dockerhub" in group and "inputs.dockerhub-repository" in group
-    assert merge["concurrency"]["cancel-in-progress"] is False
-
-
-def test_the_merge_job_never_runs_on_either_pull_request_event():
-    cond = str(jobs(load(RELEASE))["merge"]["if"])
-    assert "github.event_name != 'pull_request'" in cond
-    assert "github.event_name != 'pull_request_target'" in cond
-    assert "inputs.push" in cond
-
-
-def test_the_build_pushes_only_the_per_platform_tag_and_needs_the_plan():
-    build = jobs(load(RELEASE))["build"]
-    push = {s.get("name"): s for s in steps_of(build)}["Build and push this platform's image"]
-    tags = [t for t in str(push["with"]["tags"]).splitlines() if t.strip()]
-    assert tags == ["${{ needs.plan.outputs.ghcr }}:${{ github.sha }}-${{ matrix.arch }}"]
-    assert push["with"]["push"] is True
-    assert "needs.plan.result == 'success'" in str(build["if"])
-
-
-def test_the_digest_download_is_this_runs_own_artifacts_only():
-    fetch = step("Fetch the per-platform digests")
-    assert set(fetch["with"]) == {"pattern", "path"}, "no run-id, github-token or repository input"
-    assert fetch["with"]["pattern"] == "image-digest-*"
-    assert "if" not in fetch or fetch["if"] == "inputs.push"
+def test_the_registry_retry_helper_is_the_same_text_in_the_index_and_tag_steps():
+    index, tags = step(INDEX)["run"], step(PUBLISH)["run"]
+    for fn in ("registry_transient", "registry_retry"):
+        assert function_text(index, fn) == function_text(tags, fn), fn
 
 
 # --- the signer identity must be a strict, anchored, literal value ----------------
@@ -540,6 +776,15 @@ def run_validate(tmp_path: Path, value: str) -> subprocess.CompletedProcess:
         text=True,
         timeout=TIMEOUT,
     )
+
+
+def test_the_signer_identity_input_defaults_to_the_reusable_workflow_and_is_forwarded():
+    inputs = triggers(load(RELEASE))["workflow_call"]["inputs"]
+    default = inputs["signer-identity-regexp"]["default"]
+    assert default == IDENTITY, "must name this workflow file, not just the owner"
+    assert inputs["signer-identity-regexp"]["type"] == "string"
+    thin = jobs(load(WORKFLOWS / "python-docker-release.yml"))["release"]["with"]
+    assert thin["signer-identity-regexp"] == "${{ inputs.signer-identity-regexp }}"
 
 
 def test_the_default_signer_identity_passes_the_validator(tmp_path):
@@ -614,23 +859,30 @@ def plan_require() -> dict:
 
 
 @pytest.mark.parametrize("off", ["SIGN", "SBOM", "PROVENANCE"])
-def test_a_push_with_signing_off_fails_early_unless_allowed(off):
-    on = {"PUSH": "true", "SIGN": "true", "SBOM": "true", "PROVENANCE": "true", "ALLOW_UNSIGNED": "false"}
+def test_a_publish_with_signing_off_fails_early_unless_allowed(off):
+    on = {"PUBLISH": "true", "SIGN": "true", "SBOM": "true", "PROVENANCE": "true", "ALLOW_UNSIGNED": "false"}
     assert run_require(plan_require(), **on).returncode == 0
     refused = run_require(plan_require(), **{**on, off: "false"})
     assert refused.returncode != 0 and "::error" in refused.stdout
     assert run_require(plan_require(), **{**on, off: "false", "ALLOW_UNSIGNED": "true"}).returncode == 0
-    assert run_require(plan_require(), **{**on, off: "false", "PUSH": "false"}).returncode == 0
+    # a run that does not publish pushes nothing, so it has no unsigned release to refuse
+    assert run_require(plan_require(), **{**on, off: "false", "PUBLISH": "false"}).returncode == 0
+
+
+def test_the_signing_check_is_keyed_on_the_publish_decision_and_runs_after_it():
+    check = plan_require()
+    assert check["env"]["PUBLISH"] == "${{ steps.publish.outputs.publish }}"
+    order = [s.get("name") for s in steps_of(jobs(load(RELEASE))["plan"])]
+    assert order.index("Decide whether to publish") < order.index(REQUIRE) < order.index("Plan the matrix")
 
 
 @pytest.mark.parametrize("off", ["SIGN", "SBOM", "PROVENANCE"])
 def test_the_tags_do_not_move_with_signing_off_unless_allowed(tmp_path, stub, off):
-    (stub / "inspect.default.out").write_text(DIGEST + "\n")
-    env = {**SIGNED, off: "false"}
-    done = run_step(tmp_path, PUBLISH, stub, **{**env, "TAGS": "ghcr.io/o/r:latest"})
+    registry(tmp_path, stub)
+    done = publish(tmp_path, stub, tags=G_LATEST, **{off: "false"})
     assert done.returncode != 0 and "::error" in done.stdout
-    assert calls(stub, "docker buildx imagetools create") == []
-    ok = run_step(tmp_path, PUBLISH, stub, **{**env, "ALLOW_UNSIGNED": "true", "TAGS": "ghcr.io/o/r:latest"})
+    assert create_order(stub) == []
+    ok = publish(tmp_path, stub, tags=G_LATEST, **{off: "false", "ALLOW_UNSIGNED": "true"})
     assert ok.returncode == 0, ok.stdout + ok.stderr
 
 
@@ -648,14 +900,16 @@ def test_unsigned_publish_is_off_by_default_and_forwarded():
 
 # --- the gates themselves cannot be switched off -----------------------------------
 
+GATE = "needs.plan.outputs.publish == 'true'"
+
 
 def test_the_signing_steps_are_gated_exactly_on_their_inputs():
-    assert step(SIGN)["if"] == "inputs.push && inputs.sign"
-    assert step(ATTEST)["if"] == "inputs.push && inputs.sbom"
-    assert step("Generate the SBOM with syft")["if"] == "inputs.push && inputs.sbom"
-    assert step("Record build provenance")["if"] == "inputs.push && inputs.provenance"
-    assert step(VERIFY)["if"] == "inputs.push && (inputs.sign || inputs.sbom)"
-    assert step(PUBLISH)["if"] == "inputs.push"
+    assert step(SIGN)["if"] == f"{GATE} && inputs.sign"
+    assert step(ATTEST)["if"] == f"{GATE} && inputs.sbom"
+    assert step("Generate the SBOM with syft")["if"] == f"{GATE} && inputs.sbom"
+    assert step("Record build provenance")["if"] == f"{GATE} && inputs.provenance"
+    assert step(VERIFY)["if"] == f"{GATE} && (inputs.sign || inputs.sbom)"
+    assert step(PUBLISH)["if"] == GATE
 
 
 def test_no_merge_step_is_disabled_by_a_constant_condition():
@@ -682,72 +936,194 @@ def test_no_loop_word_splits_the_image_names():
         assert "for image in $" not in s.get("run", ""), s.get("name")
 
 
+# --- one publish at a time, never on a pull request -----------------------------------
+
+
+def test_one_publish_per_destination_at_a_time_whatever_the_ref_and_never_cancelled():
+    merge = jobs(load(RELEASE))["merge"]
+    group = merge["concurrency"]["group"]
+    assert "needs.plan.outputs.ghcr" in group
+    for event_data in ("github.ref", "github.sha", "github.head_ref", "github.event", "github.workflow"):
+        assert event_data not in group, f"{event_data}: runs for different refs must queue, not race"
+    assert "github." not in group, "the key is the destination image only, from caller inputs and the plan"
+    assert "inputs.dockerhub" in group and "inputs.dockerhub-repository" in group
+    assert merge["concurrency"]["cancel-in-progress"] is False
+
+
+def test_the_merge_job_never_runs_on_a_pull_request_or_without_the_publish_decision():
+    cond = str(jobs(load(RELEASE))["merge"]["if"])
+    assert "github.event_name != 'pull_request'" in cond
+    assert GATE in cond
+
+
+def test_the_publish_step_runs_only_after_every_earlier_step_succeeded():
+    """Normal success semantics: no step between the index and the tag step can be skipped past a failure."""
+    order = names()
+    start, end = order.index(INDEX), order.index(PUBLISH)
+    assert step(PUBLISH)["if"] == GATE, "exactly the audited publish condition"
+    for s in merge_steps()[start : end + 1]:
+        cond = str(s.get("if", ""))
+        for override in ("always()", "failure()", "cancelled()", "success() ||"):
+            assert override not in cond, (s.get("name"), override)
+        assert not s.get("continue-on-error"), s.get("name")
+    for needed in (
+        "Sign the image (keyless)",
+        "Attach the SBOM as a cosign attestation",
+        "Record build provenance",
+        VERIFY,
+    ):
+        assert start < order.index(needed) < end, needed
+    merge = jobs(load(RELEASE))["merge"]
+    assert not merge.get("continue-on-error") and "always()" not in str(merge.get("if"))
+
+
+def test_no_run_block_in_the_merge_job_writes_a_tag_outside_the_audited_steps():
+    audited = {INDEX, PUBLISH}
+    for s in merge_steps():
+        run = s.get("run", "")
+        if s.get("name") in audited:
+            continue
+        for forbidden in ("imagetools create", "--tag", "docker push", "docker tag", "imagetools"):
+            assert forbidden not in run, (s.get("name"), forbidden)
+    # inside the audited steps every create goes through the bounded retry helper
+    for name in audited:
+        for line in step(name)["run"].splitlines():
+            if "imagetools create" in line and not line.lstrip().startswith("#"):
+                assert "registry_retry docker buildx imagetools create" in line, (name, line)
+
+
+def test_the_merge_job_needs_the_plan_and_the_build():
+    merge = jobs(load(RELEASE))["merge"]
+    assert merge["needs"] == ["plan", "build"], "without the plan the concurrency key is empty"
+
+
 # --- a stale run does not move a branch's moving tags ----------------------------------
 
-BRANCH_TAGS = "ghcr.io/o/r:latest\nghcr.io/o/r:main\nghcr.io/o/r:sha-1234567"
+BRANCH_TAGS = f"{G_LATEST}\n{G_MAIN}\n{G_SHA}"
 
 
 def publish_on_branch(tmp_path, stub, head: str | None, rc: int = 0, ref: str = "refs/heads/main"):
-    (stub / "inspect.default.out").write_text(DIGEST + "\n")
+    registry(tmp_path, stub)
     if head is not None:
         (stub / "gh.out").write_text(head + "\n")
     (stub / "gh.rc").write_text(str(rc))
-    return run_step(tmp_path, PUBLISH, stub, **{**SIGNED, "REF": ref, "TAGS": BRANCH_TAGS})
+    return publish(tmp_path, stub, tags=BRANCH_TAGS, REF=ref)
 
 
 def test_a_run_at_the_branch_head_moves_every_tag(tmp_path, stub):
     done = publish_on_branch(tmp_path, stub, SHA)
     assert done.returncode == 0, done.stdout + done.stderr
-    create = calls(stub, "docker buildx imagetools create")
-    assert len(create) == 1
-    for tag in ("latest", "main", "sha-1234567"):
-        assert f"--tag ghcr.io/o/r:{tag}" in create[0]
-    gh = calls(stub, "gh api")
-    assert gh == [f"gh api repos/{REPO}/commits/main --jq .sha"]
+    assert create_order(stub) == [G_SHA, G_MAIN, G_LATEST]
+    assert calls(stub, "gh api") == [f"gh api repos/{REPO}/commits/main --jq .sha"]
 
 
 def test_a_stale_run_publishes_only_the_immutable_tag_and_does_not_fail(tmp_path, stub):
     done = publish_on_branch(tmp_path, stub, "f" * 40)
     assert done.returncode == 0, done.stdout + done.stderr
     assert "::warning" in done.stdout
-    create = calls(stub, "docker buildx imagetools create")
-    assert len(create) == 1
-    assert "--tag ghcr.io/o/r:sha-1234567" in create[0]
-    assert "latest" not in create[0] and "ghcr.io/o/r:main" not in create[0]
+    assert create_order(stub) == [G_SHA]
 
 
 def test_a_stale_run_with_no_immutable_tag_publishes_nothing_and_does_not_fail(tmp_path, stub):
-    (stub / "inspect.default.out").write_text(DIGEST + "\n")
+    registry(tmp_path, stub)
     (stub / "gh.out").write_text("f" * 40 + "\n")
-    done = run_step(tmp_path, PUBLISH, stub, **{**SIGNED, "REF": "refs/heads/main", "TAGS": "ghcr.io/o/r:latest"})
+    done = publish(tmp_path, stub, tags=G_LATEST, REF="refs/heads/main")
     assert done.returncode == 0 and "::warning" in done.stdout
-    assert calls(stub, "docker buildx imagetools create") == []
+    assert create_order(stub) == []
 
 
 @pytest.mark.parametrize("answer", [None, "", "not-a-sha", "ab" * 10])
 def test_an_unreadable_branch_head_fails_and_moves_nothing(tmp_path, stub, answer):
     done = publish_on_branch(tmp_path, stub, answer, rc=1 if answer is None else 0)
     assert done.returncode != 0 and "::error" in done.stdout
-    assert calls(stub, "docker buildx imagetools create") == []
+    assert create_order(stub) == []
 
 
-def test_a_tag_ref_is_unaffected_and_never_asks_the_api(tmp_path, stub):
-    done = publish_on_branch(tmp_path, stub, "f" * 40, ref="refs/tags/v1.2.3")
+# --- a release tag ref moves the mutable tags only when it is the newest release ------------
+
+R = "ghcr.io/o/r"
+RELEASE_TAGS = "\n".join([f"{R}:1.9.0", f"{R}:1.9", f"{R}:1", f"{R}:latest", f"{R}:sha-1234567"])
+
+
+def release(tmp_path, stub, ref: str, existing: list[str], tags: str = RELEASE_TAGS, **inject):
+    registry(tmp_path, stub, tags={}, **inject)
+    (stub / "gh.tags").write_text("".join(f"refs/tags/{t}\n" for t in existing))
+    return publish(tmp_path, stub, tags=tags, REF=ref)
+
+
+def test_the_newest_release_moves_every_tag(tmp_path, stub):
+    done = release(tmp_path, stub, "refs/tags/v2.0.0", ["v1.9.0", "v2.0.0"], tags=RELEASE_TAGS.replace("1.9", "2.0"))
     assert done.returncode == 0, done.stdout + done.stderr
-    assert calls(stub, "gh") == []
-    assert "--tag ghcr.io/o/r:latest" in calls(stub, "docker buildx imagetools create")[0]
+    assert f"{R}:latest" in create_order(stub) and len(create_order(stub)) == 5
+    assert any("matching-refs/tags/v" in c for c in calls(stub, "gh api"))
+
+
+def test_an_older_release_publishes_only_its_version_and_sha_tags(tmp_path, stub):
+    done = release(tmp_path, stub, "refs/tags/v1.9.0", ["v1.9.0", "v2.0.0"])
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert sorted(create_order(stub)) == sorted([f"{R}:1.9.0", f"{R}:sha-1234567"])
+    assert "::notice title=older release" in done.stdout and "v2.0.0 is newer" in done.stdout
+
+
+@pytest.mark.parametrize(
+    "ref,existing,newest",
+    [
+        ("refs/tags/v1.10.0", ["v1.9.0", "v1.10.0"], True),
+        ("refs/tags/v1.9.0", ["v1.9.0", "v1.10.0"], False),
+        ("refs/tags/v1.0.0", ["v1.0.0", "v1.0.0-rc.1"], True),
+        ("refs/tags/v1.0.0-rc.1", ["v1.0.0-rc.1", "v1.0.0"], False),
+        ("refs/tags/v1.0.0-rc.2", ["v1.0.0-rc.1", "v1.0.0-rc.2"], True),
+        ("refs/tags/v1.0.0-rc.10", ["v1.0.0-rc.9", "v1.0.0-rc.10"], True),
+        ("refs/tags/v1.0.0-alpha", ["v1.0.0-alpha", "v1.0.0-alpha.1"], False),
+        ("refs/tags/v2.0.0", ["v2.0.0", "v3.0.0-rc.1"], True),
+        ("refs/tags/v1.0.0+b2", ["v1.0.0+b1", "v1.0.0+b2"], True),
+        ("refs/tags/v10.0.0", ["v9.9.9", "v10.0.0"], True),
+    ],
+)
+def test_release_order_follows_semver_precedence(tmp_path, stub, ref, existing, newest):
+    version = ref.removeprefix("refs/tags/v").split("+")[0]
+    tags = f"{R}:{version}\n{R}:latest\n{R}:sha-1234567"
+    done = release(tmp_path, stub, ref, existing, tags=tags)
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert (f"{R}:latest" in create_order(stub)) is newest
+
+
+def test_a_tag_ref_that_is_not_a_semver_release_publishes_only_its_own_name_and_sha_tags(tmp_path, stub):
+    tags = f"{R}:nightly-7\n{R}:latest\n{R}:sha-1234567"
+    done = release(tmp_path, stub, "refs/tags/nightly-7", [], tags=tags)
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert sorted(create_order(stub)) == sorted([f"{R}:nightly-7", f"{R}:sha-1234567"])
+    assert "::notice title=unordered tag" in done.stdout
+    assert calls(stub, "gh api") == [], "no order to look up"
+
+
+def test_the_release_tags_that_cannot_be_read_stop_the_run_with_nothing_moved(tmp_path, stub):
+    registry(tmp_path, stub, tags={})
+    (stub / "gh.tags.rc").write_text("1")
+    done = publish(tmp_path, stub, tags=RELEASE_TAGS, REF="refs/tags/v1.9.0")
+    assert done.returncode != 0 and "release order" in done.stdout
+    assert create_order(stub) == []
+
+
+def test_an_older_release_finishing_after_a_newer_one_does_not_move_latest(tmp_path, stub):
+    """Interleaved runs on one fake registry: v2.0.0 publishes first, then v1.9.0 runs to the end."""
+    existing = ["v1.9.0", "v2.0.0"]
+    first = release(tmp_path, stub, "refs/tags/v2.0.0", existing, tags=RELEASE_TAGS.replace("1.9", "2.0"))
+    assert first.returncode == 0, first.stdout + first.stderr
+    state = reg_state(stub)
+    assert state["tags"][f"{R}:latest"] == DIGEST
+    state["known"].append(f"{R}@{OLD}")
+    (stub / "reg.json").write_text(json.dumps(state))
+    second = publish(tmp_path, stub, tags=RELEASE_TAGS, REF="refs/tags/v1.9.0", DIGEST=OLD, HUB="")
+    assert second.returncode == 0, second.stdout + second.stderr
+    after = reg_state(stub)["tags"]
+    assert after[f"{R}:latest"] == DIGEST, "the older release did not move latest back"
+    assert after[f"{R}:1"] == DIGEST and after[f"{R}:1.9.0"] == OLD, "its own version tag is still published"
 
 
 def test_the_publish_step_has_the_api_env_and_the_job_can_read_contents():
     env = step(PUBLISH)["env"]
     assert env["REF"] == "${{ github.ref }}" and env["WORKFLOW_SHA"] == "${{ github.sha }}"
     assert env["REPOSITORY"] == "${{ github.repository }}" and env["GH_TOKEN"] == "${{ github.token }}"
+    assert env["HUB"] == "${{ steps.names.outputs.dockerhub }}"
     assert jobs(load(RELEASE))["merge"]["permissions"]["contents"] == "read"
-
-
-def test_the_merge_job_needs_the_plan_and_the_build_and_the_digests_come_from_one_path():
-    merge = jobs(load(RELEASE))["merge"]
-    assert merge["needs"] == ["plan", "build"], "without the plan the concurrency key is empty"
-    fetch = step("Fetch the per-platform digests")
-    assert fetch["with"]["path"] == "${{ runner.temp }}/image-digests"
-    assert step(INDEX)["env"]["DIGESTS"] == "${{ runner.temp }}/image-digests"

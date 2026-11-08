@@ -119,6 +119,7 @@ jobs:
       # pytest-cov is in the hash-locked fixture requirements; the XML it
       # writes feeds the threshold, measured at 76% and set a few points below.
       test-command: pytest fixture/tests --cov=fixture_app --cov-report=xml
+      xdist: true  # PYTEST_ADDOPTS=-n auto reaches this pytest; the distro job runs the command as written
       coverage-threshold: "70"
       typecheck-install-command: pip install mypy==2.4.1
       typecheck-command: mypy fixture/src
@@ -245,6 +246,7 @@ jobs:
     with:
       directories: fixture/tofu
       test: true
+      test-matrix: true  # one leg here; the matrix path runs against a real module
       policy-directories: fixture/policy
       workflow-lint: false
       egress-policy: block
@@ -374,6 +376,81 @@ jobs:
       rescan: true
       rescan-severity: CRITICAL
       rescan-artifact-name: fixture-rescan
+
+  # vendored-drift.yml at this ref over the fixture's vendored file: the lock's hash, then the generator's
+  # --check, in block mode with the workflow's own default list. That the same check FAILS on drift is proved
+  # by tests/test_vendored_drift.py, which runs the inlined script against hostile locks; a deliberately
+  # failing job here would leave every run red.
+  fixture-drift:
+    name: fixture drift
+    uses: ./.github/workflows/vendored-drift.yml # zizmor: ignore[self-repository]
+    permissions:
+      contents: read
+    with:
+      lock-files: fixture/vendored/tokens.lock.json
+      generator-command: python3 fixture/vendored/gen_tokens.py
+
+  # base-image-digest.yml at this ref over the fixture's Dockerfile, in block mode with the workflow's own
+  # default list, so the registry and database hosts are measured here. exit-code "0" because a new advisory on
+  # a Tuesday must not turn main red; that a fixable finding DOES fail the job is proved by
+  # tests/test_base_image_digest.py and tests/test_base_image_workflow.py against fake docker and trivy.
+  fixture-base-image:
+    name: fixture base image
+    uses: ./.github/workflows/base-image-digest.yml # zizmor: ignore[self-repository]
+    permissions:
+      contents: read
+    with:
+      dockerfile: fixture/Dockerfile
+      exit-code: "0"
+
+  # parallel-ci.yml at this ref over the fixture's one-page site: one build, then five checks side by side (the
+  # plain one, a path-gated one, one that needs a tool the setup command installs, one with the pip cache, one
+  # that reads the second output), in block mode with the workflow's own default list. The path rules, the
+  # gate and the input validation are exercised against hostile values by tests/test_parallel_ci.py and
+  # tests/test_ci_gate.py; a deliberately failing check here would leave every run red.
+  fixture-parallel:
+    name: fixture parallel
+    uses: ./.github/workflows/parallel-ci.yml # zizmor: ignore[self-repository]
+    permissions:
+      contents: read
+    with:
+      setup-command: |
+        mkdir -p "$RUNNER_TEMP/fixture-bin" "$RUNNER_TEMP/fixture-dl"
+        echo download >"$RUNNER_TEMP/fixture-dl/note"
+        printf '#!/bin/sh\necho fixture-tool\n' >"$RUNNER_TEMP/fixture-bin/fixture-tool"
+        chmod +x "$RUNNER_TEMP/fixture-bin/fixture-tool"
+        export PATH="$RUNNER_TEMP/fixture-bin:$PATH"
+      build-command: |
+        mkdir -p fixture-site "$RUNNER_TEMP/fixture-extra"
+        cp fixture/site-src/index.html fixture-site/index.html
+        printf 'second output\n' >"$RUNNER_TEMP/fixture-extra/note.txt"
+        fixture-tool
+      build-output-path: fixture-site
+      extra-output-path: RUNNER_TEMP/fixture-extra
+      cache-tool-path: RUNNER_TEMP/fixture-dl
+      cache-tool-key-files: '["fixture/requirements.in"]'
+      cache-pip-files: '["fixture/requirements.txt"]'
+      areas: '{"docs": ["*.md", "docs/*"], "code": ["*"]}'
+      jobs: |
+        [
+          {"name": "site exists", "command": "test -s fixture-site/index.html"},
+          {"name": "code only", "command": "test -s fixture-site/index.html", "areas": ["code"], "timeout": 5},
+          {"name": "tool on path", "command": "test \"$(fixture-tool)\" = fixture-tool", "tools": true, "build": false},
+          {"name": "pip cache", "command": "mkdir -p ~/.cache/pip && echo fixture > ~/.cache/pip/fixture", "pip-cache": true, "build": false},
+          {"name": "second output", "command": "test \"$(cat \"$RUNNER_TEMP/fixture-extra/note.txt\")\" = 'second output'"}
+        ]
+
+  # ci-gate.yml at this ref over the job above: the gate a caller with several workflows side by side requires.
+  # `if: always()` is what lets it judge a red job; that it FAILS on a failure, a cancellation and a skip nobody
+  # asked for is proved by tests/test_ci_gate.py against the script it inlines.
+  fixture-gate:
+    name: fixture gate
+    needs: [fixture-parallel]
+    if: always()
+    uses: ./.github/workflows/ci-gate.yml # zizmor: ignore[self-repository]
+    permissions: {}
+    with:
+      needs-json: ${{ toJSON(needs) }}
 
   # The real Trivy, installed by the workflow's own pinned step, over an SBOM
   # naming a package with known critical advisories. tests/test_verify_published.py
@@ -580,7 +657,7 @@ jobs:
   ci-green:
     name: CI green
     if: always()
-    needs: [actionlint, zizmor, test, fixture-ci, fixture-bash, fixture-fuzz, fixture-tofu, fixture-arduino, fixture-package, fixture-sbom, fixture-artifact, fixture-pages, fixture-wiki, fixture-release, fixture-verify, fixture-rescan, rescan-live, fixture-project-sync, fixture-dast, dast-live, fixture-threat-model, fixture-agent-scan, fixture-agent-scan-planted, agent-scan-control]
+    needs: [actionlint, zizmor, test, fixture-ci, fixture-bash, fixture-fuzz, fixture-tofu, fixture-arduino, fixture-package, fixture-sbom, fixture-artifact, fixture-pages, fixture-wiki, fixture-release, fixture-verify, fixture-rescan, fixture-drift, fixture-base-image, fixture-parallel, fixture-gate, rescan-live, fixture-project-sync, fixture-dast, dast-live, fixture-threat-model, fixture-agent-scan, fixture-agent-scan-planted, agent-scan-control]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}

@@ -60,7 +60,7 @@ Read in this order. Each one is short.
 
 ## What is in the repository
 
-Eighteen reusable workflows and one composite action:
+Twenty-three reusable workflows and six composite actions:
 
 | File | What it does |
 |---|---|
@@ -72,6 +72,10 @@ Eighteen reusable workflows and one composite action:
 | `.github/workflows/container-release.yml` | Build, test, Trivy-scan, then publish multi-arch to GHCR (and Docker Hub), sign with cosign, attach a syft SBOM, record SLSA provenance. Builds whatever the Dockerfile builds |
 | `.github/workflows/python-docker-release.yml` | The old name of the above: a thin caller that forwards every input, the secret and the outputs through a `./` reference at its own commit, so an existing pin keeps working. New callers use `container-release.yml` |
 | `.github/workflows/verify-published.yml` | Consumer-side verification of a published image (cosign signature, SPDX SBOM attestation and build provenance verified from outside, then each platform pulled and checked) or of a GitHub release's assets (checksums, provenance, SBOMs). Read-only, no secret, no token beyond the default one |
+| `.github/workflows/vendored-drift.yml` | Opt-in drift check for a file vendored from another repository: each lock file (path, source repository, commit, sha256) must match the file's hash, and an optional generator run with `--check` must agree. Read-only, no secret |
+| `.github/workflows/base-image-digest.yml` | Opt-in scheduled check of a Dockerfile's `FROM image:tag@sha256:...` pins: resolves today's digest of each tag and fails when the pinned digest has a fixable HIGH or CRITICAL finding (Trivy, container-release.yml's flags) that the current digest does not. Read-only, no secret, no issue write |
+| `.github/workflows/parallel-ci.yml` | One build, then caller-supplied checks as separate jobs that share it: a matrix over a `jobs` list, each leg downloading the one-day build artifact, with path rules that skip checks a change cannot affect (failing closed: a push, a schedule, an unmatched path or an unreadable diff runs everything), pip and tool-download caches keyed on pin files, and one `CI green` gate that counts only deliberate skips as passed. Holds no token |
+| `.github/workflows/ci-gate.yml` | The gate on its own: `CI green` over the jobs a caller hands it (`parallel-ci.yml`, `bash-ci.yml`, `security.yml`, a job of its own), red on anything that failed, was cancelled or was skipped without being named. Holds no token |
 | `.github/workflows/python-package-release.yml` | Build the sdist and wheel, `twine check`, refuse a tag that disagrees with the packaged version, smoke-test from the wheel, then publish to the GitHub release with SHA256SUMS and build provenance; PyPI is published from a job in the caller's own workflow with a download step and the pypa publish action as direct steps (Trusted Publishing cannot use a reusable workflow). No secret anywhere |
 | `.github/workflows/artifact-release.yml` | For a file rather than an image (a `.deb`, a firmware binary, a bundle): build it with a command, then publish it to the GitHub release with SHA256SUMS, a keyless cosign signature bundle per file and build provenance. No secret anywhere |
 | `.github/workflows/docs-pages.yml` | Build a static documentation site with a command you supply (MkDocs strict by default) on every pull request; upload it and deploy it to GitHub Pages from the default branch only. The two Pages writes sit on the deploy job alone |
@@ -86,6 +90,8 @@ Eighteen reusable workflows and one composite action:
 | `.github/actions/doppler-secrets` | Fetches a Doppler config as masked environment variables (default), or with `export: outputs` as one masked JSON output only the steps you hand it to can read; `names` narrows either to an allow-list. Over OIDC or a Service Token. The workflows inline a copy of its decide step (see the design rules); this is the source |
 | `.github/actions/egress-canary` | Fails a job fast when any address of `github.com`, `api.github.com` or the Actions results receiver is unreachable under harden-runner `block` (security exception EX-0001). The workflows inline a copy of it; this is the source |
 | `.github/actions/wait-ci` | Pins a commit and waits for its required check (`CI green` by default, exact name) to pass, then optionally squash-merges exactly that commit with `--match-head-commit`. Also requires every other check run on that commit to be complete and not red, and waits while one is open (an optional `allow-red` list records a named exception, `require-check` names late workflows, and a green is believed only after two identical reads one interval apart). Exit codes: 0 green, 1 gate red, 2 timeout, 3 hung, 4 head moved, 5 queued, 6 another check red. Wraps `scripts/wait-ci.sh`; a monitor's tool, not a step of the run it waits on. See [wait-ci](docs/wiki/Action-wait-ci.md) |
+| `.github/actions/classify-changes` | Says whether a pull request changes only paths the caller calls docs only (`docs/**`, `tests/**`, `*.md`), from the changed-file list the API returns, never from the checkout. Output `docs-only=true` only when every path matches, none is under `.github/` or the caller's never-skip list, the head has not moved and the count matches the event's; anything unconfirmed is `false`, so the job runs. Wraps `scripts/classify_changes.py`. See [Docs-only fast path and parallel CI](docs/wiki/Docs-only-fast-path.md) |
+| `.github/actions/ci-gate` | The body of a caller's own `CI green` job: every needed job must be `success`, and the one exception is a named job `skipped` while the classify-changes job succeeded with `docs-only=true`. A skip for any other reason, a failure, a cancellation or a job missing from `needs` fails. Wraps `scripts/ci_gate.py`. See [Docs-only fast path and parallel CI](docs/wiki/Docs-only-fast-path.md) |
 | `.github/actions/egress-policy-check` | Fails a job unless every egress policy input is exactly `audit` or `block`. The workflows inline a copy of it; this is the source |
 
 This repository's own pipeline, which runs the workflows against a real
@@ -285,6 +291,8 @@ Inputs of `python-ci.yml`:
 | `coverage-python-version` | `3.13` | The matrix leg that uploads coverage |
 | `install-command` | upgrade pip, `pip install -r requirements.txt` | Run before tests on every leg |
 | `test-command` | `pytest` | The test suite |
+| `xdist` | `false` | Run the `test` job's pytest in parallel: installs `pytest-xdist` after `install-command` and sets `PYTEST_ADDOPTS=-n <xdist-workers>` for the `test-command` step only. The command runs as written, so a command that chains scripts before `pytest` is unchanged and every `pytest` in it is parallel. The `distro` job does not use it. Tests must not share state (a port, a file) to run under it, and test ids must be the same on every worker (no memory addresses in a parametrize id). See [Docs-only fast path and parallel CI](docs/wiki/Docs-only-fast-path.md) |
+| `xdist-workers` | `auto` | With `xdist`: `auto`, `logical` or a whole number of workers; anything else fails the job |
 | `coverage-file` | `coverage.xml` | Uploaded as an artifact when present |
 | `coverage-threshold` | empty (no check) | Minimum total line coverage as a percentage, e.g. `85`. The `test` job fails below it, judged from the `line-rate` of `coverage-file` (Cobertura XML, as coverage.py and pytest-cov write it) on the leg that uploads it; the test command must write that file |
 | `codecov` | `false` | Also upload to Codecov over GitHub OIDC; no token, the repository just has to be enabled in the Codecov GitHub App |
@@ -889,6 +897,7 @@ Inputs of `tofu-ci.yml`:
 | `tflint` | `true` | Run tflint over every directory |
 | `tflint-version`, `tflint-sha256` | `0.65.0` and its zip's hash | The tflint release downloaded from terraform-linters/tflint |
 | `test` | `false` | `tofu test` (or `terraform test`) in every directory after `init -backend=false`. Holds no credential, so turn it on when the tests use `mock_provider` |
+| `test-matrix` | `false` | With `test`: one job per directory, all at once and none cancelled by another's failure, instead of every directory one after another in one job. `ci-green` still reports one result: a failed, cancelled or skipped leg fails it. Off, the job is the single `test` job it always was. See [Docs-only fast path and parallel CI](docs/wiki/Docs-only-fast-path.md) |
 | `policy-directories` | empty (skips the job) | Space-separated directories of Rego policies with their `_test.rego` files; each gets `opa fmt --list --fail`, `opa check --strict` and `opa test` |
 | `opa-version`, `opa-sha256` | `1.22.0` and its binary's hash | The OPA release downloaded from open-policy-agent/opa (`opa_linux_amd64_static`) |
 | `trivy` | `true` | Trivy configuration scan over the repository |
@@ -958,7 +967,7 @@ on:
   pull_request:
     branches: [main]
   schedule:
-    - cron: '0 5 * * 1'   # weekly rebuild of `latest`, so base-image fixes ship between commits
+    - cron: '0 5 * * 1'   # weekly build and scan; it publishes only if the caller allows it, see below
   workflow_dispatch:
 
 permissions:
@@ -978,6 +987,10 @@ jobs:
     with:
       dockerfile: Docker/Dockerfile
       push: ${{ github.event_name != 'pull_request' }}
+      # Publishing is allowed by default only for a push of a vMAJOR.MINOR.PATCH tag. To publish
+      # from main, the weekly schedule and manual runs as well, add both lines:
+      #   allowed-publish-events: push,schedule,workflow_dispatch
+      #   require-tag-ref: false
       dockerhub: true
       docker-test-command: docker run --rm "$IMAGE" python -c "import stream_daemon"
       egress-policy: block
@@ -1005,47 +1018,184 @@ on `ubuntu-24.04-arm`, `linux/amd64` on `ubuntu-24.04`. `docker-test-command`
 and the Trivy scan therefore run against the real arm64 image, not an emulated
 one. QEMU is set up only for a platform with no native runner. When
 publishing, each platform job pushes its image under a temporary tag
-`ghcr.io/<owner>/<repo>:<sha>-<arch>` (for example `<sha>-linux-arm64`), and a
-`merge` job joins them into the index under the real tags. The temporary tags
+`ghcr.io/<owner>/<repo>:<sha>-<run id>-<attempt>-<arch>` and records the digest of
+that push; a `merge` job checks each digest is an image of its platform and joins
+the digests (not the tags) into the index under the real tags. The temporary tags
 stay in GHCR beside the index; delete them when you no longer need them.
 
 On a pull request it builds, tests and scans and stops. Nothing is pushed,
-signed or attested from a pull request, and a test holds that order.
+signed or attested from a pull request, and a test holds that order. With
+`push: true` the workflow publishes only for the events in
+`allowed-publish-events` (default `push`) on a `vMAJOR.MINOR.PATCH` tag ref; any
+other run builds and scans only, with a warning annotation and a step summary
+that name the inputs to set.
+
+**BREAKING CHANGE: publishing is now an allow-list.** A caller that sets
+`push: true` publishes only for a push of a `vMAJOR.MINOR.PATCH` tag (SemVer
+2.0.0 pre-release and build parts allowed) unless it opts back in. A refused run
+does not fail: it builds and scans, and prints a `publish skipped` warning
+annotation and a job summary that name the reason and the inputs to set. Other
+changes in the same release:
+
+- the build is split into `build` (publishing runs only, `packages: write`) and
+  `build-local` (runs that do not publish, no package write), so the per-platform
+  job names a branch protection rule might require can show as skipped;
+- each enabled registry gets its own index, built from the verified platform
+  digests and promoted by digest;
+- the `platforms` input is validated as written (no spaces, no empty entries) and
+  a platform listed twice is refused;
+- the tag check uses the SemVer 2.0.0 grammar (`v1`, `v1.2` and `vnot-a-release`
+  no longer publish);
+- `allowed-publish-events` is validated, not normalized.
+
+Required caller changes. `penguin-overlord` and `solarstorm_scout` publish from
+pushes to `main`, a weekly schedule and manual runs (`push: ${{ github.event_name
+!= 'pull_request' }}`), so each adds `allowed-publish-events:
+push,schedule,workflow_dispatch` and `require-tag-ref: false` when it re-pins.
+A caller that releases only from `v*.*.*` tag pushes changes nothing.
+`hypeman` calls `python-package-release.yml`, not this workflow, and publishes on
+a `release` event; it needs that workflow's publish inputs instead (see its
+release notes), not these two.
+
+**Migrating a caller that published from branches, schedules or manual runs.**
+A caller with `push: ${{ github.event_name != 'pull_request' }}` that publishes
+on a push to `main`, a weekly schedule or `workflow_dispatch` (the shape of
+`penguin-overlord` and `solarstorm_scout`) stops publishing after it re-pins to
+this version, until it sets both inputs it needs:
+
+```yaml
+    with:
+      push: ${{ github.event_name != 'pull_request' }}
+      allowed-publish-events: push,schedule,workflow_dispatch   # the events it publishes from
+      require-tag-ref: false                                    # also publish from branches
+```
+
+`allowed-publish-events: "*"` allows every event except pull requests. A caller
+that publishes only from `v*.*.*` tag pushes needs no change.
+
+When publishing, each leg builds once, pushes that build under the temporary
+tag, pulls it back by digest and runs the non-root check, the probe and the Trivy
+scan against it; `merge` receives exactly the digest that passed. The index is
+staged under a tag of this run, its digest and contents are checked against the
+recorded digests, and that digest is signed, attested and verified before any
+release tag is written. The Trivy scan and checks therefore run after the image is
+pushed under its temporary tag; a failing check fails the job before `merge` runs.
+
+What the tag checks prove, and what they do not. After each release tag is
+written, and once more for every tag after the last write, `merge` reads the tag
+and requires it to resolve to the signed digest. That shows each tag pointed
+at the digest at the moment it was read. It does not make a tag immutable, it
+does not make the tags change together, and it cannot stop another writer with
+registry access from moving a tag afterwards. Signatures, the SBOM and the
+provenance attach to the digest, so consumers should deploy by digest or verify
+the signature of the digest they pull; serialize releases of one image with a
+`concurrency` group in the caller if two runs may publish the same tags.
+
+**Two build jobs.** Every action in a job can read the job's `GITHUB_TOKEN`
+([Use GITHUB_TOKEN for authentication](https://docs.github.com/en/actions/tutorials/authenticate-with-github_token)),
+and a job's `permissions:` cannot depend on an expression, so the work is split
+by a job-level `if`
+([Control the execution of jobs](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-jobs-with-conditions)).
+`build` runs only when the run publishes and holds `packages: write`.
+`build-local` runs when it does not, with `contents: read` and the SARIF upload
+permission only, no login and no push. The checks are the same text in both
+jobs, and a test holds them identical. The caller still grants the union of the
+permissions; the called workflow can only narrow them.
+
+**Docker Hub.** With `dockerhub: true` and credentials, `merge` builds a
+separate index in each registry from the same verified GHCR platform digests
+(buildx copies the manifests across registries; the previous version of this
+workflow relied on it too, and it is observed behavior in production:
+`ChiefGyk3D/Stream-Daemon` workflow run 41512180852, 2026-11-02, succeeded with
+`dockerhub` enabled and logged `copying sha256:... from ghcr.io/... to docker.io/...`
+before signing one digest in both registries. Docker's documentation says sources
+must already exist in the destination registry, so this stays a documented risk:
+if buildx ever enforces that, the Docker Hub step fails before anything is signed), checks each registry's index against the recorded
+digests, requires the two index digests to be equal, and signs and attests that
+digest in both registries. The registry's release tags are written last, by the
+tag step, from that registry's own copy. The build jobs never hold Docker Hub
+credentials. A temporary `stage-...` tag is left in each registry.
+
+Platforms are `linux/<arch>` or `linux/<arch>/v<N>` entries separated by commas,
+with no spaces and no empty entries (anything else fails the plan job), each
+platform once (`linux/arm64` and `linux/arm64/v8` are the same platform).
 
 **Order of a publish.** Each platform job records the digest it pushed. The
-`merge` job builds the index from those digests only (never from a tag), reads
-the index digest from the create result, checks that the index lists exactly
-those platform manifests, and pushes it under an immutable staging tag (the
-commit SHA) on each registry. It then signs it, attests the SBOM, records
-provenance and verifies the signature and the SBOM attestation of that exact
-digest. Only then does it move `latest` and every other tag in `tags` onto that
-digest, and it checks that each tag landed on it. If any earlier step fails,
-the release tags do not move and the job fails with a message saying so; the
-staging tags (`<fullsha>` on the index, `<sha>-<arch>` per platform) stay and
-are safe to delete; after a failed run they point at images that are not
-signed. Publishes to one destination image from one ref run one at a time and
-a running one is never cancelled midway. The group is keyed on the image and
-the ref, not the commit. It serializes runs in the order they reach the job, not
-in commit order, so the tag step checks the branch head itself: on a branch ref
-it reads the head through the API, and a run whose commit is no longer the head
-publishes only its immutable `sha-` tags, with a warning, and leaves `latest`
-and the branch tag alone. If the head cannot be read, the job fails and nothing
-moves. Tag refs are unaffected. The tradeoff: GitHub keeps one pending run per group, so a
-pending run is replaced by a newer pending run on the same ref (acceptable for
-moving tags, the newer commit supersedes it). Distinct refs, such as a main
-push and a tag push on one commit, have distinct groups and neither is dropped.
-The `merge` job never runs on `pull_request` or `pull_request_target`. Two calls of this workflow in one caller run collide on the fixed artifact name `image-digest-<arch>` and fail closed.
+`merge` job builds the index from those digests only (never from a tag), checks
+that each registry's index lists exactly those platform manifests, and pushes it
+under an immutable staging tag (`stage-<sha>-<run id>-<attempt>`) on each
+registry. It then signs it, attests the SBOM, records provenance and verifies the
+signature and the SBOM attestation of that exact digest. Only then does the tag
+step write `latest` and every other tag in `tags`, immutable `sha-` tags first
+and `latest` last, one tag at a time, from that tag's own registry. If any
+earlier step fails, no release tag is written and the job fails with a message
+saying so; the staging tags (`stage-...` on the index, `<sha>-<run id>-<attempt>-<arch>`
+per platform) stay and are safe to delete; after a failed run they point at images
+that may not be signed.
 
-A push with `sign`, `sbom` or `provenance` off fails before it builds, and the
-tag step refuses too, unless `allow-unsigned-publish: true` is set.
+**The tag step is bounded, not atomic.** A registry cannot write several tags in
+one step, so the step cannot promise that all tags move or none. What it does:
+before writing anything it checks that the staged index reads back at its digest
+in each registry and records the digest every release tag holds now (a tag the
+registry reports as not found counts as new; any other read failure stops the
+step with nothing moved). It then writes one tag at a time and reads each back,
+and reads every tag again after the last write. Every registry call is retried
+up to 4 attempts in all, waiting 5, 10 and 20 seconds, but only for HTTP 408, 425,
+429, any 5xx or a timeout or reset; a write that returns an error is judged by
+reading the tag back, not by its exit status. Every digest a tag is moved to is
+already signed, attested and verified by the steps before it, and `latest` is
+written last.
+
+On a failure the restore is best effort and never overwrites another writer. A
+tag is written back to its previous digest only while it still holds the digest
+this run wrote. A tag that holds any other digest was changed by someone else: it
+is left alone, and the step fails with a "rollback failed" error naming the tag,
+the digest it holds, the digest this run promoted and the recorded previous
+digest. A tag already back on its previous digest needs no write. A restore needs
+the previous manifest to still exist. The previous digest is whatever the tag held
+before the run; this workflow does not verify it again, so a tag that is restored
+(or left in place) is not vouched for by this release. A tag that did not exist
+before cannot be deleted, so it may remain on the new digest; the step names it.
+If a restore is refused or fails, the step fails and names every tag and digest
+left behind. Between a write and a restore a tag holds the new, verified digest;
+the step does not stop another writer with registry access.
+
+**One publish per destination, and release order.** Runs that publish to the
+same destination (the GHCR image, and the Docker Hub repository when it is on)
+run one at a time, whatever their ref, and a running one is never cancelled
+midway. The group key is the destination, from the plan job's image name and the
+caller's `dockerhub-repository`, never the ref, the commit or other event data.
+It serializes runs in the order they reach the job, not in commit order, so the
+tag step also checks order itself. On a branch ref it reads the head through the
+API, and a run whose commit is no longer the head publishes only its immutable
+`sha-` tags, with a warning, and leaves `latest` and the branch tag alone. On a
+`vMAJOR.MINOR.PATCH` tag ref it lists the repository's `v*` tags through the API
+(`contents: read`, which the job already holds) and compares SemVer 2.0.0
+precedence (a stable release is ordered against stable releases only): if any
+existing release is newer, it publishes only its version tag and the `sha-` tags
+and leaves the mutable tags (`latest`, the major and minor tags) alone, with a
+notice. A tag ref that is not a SemVer release has no order, so it publishes only
+its own tag name and the `sha-` tags. If the head or the tag list cannot be read,
+the job fails and nothing moves. The version and `sha-` tags of an older release
+are still published. The tradeoff: GitHub keeps one pending run per group, so a
+pending run is replaced by a newer pending run for the same destination; re-run
+the replaced run. A backport such as `v1.9.1` after `v2.0.0` therefore does not
+move `1.9` or `1`. The `merge` job never runs on `pull_request` or
+`pull_request_target`.
+
+A run that publishes with `sign`, `sbom` or `provenance` off fails before it
+builds, and the tag step refuses too, unless `allow-unsigned-publish: true` is
+set. A run that does not publish (a pull request, a ref the allow-list refuses)
+is not affected.
 
 **Rekor conflicts and retries.** A Rekor `409` (`an equivalent entry already
 exists`) on `cosign sign` or `cosign attest` is success only when
 `cosign verify` (or `verify-attestation`) of that digest passes with
 `signer-identity-regexp`, the GitHub OIDC issuer, the calling repository and
 the commit of this run; if it does not, the job fails. A transient Rekor or
-Fulcio error (HTTP 408/425/429/5xx, a timeout, a reset connection) is retried
-4 times in total, waiting 5, 10 and 20 seconds. Any other error fails at once.
+Fulcio error (HTTP 408, 425, 429 and every 5xx, a timeout, a reset connection)
+is retried 4 times in total, waiting 5, 10 and 20 seconds. Any other error fails
+at once.
 
 **`signer-identity-regexp`** is validated in the plan job, before any build leg pushes (and checked again in `merge`). It must be
 `^https://github\.com/<owner>/<repo>/\.github/workflows/<file>@` made of
@@ -1057,10 +1207,10 @@ reusable workflow by commit SHA: that pin is the ref the certificate carries.
 
 **First real release.** Three things could not be measured before the first
 real release and it is their canary: the `--certificate-github-workflow-sha`
-constraint, the `containerimage.digest` field of the `imagetools create`
-metadata file, and artifact transfer between the build and merge jobs under
-`block`. Each fails closed: the job fails and the release tags stay where they
-were. If the sha flag misbehaves, delete the one line
+constraint and the read-back of the staged index and of each release tag with
+`docker buildx imagetools inspect`, which the tag step treats as absent only on
+a not-found reply. Each fails closed: the job fails and the release tags stay
+where they were. If the sha flag misbehaves, delete the one line
 `--certificate-github-workflow-sha "$WORKFLOW_SHA"` from each verify (the
 helper script and the final verify step).
 
@@ -1107,7 +1257,7 @@ Inputs of `container-release.yml`:
 | `push` | `false` | Publish. `false` builds, tests and scans only |
 | `tags` | branch, pr, semver ×3, sha, `latest` on the default branch | `docker/metadata-action` tag rules |
 | `signer-identity-regexp` | `^https://github\.com/ChiefGyk3D/git-your-ship-together/\.github/workflows/container-release\.yml@` | Certificate identity the job's own signature and SBOM attestation must match after a Rekor conflict and before the tags move; strictly validated, see above |
-| `allow-unsigned-publish` | `false` | `true` lets a push move the release tags with `sign`, `sbom` or `provenance` off |
+| `allow-unsigned-publish` | `false` | `true` lets a publishing run move the release tags with `sign`, `sbom` or `provenance` off |
 | `docker-test-command` | empty | Run against the locally built image; `$IMAGE` names it |
 | `hadolint` | `true` | Lint the Dockerfile with hadolint before building |
 | `hadolint-version` | `2.15.1` | hadolint release, downloaded as a pinned binary and cached |
@@ -1127,10 +1277,13 @@ Inputs of `container-release.yml`:
 | `trivy-exit-code` | `"1"` | `"1"` makes a finding fail the job, `"0"` reports only. A caller with a fixable high or critical goes red until its base image or dependency moves |
 | `trivy-ignore-unfixed` | `true` | Skip an advisory that has no fix in the distribution, so it does not block |
 | `trivyignores` | empty | Path to the caller's `.trivyignore`, passed to trivy-action's `trivyignores` input. Give each entry a reason and a review date |
+| `skip-secret-scan-in-site-packages` | `false` | Suppress all Trivy secret findings (every secret rule, not one rule id; Trivy still reads the files, so this is not a performance boundary) from files under a short fixed list of roots: `usr/lib`, `usr/lib64`, `usr/local/lib`, `usr/local/lib64` and `opt/venv/lib`, each followed by `pythonX.Y/site-packages/` (numeric version), anchored at the image root (so `home/x/lib/python3.12/site-packages/` and `app/cache/lib/...` are still scanned). Why: a package's docstring text can match a secret rule with no credential in it; Boon-Tube-Daemon's image failed on 11 CRITICAL `gcp-service-account` findings inside the installed `anthropic` SDK, text about an API enum value, present in the newest version with no fix. Tradeoff: a genuine secret shipped by a dependency under those roots will NOT be detected. The vulnerability scan, `trivy-severity`, `trivy-ignore-unfixed` and `trivy-exit-code` are unchanged, and every other path is still scanned. Mechanism: one global `allow-rules` entry with a `path` in a `trivy-secret.yaml` written to the runner temp directory and passed through `TRIVY_SECRET_CONFIG` (Trivy secret scanning docs, "Allow Rules"). It is path-wide, not limited to the `gcp-service-account` rule: Trivy documents per-rule `allow-rules` only inside a custom rule, and a custom rule with a built-in's id runs beside the built-in instead of replacing it (measured, Trivy 0.76.2), so limiting it to one rule would need `disable-rules`, which rewrites a built-in. Fork pull requests: a caller that passes this input on `pull_request` events lets an untrusted pull request's image weaken only its own secret detection; publishing is already gated off for pull requests. |
 | `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `audit`, the measured list, empty | harden-runner, as in `python-ci.yml` |
 | `egress-policy-secretless` | `block` | harden-runner policy for the jobs that hold no stored secret, no OIDC token and no write-scoped token, and whose output no privileged job consumes; exactly `audit` or `block`. Security exception EX-0001 is closed (2026-11-02), see [Known CI platform issue: westus2 (EX-0001)](#known-ci-platform-issue-westus2-ex-0001). `audit` opts out if the defect recurs |
 | `doppler-project`, `doppler-config`, `doppler-identity-id` | empty | See [Doppler setup](#doppler-setup) |
 | `doppler-trusted-refs-only` | `true` | Fetch CI secrets only on the default branch, a version tag (vN.N.N) or a schedule; never on a pull request. See [Doppler setup](#doppler-setup) |
+| `allowed-publish-events` | `push` | Events from which `push: true` may publish, sign and attest: `*`, or lowercase event names separated by commas with no spaces, no empty or repeated entries (anything else fails the plan job). `*` allows every event except `pull_request` and `pull_request_target`, which never publish |
+| `require-tag-ref` | `true` | Publish only from a `refs/tags/vMAJOR.MINOR.PATCH` ref, with optional SemVer 2.0.0 pre-release and build parts (no leading zeroes, no empty identifiers); `v1`, `v1.2` and `vnot-a-release` do not publish. With `allowed-publish-events: "*"` and `require-tag-ref: false` the earlier behavior (any non-pull-request ref) is restored |
 | `timeout-minutes` | `60` | Timeout of each platform's build job; a platform built under QEMU is slow |
 
 Outputs: `digest` and `image` (`ghcr.io/...@sha256:...`) of the published
@@ -1243,6 +1396,251 @@ Inputs of `verify-published.yml`:
 | `egress-policy-secretless` | `block` | harden-runner policy for the jobs that hold no stored secret, no OIDC token and no write-scoped token, and whose output no privileged job consumes; exactly `audit` or `block`. Security exception EX-0001 is closed (2026-11-02), see [Known CI platform issue: westus2 (EX-0001)](#known-ci-platform-issue-westus2-ex-0001). `audit` opts out if the defect recurs |
 | `timeout-minutes` | `20` | Job timeout |
 
+### Vendored-file drift check
+
+`vendored-drift.yml` is for a file copied from another repository (design tokens, a schema, a shared configuration) that
+must not change except by a deliberate re-vendor. Each vendored file has a lock file in your repository:
+
+```json
+{
+  "vendored": "vendor/brand/tokens.css",
+  "sha256": "<64 lowercase hex characters>",
+  "source": {"repo": "owner/name", "path": "dist/tokens.css", "commit": "<40 hex characters>"}
+}
+```
+
+The job fails when a lock is malformed (exact keys, a real commit id, paths that stay inside the repository, no duplicate
+keys), when the vendored file is not a regular file inside the repository, when its SHA-256 differs from the pin, or, with
+`generator-command`, when that command with `--check` appended exits non-zero (the generated output is stale). No lock file
+is a failure, not a pass. The command is split like a shell would split it but run without one, from the repository root,
+with only `PATH`, `HOME`, `LANG`, `LC_ALL` and `TMPDIR` in its environment. The script is `scripts/check_vendored_drift.py`,
+inlined in the workflow byte for byte, so you can also vendor it and run it locally.
+
+```yaml
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  drift:
+    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/vendored-drift.yml@<sha> # vX.Y.Z
+    permissions:
+      contents: read
+    with:
+      lock-files: vendor/brand/tokens.lock.json
+      generator-command: python3 scripts/generate_tokens.py
+```
+
+Inputs of `vendored-drift.yml`:
+
+| Input | Default | Meaning |
+|---|---|---|
+| `lock-files` | empty | Newline-separated lock file paths; at least one is required |
+| `generator-command` | empty | Optional; run with `--check` appended, no shell, from the repository root |
+| `install-command` | empty | Optional shell run first, for what the generator needs |
+| `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `block`, GitHub only, empty | harden-runner; add the package index an `install-command` reaches to the extra list |
+| `egress-policy-secretless` | `block` | harden-runner policy for this job, which holds no secret; exactly `audit` or `block` |
+| `timeout-minutes` | `10` | Job timeout |
+
+### Base image digest check
+
+`base-image-digest.yml` answers a question a digest pin hides: has the tag been republished with a fix? A pinned
+`FROM image:tag@sha256:...` is reproducible and frozen, and a new advisory is otherwise found when a release scan fails at tag
+time. On a schedule, for each external base image the file pins by digest, the job resolves today's digest of the tag; if it
+differs, it scans the pinned and the current digest with Trivy (the pinned binary of `verify-published.yml`; severities, the
+unfixed filter and the ignore file are the `trivy-severity`, `trivy-ignore-unfixed` and `trivyignores` of
+`container-release.yml`) and fails when the pinned digest has a fixable finding that the current one does not. A finding both
+share, or one with no fix, does not fail. The findings and the line to change go to the job summary. A `FROM` that is not
+pinned by digest, names no tag, or uses a variable no `ARG` before the first `FROM` sets fails the job, and so does a file
+with no pinned external image: the check never passes with nothing checked.
+
+It fails the scheduled run instead of opening an issue, so it holds `contents: read` and nothing else; a caller that wants an
+issue adds a job with `needs:` and `if: failure()`. It scans public registries only, one platform, and compares by advisory
+ID and package.
+
+```yaml
+on:
+  schedule:
+    - cron: "23 5 * * 1"   # weekly; choose your own minute
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  base-image:
+    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/base-image-digest.yml@<sha> # vX.Y.Z
+    permissions:
+      contents: read
+    with:
+      dockerfile: Containerfile
+```
+
+Inputs of `base-image-digest.yml`:
+
+| Input | Default | Meaning |
+|---|---|---|
+| `dockerfile` | `Dockerfile` | Path of the Dockerfile or Containerfile |
+| `allow-unpinned` | `false` | Skip a `FROM` without a digest instead of failing; one pinned image must still be found |
+| `platform` | `linux/amd64` | Platform whose image is scanned |
+| `trivy-severity` | `CRITICAL,HIGH` | Same input and default as in `container-release.yml` |
+| `trivy-ignore-unfixed` | `true` | Same input and default as in `container-release.yml` |
+| `trivyignores` | empty | Path to a `.trivyignore`, as in `container-release.yml` |
+| `exit-code` | `1` | `0` reports in the job summary without failing |
+| `trivy-version`, `trivy-sha256` | `0.76.1`, its hash | The Trivy pin, the same as `verify-published.yml`; change both together |
+| `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `block`, the measured list, empty | harden-runner; add the registry of a base image that is not on Docker Hub or GHCR |
+| `egress-policy-secretless` | `block` | harden-runner policy for this job, which holds no secret; exactly `audit` or `block` |
+| `timeout-minutes` | `20` | Job timeout |
+
+### Parallel CI
+
+`parallel-ci.yml` is for a project whose CI is one long job: a build, then a dozen checks and test scripts one after another.
+It runs the build once, then every check as its own job, so the wall time is the build plus the slowest check. Nothing is
+dropped: each command you used to run is a line in the `jobs` list.
+
+```yaml
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/parallel-ci.yml@<sha> # vX.Y.Z
+    permissions:
+      contents: read
+    with:
+      setup-command: scripts/install-tool.sh            # runs in the same shell as each command that sets "tools": true
+      build-command: hugo --minify --gc
+      build-output-path: public
+      areas: '{"docs": ["docs/*.md", "README.md"], "site": ["*"]}'
+      jobs: |
+        [
+          {"name": "output checks", "command": "scripts/check-output.sh public"},
+          {"name": "site tests", "command": "scripts/test-site.sh", "tools": true, "timeout": 25},
+          {"name": "size budget", "command": "scripts/check-budget.sh public", "areas": ["site"]}
+        ]
+```
+
+The check run is `ci / CI green`, the same shape as the other CI workflows. A caller that also runs `bash-ci.yml` or
+`security.yml` and wants one gate over all of it calls `ci-gate.yml` (below).
+
+**The jobs.** `changes` validates every input and decides which checks this change needs; `build` runs `build-command` and
+uploads `build-output-path` (hidden files included; an executable bit does not survive an artifact) as a one-day artifact named
+`<artifact-name>-<run attempt>`, so a re-run cannot collide; `checks` is a matrix over the selected `jobs`, each leg downloading
+the build to the same path and running its command; `ci-green` is the gate. A job listed with `"build": false` skips the
+download and starts at once.
+
+**The `jobs` list.** One object per check: `name` (required; letters, digits, space and `._()-`), `command` (required),
+`timeout` (minutes, default 15), `areas` (area names; absent or empty means always run), `pip-cache` (restore pip's download
+cache), `tools` (run `setup-command` first) and `build` (default true). A typo in a key, a duplicate name, an area `areas`
+does not define or an empty list fails the first job, before anything builds.
+
+**Which checks run.** `areas` maps an area name to shell-style glob patterns (`*` crosses `/`); the first area whose pattern
+matches a path wins. On a pull request the change is `git diff --no-renames --name-only` between the base and the merge result
+(so moving a file out of a protected path still shows the old path). A job with `areas` runs only when the change touches one
+of them. The decision **fails closed**: a push to any branch (the default branch included), a schedule, a manual run, a merge
+queue, a diff that cannot be taken or is empty, a path no rule matches, and a path with a control character or invalid UTF-8
+all run every job. End your rules with a catch-all (`"site": ["*"]`) so an unknown path is a named area, not a surprise. The
+`skipped-jobs` and `everything` outputs say what was chosen.
+
+**The gate.** `ci-green` runs `if: always()` and needs every other job. It is green when each is `success`; `failure`,
+`cancelled` and a skip nobody asked for (for example every check skipped because the build failed) fail it. The only skip it
+accepts is the whole `checks` job when `changes` succeeded and the path rules selected no check at all. There is no
+`continue-on-error` anywhere in the workflow.
+
+**Setup and PATH.** `setup-command` is written to the same shell script as the command that needs it, so
+`export PATH="$RUNNER_TEMP/tool:$PATH"` there is visible to that command and to nothing else. The workflow never writes to
+`$GITHUB_PATH` or `$GITHUB_ENV` (zizmor's `github-env` rule), and a setup that exits early cannot make the step pass: the
+command only counts after the setup has run to its end. Verify what you download (a checksum fetched fresh from the release,
+every run); the cache below holds the download, never the verified binary.
+
+**Caches.** `cache-pip-files` (pin files with hashes) keys pip's download cache, and `cache-tool-path` with
+`cache-tool-key-files` keys one tool download; the key is the hash of those files' contents, so a changed pin misses. Only
+downloads are cached, never the build output; keep `--require-hashes` on installs so a cached wheel that does not match its pin
+is rejected. A cache is used only where the job's egress policy is `block` (an audit job neither restores nor saves one).
+
+**What a caller grants and what the jobs hold.** `contents: read` and nothing else, in every job. No job has a secret, an OIDC
+token or a write; the artifact is generated output only. A check that needs a host (a package index, a release download) adds
+it to `extra-allowed-endpoints`, which applies to every job. The defaults are `block` with the checkout's two hosts: the
+runner's own infrastructure carries artifacts and caches.
+
+Inputs of `parallel-ci.yml`:
+
+| Input | Default | Meaning |
+|---|---|---|
+| `build-command` | required | Shell run once in the `build` job after `setup-command`, in the same shell |
+| `build-output-path` | required | Directory the build writes, relative to the workspace; uploaded, then downloaded to the same path |
+| `extra-output-path` | empty | Optional second directory to share (relative, or `RUNNER_TEMP/<path>`), uploaded and downloaded to the same absolute path |
+| `jobs` | required | JSON list of check jobs; fields above |
+| `areas` | `{}` | JSON object, area name to glob patterns |
+| `setup-command` | empty | Tool setup, run in the same shell as the build and as each command with `"tools": true` |
+| `cache-pip-files` | `[]` | JSON list of pin files keying pip's download cache |
+| `build-pip-cache` | `false` | Also restore the pip cache in the build job |
+| `cache-tool-path`, `cache-tool-key-files` | empty, `[]` | One cached tool download and the files that key it; given together |
+| `artifact-name` | `gyst-build` | Artifact name prefix; change it when one run calls the workflow twice |
+| `artifact-retention-days` | `1` | Days the artifact is kept, 1 to 7 |
+| `build-timeout-minutes` | `15` | Timeout of the build job |
+| `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `block`, the checkout's hosts, empty | harden-runner; add the hosts your build and checks reach |
+| `egress-policy-secretless` | `block` | harden-runner policy for every job here, none of which holds a secret; exactly `audit` or `block` |
+
+Outputs of `parallel-ci.yml`: `result` (`success` or `failure`, the gate's verdict), `skipped-jobs` (comma-separated names the
+path rules skipped) and `everything` (`true` when the change could not be narrowed).
+
+The planning script is `scripts/parallel_ci_plan.py` and the gate is `scripts/parallel_ci_gate.py`, both standard library only and
+inlined in the workflow byte for byte (`tests/test_parallel_ci.py` and `tests/test_ci_gate.py` hold the copies identical), so
+you can vendor them and run them locally.
+
+### CI gate
+
+`ci-gate.yml` is the gate without the build: one job, `CI green`, green only when every job you hand it succeeded or was
+skipped on purpose. Use it when several workflows run side by side (`parallel-ci.yml`, `bash-ci.yml`, `security.yml`, a job of
+your own) and branch protection should require one result.
+
+```yaml
+jobs:
+  ci:
+    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/parallel-ci.yml@<sha> # vX.Y.Z
+    # ... as above
+  drift:
+    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/vendored-drift.yml@<sha> # vX.Y.Z
+    permissions:
+      contents: read
+    with:
+      lock-files: vendor/tokens.lock.json
+  gate:
+    if: always()
+    needs: [ci, drift]
+    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/ci-gate.yml@<sha> # vX.Y.Z
+    permissions: {}
+    with:
+      needs-json: ${{ toJSON(needs) }}
+```
+
+`if: always()` on the calling job is what lets the gate run when a job it needs failed; without it the gate is skipped, and
+branch protection reads a skipped required check as passed. A job counts only with the result `success`; `skipped` counts only
+for a job named in `deliberate-skips` (a JSON list of job ids, empty by default); `failure`, `cancelled`, an unknown result,
+no jobs at all and a deliberate skip that names no needed job fail. Pass a small result map instead of `toJSON(needs)` when
+the needed jobs have large outputs: the value is read from an environment variable.
+
+Inputs of `ci-gate.yml`:
+
+| Input | Default | Meaning |
+|---|---|---|
+| `needs-json` | required | JSON object of the needed jobs: `toJSON(needs)`, or a map of job id to result |
+| `deliberate-skips` | `[]` | JSON list of job ids that may be skipped without failing the gate |
+| `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `block`, the canary's two hosts, empty | harden-runner; the gate reaches nothing |
+| `egress-policy-secretless` | `block` | harden-runner policy for the gate job, which holds no secret; exactly `audit` or `block` |
+
+Output: `result` (`success` or `failure`).
+
 ### Python package release
 
 For a project that ships to PyPI, or attaches its wheel to a GitHub release,
@@ -1281,6 +1679,7 @@ jobs:
       attestations: write  # the provenance record
     with:
       publish: ${{ github.event_name == 'release' }}   # the GitHub release step; pypi stays false
+      allowed-publish-events: push,release             # publishing is an allow-list; the default is push only
       verify-command: grep -q "^## \[$VERSION\]" CHANGELOG.md
       smoke-command: my-cli --version
       release-notes-command: python scripts/changelog_section.py "$VERSION"
@@ -1321,7 +1720,11 @@ plugin all answer alike), refuse a tag that disagrees with it, run
 nothing out; `github-release` records build
 provenance for every file and attaches them with a `SHA256SUMS` to the
 release for the tag, creating it from the notes when it does not exist and
-uploading to it when it does (a caller that triggers on `release: published`).
+completing it when it does (a caller that triggers on `release: published`
+sets `allowed-publish-events: push,release`). An existing release is never
+rewritten: each asset must be absent or already there with the identical
+sha256 digest, or the run fails naming the asset and the version is burned. The set is read again after the upload and re-checked against exactly the built files (file names follow a conservative naming policy, stricter than GitHub's documented renaming: ASCII letters, digits, `.`, `_`, `-`, starting and ending with a letter or digit, so a build that produces other names must rename them before re-pinning; every remote asset, extras included, must be in state `uploaded` and no name may repeat; listing pages are validated before use; a new release for a SemVer prerelease tag is created with `--prerelease` (a behavior change: earlier versions never set it) and hidden files in the staging directory are rejected, not skipped; names that differ only in letter case are refused (a conservative policy; GitHub's exact rule is not verified here); an existing release must carry the prerelease flag its tag implies; an extra asset fails the run); the asset listing is paginated; a lookup that is not a clean 404 stops the run; a draft release for the tag fails the run until it is published or deleted; concurrent writers to one release are unsupported.
+Publication needs an allowed event and a `refs/tags/v<semver>` (SemVer 2.0.0: no leading zeroes, no empty identifiers) ref.
 Nothing needs a secret.
 
 Every release also carries `sbom.cdx.json` (CycloneDX) and
@@ -1365,6 +1768,7 @@ Inputs of `python-package-release.yml`:
 | `smoke-command` | empty (skips the check) | Run with the built wheel installed in a fresh venv on `PATH`, e.g. `my-cli --version` |
 | `release-notes-command` | empty (GitHub generates them) | Prints the release notes to stdout with `$VERSION` set |
 | `publish` | `false` | Publish the GitHub release. A pull request never publishes whatever this says |
+| `allowed-publish-events` | `push` | Comma-separated events (no spaces) that may publish, and only on a `refs/tags/v<semver>` (SemVer 2.0.0: no leading zeroes, no empty identifiers) ref. Set `push,release` for a caller triggered by `release: published`. A pull request event is refused even if listed |
 | `pypi` | `false` | Unsupported: `true` fails the run with the fix, because PyPI cannot trust a reusable workflow as the publisher. Publish with the two-step `publish-pypi` job in the caller's own workflow (above) |
 | `pypi-environment` | `pypi` | Unused here; the environment belongs to the caller's `publish-pypi` job. Kept so existing callers parse |
 | `github-release` | `true` | Attach the files, their SBOMs, `SHA256SUMS` and provenance to the GitHub release |
@@ -1420,7 +1824,11 @@ matching `artifacts`, and `release-notes-command`. The publish job checks
 nothing out. It writes a `SHA256SUMS`, records build provenance for every
 file, signs every file with cosign (keyless, a `<file>.sigstore.json` bundle
 beside it), and attaches all of it to the release for the tag, creating it
-from the notes or uploading to it when it exists. Verify a download with
+from the notes or completing it when it exists: every asset must be absent or
+already there with the identical sha256 digest, never replaced (a differing
+asset fails the run and the version is burned; the set is read again after the upload and re-checked against exactly the built files, so an extra asset also fails; the asset listing is paginated; a lookup that is not a clean 404 stops the run; a draft release for the tag fails the run until it is published or deleted; and concurrent writers to one release are unsupported). Publication needs an allowed
+event (`allowed-publish-events`, default `push`) and a
+`refs/tags/v<semver>` (SemVer 2.0.0: no leading zeroes, no empty identifiers) ref. Verify a download with
 `cosign verify-blob --bundle <file>.sigstore.json <file>` against this
 repository's identity, or `gh attestation verify <file> --owner ChiefGyk3D`.
 
@@ -1435,6 +1843,7 @@ Inputs of `artifact-release.yml`:
 | `verify-command` | empty | Run after the build with `$VERSION` set, to refuse a release whose files disagree with it |
 | `release-notes-command` | empty (GitHub generates them) | Prints the release notes to stdout with `$VERSION` set |
 | `publish` | `false` | Publish. A pull request never publishes whatever this says |
+| `allowed-publish-events` | `push` | Comma-separated events (no spaces) that may publish, and only on a `refs/tags/v<semver>` (SemVer 2.0.0: no leading zeroes, no empty identifiers) ref. A pull request event is refused even if listed |
 | `github-release` | `true` | Attach the files, sums, signatures and provenance to the GitHub release |
 | `release-title` | empty (the tag) | Title of a release this workflow creates |
 | `sign` | `true` | cosign keyless signature bundle per file |
@@ -1858,8 +2267,9 @@ Inputs of `security.yml`:
 | `codeql-languages` | `python,actions` | Comma-separated. `actions` scans the workflow files themselves and fits every repository; a repository with no Python passes `actions` alone, since CodeQL fails on a language with no source |
 | `codeql-queries` | `security-extended` | Query suite |
 | `codeql-config` | empty | Inline CodeQL configuration, e.g. `paths-ignore` |
-| `gitleaks` | `true` | Secret scan over the full history with the pinned gitleaks binary (MIT; no licence or secret under any account). A `.gitleaks.toml` at the repository root is honoured; findings land in code scanning under the `gitleaks` category |
-| `gitleaks-scope` | `all-refs` | What the gitleaks history scan covers: exactly `all-refs` (the default; today's behavior, every ref in the clone, so no caller loses coverage by upgrading) or `pr-commits`. `pr-commits` narrows **only** a `pull_request` run: the history scan covers the commits of the pull request (`base..head`: reachable from the head, not from the base) and a second scan covers the checked-out tree. A push (the default branch included), a schedule, a `workflow_dispatch` and any other event always scan every ref, whatever this is set to, so a protection against a leak entering the default branch never narrows. Any other value (`PR-COMMITS`, empty, anything) fails the gitleaks job; a pull request whose base or head is not a full commit id present in the clone fails it too, rather than scanning less. The canary plants a key in a scratch repository and runs the same scan command shape as the job (the one argument list the resolve step builds, the same configuration, SARIF options and `.` target; with `pr-commits` also the range form, with real commit ids, and the tree scan). **Configuration source (both scopes):** on a `pull_request` event the scan reads `.gitleaks.toml` and `.gitleaksignore` from the **base commit** (copied outside the workspace and passed with `--config` and `--gitleaks-ignore-path`), never from the pull request's own tree, so a pull request cannot allowlist its own secret; a base with no `.gitleaks.toml` gets the scanner defaults. gitleaks also applies a `.gitleaksignore` at the **root of the scanned tree** whatever `--gitleaks-ignore-path` says (measured with the pinned 8.30.1 for both the `git` and the `dir` scan; a nested one and a repository `.gitleaks.toml` beside an explicit `--config` do not apply), so on a pull request the checkout's root `.gitleaksignore` is replaced by the base's copy, or removed when the base has none, before any scan (the checkout is throwaway); the history scan reads that same file, so both scans use the base's. A pull request that changes either file gets a `::warning` naming it, and the job still scans with the base versions. The effect: a pull request that changes either file is scanned with the old version until it merges, and a base config that extends another file by relative path is not supported on a pull request (the copy sits elsewhere). Push, schedule, `workflow_dispatch` and other events use the checked-out file, as before. **What `pr-commits` covers:** every commit of the pull request, including a key committed and reverted inside it, and the tree at the checkout. **What it misses (the residual):** a key in a commit that is already in the base history (the scan of the default branch after the merge, or an earlier scan of that branch, is what covers it); a key on another unmerged branch (that is the point of the setting; it is found when that branch has its own pull request); a key that only a merge-conflict resolution introduces and a later commit removes (git shows no patch for a merge commit); and a key in a pull request commit that was force-pushed away before the scan. Also not covered: an empty range (base equal to head, or a head already in the base) makes the history scan green and leaves only the tree scan; tags and notes outside `base..head`; a re-run of a workflow, which uses the original event payload; an inline `gitleaks:allow` comment in the pull request's own files (measured: honored, unless the scanner is run with `--ignore-gitleaks-allow`, which this job does not pass because it would also fail callers' legitimate allow comments); the generated `gitleaks.sarif` lies in the workspace while the tree scan walks it (its contents are redacted); and the tree scanned is GitHub's merge-preview checkout, not the literal head tree. The tree scan reports in the job log only; its findings are not uploaded as SARIF. Guidance: also protect `.gitleaks.toml` and `.gitleaksignore` with CODEOWNERS and branch protection, since a change to them takes effect after the merge |
+| `gitleaks` | `true` | Secret scan (a pull request's own commits plus the tree by default, the full history on a push or schedule; see `gitleaks-scope`) with the pinned gitleaks binary (MIT; no licence or secret under any account). A `.gitleaks.toml` at the repository root is honoured; findings land in code scanning under the `gitleaks` category |
+| `gitleaks-scope` | `pr-commits` | What the gitleaks history scan covers: exactly `pr-commits` (the default) or `all-refs` (opt-in; every ref in the clone, the behavior before the default changed; a key on any unmerged branch then fails every pull request). `pr-commits` narrows **only** a `pull_request` run: the history scan covers the commits of the pull request (`base..head`: reachable from the head, not from the base) and a second scan covers the checked-out tree. A push (the default branch included), a schedule, a `workflow_dispatch` and any other event always scan every ref, whatever this is set to, so a protection against a leak entering the default branch never narrows. Any other value (`PR-COMMITS`, empty, anything) fails the gitleaks job; a pull request whose base or head is not a full commit id present in the clone fails it too, rather than scanning less. The canary plants a key in a scratch repository and runs the same scan command shape as the job (the one argument list the resolve step builds, the same configuration, SARIF options and `.` target; with `pr-commits` also the range form, with real commit ids, and the tree scan). **Configuration source (both scopes):** on a `pull_request` event the scan reads `.gitleaks.toml` and `.gitleaksignore` from the **base commit** (copied outside the workspace and passed with `--config` and `--gitleaks-ignore-path`), never from the pull request's own tree, so a pull request cannot allowlist its own secret; a base with no `.gitleaks.toml` gets the scanner defaults. gitleaks also applies a `.gitleaksignore` at the **root of the scanned tree** whatever `--gitleaks-ignore-path` says (measured with the pinned 8.30.1 for both the `git` and the `dir` scan; a nested one and a repository `.gitleaks.toml` beside an explicit `--config` do not apply), so on a pull request the checkout's root `.gitleaksignore` is replaced by the base's copy, or removed when the base has none, before any scan (the checkout is throwaway); the history scan reads that same file, so both scans use the base's. A pull request that changes either file gets a `::warning` naming it, and the job still scans with the base versions. The effect: a pull request that changes either file is scanned with the old version until it merges, and a base config that extends another file by relative path is not supported on a pull request (the copy sits elsewhere). Push, schedule, `workflow_dispatch` and other events use the checked-out file, as before. **What `pr-commits` covers:** every commit of the pull request, including a key committed and reverted inside it, and the tree at the checkout. **What it misses (the residual):** a key in a commit that is already in the base history (the scan of the default branch after the merge, or an earlier scan of that branch, is what covers it); a key on another unmerged branch (that is the point of the setting; it is found when that branch has its own pull request); a key that only a merge-conflict resolution introduces and a later commit removes (git shows no patch for a merge commit); and a key in a pull request commit that was force-pushed away before the scan. Also not covered: an empty range (base equal to head, or a head already in the base) makes the history scan green and leaves only the tree scan; tags and notes outside `base..head`; a re-run of a workflow, which uses the original event payload; an inline `gitleaks:allow` comment in the pull request's own files (measured: honored, unless the scanner is run with `--ignore-gitleaks-allow`, which this job does not pass because it would also fail callers' legitimate allow comments); the generated `gitleaks.sarif` lies in the workspace while the tree scan walks it (its contents are redacted); and the tree scanned is GitHub's merge-preview checkout, not the literal head tree. The tree scan reports in the job log only; its findings are not uploaded as SARIF. Guidance: also protect `.gitleaks.toml` and `.gitleaksignore` with CODEOWNERS and branch protection, since a change to them takes effect after the merge |
+| `gitleaks-hash-manifest-paths` | empty | Newline-separated repository-relative file paths of content-hash manifests (an asset manifest that records the SHA-256 of `discord.svg`, for example). Empty (the default) adds nothing. The default gitleaks rule `discord-api-token` reads a 64-hex SHA-256 on a line keyed `discord` as a token; for exactly the listed files, a finding of that one rule whose value is exactly 64 lowercase hex characters is allowed. The allowlist is an AND of path and value (`targetRules = ["discord-api-token"]`, `regexes = ^[a-f0-9]{64}$`, `paths` = each listed path matched whole, anchored at both ends, `.` escaped, no globs), so the same hash in an unlisted file, any other rule in a listed file, and the same rule with any other value are still reported; it covers the history scan and the tree scan alike. It is layered on the configuration the scan already uses (an overlay that `extend`s it): on a `pull_request` event that is the **base commit's** `.gitleaks.toml` (scanner defaults if none), so a pull request cannot allowlist itself with its own tree; on other events the checked-out file. The list comes from the caller's workflow file, so changing it needs the same review as any workflow change. Each line must be a plain path of letters, digits, `_`, `.`, `-` and `/` with no empty, `.` or `..` segment and no leading or trailing `/`; blank lines are ignored; more than 100 paths, or any other line (a glob, a space, a quote, an absolute path), fails the gitleaks job with an error that names the input and never echoes the value. The canary runs with the same overlay in its arguments, so the planted AWS-shaped key must still be caught |
 | `gitleaks-version`, `gitleaks-sha256` | `8.30.1` and its linux_x64 tarball's hash | The gitleaks release downloaded from gitleaks/gitleaks; the hash is checked with `sha256sum -c` before extraction |
 | `advanced-security` | `true` | Whether the repository has GitHub Advanced Security: exactly `true` (the default, behavior unchanged) or `false`. **A private repository without Advanced Security must set `advanced-security: false` once in its caller**; otherwise the run fails, even on a clean scan. Observed on 2026-10-30 on a private repository without Advanced Security: dependency review fails with "Dependency review is not supported on this repository. Please ensure that Dependency graph is enabled along with GitHub Advanced Security"; CodeQL, Semgrep and the gitleaks SARIF upload each fail with "Resource not accessible by integration" (the failing call is the SARIF upload; the same text also shows as a telemetry warning). With `false`, **dependency review and CodeQL are skipped** (they show as skipped, never failed), **Semgrep and gitleaks still run and still fail the job on a finding** but their SARIF uploads are skipped, and both jobs write a job-summary note saying what was skipped and why. Any other value (`False`, `FALSE`, empty, anything) fails the new always-running `advanced-security-check` job and so the whole call, loudly. It is not a gate: no job has `needs`, the scans run as before (a case variant such as `False` skips CodeQL and dependency review, and the run is still red; any value other than `false` runs those scans). Do not mask that red run: `continue-on-error` on the calling job, or a downstream aggregator that treats a skipped or failed called workflow as success, hides it. Snyk and Scorecard are opt-in and unaffected. `gitleaks-upload-sarif: false` still turns the gitleaks upload off on its own |
 | `gitleaks-upload-sarif` | `true` | Upload the gitleaks SARIF to code scanning. Also skipped when `advanced-security` is `false`; set this to `false` only to skip this upload on a repository that otherwise has Advanced Security. The scan still runs and still fails on a finding |
@@ -2862,6 +3272,8 @@ The tests are the contract, one file per thing they hold still:
 
 | File | Holds |
 |---|---|
+| `tests/test_parallel_ci.py` | `parallel-ci.yml`: the planning script run over ordinary and hostile inputs (the path rules fail closed on a push, a missing or empty diff, an unmatched path, an odd byte in a name; every invalid `jobs`, `areas`, path, artifact name, retention and pin file is refused with a passing twin), the `changes` step run under bash in a real repository with a real merge commit (a rename out of a code path counts as code), the build and check steps run under bash (a setup that exits early cannot pass, PATH changes stay in the step), and the YAML: no `continue-on-error`, no expression in a `run:`, nothing written to `$GITHUB_PATH` or `$GITHUB_ENV`, a one-day artifact named with the run attempt, caches off in audit and keyed on pins |
+| `tests/test_ci_gate.py` | `scripts/parallel_ci_gate.py` and the gates of `parallel-ci.yml` and `ci-gate.yml`: success only for `success`, a skip only when named, red on failure, cancellation, an unknown result, no jobs, unreadable input or a deliberate skip that names no job; the inlined copies are byte for byte the script |
 | `tests/test_workflows.py` | SHA pins with version comments; no reference to this repository by branch; no `pull_request_target`; the write-permission allow-list; per-job permissions and timeouts; harden-runner first in every job; `persist-credentials: false` on every checkout; no untrusted interpolation; the inlined Doppler script identical to the composite action and gated on the decide step; no OIDC token on a job a pull request can run, and none on the test job; every input declared, defaulted, used and documented here; `CI green` needing every other job; signing and attestation only after a push; no Actions cache on a publishing build; the allow-list defaults one sorted line; every reusable workflow run against the fixture from this repository at the pull request's ref, never publishing |
 | `tests/test_doppler_gate.py` | The decide script, run under bash for the push, schedule, dispatch, pull request and non-PR events and the ref shapes listed there: trusted refs fetch, untrusted refs get a notice and never fail, a fork's `pull_request` never fetches (`pull_request_target` with the gate off is pinned as it is), a refused tag fails a job that asked for a secret, the Service Token path is gated the same way |
 | `tests/test_audit_baseline.py` | The audit, fed a passing repository and a broken one per criterion; a 403 comes back UNKNOWN, never PASS; exit codes tell FAIL from UNKNOWN |

@@ -25,6 +25,10 @@ the workflow's YAML so it cannot drift; the README is the authority.
 | A wiki generated from docs | `wiki-publish.yml` | [wiki-publish](Workflow-wiki-publish.md) |
 | An AI component whose threat model must stay current | `threat-model.yml` | [threat-model](Workflow-threat-model.md) |
 | A scheduled or on-demand deep-dive audit by Lory (not a per-PR gate) | `lory-audit.yml` | [lory-audit](Workflow-lory-audit.md) |
+| A long single CI job that should run its build once and its checks side by side | `parallel-ci.yml` | [parallel-ci](Workflow-parallel-ci.md) |
+| One `CI green` over several workflows side by side | `ci-gate.yml` | [ci-gate](Workflow-ci-gate.md) |
+| A file vendored from another repository that must not drift (opt-in) | `vendored-drift.yml` | [vendored-drift](Workflow-vendored-drift.md) |
+| A Dockerfile whose base image is pinned by digest and should be rechecked on a schedule (opt-in) | `base-image-digest.yml` | [base-image-digest](Workflow-base-image-digest.md) |
 | Agent skills or MCP tool definitions (optional, advisory static scan) | `agent-scan.yml` | [agent-scan](Workflow-agent-scan.md) |
 
 Not a workflow, but a tool: to wait for a commit's CI and merge exactly that commit, use the `wait-ci` action or script ([wait-ci](Action-wait-ci.md)).
@@ -44,6 +48,10 @@ from its own caller job, and requires every gate. See
 | `python-fuzz.yml` | No | No | Yes | No |
 | `container-release.yml` | Yes, after a push only | Docker Hub credentials, if used | Builds and scans only | GHCR (and Docker Hub) |
 | `verify-published.yml` | No (`packages: read`; the rescan adds nothing) | No | n/a (scheduled) | No |
+| `vendored-drift.yml` | No | No | Yes | No |
+| `parallel-ci.yml` | No (`contents: read` only) | No | Yes | No |
+| `ci-gate.yml` | No | No | Yes | No |
+| `base-image-digest.yml` | No (`contents: read` only) | No | n/a (scheduled) | No |
 | `python-package-release.yml` | Yes, the release job only (your own `publish-pypi` job holds `id-token` for PyPI) | No (Trusted Publishing) | Builds and checks only | GitHub release; PyPI from your job |
 | `artifact-release.yml` | Yes, publish job only | No | Builds and checks only | GitHub release |
 | `security.yml` | `security-events`, plus `id-token` for Snyk and Scorecard | For `SNYK_TOKEN` | Yes (no Snyk, no secrets) | SARIF to the Security tab |

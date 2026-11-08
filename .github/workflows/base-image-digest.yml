@@ -1,0 +1,576 @@
+# Reusable base-image digest check, for the scheduled run a pinned `FROM image:tag@sha256:...` needs.
+# A digest pin makes a build reproducible and also freezes it: when the maintainers republish the tag with a
+# fixed package, nothing tells you until a release scan fails at tag time. This workflow tells you sooner.
+#
+# For each external base image the Dockerfile or Containerfile pins by digest it:
+#   1. resolves what the tag points to today (`docker buildx imagetools inspect`);
+#   2. if that is the pinned digest, stops: there is nothing newer to move to;
+#   3. otherwise scans the pinned digest and the current digest with Trivy, with the same flags
+#      container-release.yml scans an image with (`trivy-severity`, `trivy-ignore-unfixed`, `trivyignores`),
+#      and compares the two reports.
+# The job fails when the pinned digest has a fixable finding at those severities that the current digest does
+# not have: bumping the pin would fix it. A finding both digests share does not fail (a bump would not help),
+# and neither does one nobody has fixed yet. `exit-code: "0"` reports without failing.
+#
+# It fails the scheduled run rather than opening an issue, so it needs no write permission at all: a red
+# scheduled run is what notifies the repository's watchers, and a caller that wants an issue adds a job with
+# `if: failure()` and `needs:` this one. The findings and the line to change are in the job summary.
+#
+# The two pure steps (reading the pins, comparing the reports) are scripts/base_image_digest.py in this
+# repository, written below byte for byte; tests/test_base_image_digest.py holds the copy identical.
+#
+# Opt-in, and not a pull-request check: schedule it. A caller:
+#
+#   on:
+#     schedule:
+#       - cron: "23 5 * * 1"   # weekly; pick your own minute
+#     workflow_dispatch:
+#
+#   permissions:
+#     contents: read
+#
+#   jobs:
+#     base-image:
+#       uses: ChiefGyk3D/git-your-ship-together/.github/workflows/base-image-digest.yml@<sha> # vX.Y.Z
+#       permissions:
+#         contents: read
+#       with:
+#         dockerfile: Containerfile
+#
+# Limits, so the green is not over-read: public registries only (no credential is passed), one platform
+# (`platform`), and the comparison is by advisory ID and package, so a finding that moves package is a new one.
+
+name: Base image digest check (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      dockerfile:
+        description: Path of the Dockerfile or Containerfile, relative to the repository. Every external `FROM` in it must be pinned by digest and name a tag (see `allow-unpinned`); a file with no pinned external image fails the job.
+        type: string
+        default: Dockerfile
+      allow-unpinned:
+        description: Skip a `FROM` that has no `@sha256:` digest instead of failing on it. At least one pinned image must still be found.
+        type: boolean
+        default: false
+      platform:
+        description: Platform whose image is scanned, for example `linux/amd64`.
+        type: string
+        default: linux/amd64
+      trivy-severity:
+        description: Severities Trivy reports; the same input and default as `trivy-severity` in container-release.yml.
+        type: string
+        default: CRITICAL,HIGH
+      trivy-ignore-unfixed:
+        description: Skip advisories that have no fixed version yet; the same input and default as `trivy-ignore-unfixed` in container-release.yml. A finding without a fix is never a reason to bump, so turning this off does not change the verdict.
+        type: boolean
+        default: true
+      trivyignores:
+        description: Path to the caller's .trivyignore file, relative to the repository, as in container-release.yml. Empty means none. Every entry needs a reason and a review date.
+        type: string
+        default: ""
+      exit-code:
+        description: Exit code when a bump would fix a finding. "1" (the default) fails the job; "0" reports in the job summary only.
+        type: string
+        default: "1"
+      trivy-version:
+        description: Trivy release to download (aquasecurity/trivy), without the `v`; the same pin as verify-published.yml. Changing it means changing `trivy-sha256`.
+        type: string
+        default: 0.76.1
+      trivy-sha256:
+        description: sha256 of `trivy_<trivy-version>_Linux-64bit.tar.gz`. The download is refused when it does not match.
+        type: string
+        default: c7cbe3137fb8a48a17574bede3dd6beb16742d1e9772929940fc90082c39d9c0
+      egress-policy:
+        description: harden-runner egress policy - `audit` logs outbound connections, `block` allows only `allowed-endpoints`. Jobs that hold no secret follow `egress-policy-secretless` instead (EX-0001).
+        type: string
+        default: block
+      egress-policy-secretless:
+        description: harden-runner egress policy for the jobs that hold no stored secret, no OIDC token and no write-scoped or publish-capable token (read-only contents, a SARIF upload at most), and whose output no privileged job consumes - exactly `audit` or `block`. Defaults to `block` since security exception EX-0001 (GitHub-hosted runners in westus2 broke harden-runner `block`) was closed on 2026-11-02 after harden-runner v2.22.3 passed on westus2; see docs/security/exceptions/. Every job still has the default read-only job token. Set `audit` to opt out if the defect recurs. Any other job follows `egress-policy`. Any other value fails the job.
+        type: string
+        default: block
+      allowed-endpoints:
+        description: harden-runner allow-list for `block`, space-separated host:port entries. The default covers the Trivy download and database, GitHub, Docker Hub and GHCR; wildcards are not supported.
+        type: string
+        default: "api.github.com:443 auth.docker.io:443 docker-images-prod.s3.dualstack.us-east-1.amazonaws.com:443 fulcio.sigstore.dev:443 ghcr.io:443 github.com:443 index.docker.io:443 mirror.gcr.io:443 pkg-containers.githubusercontent.com:443 production.cloudfront.docker.com:443 raw.githubusercontent.com:443 registry-1.docker.io:443 rekor.sigstore.dev:443 release-assets.githubusercontent.com:443 timestamp.sigstore.dev:443 tmaproduction.blob.core.windows.net:443 tuf-repo-cdn.sigstore.dev:443"
+      extra-allowed-endpoints:
+        description: Appended to `allowed-endpoints`, for the registry of a base image that is not on Docker Hub or GHCR (`quay.io:443`, `cdn01.quay.io:443`). Same format.
+        type: string
+        default: ""
+      timeout-minutes:
+        description: Job timeout.
+        type: number
+        default: 20
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Base images are as fresh as their tags
+    runs-on: ubuntu-24.04
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read  # check out the caller's repository; nothing is written
+    steps:
+      - name: Validate the egress policy inputs (EX-0001)
+        timeout-minutes: 1
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        env:
+          POLICY_EGRESS_POLICY: ${{ inputs.egress-policy }}
+          POLICY_EGRESS_POLICY_SECRETLESS: ${{ inputs.egress-policy-secretless }}
+        run: |
+          set -u
+          bad=0
+          check() {
+            if [ "$2" = set ] && [ "$3" != audit ] && [ "$3" != block ]; then
+              echo "::error title=egress policy::the $1 input must be exactly 'audit' or 'block' (its value is ${#3} characters long)"
+              bad=1
+            fi
+          }
+          check egress-policy "${POLICY_EGRESS_POLICY+set}" "${POLICY_EGRESS_POLICY-}"
+          check egress-policy-secretless "${POLICY_EGRESS_POLICY_SECRETLESS+set}" "${POLICY_EGRESS_POLICY_SECRETLESS-}"
+          check distro-egress-policy "${POLICY_DISTRO_EGRESS_POLICY+set}" "${POLICY_DISTRO_EGRESS_POLICY-}"
+          check semgrep-egress-policy "${POLICY_SEMGREP_EGRESS_POLICY+set}" "${POLICY_SEMGREP_EGRESS_POLICY-}"
+          exit "$bad"
+
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: ${{ (inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block' }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
+          disable-sudo: true
+          # The agent may only stop reporting to StepSecurity in block mode.
+          disable-telemetry: ${{ ((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block') == 'block' }}
+
+      - name: Egress canary (EX-0001)
+        if: ${{ runner.os == 'Linux' && (((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block') == 'block') }}
+        timeout-minutes: 2
+        shell: bash
+        # The workspace root exists before checkout; a job default working-directory may not.
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -u
+          NAMES="github.com api.github.com results-receiver.actions.githubusercontent.com"
+          PORT=443
+          canary_resolve() { timeout 5 getent ahostsv4 "$1" 2>/dev/null | awk '$2 == "STREAM" { print $1 }'; }
+          canary_probe() { timeout 3 bash -c "exec 3<>\"/dev/tcp/\$0/\$1\"" "$1" "$PORT" 2>/dev/null; }
+          canary_reach() {
+            local i
+            for i in 1 2 3 4; do
+              canary_probe "$1" && return 0
+              [ "$i" -lt 4 ] && sleep 1
+            done
+            return 1
+          }
+          canary_show() { local n=$1; shift; echo "+ $*"; { timeout 10 "$@" 2>&1 || true; } | head -n "$n" || true; }
+          canary_diag() {
+            local name
+            echo "::group::egress canary diagnostics (EX-0001, for the GitHub Support ticket)"
+            canary_show 5 uname -srmo
+            canary_show 20 cat /etc/resolv.conf
+            canary_show 20 bash -c "resolvectl status 2>/dev/null | grep -E '^ *(Current DNS Server|DNS Servers?|DNS Domain):'"
+            canary_show 20 bash -c "ss -lun | grep ':53 '"
+            for name in $NAMES pipelines.actions.githubusercontent.com; do
+              canary_show 20 getent ahostsv4 "$name"
+              canary_show 5 curl -sS -o /dev/null -w '%{http_code} %{remote_ip} %{time_connect}\n' --max-time 8 "https://$name"
+            done
+            echo "::endgroup::"
+          }
+          canary_main() {
+            local tmp name addr n=0 bad
+            tmp=$(mktemp -d) || return 1
+            for _ in 1 2 3; do
+              for name in $NAMES; do canary_resolve "$name" >>"$tmp/res.$name" & done
+              wait
+              sleep 1
+            done
+            for name in $NAMES; do
+              if [ -s "$tmp/res.$name" ]; then sort -u "$tmp/res.$name"; else echo "-"; fi | sed "s|^|$name |" >>"$tmp/pairs"
+            done
+            while read -r name addr; do
+              n=$((n + 1))
+              ( { [ "$addr" != "-" ] && canary_reach "$addr"; } || echo "$name $addr" >"$tmp/bad.$n" ) </dev/null &
+            done <"$tmp/pairs"
+            wait
+            bad=$(cat "$tmp"/bad.* 2>/dev/null | sort || true)
+            rm -rf "$tmp"
+            if [ -z "$bad" ]; then
+              echo "egress canary: all $n addresses of $NAMES accept TCP $PORT"
+              return 0
+            fi
+            echo "::error title=egress canary::egress broken on this runner (known westus2 DNS issue, EX-0001): rerun the job"
+            echo "unreachable addresses (name address; '-' means the name did not resolve):"
+            printf '%s\n' "$bad"
+            canary_diag
+            echo "EX-0001 egress canary failed, unreachable: $(printf '%s' "$bad" | tr '\n' ';')" >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
+            return 1
+          }
+          set -m
+          canary_main &
+          main=$!
+          (sleep 90; kill -TERM -- "-$main"; sleep 2; kill -KILL -- "-$main") >/dev/null 2>&1 &
+          dog=$!
+          wait "$main" && rc=0 || rc=$?
+          kill -TERM -- "-$dog" >/dev/null 2>&1 || true
+          if kill -0 -- "-$main" >/dev/null 2>&1; then
+            kill -TERM -- "-$main" >/dev/null 2>&1 || true
+            sleep 1
+            kill -KILL -- "-$main" >/dev/null 2>&1 || true
+          fi
+          if [ "$rc" -eq 143 ] || [ "$rc" -eq 137 ]; then
+            echo "::error title=egress canary::the canary hit its 90 s deadline (EX-0001): rerun the job"
+            rc=124
+          fi
+          exit "$rc"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The binary is pinned by hash; no action and no new egress host is
+      # involved (github.com redirects to release-assets.githubusercontent.com,
+      # and the vulnerability database comes from mirror.gcr.io or ghcr.io,
+      # all already on the list).
+      - name: Install Trivy
+        env:
+          TRIVY_VERSION: ${{ inputs.trivy-version }}
+          TRIVY_SHA256: ${{ inputs.trivy-sha256 }}
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/trivy.tar.gz"
+          curl -sSfL -o "$archive" "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          echo "${TRIVY_SHA256}  ${archive}" | sha256sum -c -
+          mkdir "$RUNNER_TEMP/trivy-bin"
+          tar -xzf "$archive" -C "$RUNNER_TEMP/trivy-bin" trivy
+          "$RUNNER_TEMP/trivy-bin/trivy" --version
+
+      # The caller's .trivyignore is data for Trivy, read from the checkout. It must be a regular file inside the
+      # workspace; the check resolves symbolic links first.
+      - name: Check the inputs
+        env:
+          DOCKERFILE: ${{ inputs.dockerfile }}
+          TRIVYIGNORES: ${{ inputs.trivyignores }}
+          PLATFORM: ${{ inputs.platform }}
+          SEVERITY: ${{ inputs.trivy-severity }}
+          EXIT_CODE: ${{ inputs.exit-code }}
+        run: |
+          set -euo pipefail
+          bad=0
+          inside() {
+            local real
+            real="$(realpath -e -- "$GITHUB_WORKSPACE/$2" 2>/dev/null)" || { echo "::error title=$1::$1 does not name a file in the repository"; bad=1; return; }
+            case "$real" in
+              "$GITHUB_WORKSPACE"/*) [ -f "$real" ] || { echo "::error title=$1::$1 is not a regular file"; bad=1; } ;;
+              *) echo "::error title=$1::$1 leaves the repository"; bad=1 ;;
+            esac
+          }
+          inside dockerfile "$DOCKERFILE"
+          if [ -n "$TRIVYIGNORES" ]; then inside trivyignores "$TRIVYIGNORES"; fi
+          [[ "$PLATFORM" =~ ^[a-z0-9]+/[a-z0-9]+(/[a-z0-9]+)?$ ]] || { echo "::error title=platform::platform must look like linux/amd64"; bad=1; }
+          [[ "$SEVERITY" =~ ^(UNKNOWN|LOW|MEDIUM|HIGH|CRITICAL)(,(UNKNOWN|LOW|MEDIUM|HIGH|CRITICAL))*$ ]] || { echo "::error title=trivy-severity::trivy-severity must be a comma-separated list of UNKNOWN, LOW, MEDIUM, HIGH, CRITICAL"; bad=1; }
+          [[ "$EXIT_CODE" =~ ^[01]$ ]] || { echo "::error title=exit-code::exit-code must be 0 or 1"; bad=1; }
+          exit "$bad"
+
+      - name: Write the helper
+        run: |
+          cat > "$RUNNER_TEMP/base_image_digest.py" <<'PY'
+          #!/usr/bin/env python3
+          """The two pure steps of the base-image digest check: read the pins, compare the scans.
+
+          Stdlib only. The workflow `base-image-digest.yml` carries a byte-identical copy of this file
+          (tests/test_base_image_digest.py holds the two together) and does the networked part (resolve the
+          current digest of each tag, scan both digests with Trivy) around it.
+
+              python3 -I base_image_digest.py list DOCKERFILE [--allow-unpinned]
+                  Print a JSON array of the external base images the file pins:
+                  [{"line": 4, "image": "python:3.14-slim", "repo": "python", "tag": "3.14-slim",
+                    "digest": "sha256:..."}]. A FROM that is not a plain, resolvable, pinned external image
+                  is a failure (exit 1, `FAIL` lines on stdout); so is a file with no external image at all.
+
+              python3 -I base_image_digest.py diff PINNED.json CURRENT.json
+                  Both are `trivy image --format json` reports. Print the findings the pinned digest has that
+                  the current digest does not, and exit 1 if there is one: the bump would fix it. A finding in
+                  both is not a reason to bump, so it never fails. A finding with no fixed version is not
+                  actionable either, and is skipped even if the report carries it.
+
+          Dockerfile text and Trivy reports are data. Values taken from them are printed JSON-escaped.
+          """
+
+          from __future__ import annotations
+
+          import argparse
+          import json
+          import re
+          import sys
+          from pathlib import Path
+
+          MAX_BYTES = 8 << 20
+          NAME = r"(?:[A-Za-z0-9][A-Za-z0-9.-]*(?::[0-9]{1,5})?/)?[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)*"
+          IMAGE = re.compile(rf"(?P<repo>{NAME})(?::(?P<tag>[A-Za-z0-9_][A-Za-z0-9._-]{{0,127}}))?(?:@(?P<digest>sha256:[0-9a-f]{{64}}))?")
+          ARG_LINE = re.compile(r"ARG\s+([A-Za-z_][A-Za-z0-9_]*)(?:=(.*))?", re.IGNORECASE)
+          VAR = re.compile(r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))")
+
+
+          def q(value: object) -> str:
+              text = value if isinstance(value, str) else repr(value)
+              return json.dumps(text[:200], ensure_ascii=True)
+
+
+          def logical_lines(text: str) -> list[tuple[int, str]]:
+              """(first line number, instruction) with continuations joined and comment lines dropped."""
+              out: list[tuple[int, str]] = []
+              pending, start = "", 0
+              for number, raw in enumerate(text.splitlines(), 1):
+                  line = raw.strip()
+                  if line.startswith("#"):  # a comment, also in the middle of a continued instruction
+                      continue
+                  if not pending:
+                      start = number
+                  if line.endswith("\\"):
+                      pending += line[:-1] + " "
+                      continue
+                  full = (pending + line).strip()
+                  pending = ""
+                  if full:
+                      out.append((start, full))
+              if pending.strip():
+                  out.append((start, pending.strip()))
+              return out
+
+
+          def substitute(value: str, args: dict[str, str]) -> str:
+              return VAR.sub(lambda m: args.get(m.group(1) or m.group(2), m.group(0)), value)
+
+
+          def pins(text: str, allow_unpinned: bool = False) -> tuple[list[dict[str, object]], list[str]]:
+              problems: list[str] = []
+              found: list[dict[str, object]] = []
+              args: dict[str, str] = {}
+              stages: set[str] = set()
+              seen_from = False
+              for number, line in logical_lines(text):
+                  word, _, rest = line.partition(" ")
+                  word = word.upper()
+                  if word == "ARG" and not seen_from:
+                      m = ARG_LINE.fullmatch(line)
+                      if m and m.group(2) is not None:
+                          args[m.group(1)] = m.group(2).strip().strip("\"'")
+                      continue
+                  if word != "FROM":
+                      continue
+                  seen_from = True
+                  tokens = rest.split()
+                  while tokens and tokens[0].startswith("--"):
+                      tokens.pop(0)
+                  if not tokens:
+                      problems.append(f"line {number}: FROM names no image")
+                      continue
+                  raw_image = tokens[0]
+                  if len(tokens) >= 3 and tokens[1].upper() == "AS":
+                      stages.add(tokens[2].lower())
+                  elif len(tokens) != 1:
+                      problems.append(f"line {number}: cannot read this FROM ({q(line)})")
+                      continue
+                  if raw_image.lower() == "scratch" or raw_image.lower() in stages:
+                      continue
+                  image = substitute(raw_image, args)
+                  if "$" in image:
+                      problems.append(f"line {number}: {q(raw_image)} uses a variable with no default set by an ARG before the first FROM")
+                      continue
+                  m = IMAGE.fullmatch(image)
+                  if not m:
+                      problems.append(f"line {number}: {q(image)} is not an image reference this check can follow")
+                      continue
+                  if not m["digest"]:
+                      if not allow_unpinned:
+                          problems.append(f"line {number}: {q(image)} is not pinned by digest (@sha256:...)")
+                      continue
+                  if not m["tag"]:
+                      problems.append(f"line {number}: {q(image)} pins a digest but names no tag, so there is no tag to follow")
+                      continue
+                  entry = {
+                      "line": number,
+                      "image": f"{m['repo']}:{m['tag']}",
+                      "repo": m["repo"],
+                      "tag": m["tag"],
+                      "digest": m["digest"],
+                  }
+                  if not any(e["image"] == entry["image"] and e["digest"] == entry["digest"] for e in found):
+                      found.append(entry)
+              if not found and not problems:
+                  problems.append("no external base image pinned by digest was found; there is nothing to check")
+              return found, problems
+
+
+          def findings(report: object) -> dict[tuple[str, str], dict[str, str]]:
+              """(advisory id, package) -> finding, for the fixable ones in a Trivy JSON report."""
+              if not isinstance(report, dict):
+                  raise ValueError("a Trivy report is a JSON object")
+              results = report.get("Results")
+              if not isinstance(results, list):
+                  raise ValueError("the report has no Results list (an empty list is fine, a missing one means the scan failed)")
+              out: dict[tuple[str, str], dict[str, str]] = {}
+              for result in results:
+                  vulns = result.get("Vulnerabilities") if isinstance(result, dict) else None
+                  for vuln in vulns or []:
+                      if not isinstance(vuln, dict):
+                          continue
+                      ident, pkg, fixed = vuln.get("VulnerabilityID"), vuln.get("PkgName"), vuln.get("FixedVersion")
+                      if not (isinstance(ident, str) and isinstance(pkg, str) and isinstance(fixed, str) and fixed):
+                          continue
+                      out[(ident, pkg)] = {
+                          "id": ident,
+                          "pkg": pkg,
+                          "installed": str(vuln.get("InstalledVersion", "")),
+                          "fixed": fixed,
+                          "severity": str(vuln.get("Severity", "")),
+                      }
+              return out
+
+
+          def fixed_by_bump(pinned: object, current: object) -> list[dict[str, str]]:
+              now = findings(current)
+              return [f for key, f in sorted(findings(pinned).items()) if key not in now]
+
+
+          def load_json(path: Path) -> object:
+              if not path.is_file() or path.stat().st_size > MAX_BYTES:
+                  raise ValueError(f"{q(str(path))} is not a regular file of at most {MAX_BYTES} bytes")
+              return json.loads(path.read_text(encoding="utf-8"))
+
+
+          def main(argv: list[str]) -> int:
+              parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n")[0])
+              sub = parser.add_subparsers(dest="cmd", required=True)
+              p_list = sub.add_parser("list")
+              p_list.add_argument("dockerfile", type=Path)
+              p_list.add_argument("--allow-unpinned", action="store_true")
+              p_diff = sub.add_parser("diff")
+              p_diff.add_argument("pinned", type=Path)
+              p_diff.add_argument("current", type=Path)
+              args = parser.parse_args(argv)
+
+              if args.cmd == "list":
+                  try:
+                      if not args.dockerfile.is_file() or args.dockerfile.stat().st_size > MAX_BYTES:
+                          raise ValueError("not a regular file of reasonable size")
+                      text = args.dockerfile.read_text(encoding="utf-8")
+                  except (OSError, ValueError, UnicodeDecodeError) as exc:
+                      print(f"FAIL cannot read {q(str(args.dockerfile))} ({type(exc).__name__}: {q(str(exc))})")
+                      return 1
+                  found, problems = pins(text, args.allow_unpinned)
+                  for problem in problems:
+                      print(f"FAIL {problem}")
+                  if problems:
+                      return 1
+                  print(json.dumps(found))
+                  return 0
+
+              try:
+                  fixed = fixed_by_bump(load_json(args.pinned), load_json(args.current))
+              except (OSError, ValueError, UnicodeDecodeError, RecursionError) as exc:
+                  print(f"FAIL cannot compare the reports ({type(exc).__name__}: {q(str(exc))})")
+                  return 1
+              for f in fixed:
+                  print(f"FIXED {q(f['id'])} {f['severity'] or '?'} {q(f['pkg'])} {q(f['installed'])} -> {q(f['fixed'])}")
+              if fixed:
+                  return 1
+              print("ok   the current digest fixes nothing the pinned one has")
+              return 0
+
+
+          if __name__ == "__main__":
+              sys.exit(main(sys.argv[1:]))
+          PY
+
+      # Per image: today's digest of the tag, then (only if it moved) a scan of each digest and a comparison. A
+      # failed lookup or scan fails the job; it is never read as "nothing found". Every image is processed before
+      # the step fails, so one finding hides nothing.
+      - name: Compare the pinned digests with today's
+        env:
+          TRIVY_CACHE_DIR: ${{ runner.temp }}/trivy-cache
+          TRIVY_DISABLE_TELEMETRY: "true"
+          DOCKERFILE: ${{ inputs.dockerfile }}
+          ALLOW_UNPINNED: ${{ inputs.allow-unpinned }}
+          PLATFORM: ${{ inputs.platform }}
+          SEVERITY: ${{ inputs.trivy-severity }}
+          IGNORE_UNFIXED: ${{ inputs.trivy-ignore-unfixed }}
+          TRIVYIGNORES: ${{ inputs.trivyignores }}
+          EXIT_CODE: ${{ inputs.exit-code }}
+        run: |
+          set -u +e
+          set -o pipefail
+          helper="$RUNNER_TEMP/base_image_digest.py"
+          trivy="$RUNNER_TEMP/trivy-bin/trivy"
+          out="$RUNNER_TEMP/base-image"
+          mkdir -p "$out"
+          summary="${GITHUB_STEP_SUMMARY:-/dev/null}"
+          common=(--quiet --skip-version-check --scanners vuln --severity "$SEVERITY" --image-src remote --platform "$PLATFORM" --format json --exit-code 0)
+          if [ "$IGNORE_UNFIXED" = "true" ]; then common+=(--ignore-unfixed); fi
+          if [ -n "$TRIVYIGNORES" ]; then common+=(--ignorefile "$GITHUB_WORKSPACE/$TRIVYIGNORES"); fi
+          status=0
+          bump=0
+
+          flags=(list "$GITHUB_WORKSPACE/$DOCKERFILE")
+          if [ "$ALLOW_UNPINNED" = "true" ]; then flags+=(--allow-unpinned); fi
+          if ! python3 -I "$helper" "${flags[@]}" > "$out/pins.json"; then
+            cat "$out/pins.json"
+            echo "::error title=base image::the Dockerfile has no base image this check can follow (see above)"
+            exit 1
+          fi
+          count="$(jq 'length' "$out/pins.json")"
+          echo "checking $count pinned base image(s) on $PLATFORM"
+
+          for i in $(seq 0 $((count - 1))); do
+            image="$(jq -r ".[$i].image" "$out/pins.json")"
+            repo="$(jq -r ".[$i].repo" "$out/pins.json")"
+            pinned="$(jq -r ".[$i].digest" "$out/pins.json")"
+            echo "::group::$image"
+            current="$(docker buildx imagetools inspect "$image" --format '{{json .Manifest}}' | jq -r '.digest')"
+            if ! [[ "$current" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "::endgroup::"
+              echo "::error title=base image::could not resolve today's digest of $image"
+              status=1
+              continue
+            fi
+            if [ "$current" = "$pinned" ]; then
+              echo "$image: the pin is what the tag points to today"
+              echo "::endgroup::"
+              continue
+            fi
+            echo "$image: the tag moved from $pinned to $current"
+            ok=1
+            "$trivy" image "${common[@]}" --output "$out/pinned-$i.json" "$repo@$pinned" || ok=0
+            "$trivy" image "${common[@]}" --output "$out/current-$i.json" "$repo@$current" || ok=0
+            if [ "$ok" -ne 1 ]; then
+              echo "::endgroup::"
+              echo "::error title=base image::Trivy failed on $image, so nothing was compared"
+              status=1
+              continue
+            fi
+            report="$(python3 -I "$helper" diff "$out/pinned-$i.json" "$out/current-$i.json")"
+            rc=$?
+            printf '%s\n' "$report"
+            echo "::endgroup::"
+            if [ "$rc" -ne 0 ]; then
+              if printf '%s\n' "$report" | grep -q '^FAIL'; then
+                echo "::error title=base image::the reports for $image could not be compared"
+                status=1
+              else
+                bump=1
+                {
+                  echo "### Bump $image"
+                  echo
+                  echo "The tag now points to \`$current\`; the pin is \`$pinned\`. The current digest fixes:"
+                  echo
+                  printf '%s\n' "$report" | sed 's/^/- /'
+                  echo
+                  echo "Change the pin to \`$repo:${image##*:}@$current\`."
+                } >> "$summary"
+                echo "::error title=base image::$image: pinning $current would fix findings at $SEVERITY (listed above and in the job summary)"
+              fi
+            fi
+          done
+          if [ "$bump" -eq 1 ] && [ "$EXIT_CODE" = "1" ]; then status=1; fi
+          exit "$status"

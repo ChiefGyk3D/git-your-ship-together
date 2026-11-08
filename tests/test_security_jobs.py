@@ -212,12 +212,13 @@ def test_gitleaks_is_a_pinned_binary_not_a_licensed_action():
     assert install["run"].index("sha256sum -c") < install["run"].index("tar ")
 
 
-def test_gitleaks_scans_every_ref_by_default_and_uploads_sarif():
+def test_gitleaks_scans_the_pr_range_on_a_pull_request_by_default_and_uploads_sarif():
     checkout = next(s for s in steps_of(GITLEAKS) if str(s.get("uses", "")).startswith("actions/checkout@"))
     assert checkout["with"]["fetch-depth"] == 0
     scan = next(s for s in steps_of(GITLEAKS) if s.get("name", "").startswith("Scan the commits"))
     assert "$SCAN_ARGS" in scan["run"] and '--log-opts="$LOG_OPTS"' in scan["run"]
-    assert INPUTS["gitleaks-scope"]["default"] == "all-refs"  # --all unless a caller narrows a pull request
+    # a pull request is narrowed to base..head by default; push and schedule stay --all (tests/test_gitleaks_scope.py)
+    assert INPUTS["gitleaks-scope"]["default"] == "pr-commits"
     assert "--report-format sarif --report-path gitleaks.sarif" in scan["run"]
     upload = next(s for s in steps_of(GITLEAKS) if "upload-sarif" in str(s.get("uses", "")))
     assert upload["with"] == {"sarif_file": "gitleaks.sarif", "category": "gitleaks"}

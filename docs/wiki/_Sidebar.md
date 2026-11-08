@@ -33,6 +33,8 @@
 - [tofu-ci](Workflow-tofu-ci.md)
 - [arduino-ci](Workflow-arduino-ci.md)
 - [python-fuzz](Workflow-python-fuzz.md)
+- [parallel-ci](Workflow-parallel-ci.md)
+- [ci-gate](Workflow-ci-gate.md)
 
 **Security**
 
@@ -47,6 +49,7 @@
 - [python-package-release](Workflow-python-package-release.md)
 - [artifact-release](Workflow-artifact-release.md)
 - [verify-published](Workflow-verify-published.md)
+- [base-image-digest](Workflow-base-image-digest.md)
 
 **Docs and project**
 
@@ -56,7 +59,9 @@
 - [threat-model](Workflow-threat-model.md)
 - [lory-audit](Workflow-lory-audit.md)
 - [agent-scan](Workflow-agent-scan.md)
+- [vendored-drift](Workflow-vendored-drift.md)
 
 **Tools**
 
 - [wait-ci](Action-wait-ci.md)
+- [Docs-only fast path and parallel CI](Docs-only-fast-path.md)

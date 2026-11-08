@@ -103,9 +103,11 @@ on:
         default: ^https://github\.com/ChiefGyk3D/git-your-ship-together/\.github/workflows/container-release\.yml@
       allow-unsigned-publish:
         description: >-
-          Let a push move the release tags with sign, sbom or provenance turned
-          off. Default false: a push with any of the three off fails before it
-          builds, so an unsigned image cannot reach latest by accident.
+          Let a publishing run move the release tags with sign, sbom or
+          provenance turned off. Default false: a run that would publish with
+          any of the three off fails before it builds, so an unsigned image
+          cannot reach latest by accident. A run that does not publish is not
+          affected.
         type: boolean
         default: false
       docker-test-command:
@@ -184,6 +186,14 @@ on:
         description: Skip advisories that have no fix in the distribution, so they do not block the gate.
         type: boolean
         default: true
+      skip-secret-scan-in-site-packages:
+        description: >-
+          Suppress ALL Trivy secret findings (every secret rule, not one rule id) from files under three image roots only: usr/lib[64], usr/local/lib[64] and opt/venv/lib, each pythonX.Y/site-packages.
+          Reason: a package's docstring text can match a secret rule (the anthropic SDK's text about an API enum value matches
+          gcp-service-account) when nothing is a credential and no fixed version exists. Trivy still reads those files (this is not a performance boundary) and only secret findings are affected: the
+          vulnerability scan, severity, ignore-unfixed and exit code are unchanged. A real secret shipped inside a dependency under those roots will NOT be detected (a supply-chain tradeoff); secrets at every other path are still found.
+        type: boolean
+        default: false
       trivyignores:
         description: Path to the caller's .trivyignore file, relative to the repository. Empty means none. Every entry needs a reason and a review date.
         type: string
@@ -220,6 +230,14 @@ on:
         description: Fetch CI secrets only on the default branch, a version tag (vN.N.N) or a schedule; never on a pull request or another branch. `false` restores fetching on every same-repository run.
         type: boolean
         default: true
+      allowed-publish-events:
+        description: Comma-separated event names (`github.event_name`) from which `push` may publish. Default `push`. `*` allows every event except `pull_request` and `pull_request_target`, which never publish. Together with `require-tag-ref` this is the allow-list for pushing, signing and attesting.
+        type: string
+        default: push
+      require-tag-ref:
+        description: Publish only from a `refs/tags/v*` ref. `false` also allows other refs, for a caller that publishes from a branch on purpose.
+        type: boolean
+        default: true
       timeout-minutes:
         description: Job timeout. Multi-arch builds that compile native code need a generous one.
         type: number
@@ -251,6 +269,7 @@ jobs:
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
       ghcr: ${{ steps.plan.outputs.ghcr }}
+      publish: ${{ steps.publish.outputs.publish }}
     steps:
       - name: Validate the egress policy inputs (EX-0001)
         timeout-minutes: 1
@@ -362,19 +381,80 @@ jobs:
           fi
           exit "$rc"
 
+      - name: Decide whether to publish
+        id: publish
+        env:
+          PUSH: ${{ inputs.push }}
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          ALLOWED_EVENTS: ${{ inputs.allowed-publish-events }}
+          REQUIRE_TAG: ${{ inputs.require-tag-ref }}
+        run: |
+          set -euo pipefail
+          set -f
+          shopt -u nocasematch nocaseglob
+          is_semver_release_tag() {
+            local re='^refs/tags/v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+            [[ $1 =~ $re ]]
+          }
+          # Pushing, signing and attesting follow this one decision: the
+          # `push` input, an allowed event, and (by default) a SemVer v-tag.
+          events_re='^(\*|[a-z][a-z_]*(,[a-z][a-z_]*)*)$'
+          if ! [[ $ALLOWED_EVENTS =~ $events_re ]]; then
+            echo "::error title=allowed-publish-events::allowed-publish-events must be * or comma-separated lowercase event names with no spaces or empty entries, such as push or push,workflow_dispatch"
+            exit 1
+          fi
+          IFS=',' read -r -a items <<< "$ALLOWED_EVENTS"
+          for ((i = 0; i < ${#items[@]}; i++)); do
+            for ((j = i + 1; j < ${#items[@]}; j++)); do
+              if [ "${items[i]}" = "${items[j]}" ]; then
+                echo "::error title=allowed-publish-events::allowed-publish-events lists '${items[i]}' twice"
+                exit 1
+              fi
+            done
+          done
+          ok=false
+          reason=""
+          case "$EVENT" in
+            pull_request | pull_request_target | "") reason="pull requests never publish (event '$EVENT')" ;;
+            *)
+              case ",$ALLOWED_EVENTS," in ",*,") ok=true ;; *",$EVENT,"*) ok=true ;; esac
+              if [ "$ok" != true ]; then reason="event '$EVENT' is not in allowed-publish-events ('$ALLOWED_EVENTS')"; fi
+              ;;
+          esac
+          if [ "$ok" = true ] && [ "$REQUIRE_TAG" != "false" ] && ! is_semver_release_tag "$REF"; then
+            ok=false
+            reason="ref '$REF' is not a vMAJOR.MINOR.PATCH release tag (require-tag-ref is true)"
+          fi
+          publish=false
+          if [ "$PUSH" = "true" ]; then
+            if [ "$ok" = true ]; then
+              publish=true
+            else
+              msg="push is true but this run did NOT publish: $reason. (event '$EVENT', ref '$REF'.) Publishing needs the event in allowed-publish-events and, while require-tag-ref is true, a vMAJOR.MINOR.PATCH tag ref. To publish from branches, schedules or manual runs, set allowed-publish-events (for example push,schedule,workflow_dispatch) and require-tag-ref: false in the caller. This run only built and scanned."
+              echo "::warning title=publish skipped::$msg"
+              { echo "### Publish skipped: this run did NOT publish"; echo; echo "$msg"; } >> "$GITHUB_STEP_SUMMARY"
+            fi
+          fi
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+          echo "publish: $publish"
+
       - name: Require signing for a publish
         timeout-minutes: 1
         env:
-          PUSH: ${{ inputs.push }}
+          PUBLISH: ${{ steps.publish.outputs.publish }}
           SIGN: ${{ inputs.sign }}
           SBOM: ${{ inputs.sbom }}
           PROVENANCE: ${{ inputs.provenance }}
           ALLOW_UNSIGNED: ${{ inputs.allow-unsigned-publish }}
         run: |
           set -euo pipefail
-          if [ "$PUSH" = "true" ] && [ "$ALLOW_UNSIGNED" != "true" ] \
+          # Keyed on the publish decision: a run that does not publish (a pull
+          # request, a branch the caller did not allow) pushes nothing, so it
+          # has no unsigned release to refuse.
+          if [ "$PUBLISH" = "true" ] && [ "$ALLOW_UNSIGNED" != "true" ] \
             && { [ "$SIGN" != "true" ] || [ "$SBOM" != "true" ] || [ "$PROVENANCE" != "true" ]; }; then
-            echo "::error title=unsigned publish::push is true but sign, sbom or provenance is off; set all three, or set allow-unsigned-publish: true to accept an unsigned release"
+            echo "::error title=unsigned publish::this run would publish but sign, sbom or provenance is off; set all three, or set allow-unsigned-publish: true to accept an unsigned release"
             exit 1
           fi
 
@@ -409,21 +489,40 @@ jobs:
           # arm64 and amd64 build natively on their own runner; anything else
           # falls back to an amd64 runner with QEMU.
           matrix='[]'
+          seen=""
+          # Exactly comma-separated linux/<arch>[/v<N>] entries: no spaces, no
+          # empty entries, nothing is repaired.
+          platforms_re='^linux/[a-z0-9]+(/v[0-9]+)?(,linux/[a-z0-9]+(/v[0-9]+)?)*$'
+          if ! [[ $PLATFORMS =~ $platforms_re ]]; then
+            echo "::error title=platforms::platforms must be comma-separated linux/<arch> or linux/<arch>/v<N> entries with no spaces and no empty entries"
+            exit 1
+          fi
           IFS=',' read -r -a platforms <<< "$PLATFORMS"
           for platform in "${platforms[@]}"; do
-            platform="$(printf '%s' "$platform" | tr -d '[:space:]')"
-            [ -n "$platform" ] || continue
-            if ! printf '%s' "$platform" | grep -Eq '^linux/[a-z0-9]+(/v[0-9]+)?$'; then
-              echo "::error title=platforms::'$platform' is not a linux/<arch> platform"
-              exit 1
-            fi
+            # One image per platform: a repeat (after default variants are
+            # applied) would share a temporary tag and make the index ambiguous.
+            IFS=/ read -r _ parch pvar <<< "$platform"
+            case "$parch" in arm64) pdef=v8 ;; arm) pdef=v7 ;; amd64) pdef=v1 ;; *) pdef="" ;; esac
+            key="${parch}/${pvar:-$pdef}"
+            case " $seen " in
+              *" $key "*)
+                echo "::error title=platforms::'$platform' is a duplicate platform (after default variants); list each platform once"
+                exit 1
+                ;;
+            esac
+            seen="$seen $key"
             case "$platform" in
               linux/arm64) runner=ubuntu-24.04-arm ;;
               *) runner=ubuntu-24.04 ;;
             esac
             matrix="$(jq -c --arg platform "$platform" --arg arch "${platform//\//-}" --arg runner "$runner" \
-              '. + [{platform: $platform, arch: $arch, runner: $runner}]' <<< "$matrix")"
+              '. + [{platform: $platform, arch: $arch, runner: $runner, idx: length}]' <<< "$matrix")"
           done
+          count="$(jq 'length' <<< "$matrix")"
+          if [ "$count" -gt 8 ]; then
+            echo "::error title=platforms::at most 8 platforms are supported"
+            exit 1
+          fi
           if [ "$matrix" = "[]" ]; then
             echo "::error title=platforms::no platform given"
             exit 1
@@ -604,21 +703,36 @@ jobs:
           read -r -a args <<< "$ARGS"
           "$HADOLINT" "${args[@]}" "$DOCKERFILE"
 
-  # One job per platform, on a runner of that architecture: build, check and
-  # scan the image where it runs. When publishing, the same job pushes the
-  # platform image under a temporary tag, `<sha>-<arch>`, for `merge`.
+  # One job per platform, on a runner of that architecture, for a run that
+  # publishes: build once, push under a temporary tag
+  # (`<sha>-<run id>-<attempt>-<arch>`), pull that image back by digest and run
+  # every check against it, then hand the digest to `merge`, which merges by
+  # digest, not by tag. A run that does not publish uses `build-local`.
   build:
     name: Build, test, scan (${{ matrix.platform }})
     needs: [plan, dockerfile-lint]
     # A skipped lint (hadolint: false) must not skip the build; a failed or
     # cancelled one must.
-    if: ${{ !cancelled() && needs.plan.result == 'success' && (needs.dockerfile-lint.result == 'success' || needs.dockerfile-lint.result == 'skipped') }}
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.publish == 'true' && (needs.dockerfile-lint.result == 'success' || needs.dockerfile-lint.result == 'skipped') }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
+    # This job runs only when publishing and is the only build job with
+    # `packages: write`: every action in a job can read the job token, and a
+    # job's permissions cannot depend on an expression, so a run that does not
+    # publish uses `build-local` instead.
     permissions:
       contents: read
       packages: write  # push the per-platform image under its temporary tag
       security-events: write  # Trivy SARIF upload
+    outputs:
+      d0: ${{ steps.record.outputs.d0 }}
+      d1: ${{ steps.record.outputs.d1 }}
+      d2: ${{ steps.record.outputs.d2 }}
+      d3: ${{ steps.record.outputs.d3 }}
+      d4: ${{ steps.record.outputs.d4 }}
+      d5: ${{ steps.record.outputs.d5 }}
+      d6: ${{ steps.record.outputs.d6 }}
+      d7: ${{ steps.record.outputs.d7 }}
     strategy:
       fail-fast: false
       matrix:
@@ -745,12 +859,304 @@ jobs:
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Log in to GHCR
-        if: inputs.push
+        if: needs.plan.outputs.publish == 'true'
         uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image metadata
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ needs.plan.outputs.ghcr }}
+          tags: ${{ inputs.tags }}
+
+      - name: Build and push this platform's image
+        if: needs.plan.outputs.publish == 'true'
+        id: push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ${{ inputs.context }}
+          file: ${{ inputs.dockerfile }}
+          platforms: ${{ matrix.platform }}
+          push: true
+          tags: ${{ needs.plan.outputs.ghcr }}:${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.arch }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # No cache here: a publishing build never reads the Actions cache.
+          # Signing, the SBOM and provenance are produced by `merge` as
+          # explicit, verifiable artefacts; BuildKit's own attestation
+          # manifests would duplicate them and add unknown/unknown entries.
+          provenance: false
+          sbom: false
+
+      - name: Pull and verify the pushed image
+        id: pushed
+        if: needs.plan.outputs.publish == 'true'
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+          PLATFORM: ${{ matrix.platform }}
+          GHCR: ${{ needs.plan.outputs.ghcr }}
+        run: |
+          set -euo pipefail
+          shopt -u nocasematch
+          verify_platform_image() {
+            local ref=$1 want=$2 raw config actual wos warch wvar aos aarch avar def
+            raw="$(docker buildx imagetools inspect --raw "$ref")" || return 1
+            if ! jq -e 'type == "object" and (has("manifests") | not) and has("config") and has("layers")' <<< "$raw" > /dev/null; then
+              echo "::error title=digest::$ref is not a single-platform image manifest"
+              return 1
+            fi
+            config="$(docker buildx imagetools inspect "$ref" --format '{{json .Image}}')" || return 1
+            actual="$(jq -r 'if type != "object" then "invalid" elif has("architecture") then "\(.os)/\(.architecture)/\(.variant // "")" elif length == 1 then (.[] | "\(.os)/\(.architecture)/\(.variant // "")") else "invalid" end' <<< "$config")"
+            IFS=/ read -r wos warch wvar <<< "$want"
+            IFS=/ read -r aos aarch avar <<< "$actual"
+            # An omitted variant means the architecture's default, on both sides.
+            case "$warch" in arm64) def=v8 ;; arm) def=v7 ;; amd64) def=v1 ;; *) def="" ;; esac
+            if [ "$wos/$warch/${wvar:-$def}" != "$aos/$aarch/${avar:-$def}" ]; then
+              echo "::error title=digest::$ref is $actual, expected $want"
+              return 1
+            fi
+          }
+
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error title=digest::the push of $PLATFORM produced no valid digest"; exit 1; }
+          ref="${GHCR}@${DIGEST}"
+          # The checks below run against exactly the image that was pushed.
+          verify_platform_image "$ref" "$PLATFORM"
+          docker pull --platform "$PLATFORM" "$ref"
+          docker tag "$ref" release-candidate:local
+
+      - name: Require a non-root user
+        if: inputs.require-non-root
+        run: |
+          set -euo pipefail
+          if ! uid="$(docker run --rm --entrypoint id release-candidate:local -u)"; then
+            echo "::error title=non-root::could not run \`id -u\` in the image; add a USER instruction, or set require-non-root: false for an image with no id binary"
+            exit 1
+          fi
+          if [ "$uid" = "0" ]; then
+            echo "::error title=non-root::the image runs as root (uid 0); add a USER instruction to the Dockerfile, or set require-non-root: false"
+            exit 1
+          fi
+          echo "the image runs as uid $uid"
+
+      - name: Check the image
+        if: inputs.docker-test-command != ''
+        env:
+          IMAGE: release-candidate:local
+          COMMAND: ${{ inputs.docker-test-command }}
+        run: bash -eo pipefail -c "$COMMAND"
+
+      - name: Probe with a read-only root filesystem
+        if: inputs.probe-read-only
+        env:
+          PROBE_COMMAND: ${{ inputs.probe-command }}
+        run: |
+          set -euo pipefail
+          if [ -z "$PROBE_COMMAND" ]; then
+            echo "::error title=probe-read-only::probe-command is empty; give it the arguments that make the image exit on its own, such as --version"
+            exit 1
+          fi
+          read -r -a args <<< "$PROBE_COMMAND"
+          if ! docker run --rm --read-only --tmpfs /tmp release-candidate:local "${args[@]}"; then
+            echo "::error title=probe-read-only::the image fails with a read-only root filesystem; it writes outside /tmp. Point its writable paths at a tmpfs or a volume, or leave probe-read-only off"
+            exit 1
+          fi
+
+      - name: Suppress Trivy secret findings under installed Python package roots
+        if: inputs.trivy && inputs.skip-secret-scan-in-site-packages
+        run: |
+          # One global allow rule with a path only: Trivy still reads these files and detects secrets in them
+          # but drops those findings, for a Python site-packages directory of one of three image roots
+          # (usr/lib, usr/local/lib, opt/venv/lib; lib64 too), the path anchored at the image root with a
+          # numeric X.Y version. Trivy's vulnerability scanner reads the same packages as before.
+          # Nothing else is allowed, disabled or skipped. Trivy reads the file through its documented
+          # --secret-config flag, set here by its environment form.
+          CONFIG="$RUNNER_TEMP/trivy-secret.yaml"
+          cat > "$CONFIG" <<'EOF'
+          allow-rules:
+            - id: python-site-packages
+              description: Installed Python packages under the listed roots (see skip-secret-scan-in-site-packages)
+              path: ^(usr/(local/)?lib(64)?|opt/venv/lib)/python[0-9]+\.[0-9]+/site-packages/
+          EOF
+          echo "TRIVY_SECRET_CONFIG=$CONFIG" >> "$GITHUB_ENV"
+
+      - name: Scan the image with Trivy
+        if: inputs.trivy
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: release-candidate:local
+          format: sarif
+          output: trivy-results.sarif
+          severity: ${{ inputs.trivy-severity }}
+          exit-code: ${{ inputs.trivy-exit-code }}
+          ignore-unfixed: ${{ inputs.trivy-ignore-unfixed }}
+          trivyignores: ${{ inputs.trivyignores }}
+
+      - name: Upload Trivy results to the Security tab
+        if: inputs.trivy && always() && hashFiles('trivy-results.sarif') != ''
+        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          sarif_file: trivy-results.sarif
+          category: trivy-image-${{ matrix.arch }}
+
+      - name: Record this platform's digest
+        id: record
+        if: needs.plan.outputs.publish == 'true'
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+          PLATFORM: ${{ matrix.platform }}
+          IDX: ${{ matrix.idx }}
+        run: |
+          set -euo pipefail
+          shopt -u nocasematch
+          [[ "$IDX" =~ ^[0-7]$ ]] || { echo "::error title=digest::bad platform index"; exit 1; }
+          [[ "$PLATFORM" =~ ^linux/[a-z0-9]+(/v[0-9]+)?$ ]] || { echo "::error title=digest::bad platform"; exit 1; }
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error title=digest::the push of $PLATFORM produced no valid digest"; exit 1; }
+          # Reached only after the checks passed on this exact digest.
+          echo "d${IDX}=${PLATFORM} ${DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "recorded ${PLATFORM} ${DIGEST}"
+
+
+  # The same checks for a run that does not publish: one local build that is the
+  # one tested, with no package write permission and no login. A publishing run
+  # uses `build`.
+  build-local:
+    name: Build, test, scan, local (${{ matrix.platform }})
+    needs: [plan, dockerfile-lint]
+    # A skipped lint (hadolint: false) must not skip the build; a failed or
+    # cancelled one must.
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.publish != 'true' && (needs.dockerfile-lint.result == 'success' || needs.dockerfile-lint.result == 'skipped') }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+      security-events: write  # Trivy SARIF upload
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - name: Validate the egress policy inputs (EX-0001)
+        timeout-minutes: 1
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        env:
+          POLICY_EGRESS_POLICY: ${{ inputs.egress-policy }}
+          POLICY_EGRESS_POLICY_SECRETLESS: ${{ inputs.egress-policy-secretless }}
+        run: |
+          set -u
+          bad=0
+          check() {
+            if [ "$2" = set ] && [ "$3" != audit ] && [ "$3" != block ]; then
+              echo "::error title=egress policy::the $1 input must be exactly 'audit' or 'block' (its value is ${#3} characters long)"
+              bad=1
+            fi
+          }
+          check egress-policy "${POLICY_EGRESS_POLICY+set}" "${POLICY_EGRESS_POLICY-}"
+          check egress-policy-secretless "${POLICY_EGRESS_POLICY_SECRETLESS+set}" "${POLICY_EGRESS_POLICY_SECRETLESS-}"
+          check distro-egress-policy "${POLICY_DISTRO_EGRESS_POLICY+set}" "${POLICY_DISTRO_EGRESS_POLICY-}"
+          check semgrep-egress-policy "${POLICY_SEMGREP_EGRESS_POLICY+set}" "${POLICY_SEMGREP_EGRESS_POLICY-}"
+          exit "$bad"
+
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: ${{ inputs.egress-policy == 'audit' && 'audit' || 'block' }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
+          # The agent may only stop reporting to StepSecurity in block mode.
+          disable-telemetry: ${{ (inputs.egress-policy == 'audit' && 'audit' || 'block') == 'block' }}
+
+      - name: Egress canary (EX-0001)
+        if: ${{ runner.os == 'Linux' && ((inputs.egress-policy == 'audit' && 'audit' || 'block') == 'block') }}
+        timeout-minutes: 2
+        shell: bash
+        # The workspace root exists before checkout; a job default working-directory may not.
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -u
+          NAMES="github.com api.github.com results-receiver.actions.githubusercontent.com"
+          PORT=443
+          canary_resolve() { timeout 5 getent ahostsv4 "$1" 2>/dev/null | awk '$2 == "STREAM" { print $1 }'; }
+          canary_probe() { timeout 3 bash -c "exec 3<>\"/dev/tcp/\$0/\$1\"" "$1" "$PORT" 2>/dev/null; }
+          canary_reach() {
+            local i
+            for i in 1 2 3 4; do
+              canary_probe "$1" && return 0
+              [ "$i" -lt 4 ] && sleep 1
+            done
+            return 1
+          }
+          canary_show() { local n=$1; shift; echo "+ $*"; { timeout 10 "$@" 2>&1 || true; } | head -n "$n" || true; }
+          canary_diag() {
+            local name
+            echo "::group::egress canary diagnostics (EX-0001, for the GitHub Support ticket)"
+            canary_show 5 uname -srmo
+            canary_show 20 cat /etc/resolv.conf
+            canary_show 20 bash -c "resolvectl status 2>/dev/null | grep -E '^ *(Current DNS Server|DNS Servers?|DNS Domain):'"
+            canary_show 20 bash -c "ss -lun | grep ':53 '"
+            for name in $NAMES pipelines.actions.githubusercontent.com; do
+              canary_show 20 getent ahostsv4 "$name"
+              canary_show 5 curl -sS -o /dev/null -w '%{http_code} %{remote_ip} %{time_connect}\n' --max-time 8 "https://$name"
+            done
+            echo "::endgroup::"
+          }
+          canary_main() {
+            local tmp name addr n=0 bad
+            tmp=$(mktemp -d) || return 1
+            for _ in 1 2 3; do
+              for name in $NAMES; do canary_resolve "$name" >>"$tmp/res.$name" & done
+              wait
+              sleep 1
+            done
+            for name in $NAMES; do
+              if [ -s "$tmp/res.$name" ]; then sort -u "$tmp/res.$name"; else echo "-"; fi | sed "s|^|$name |" >>"$tmp/pairs"
+            done
+            while read -r name addr; do
+              n=$((n + 1))
+              ( { [ "$addr" != "-" ] && canary_reach "$addr"; } || echo "$name $addr" >"$tmp/bad.$n" ) </dev/null &
+            done <"$tmp/pairs"
+            wait
+            bad=$(cat "$tmp"/bad.* 2>/dev/null | sort || true)
+            rm -rf "$tmp"
+            if [ -z "$bad" ]; then
+              echo "egress canary: all $n addresses of $NAMES accept TCP $PORT"
+              return 0
+            fi
+            echo "::error title=egress canary::egress broken on this runner (known westus2 DNS issue, EX-0001): rerun the job"
+            echo "unreachable addresses (name address; '-' means the name did not resolve):"
+            printf '%s\n' "$bad"
+            canary_diag
+            echo "EX-0001 egress canary failed, unreachable: $(printf '%s' "$bad" | tr '\n' ';')" >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
+            return 1
+          }
+          set -m
+          canary_main &
+          main=$!
+          (sleep 90; kill -TERM -- "-$main"; sleep 2; kill -KILL -- "-$main") >/dev/null 2>&1 &
+          dog=$!
+          wait "$main" && rc=0 || rc=$?
+          kill -TERM -- "-$dog" >/dev/null 2>&1 || true
+          if kill -0 -- "-$main" >/dev/null 2>&1; then
+            kill -TERM -- "-$main" >/dev/null 2>&1 || true
+            sleep 1
+            kill -KILL -- "-$main" >/dev/null 2>&1 || true
+          fi
+          if [ "$rc" -eq 143 ] || [ "$rc" -eq 137 ]; then
+            echo "::error title=egress canary::the canary hit its 90 s deadline (EX-0001): rerun the job"
+            rc=124
+          fi
+          exit "$rc"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Only a platform with no native runner needs emulation.
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+        if: matrix.platform != 'linux/amd64' && matrix.platform != 'linux/arm64'
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Image metadata
         id: meta
@@ -812,6 +1218,24 @@ jobs:
             exit 1
           fi
 
+      - name: Suppress Trivy secret findings under installed Python package roots
+        if: inputs.trivy && inputs.skip-secret-scan-in-site-packages
+        run: |
+          # One global allow rule with a path only: Trivy still reads these files and detects secrets in them
+          # but drops those findings, for a Python site-packages directory of one of three image roots
+          # (usr/lib, usr/local/lib, opt/venv/lib; lib64 too), the path anchored at the image root with a
+          # numeric X.Y version. Trivy's vulnerability scanner reads the same packages as before.
+          # Nothing else is allowed, disabled or skipped. Trivy reads the file through its documented
+          # --secret-config flag, set here by its environment form.
+          CONFIG="$RUNNER_TEMP/trivy-secret.yaml"
+          cat > "$CONFIG" <<'EOF'
+          allow-rules:
+            - id: python-site-packages
+              description: Installed Python packages under the listed roots (see skip-secret-scan-in-site-packages)
+              path: ^(usr/(local/)?lib(64)?|opt/venv/lib)/python[0-9]+\.[0-9]+/site-packages/
+          EOF
+          echo "TRIVY_SECRET_CONFIG=$CONFIG" >> "$GITHUB_ENV"
+
       - name: Scan the image with Trivy
         if: inputs.trivy
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
@@ -831,61 +1255,25 @@ jobs:
           sarif_file: trivy-results.sarif
           category: trivy-image-${{ matrix.arch }}
 
-      - name: Build and push this platform's image
-        if: inputs.push
-        id: push
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: ${{ inputs.context }}
-          file: ${{ inputs.dockerfile }}
-          platforms: ${{ matrix.platform }}
-          push: true
-          tags: ${{ needs.plan.outputs.ghcr }}:${{ github.sha }}-${{ matrix.arch }}
-          labels: ${{ steps.meta.outputs.labels }}
-          # No cache here: a publishing build never reads the Actions cache.
-          # Signing, the SBOM and provenance are produced by `merge` as
-          # explicit, verifiable artefacts; BuildKit's own attestation
-          # manifests would duplicate them and add unknown/unknown entries.
-          provenance: false
-          sbom: false
-
-      - name: Record this platform's image digest
-        if: inputs.push
-        env:
-          DIGEST: ${{ steps.push.outputs.digest }}
-          DIGEST_DIR: ${{ runner.temp }}/image-digest
-        run: |
-          set -euo pipefail
-          if ! [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-            echo "::error title=digest::the platform build returned no usable digest: ${DIGEST}"
-            exit 1
-          fi
-          mkdir -p "$DIGEST_DIR"
-          printf '%s\n' "$DIGEST" > "$DIGEST_DIR/digest.txt"
-
-      - name: Hand the digest to the merge job
-        if: inputs.push
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: image-digest-${{ matrix.arch }}
-          path: ${{ runner.temp }}/image-digest/digest.txt
-          retention-days: 1
-          if-no-files-found: error
-
   # Joins the per-platform images into one multi-arch index under the real
   # tags, then signs, attests and records provenance for that index.
   merge:
     name: Publish, sign
     # Never on a pull request, whatever the caller passes: this job holds the
     # tokens that sign and attest.
-    if: inputs.push && github.event_name != 'pull_request' && github.event_name != 'pull_request_target'
+    if: needs.plan.outputs.publish == 'true' && github.event_name != 'pull_request'
     needs: [plan, build]
-    # One publish per destination image and ref at a time, and a running one is
-    # never cancelled halfway through signing. The group serializes runs in the
-    # order they reach this job, not in commit order; the "Publish the release
-    # tags" step is what keeps a stale run from moving a branch's tags.
+    # One publish per destination image at a time, whatever the ref, and a
+    # running one is never cancelled halfway through signing. The key is the
+    # destination (the GHCR image, and the Docker Hub repository when it is
+    # on), both caller inputs, never event data. The group serializes runs in
+    # the order they reach this job, not in commit order; the "Publish the
+    # release tags" step keeps a stale run from moving a branch's tags and an
+    # older release from moving the mutable tags. GitHub keeps one pending run
+    # per group, so a pending run is replaced by a newer pending run of the
+    # same destination; re-run the replaced one.
     concurrency:
-      group: container-release-${{ needs.plan.outputs.ghcr }}-${{ inputs.dockerhub && format('hub-{0}', inputs.dockerhub-repository) || 'ghcr' }}-${{ github.ref }}
+      group: container-release-${{ needs.plan.outputs.ghcr }}-${{ inputs.dockerhub && format('hub-{0}', inputs.dockerhub-repository) || 'ghcr' }}
       cancel-in-progress: false
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -1027,7 +1415,7 @@ jobs:
 
       - name: Decide how to authenticate to Doppler
         id: doppler
-        if: inputs.push && inputs.dockerhub
+        if: needs.plan.outputs.publish == 'true' && inputs.dockerhub
         env:
           IDENTITY_ID: ${{ inputs.doppler-identity-id }}
           TOKEN: ${{ secrets.DOPPLER_TOKEN }}
@@ -1155,7 +1543,7 @@ jobs:
           IMAGE_NAME: ${{ inputs.image-name }}
           DOCKERHUB: ${{ inputs.dockerhub }}
           DOCKERHUB_REPOSITORY: ${{ inputs.dockerhub-repository }}
-          PUSH: ${{ inputs.push }}
+          PUSH: ${{ needs.plan.outputs.publish }}
           UNTRUSTED_TAG: ${{ steps.doppler.outputs.untrusted-tag }}
           REF: ${{ github.ref }}
         run: |
@@ -1191,7 +1579,7 @@ jobs:
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Log in to GHCR
-        if: inputs.push
+        if: needs.plan.outputs.publish == 'true'
         uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
@@ -1199,7 +1587,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Log in to Docker Hub
-        if: inputs.push && steps.names.outputs.dockerhub != ''
+        if: needs.plan.outputs.publish == 'true' && steps.names.outputs.dockerhub != ''
         uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: docker.io
@@ -1213,74 +1601,131 @@ jobs:
           images: ${{ steps.names.outputs.images }}
           tags: ${{ inputs.tags }}
 
-      - name: Fetch the per-platform digests
-        if: inputs.push
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          pattern: image-digest-*
-          path: ${{ runner.temp }}/image-digests
-
-      # The index is built from the digests the build jobs pushed, never from
-      # a tag, and goes up under a staging tag (the commit SHA) only. Its own
-      # digest is read from the create result and cross-checked against the
-      # manifests it lists. `latest` and every other moving tag wait for
-      # "Publish the release tags", after the image is signed, attested and
-      # verified (issue #286).
+      # The index is built from the digests the build jobs pushed and checked,
+      # never from a tag, and goes up in each registry under a staging tag of
+      # this run only. No release tag (`latest`, the branch, semver or sha
+      # tags) is written here: they wait for "Publish the release tags", after
+      # the image is signed, attested, recorded and verified (issue #286).
       - name: Create the multi-arch index
         id: index
+        if: needs.plan.outputs.publish == 'true'
         env:
           GHCR: ${{ steps.names.outputs.ghcr }}
-          DOCKERHUB: ${{ steps.names.outputs.dockerhub }}
-          PLATFORMS: ${{ inputs.platforms }}
+          HUB: ${{ steps.names.outputs.dockerhub }}
+          MATRIX: ${{ needs.plan.outputs.matrix }}
           SHA: ${{ github.sha }}
-          DIGESTS: ${{ runner.temp }}/image-digests
-          META: ${{ runner.temp }}/index-metadata.json
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          D0: ${{ needs.build.outputs.d0 }}
+          D1: ${{ needs.build.outputs.d1 }}
+          D2: ${{ needs.build.outputs.d2 }}
+          D3: ${{ needs.build.outputs.d3 }}
+          D4: ${{ needs.build.outputs.d4 }}
+          D5: ${{ needs.build.outputs.d5 }}
+          D6: ${{ needs.build.outputs.d6 }}
+          D7: ${{ needs.build.outputs.d7 }}
         run: |
           set -euo pipefail
-          tags=(--tag "${GHCR}:${SHA}")
-          if [ -n "$DOCKERHUB" ]; then
-            tags+=(--tag "${DOCKERHUB}:${SHA}")
-          fi
+          shopt -u nocasematch
+          verify_platform_image() {
+            local ref=$1 want=$2 raw config actual wos warch wvar aos aarch avar def
+            raw="$(docker buildx imagetools inspect --raw "$ref")" || return 1
+            if ! jq -e 'type == "object" and (has("manifests") | not) and has("config") and has("layers")' <<< "$raw" > /dev/null; then
+              echo "::error title=digest::$ref is not a single-platform image manifest"
+              return 1
+            fi
+            config="$(docker buildx imagetools inspect "$ref" --format '{{json .Image}}')" || return 1
+            actual="$(jq -r 'if type != "object" then "invalid" elif has("architecture") then "\(.os)/\(.architecture)/\(.variant // "")" elif length == 1 then (.[] | "\(.os)/\(.architecture)/\(.variant // "")") else "invalid" end' <<< "$config")"
+            IFS=/ read -r wos warch wvar <<< "$want"
+            IFS=/ read -r aos aarch avar <<< "$actual"
+            # An omitted variant means the architecture's default, on both sides.
+            case "$warch" in arm64) def=v8 ;; arm) def=v7 ;; amd64) def=v1 ;; *) def="" ;; esac
+            if [ "$wos/$warch/${wvar:-$def}" != "$aos/$aarch/${avar:-$def}" ]; then
+              echo "::error title=digest::$ref is $actual, expected $want"
+              return 1
+            fi
+          }
+
+          fail() { echo "::error title=digest::$1"; exit 1; }
+          digest_re='^sha256:[0-9a-f]{64}$'
+          # One bounded retry for every registry call: 4 attempts in all,
+          # waiting 5, 10 and 20 seconds. Only a transient failure is retried
+          # (HTTP 408, 425, 429 and every 5xx, a timeout, a reset connection).
+          registry_transient() {
+            grep -Eqi '(^|[ :[(])(408|425|429|5[0-9]{2})( |]|\)|$)|context deadline exceeded|i/o timeout|timed out|connection reset|connection refused|temporarily unavailable|unexpected EOF|TLS handshake timeout' <<< "$1"
+          }
+          registry_retry() {
+            local n=1 rc errf delay
+            while :; do
+              rc=0
+              errf="$(mktemp)"
+              REG_OUT="$("$@" 2> "$errf")" || rc=$?
+              REG_ERR="$(< "$errf")"
+              rm -f "$errf"
+              if [ "$rc" -eq 0 ]; then return 0; fi
+              if registry_transient "$REG_ERR" && [ "$n" -lt 4 ]; then
+                delay=$(( ${REGISTRY_BACKOFF_SECONDS:-5} * (1 << (n - 1)) ))
+                echo "::warning title=registry retry::attempt ${n} of 4 of '$1 $2 $3' hit a transient error; retrying in ${delay}s" >&2
+                sleep "$delay"
+                n=$((n + 1))
+                continue
+              fi
+              return "$rc"
+            done
+          }
+          # The index is made from the digests the build jobs pushed and
+          # checked, one per planned platform, each an image of its platform.
+          slots=("$D0" "$D1" "$D2" "$D3" "$D4" "$D5" "$D6" "$D7")
+          count="$(jq 'length' <<< "$MATRIX")"
           sources=()
-          expected=()
-          IFS=',' read -r -a platforms <<< "$PLATFORMS"
-          for platform in "${platforms[@]}"; do
-            platform="$(printf '%s' "$platform" | tr -d '[:space:]')"
-            [ -n "$platform" ] || continue
-            file="${DIGESTS}/image-digest-${platform//\//-}/digest.txt"
-            if [ ! -f "$file" ]; then
-              echo "::error title=index::no digest was recorded for ${platform}"
-              exit 1
+          digests=()
+          for i in 0 1 2 3 4 5 6 7; do
+            value="${slots[$i]}"
+            if [ "$i" -ge "$count" ]; then
+              [ -z "$value" ] || fail "unexpected digest in slot $i"
+              continue
             fi
-            platform_digest="$(head -n 1 "$file")"
-            if ! [[ "$platform_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-              echo "::error title=index::the recorded digest for ${platform} is not a sha256 digest"
-              exit 1
+            want="$(jq -r --argjson i "$i" '.[] | select(.idx == $i) | .platform' <<< "$MATRIX")"
+            platform="${value%% *}"
+            digest="${value#* }"
+            if [ -z "$value" ] || [ "$platform" != "$want" ] || ! [[ "$digest" =~ $digest_re ]]; then
+              fail "no valid digest was recorded for $want"
             fi
-            sources+=("${GHCR}@${platform_digest}")
-            expected+=("$platform_digest")
+            verify_platform_image "${GHCR}@${digest}" "$want" || exit 1
+            sources+=("${GHCR}@${digest}")
+            digests+=("$digest")
           done
-          if [ "${#sources[@]}" -eq 0 ]; then
-            echo "::error title=index::no platform to merge"
-            exit 1
-          fi
-          docker buildx imagetools create --metadata-file "$META" "${tags[@]}" "${sources[@]}"
-          digest="$(jq -r '."containerimage.digest" // .["containerimage.descriptor"].digest // empty' "$META")"
-          if ! [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-            echo "::error title=index::the create result has no usable index digest"
-            exit 1
-          fi
-          listed="$(docker buildx imagetools inspect "${GHCR}@${digest}" --raw | jq -r '.manifests[].digest' | sort)"
-          wanted="$(printf '%s\n' "${expected[@]}" | sort)"
-          if [ "$listed" != "$wanted" ]; then
-            echo "::error title=index::the index ${digest} does not list exactly the platform digests that were built"
-            exit 1
-          fi
-          echo "digest=$digest" >> "$GITHUB_OUTPUT"
-          echo "index digest: $digest (staging tag ${SHA}; release tags are not pushed yet)"
+          # Each registry gets its own index, staged under a tag of this run
+          # only and checked against the recorded platform digests. A source
+          # held by another registry is copied by buildx. The digests are
+          # compared, not assumed equal.
+          registries=("$GHCR")
+          if [ -n "$HUB" ]; then registries+=("$HUB"); fi
+          first_digest=""
+          for repo in "${registries[@]}"; do
+            staging="${repo}:stage-${SHA}-${RUN_ID}-${RUN_ATTEMPT}"
+            # A write that returned an error may still have committed: the
+            # staged tag is read back and judged by what it holds.
+            registry_retry docker buildx imagetools create --tag "$staging" "${sources[@]}" \
+              || echo "::notice title=staging::writing $staging returned an error; reading it back"
+            registry_retry docker buildx imagetools inspect "$staging" --format '{{.Manifest.Digest}}' \
+              || fail "the staged index $staging could not be read back in $repo"
+            digest="$REG_OUT"
+            [[ "$digest" =~ $digest_re ]] || fail "the staged index in $repo has no valid digest"
+            # The staged index must hold exactly the digests that passed.
+            registry_retry docker buildx imagetools inspect --raw "${repo}@${digest}" \
+              || fail "the staged index ${repo}@${digest} could not be read"
+            got="$(jq -c '[.manifests[]?.digest] | sort' <<< "$REG_OUT")"
+            want_set="$(printf '%s\n' "${digests[@]}" | jq -R . | jq -sc 'sort')"
+            [ "$got" = "$want_set" ] || fail "the staged index in $repo does not hold exactly the recorded platform digests"
+            if [ -z "$first_digest" ]; then first_digest="$digest"; fi
+            [ "$digest" = "$first_digest" ] || fail "the index digest in $repo ($digest) differs from the one in $GHCR ($first_digest)"
+          done
+          echo "digest=$first_digest" >> "$GITHUB_OUTPUT"
+          echo "index digest: $first_digest (staging tags only; the release tags have not moved)"
 
       - name: Install cosign
-        if: inputs.push && (inputs.sign || inputs.sbom)
+        if: needs.plan.outputs.publish == 'true' && (inputs.sign || inputs.sbom)
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
       # A Rekor 409 ("an equivalent entry already exists") is not a failure by
@@ -1288,7 +1733,7 @@ jobs:
       # passes with the constraints below. Transient Rekor/Fulcio errors are
       # retried 4 times with a doubling backoff. Everything else is fatal.
       - name: Prepare the Rekor retry helper
-        if: inputs.push && (inputs.sign || inputs.sbom)
+        if: needs.plan.outputs.publish == 'true' && (inputs.sign || inputs.sbom)
         run: |
           set -euo pipefail
           cat > "$RUNNER_TEMP/rekor-run.sh" <<'HELPER'
@@ -1302,7 +1747,7 @@ jobs:
           }
 
           rekor_is_transient() {
-            grep -Eqi '\[(408|425|429|500|502|503|504)\]|context deadline exceeded|i/o timeout|timed out|connection reset|connection refused|temporarily unavailable|unexpected EOF|TLS handshake timeout' <<<"$1"
+            grep -Eqi '\[(408|425|429|5[0-9]{2})\]|context deadline exceeded|i/o timeout|timed out|connection reset|connection refused|temporarily unavailable|unexpected EOF|TLS handshake timeout' <<<"$1"
           }
 
           # Never an unconstrained verify: an empty regexp matches every identity.
@@ -1364,7 +1809,7 @@ jobs:
           chmod 700 "$RUNNER_TEMP/rekor-run.sh"
 
       - name: Sign the image (keyless)
-        if: inputs.push && inputs.sign
+        if: needs.plan.outputs.publish == 'true' && inputs.sign
         env:
           GHCR: ${{ steps.names.outputs.ghcr }}
           DOCKERHUB: ${{ steps.names.outputs.dockerhub }}
@@ -1383,7 +1828,7 @@ jobs:
           done
 
       - name: Generate the SBOM with syft
-        if: inputs.push && inputs.sbom
+        if: needs.plan.outputs.publish == 'true' && inputs.sbom
         uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
         with:
           image: ${{ steps.names.outputs.ghcr }}@${{ steps.index.outputs.digest }}
@@ -1396,7 +1841,7 @@ jobs:
           upload-release-assets: false
 
       - name: Attach the SBOM as a cosign attestation
-        if: inputs.push && inputs.sbom
+        if: needs.plan.outputs.publish == 'true' && inputs.sbom
         env:
           GHCR: ${{ steps.names.outputs.ghcr }}
           DOCKERHUB: ${{ steps.names.outputs.dockerhub }}
@@ -1416,7 +1861,7 @@ jobs:
           done
 
       - name: Record build provenance
-        if: inputs.push && inputs.provenance
+        if: needs.plan.outputs.publish == 'true' && inputs.provenance
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-name: ${{ steps.names.outputs.ghcr }}
@@ -1424,7 +1869,7 @@ jobs:
           push-to-registry: true
 
       - name: Verify the image before publishing the tags
-        if: inputs.push && (inputs.sign || inputs.sbom)
+        if: needs.plan.outputs.publish == 'true' && (inputs.sign || inputs.sbom)
         env:
           GHCR: ${{ steps.names.outputs.ghcr }}
           DOCKERHUB: ${{ steps.names.outputs.dockerhub }}
@@ -1469,10 +1914,32 @@ jobs:
           done
 
       # The only step that moves latest, the branch, semver and sha tags.
+      #
+      # What the step guarantees, and what it does not. A registry cannot
+      # write several tags in one step, so the step is bounded, not atomic.
+      # It moves one tag at a time, after recording the digest every tag holds
+      # now, and reads each tag back; every registry call is retried a bounded
+      # number of times when the failure is transient, and a write that returns
+      # an error is judged by reading the tag back, not by its exit status.
+      # Every digest a tag is moved to is already signed, attested and verified
+      # by the steps before it, and `latest` moves last. On a failure it
+      # restores a tag to its previous digest only while the tag still holds
+      # the digest this run wrote: a tag that holds anything else was changed
+      # by another writer and is left alone, and the step fails naming the tag
+      # and the digests. The restore is best effort: it needs the previous
+      # manifest to still exist, a restored digest is whatever the tag held
+      # and is not verified again by this workflow, and a tag that did not
+      # exist before cannot be deleted, so it may remain. If a restore fails
+      # or is refused, the step fails with a "rollback failed" error that names
+      # every tag and digest left behind. Runs that can write the same
+      # destination are serialized by the job's concurrency group, and a
+      # release tag ref moves the mutable tags only when it is the newest
+      # SemVer release.
       - name: Publish the release tags
-        if: inputs.push
+        if: needs.plan.outputs.publish == 'true'
         env:
           GHCR: ${{ steps.names.outputs.ghcr }}
+          HUB: ${{ steps.names.outputs.dockerhub }}
           DIGEST: ${{ steps.index.outputs.digest }}
           TAGS: ${{ steps.meta.outputs.tags }}
           SIGN: ${{ inputs.sign }}
@@ -1485,56 +1952,302 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          set -f
+          shopt -u nocasematch
+          export LC_ALL=C
+          digest_re='^sha256:[0-9a-f]{64}$'
+          semver_re='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+
+          # One bounded retry for every registry and API call: 4 attempts in
+          # all, waiting 5, 10 and 20 seconds. Only a transient failure is
+          # retried (HTTP 408, 425, 429 and every 5xx, a timeout, a reset
+          # connection). The output is left in REG_OUT and REG_ERR.
+          registry_transient() {
+            grep -Eqi '(^|[ :[(])(408|425|429|5[0-9]{2})( |]|\)|$)|context deadline exceeded|i/o timeout|timed out|connection reset|connection refused|temporarily unavailable|unexpected EOF|TLS handshake timeout' <<< "$1"
+          }
+          registry_retry() {
+            local n=1 rc errf delay
+            while :; do
+              rc=0
+              errf="$(mktemp)"
+              REG_OUT="$("$@" 2> "$errf")" || rc=$?
+              REG_ERR="$(< "$errf")"
+              rm -f "$errf"
+              if [ "$rc" -eq 0 ]; then return 0; fi
+              if registry_transient "$REG_ERR" && [ "$n" -lt 4 ]; then
+                delay=$(( ${REGISTRY_BACKOFF_SECONDS:-5} * (1 << (n - 1)) ))
+                echo "::warning title=registry retry::attempt ${n} of 4 of '$1 $2 $3' hit a transient error; retrying in ${delay}s" >&2
+                sleep "$delay"
+                n=$((n + 1))
+                continue
+              fi
+              return "$rc"
+            done
+          }
+
+          # SemVer 2.0.0 precedence: prints -1, 0 or 1 for $1 against $2
+          # (versions without the leading v; build metadata is ignored).
+          semver_cmp() {
+            local a="${1%%+*}" b="${2%%+*}" ac bc ap="" bp="" i x y xn yn
+            local -a an bn ai bi
+            ac="${a%%-*}"; if [ "$ac" != "$a" ]; then ap="${a#*-}"; fi
+            bc="${b%%-*}"; if [ "$bc" != "$b" ]; then bp="${b#*-}"; fi
+            IFS=. read -r -a an <<< "$ac"
+            IFS=. read -r -a bn <<< "$bc"
+            for i in 0 1 2; do
+              x="${an[i]}"; y="${bn[i]}"
+              if [ "${#x}" -gt "${#y}" ]; then echo 1; return; fi
+              if [ "${#x}" -lt "${#y}" ]; then echo -1; return; fi
+              if [[ $x > $y ]]; then echo 1; return; fi
+              if [[ $x < $y ]]; then echo -1; return; fi
+            done
+            if [ -z "$ap" ] && [ -z "$bp" ]; then echo 0; return; fi
+            if [ -z "$ap" ]; then echo 1; return; fi
+            if [ -z "$bp" ]; then echo -1; return; fi
+            IFS=. read -r -a ai <<< "$ap"
+            IFS=. read -r -a bi <<< "$bp"
+            for ((i = 0; ; i++)); do
+              if [ "$i" -ge "${#ai[@]}" ] || [ "$i" -ge "${#bi[@]}" ]; then
+                if [ "${#ai[@]}" -eq "${#bi[@]}" ]; then echo 0
+                elif [ "${#ai[@]}" -lt "${#bi[@]}" ]; then echo -1
+                else echo 1; fi
+                return
+              fi
+              x="${ai[i]}"; y="${bi[i]}"
+              xn=0; yn=0
+              if [[ $x =~ ^[0-9]+$ ]]; then xn=1; fi
+              if [[ $y =~ ^[0-9]+$ ]]; then yn=1; fi
+              if [ "$xn" = 1 ] && [ "$yn" = 1 ]; then
+                if [ "${#x}" -gt "${#y}" ]; then echo 1; return; fi
+                if [ "${#x}" -lt "${#y}" ]; then echo -1; return; fi
+              elif [ "$xn" = 1 ]; then echo -1; return
+              elif [ "$yn" = 1 ]; then echo 1; return
+              fi
+              if [[ $x > $y ]]; then echo 1; return; fi
+              if [[ $x < $y ]]; then echo -1; return; fi
+            done
+          }
+
           if [ "$ALLOW_UNSIGNED" != "true" ] \
             && { [ "$SIGN" != "true" ] || [ "$SBOM" != "true" ] || [ "$PROVENANCE" != "true" ]; }; then
             echo "::error title=unsigned publish::sign, sbom or provenance is off and allow-unsigned-publish is not true; the release tags were not moved"
             exit 1
           fi
+          [[ "$DIGEST" =~ $digest_re ]] || { echo "::error title=tags::no usable index digest; the release tags were not moved"; exit 1; }
           mapfile -t release_tags < <(printf '%s\n' "$TAGS" | sed '/^$/d')
           if [ "${#release_tags[@]}" -eq 0 ]; then
             echo "::error title=tags::no release tags to publish"
             exit 1
           fi
-          # A run on a branch moves the moving tags only if its commit is still
-          # the branch head. A stale run (an older commit, or a re-run) publishes
-          # its immutable sha- tags only and does not fail. Tag refs are unaffected.
-          # If the head cannot be read, nothing is moved and the job fails.
+
+          # Which tags this run may write. A branch run moves its tags only if
+          # its commit is still the branch head. A release tag ref moves the
+          # mutable tags (latest, major and minor, anything but the full
+          # version and the sha- tags) only when it is the newest SemVer
+          # release; a tag ref that is not a SemVer release has no order, so
+          # it publishes only its own tag name and the sha- tags. Everything
+          # skipped is announced. If the head or the tag list cannot be read,
+          # nothing is moved and the job fails.
           publish_tags=("${release_tags[@]}")
+          keep_immutable() {
+            local kept=() tag name
+            for tag in "${publish_tags[@]}"; do
+              name="${tag##*:}"
+              case "$name" in sha-* | "$1" | "v$1" | "$2") kept+=("$tag") ;; esac
+            done
+            publish_tags=("${kept[@]}")
+          }
           case "$REF" in
             refs/heads/*)
-              if ! head="$(gh api "repos/${REPOSITORY}/commits/${REF#refs/heads/}" --jq .sha)" \
-                || ! [[ "$head" =~ ^[0-9a-f]{40}$ ]]; then
+              if ! registry_retry gh api "repos/${REPOSITORY}/commits/${REF#refs/heads/}" --jq .sha \
+                || ! [[ "$REG_OUT" =~ ^[0-9a-f]{40}$ ]]; then
                 echo "::error title=branch head::could not read the head of ${REF#refs/heads/}; the release tags were not moved"
                 exit 1
               fi
-              if [ "$head" != "$WORKFLOW_SHA" ]; then
+              if [ "$REG_OUT" != "$WORKFLOW_SHA" ]; then
                 publish_tags=()
                 for tag in "${release_tags[@]}"; do
                   case "${tag##*:}" in sha-*) publish_tags+=("$tag") ;; esac
                 done
                 echo "::warning title=stale run::${WORKFLOW_SHA} is no longer the head of ${REF#refs/heads/}; only the immutable sha- tags are published, the moving tags were not moved"
               fi ;;
+            refs/tags/*)
+              ref_name="${REF#refs/tags/}"
+              version="${ref_name#v}"
+              if [[ "$version" =~ $semver_re ]] && [ "$ref_name" != "$version" ]; then
+                if ! registry_retry gh api --paginate "repos/${REPOSITORY}/git/matching-refs/tags/v" --jq '.[].ref'; then
+                  echo "::error title=release order::could not read the release tags of ${REPOSITORY}; the release tags were not moved"
+                  exit 1
+                fi
+                newer=""
+                while IFS= read -r existing; do
+                  existing="${existing#refs/tags/v}"
+                  [[ "$existing" =~ $semver_re ]] || continue
+                  # A stable release is ordered against stable releases only.
+                  if [[ "$version" != *-* && "$existing" == *-* ]]; then continue; fi
+                  if [ "$(semver_cmp "$existing" "$version")" = "1" ]; then newer="$existing"; break; fi
+                done <<< "$REG_OUT"
+                if [ -n "$newer" ]; then
+                  keep_immutable "${version%%+*}" "$ref_name"
+                  echo "::notice title=older release::v${newer} is newer than ${ref_name}; only the version and sha- tags are published, the moving tags (latest and the like) were not moved"
+                fi
+              else
+                keep_immutable "${version%%+*}" "$ref_name"
+                echo "::notice title=unordered tag::${ref_name} is not a vMAJOR.MINOR.PATCH release, so it has no order against other releases; only its own tag name and the sha- tags are published, the moving tags were not moved"
+              fi ;;
           esac
           if [ "${#publish_tags[@]}" -eq 0 ]; then
-            echo "::warning title=stale run::this run is stale and has no immutable tag to publish"
+            echo "::warning title=nothing to publish::this run has no tag it may write"
             exit 0
           fi
-          args=()
-          for tag in "${publish_tags[@]}"; do
-            args+=(--tag "$tag")
+
+          # Order: the immutable sha- tags, then the other tags, `latest` last.
+          # Every tag must belong to a registry that holds the staged index.
+          ordered=()
+          seen=" "
+          for pass in sha other latest; do
+            for tag in "${publish_tags[@]}"; do
+              name="${tag##*:}"
+              case "$pass:$name" in
+                sha:sha-* | latest:latest) ;;
+                other:sha-* | other:latest) continue ;;
+                other:*) ;;
+                *) continue ;;
+              esac
+              case "$seen" in *" $tag "*) continue ;; esac
+              seen="$seen$tag "
+              repo="${tag%:*}"
+              if [ "$repo" != "$GHCR" ] && { [ -z "$HUB" ] || [ "$repo" != "$HUB" ]; }; then
+                echo "::error title=tags::${tag} is not in a registry that holds the staged index; the release tags were not moved"
+                exit 1
+              fi
+              ordered+=("$tag")
+            done
           done
-          docker buildx imagetools create "${args[@]}" "${GHCR}@${DIGEST}"
-          for tag in "${publish_tags[@]}"; do
-            got="$(docker buildx imagetools inspect "$tag" --format '{{.Manifest.Digest}}')"
-            if [ "$got" != "$DIGEST" ]; then
-              echo "::error title=tags::${tag} points at ${got}, not at the signed ${DIGEST}"
+
+          # Prints the digest a reference resolves to, or "absent" when the
+          # registry says it does not exist. Any other failure is an error.
+          read_digest() {
+            local out rc=0
+            if registry_retry docker buildx imagetools inspect "$1" --format '{{.Manifest.Digest}}'; then
+              out="$(printf '%s' "$REG_OUT" | tr -d '[:space:]')"
+              [[ "$out" =~ $digest_re ]] || return 1
+              printf '%s' "$out"
+              return 0
+            else
+              rc=$?
+            fi
+            if [ "$rc" -ne 127 ] && grep -Eqi 'not found|manifest unknown|name unknown|404' <<< "$REG_ERR"; then
+              printf 'absent'
+              return 0
+            fi
+            return 1
+          }
+
+          # Before anything moves: the staged index is where it should be, and
+          # every tag's current digest is known. An unreadable tag stops the run
+          # with nothing moved, since it could not be restored.
+          declare -A prev=()
+          for repo in "$GHCR" ${HUB:+"$HUB"}; do
+            staged="$(read_digest "${repo}@${DIGEST}")" || staged="unreadable"
+            if [ "$staged" != "$DIGEST" ]; then
+              echo "::error title=tags::the staged index ${repo}@${DIGEST} reads back as '${staged}'; the release tags were not moved"
               exit 1
+            fi
+          done
+          for tag in "${ordered[@]}"; do
+            if ! now="$(read_digest "$tag")"; then
+              echo "::error title=tags::could not read the current digest of ${tag}; the release tags were not moved"
+              exit 1
+            fi
+            prev["$tag"]="$now"
+          done
+
+          touched=()
+          problem=""
+          for tag in "${ordered[@]}"; do
+            repo="${tag%:*}"
+            touched+=("$tag")
+            write_rc=0
+            registry_retry docker buildx imagetools create --tag "$tag" "${repo}@${DIGEST}" || write_rc=$?
+            # A write that returned an error may still have committed, so the
+            # tag is read back and judged by what it holds.
+            got="$(read_digest "$tag")" || got="unreadable"
+            if [ "$got" != "$DIGEST" ]; then
+              if [ "$write_rc" -ne 0 ] && [ "$got" = "${prev[$tag]}" ]; then
+                problem="writing ${tag} failed and the tag did not move"
+              else
+                problem="${tag} reads back as ${got}, not as the signed ${DIGEST}"
+              fi
+              break
+            fi
+            if [ "$write_rc" -ne 0 ]; then
+              echo "::notice title=write error::writing ${tag} returned an error but the tag reads back as ${DIGEST}"
             fi
             echo "published ${tag} -> ${DIGEST}"
           done
+          if [ -z "$problem" ]; then
+            # A second read of every tag: one that moved while the others were
+            # written is a failure too.
+            for tag in "${ordered[@]}"; do
+              got="$(read_digest "$tag")" || got="unreadable"
+              if [ "$got" != "$DIGEST" ]; then
+                problem="${tag} reads back as ${got} after the last write, not as ${DIGEST}"
+                break
+              fi
+            done
+          fi
+          if [ -z "$problem" ]; then
+            echo "all ${#ordered[@]} release tags resolve to ${DIGEST}"
+            exit 0
+          fi
+
+          # Best-effort restore, newest write first. A tag is written back
+          # only while it still holds the digest this run wrote; any other
+          # digest means another writer changed it, and it is left alone.
+          echo "::error title=tags::promotion failed: ${problem}; restoring the tags this run moved"
+          restored=()
+          failed=()
+          kept=()
+          for ((i = ${#touched[@]} - 1; i >= 0; i--)); do
+            tag="${touched[$i]}"
+            repo="${tag%:*}"
+            want="${prev[$tag]}"
+            cur="$(read_digest "$tag")" || cur="unreadable"
+            if [ "$want" = "absent" ]; then
+              # A registry tag cannot be deleted with these tools.
+              if [ "$cur" != "absent" ]; then kept+=("${tag} (new, now ${cur})"); fi
+              continue
+            fi
+            if [ "$cur" = "$want" ]; then continue; fi
+            if [ "$cur" != "$DIGEST" ]; then
+              failed+=("${tag} holds ${cur}, this run promoted ${DIGEST}, the recorded previous digest is ${want}; a concurrent change prevented a safe restore and nothing was written")
+              continue
+            fi
+            restore_rc=0
+            registry_retry docker buildx imagetools create --tag "$tag" "${repo}@${want}" || restore_rc=$?
+            cur="$(read_digest "$tag")" || cur="unreadable"
+            if [ "$cur" = "$want" ]; then
+              restored+=("${tag} -> ${want}")
+            else
+              failed+=("${tag} is ${cur}, was ${want}, this run promoted ${DIGEST} (the restore write ended with status ${restore_rc})")
+            fi
+          done
+          if [ "${#restored[@]}" -gt 0 ]; then
+            echo "restored: $(printf '%s; ' "${restored[@]}")"
+          fi
+          if [ "${#kept[@]}" -gt 0 ]; then
+            echo "::warning title=new tags::these tags did not exist before and cannot be deleted by this step: $(printf '%s; ' "${kept[@]}")"
+          fi
+          if [ "${#failed[@]}" -gt 0 ]; then
+            echo "::error title=rollback failed::the release failed (${problem}) and these tags could NOT be restored, so they were left behind: $(printf '%s; ' "${failed[@]}")"
+            exit 1
+          fi
+          echo "::error title=tags::the release failed (${problem}); the tags this run moved were restored and read back"
+          exit 1
 
       - name: Summary
-        if: inputs.push
+        if: needs.plan.outputs.publish == 'true'
         env:
           GHCR: ${{ steps.names.outputs.ghcr }}
           DIGEST: ${{ steps.index.outputs.digest }}
