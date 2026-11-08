@@ -2156,7 +2156,29 @@ jobs:
       doppler-project: ci
       doppler-config: ci
       doppler-identity-id: ${{ vars.DOPPLER_IDENTITY_ID }}
+  gate:
+    if: always()
+    needs: [security]
+    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/ci-gate.yml@<sha> # vX.Y.Z
+    permissions: {}
+    with:
+      needs-json: ${{ toJSON(needs) }}
 ```
+
+#### A security-only repository still needs a `CI green` gate
+
+`security.yml` has no gate job of its own, so a repository whose only GYST caller is the one above produces no single
+check that branch protection can require, and a merge there is not gated. Keep the `gate` job in the example: it calls
+[`ci-gate.yml`](#ci-gate) over `security`, and the check run is named `gate / CI green`. `if: always()` is what makes it
+run, and fail, when `security` failed; without it a red scan leaves the gate skipped, which branch protection reads as
+passed. A repository that also calls `python-ci.yml` or `bash-ci.yml` already has `ci / CI green`; list `security` in the
+`needs` of one gate job (`ci-gate.yml`) instead of adding a second gate, or require both checks.
+
+Then require it. Default-branch protection with the required check `gate / CI green` is a repository settings write, so it
+is a separate, approved step for each repository, not part of adding the caller. `scripts/audit_baseline.py` (the weekly
+audit) derives the `<job> / CI green` checks a caller produces, calls to `ci-gate.yml` included, and reports a protection
+that does not require them. A repository where protection makes no sense (an archive, a fork kept only to track upstream) gets
+its reason written down in the roll-out issue instead of being left unprotected without a word.
 
 Inputs of `security.yml`:
 
@@ -3207,6 +3229,7 @@ The tests are the contract, one file per thing they hold still:
 | `tests/test_python_support.py` | `.github/python-support.json` is the one list of supported CPython versions with their security-support end dates; `python-ci.yml`'s default matrix, `scripts/new-repo.sh`'s fallback and the README row equal it; every `python-version` input default is a listed version; no listed version is past its end date (the clock is a parameter, so the tests name the date); the tool-lock newest minor and oldest floors come from it, with a dated grace entry for 3.10 |
 | `tests/test_tool_locks.py` | No `run:` step of any workflow or composite action runs a `pip install` without `--require-hashes`; `security.yml` carries `.github/requirements/*.txt` verbatim; every lock line has a hash; the Snyk install step, run under bash with a recording `pip`, installs a hashed lock under `--require-hashes` and refuses an unhashed one without calling pip |
 | `tests/test_advanced_security.py` | `advanced-security`: the validation job runs under bash against 26 invalid values (case variants, empty, whitespace, unicode lookalikes, substitution strings), each failing with a clear error and nothing executed; it always runs and has no checkout; no job has `needs`, so the scans always run; the job conditions skip only on `false` (every other value, invalid ones included, runs the scans and fails the check); the SARIF uploads are gated, the scans are not; the summary note runs for real; job count is pinned |
+| `tests/test_security_caller_gate.py` | The security caller example ends in a `gate` job over `ci-gate.yml` (`if: always()`, no token); a failed, cancelled or skipped scan is a red gate; the audit derives `gate / CI green` from a `ci-gate.yml` call and nothing from `security.yml` alone |
 | `tests/test_security_jobs.py` | The Semgrep job's defaults and its content-driven config; the gitleaks job as a pinned binary: no licence, no Doppler, no `id-token`, the sha256 checked before extraction, the `gitleaks-scope` input (`tests/test_gitleaks_scope.py`: a decision table over event and input, fail closed on any other value, no expression in `run:`), SARIF under category `gitleaks`, and a canary step that plants an AWS-shaped key in a scratch repository and requires exit 1 before the real scan runs (the test also fetches the pinned release, checks the hash, and runs that canary for real; it skips only when offline) |
 | `tests/test_pre_commit_hook.py` | `.githooks/pre-commit` pins the same gitleaks version and sha256 as `security.yml`; run in a scratch repository it refuses a planted AWS-shaped key naming the rule and file but not the secret, passes a clean commit, honours `.gitleaks.toml`, refuses on a broken config or a download that is not the pinned release, and warns and allows offline (the cases that need the binary download it through the hook and skip when offline); `new-repo.sh` writes it byte for byte, executable, and adds the `core.hooksPath` line to a README's Developing section once |
 | `tests/test_wiki.py` | Every reusable workflow has a page and its generated table follows the YAML; regenerating is a no-op and `--check` catches a stale tree; every link resolves and every cited test exists; every workflow, script, composite action, audit check, test file and baseline file is mentioned somewhere in the wiki; `wiki.yml` is the self-call it should be |

@@ -37,6 +37,15 @@ Migration, pick one: drop the commit id from the entry (`file:rule:line`, also s
 and rule in `.gitleaks.toml` with a reason (read from the base commit on a pull request); or set `gitleaks-scope: all-refs`.
 README has the details under "Migrating `.gitleaksignore` entries".
 
+### Changed: the documented security-only caller carries a `CI green` gate (issue #337)
+
+The README `Security` caller example now ends in a `gate` job that calls `ci-gate.yml` over `security` (`if: always()`,
+`permissions: {}`), so a repository whose only GYST caller is `security.yml` produces a check, `gate / CI green`, that branch
+protection can require. `scripts/audit_baseline.py` now also derives `<job> / CI green` from a job that calls `ci-gate.yml`, so
+a caller that already uses `ci-gate.yml` is expected to require that check too (before, only `*-ci.yml` calls counted). Nothing
+in `security.yml` changes; adding the job and requiring the check is the caller's step, and a protection write on a repository
+is a separate approval.
+
 ### New: `container-release.yml` `skip-secret-scan-in-site-packages` (issue #327)
 
 Opt-in, default `false`: a caller that sets nothing sees no change after it re-pins, and the Trivy step is byte for byte what it was.

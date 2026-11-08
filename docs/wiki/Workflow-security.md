@@ -34,6 +34,12 @@ A pull request's tree scan can only match a `file:rule:line` ignore entry, not t
 (`commit:file:rule:line`) gitleaks writes for a history finding; the job warns about such entries by line number, file and rule
 (never the commit or a value) and the README's "Migrating `.gitleaksignore` entries" says how to move them.
 
+## A security-only repository
+
+`security.yml` has no gate job. A repository whose only GYST caller is this one adds a `gate` job that calls
+[ci-gate](Workflow-ci-gate.md) over `security` (`if: always()`, `permissions: {}`), and requires `gate / CI green` in branch
+protection. The README's Security caller example has it.
+
 ## The same scan before a commit
 
 `.githooks/pre-commit` runs the gitleaks scan on the *staged* changes, so a secret is caught before it is in history. It uses
