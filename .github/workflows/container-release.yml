@@ -485,22 +485,27 @@ jobs:
           DOCKERHUB_REPOSITORY: ${{ inputs.dockerhub-repository }}
         run: |
           set -euo pipefail
+          # These values reach $GITHUB_OUTPUT and a concurrency group: a
+          # newline or any character outside this set is refused before
+          # anything is written.
+          name_re='^[A-Za-z0-9._/-]+$'
+          for pair in "repository:${REPOSITORY}" "image-name:${IMAGE_NAME:-}" "dockerhub-repository:${DOCKERHUB_REPOSITORY:-}"; do
+            label="${pair%%:*}"
+            val="${pair#*:}"
+            if [ -n "$val" ] && ! [[ "$val" =~ $name_re ]]; then
+              echo "::error title=${label}::${label} may contain only letters, digits, . _ - and /, on one line"
+              exit 1
+            fi
+          done
           repo_name="${REPOSITORY#*/}"
           repo_name="$(printf '%s' "$repo_name" | tr '[:upper:]' '[:lower:]')"
           owner="$(printf '%s' "${REPOSITORY%%/*}" | tr '[:upper:]' '[:lower:]')"
+          image="$(printf '%s' "${IMAGE_NAME:-$repo_name}" | tr '[:upper:]' '[:lower:]')"
           echo "ghcr=ghcr.io/${owner}/${IMAGE_NAME:-$repo_name}" >> "$GITHUB_OUTPUT"
-          # The publish queue is per concrete destination. With Docker Hub on,
-          # the destination is the Hub repository: its namespace comes from the
-          # Doppler credentials, which are not known before the job starts, so
-          # the key is the Hub repository name (resolved as the merge job
-          # resolves it) and callers that share a Hub repository share a queue
-          # whatever their GHCR image. With Docker Hub off it is the GHCR image.
-          if [ "${DOCKERHUB:-}" = "true" ]; then
-            hub_repo="$(printf '%s' "${DOCKERHUB_REPOSITORY:-$repo_name}" | tr '[:upper:]' '[:lower:]')"
-            echo "serialize=hub-${hub_repo}" >> "$GITHUB_OUTPUT"
-          else
-            echo "serialize=ghcr-${owner}/${IMAGE_NAME:-$repo_name}" >> "$GITHUB_OUTPUT"
-          fi
+          # The publish queue always names the GHCR image: every run writes it,
+          # whether or not Docker Hub is on and whichever Hub repository it
+          # uses, so runs that write one GHCR image share one queue.
+          echo "serialize=ghcr-${owner}/${image}" >> "$GITHUB_OUTPUT"
           # arm64 and amd64 build natively on their own runner; anything else
           # falls back to an amd64 runner with QEMU.
           matrix='[]'
@@ -1278,18 +1283,20 @@ jobs:
     # tokens that sign and attest.
     if: needs.plan.outputs.publish == 'true' && github.event_name != 'pull_request'
     needs: [plan, build]
-    # One publish per destination at a time, whatever the ref, and a running
-    # one is never cancelled halfway through signing. The key comes from the
-    # plan: the Docker Hub repository when Hub is on (callers that share a Hub
-    # repository share a queue, whatever their GHCR image), otherwise the GHCR
-    # image. Both are caller inputs, never event data. A job has one group, so
-    # with Hub on, two callers that share a GHCR image but not a Hub repository
-    # are not queued behind each other. The group serializes runs in the order
-    # they reach this job, not in commit order; the "Publish the release tags"
-    # step re-checks the ref before each moving tag, so a stale run does not
-    # move a branch's tags nor an older release the mutable tags. GitHub keeps one pending run
-    # per group, so a pending run is replaced by a newer pending run of the
-    # same destination; re-run the replaced one.
+    # One publish per GHCR image at a time, whatever the ref and whether or
+    # not Docker Hub is on, and a running one is never cancelled halfway
+    # through signing. The key comes from the plan and always names the GHCR
+    # image, which every run writes; it is a caller input, never event data.
+    # A job has one group, so Docker Hub is not in the key: two callers with
+    # different GHCR images that share one Hub repository are not queued
+    # behind each other (the Hub namespace is also unknown before the job
+    # starts). Their Hub writes are covered only by the compare-before-write
+    # checks and read-backs in the publish step. The group serializes runs in
+    # the order they reach this job, not in commit order; the publish step
+    # re-checks the ref before each moving tag and once after the last, so a
+    # stale run does not leave a branch's or an older release's mutable tags.
+    # GitHub keeps one pending run per group, so a pending run is replaced by
+    # a newer pending run of the same image; re-run the replaced one.
     concurrency:
       group: container-release-${{ needs.plan.outputs.serialize }}
       cancel-in-progress: false
@@ -2280,6 +2287,19 @@ jobs:
             echo "::warning title=stale run::${problem}; only the immutable tags were published, the moving tags were not moved"
             exit 0
           fi
+          if [ -z "$problem" ] && [ "$moving_written" = 1 ]; then
+            # Nothing re-checks the ref after the last moving write unless this
+            # does: the ref may have moved between the lookup before that write
+            # and the write itself. A run that is no longer the newest is rolled
+            # back and fails.
+            check_rc=0
+            check_newest || check_rc=$?
+            if [ "$check_rc" -eq 1 ]; then
+              problem="${ORDER_MSG} after the last moving tag was written"
+            elif [ "$check_rc" -eq 2 ]; then
+              problem="a newer ref (${NEWER}) appeared while the last moving tag was written, so this run is no longer the newest"
+            fi
+          fi
           if [ -z "$problem" ]; then
             # A second read of every tag: one that moved while the others were
             # written is a failure too.
@@ -2321,9 +2341,13 @@ jobs:
             # The registry has no conditional write (no compare-and-swap on a
             # tag), so the check above and the write below cannot be one atomic
             # step. The window is cut to the one read between them: read the tag
-            # again and write only if it still holds this run's digest. A change
-            # inside that last window cannot be detected here; it is caught by
-            # the read-back after the write, which fails the step loudly.
+            # again and write only if it still holds this run's digest. It
+            # cannot be closed: a writer that changes the tag after that read
+            # and before the write is overwritten, and nothing can detect it,
+            # because the read-back after the write sees only this run's
+            # restore. What narrows it is the concurrency group (writers of
+            # one GHCR image queue) and the immediate re-read; the step fails
+            # loudly whenever the restore does not read back as expected.
             again="$(read_digest "$tag")" || again="unreadable"
             if [ "$again" != "$DIGEST" ]; then
               failed+=("${tag} holds ${again}, this run promoted ${DIGEST}, the recorded previous digest is ${want}; it changed between the check and the restore (a concurrent change) and nothing was written")

@@ -1158,13 +1158,21 @@ before the run; this workflow does not verify it again, so a tag that is restore
 before cannot be deleted, so it may remain on the new digest; the step names it.
 If a restore is refused or fails, the step fails and names every tag and digest
 left behind. Between a write and a restore a tag holds the new, verified digest;
-the step does not stop another writer with registry access.
+the step does not stop another writer with registry access. A registry has no
+compare-and-swap on a tag, so the last read before a restore write cannot be made
+atomic with it: this window cannot be closed, only narrowed by the group and the
+immediate re-read.
 
-**One publish per destination, and release order.** Runs that publish to the
-same destination (the GHCR image, and the Docker Hub repository when it is on)
-run one at a time, whatever their ref, and a running one is never cancelled
-midway. The group key is the destination, from the plan job's image name and the
-caller's `dockerhub-repository`, never the ref, the commit or other event data.
+**One publish per GHCR image, and release order.** Runs that publish the same
+GHCR image run one at a time, whether or not Docker Hub is on, whatever their
+ref, and a running one is never cancelled midway. The group key is the GHCR
+image, from the plan job's repository owner and image name, never the ref, the
+commit or other event data. A job has one group, so Docker Hub is not in the key:
+callers with different GHCR images that share a Hub repository are not queued
+behind each other. The image name and `dockerhub-repository` may contain only
+letters, digits, `.`, `_`, `-` and `/`, on one line; anything else fails the plan.
+The ref is checked again before each moving tag and once after the last one; a run
+that is no longer the newest is rolled back and fails.
 It serializes runs in the order they reach the job, not in commit order, so the
 tag step also checks order itself. On a branch ref it reads the head through the
 API, and a run whose commit is no longer the head publishes only its immutable
@@ -1178,7 +1186,7 @@ notice. A tag ref that is not a SemVer release has no order, so it publishes onl
 its own tag name and the `sha-` tags. If the head or the tag list cannot be read,
 the job fails and nothing moves. The version and `sha-` tags of an older release
 are still published. The tradeoff: GitHub keeps one pending run per group, so a
-pending run is replaced by a newer pending run for the same destination; re-run
+pending run is replaced by a newer pending run for the same image; re-run
 the replaced run. A backport such as `v1.9.1` after `v2.0.0` therefore does not
 move `1.9` or `1`. The `merge` job never runs on `pull_request` or
 `pull_request_target`.

@@ -1031,7 +1031,7 @@ def test_a_run_at_the_branch_head_moves_every_tag(tmp_path, stub):
     assert done.returncode == 0, done.stdout + done.stderr
     assert create_order(stub) == [G_SHA, G_MAIN, G_LATEST]
     head = f"gh api repos/{REPO}/commits/main --jq .sha"
-    assert calls(stub, "gh api") == [head] * 3, "once at the start, then right before main and before latest"
+    assert calls(stub, "gh api") == [head] * 4, "at the start, before main, before latest, and after the last moving write"
 
 
 def test_a_stale_run_publishes_only_the_immutable_tag_and_does_not_fail(tmp_path, stub):
@@ -1223,25 +1223,62 @@ def test_the_publish_group_is_the_plan_destination_key_and_nothing_else():
     assert jobs(load(RELEASE))["plan"]["outputs"]["serialize"] == "${{ steps.plan.outputs.serialize }}"
 
 
-def test_two_callers_that_resolve_to_one_hub_destination_share_a_group(tmp_path):
-    a = plan_group(tmp_path, **hub("owner/app-a", image="ghcr-a", hub_repository="shared"))
-    b = plan_group(tmp_path, **hub("owner/app-b", image="ghcr-b", hub_repository="shared"))
-    assert a == b, "different GHCR images, one Docker Hub repository: one queue"
+def test_hub_on_and_hub_off_callers_of_one_ghcr_image_share_a_group(tmp_path):
+    off = plan_group(tmp_path, **hub("o/app", image="shared", on="false"))
+    on = plan_group(tmp_path, **hub("o/app", image="shared", hub_repository="shared"))
+    assert on == off, "both write ghcr.io/o/shared, so both are one queue"
 
 
-def test_a_defaulted_hub_repository_resolves_like_the_explicit_one(tmp_path):
-    defaulted = plan_group(tmp_path, **hub("one/Svc", image="x"))
-    explicit = plan_group(tmp_path, **hub("two/other", image="y", hub_repository="svc"))
-    assert defaulted == explicit
+def test_two_hub_repositories_of_one_ghcr_image_share_a_group(tmp_path):
+    a = plan_group(tmp_path, **hub("o/app", image="shared", hub_repository="one"))
+    b = plan_group(tmp_path, **hub("o/other", image="shared", hub_repository="two"))
+    assert a == b
 
 
-def test_different_destinations_do_not_share_a_group(tmp_path):
+def test_the_key_is_case_insensitive_like_the_registry_name(tmp_path):
+    assert plan_group(tmp_path, **hub("O/App", image="Shared", on="false")) == plan_group(
+        tmp_path, **hub("o/app", image="shared", on="false")
+    )
+
+
+def test_different_ghcr_images_do_not_share_a_group(tmp_path):
     base = plan_group(tmp_path, **hub("o/a", hub_repository="one"))
-    assert plan_group(tmp_path, **hub("o/a", hub_repository="two")) != base
-    ghcr_a = plan_group(tmp_path, **hub("o/a", on="false"))
-    ghcr_b = plan_group(tmp_path, **hub("o/b", on="false"))
-    assert ghcr_a != ghcr_b and ghcr_a != base
-    assert plan_group(tmp_path, **hub("o/a", on="false", hub_repository="ignored")) == ghcr_a
+    assert plan_group(tmp_path, **hub("o/b", hub_repository="one")) != base
+    assert plan_group(tmp_path, **hub("o/a", image="x", hub_repository="one")) != base
+    assert plan_group(tmp_path, **hub("p/a", hub_repository="one")) != base
+
+
+def run_plan(tmp_path: Path, **env: str) -> tuple[subprocess.CompletedProcess, str]:
+    plan = [s for s in steps_of(jobs(load(RELEASE))["plan"]) if s.get("name") == "Plan the matrix"][0]
+    out = tmp_path / "plan-hostile-out"
+    out.write_text("")
+    base = {"PATH": os.environ["PATH"], "PLATFORMS": "linux/amd64", "GITHUB_OUTPUT": str(out)}
+    done = subprocess.run(["bash", "-c", plan["run"]], env={**base, **env}, capture_output=True, text=True, timeout=TIMEOUT)
+    return done, out.read_text()
+
+
+HOSTILE = [
+    ("DOCKERHUB_REPOSITORY", "harmless\nserialize=ghcr-owner/victim"),
+    ("IMAGE_NAME", "img\nserialize=ghcr-owner/victim"),
+    ("IMAGE_NAME", "img\n"),
+    ("REPOSITORY", "o/r\nserialize=x"),
+    ("IMAGE_NAME", "a b"),
+    ("IMAGE_NAME", "a;b"),
+    ("DOCKERHUB_REPOSITORY", "a$(x)"),
+]
+
+
+@pytest.mark.parametrize("field,value", HOSTILE)
+def test_a_name_with_a_newline_or_unsafe_character_is_refused_before_any_output(tmp_path, field, value):
+    done, written = run_plan(tmp_path, **{**hub("o/r", on="false"), field: value})
+    assert done.returncode != 0 and "::error" in done.stdout, done.stdout
+    assert written == "", "nothing reached $GITHUB_OUTPUT"
+
+
+def test_ordinary_names_still_pass_the_input_check(tmp_path):
+    done, written = run_plan(tmp_path, **hub("Own/Repo", image="grp/app-1.x_y", hub_repository="hub-repo"))
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert written.count("serialize=") == 1
 
 
 # --- the newest-ref check is repeated right before each mutable tag write --------------------------
@@ -1319,3 +1356,45 @@ def test_the_release_list_that_cannot_be_read_before_a_moving_write_fails_and_wr
     assert done.returncode != 0 and "could not read the release tags" in done.stdout
     order = create_order(stub)
     assert f"{R}:1.9" not in order and f"{R}:latest" not in order
+
+
+def test_a_branch_that_moves_after_the_lookup_before_the_final_write_is_rolled_back_and_fails(tmp_path, stub):
+    # Lookups: 1 start, 2 before main, 3 before latest, 4 after the last write. The head moves right after
+    # lookup 3 answered, so the latest write goes through and only the check after it can see the change.
+    registry(tmp_path, stub)
+    (stub / "gh.out").write_text(SHA + "\n")
+    (stub / "gh.out.4").write_text("f" * 40 + "\n")
+    done = publish(tmp_path, stub, tags=BRANCH_TAGS, REF="refs/heads/main")
+    assert done.returncode != 0, done.stdout
+    assert "no longer the newest" in done.stdout
+    state = reg_state(stub)["tags"]
+    assert state[G_LATEST] == OLD and state[G_MAIN] == OLD, "the moving tags were put back"
+    assert create_order(stub).count(G_LATEST) == 2, "written, then restored"
+
+
+def test_a_release_that_appears_after_the_final_write_is_rolled_back_and_fails(tmp_path, stub):
+    registry(tmp_path, stub, tags={})
+    (stub / "gh.tags").write_text("refs/tags/v1.9.0\n")
+    # Lookups: 1 start, 2-4 before 1.9, 1 and latest, 5 after the last write.
+    (stub / "gh.tags.5").write_text("refs/tags/v1.9.0\nrefs/tags/v2.0.0\n")
+    done = publish(tmp_path, stub, tags=RELEASE_TAGS, REF="refs/tags/v1.9.0")
+    assert done.returncode != 0 and "no longer the newest" in done.stdout
+
+
+def test_an_unreadable_ref_after_the_final_write_fails_and_rolls_back(tmp_path, stub):
+    registry(tmp_path, stub)
+    (stub / "gh.out").write_text(SHA + "\n")
+    (stub / "gh.out.4").write_text("not-a-sha\n")
+    done = publish(tmp_path, stub, tags=BRANCH_TAGS, REF="refs/heads/main")
+    assert done.returncode != 0 and "after the last moving tag was written" in done.stdout
+    assert reg_state(stub)["tags"][G_LATEST] == OLD
+
+
+def test_the_restore_states_the_window_it_cannot_close():
+    flat = WORKFLOW_TEXT.replace("\n          # ", " ")
+    assert "cannot be closed" in flat and "nothing can detect it" in flat
+
+
+def test_the_restore_window_residual_is_documented_in_the_wiki():
+    wiki = (RELEASE.parents[2] / "docs/wiki/Workflow-container-release.md").read_text()
+    assert "compare-and-swap" in wiki and "cannot be closed" in wiki
