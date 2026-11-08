@@ -226,11 +226,14 @@ jobs:
           import time
           import urllib.error
           import urllib.request
+          from collections.abc import Callable
           from pathlib import Path
-          from typing import Callable
           from urllib.parse import urlsplit
 
-          USES = re.compile(r"^\s*(?:-\s+)?uses:\s*['\"]?([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)(/[^\s@'\"#]*)?@([0-9a-f]{40})['\"]?(?P<rest>.*)$")
+          USES = re.compile(
+              r"^\s*(?:-\s+)?uses:\s*['\"]?([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)(/[^\s@'\"#]*)?"
+              r"@([0-9a-f]{40})['\"]?(?P<rest>.*)$"
+          )
           VERSION = re.compile(r"^\s*#\s*(v?\d+(?:\.\d+){0,3}(?:[-+][0-9A-Za-z.-]+)?)(?:\s|$)")
           COMMIT = re.compile(r"[0-9a-f]{40}")
           REQUEST_TIMEOUT = 10
