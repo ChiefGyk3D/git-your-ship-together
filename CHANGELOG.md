@@ -5,6 +5,15 @@ name what a caller sees after that.
 
 ## Unreleased
 
+### Added: `wait-ci` ends early on a merge conflict, exit 7 (issue #352)
+
+With `--pr`, `scripts/wait-ci.sh` (and the `wait-ci` action) now reads the pull request's `mergeable` and `mergeable_state` on every
+poll and again at the re-read after green. `mergeable: false` or state `dirty` ends the wait at once with the new exit code `7`
+(`result` is `conflict`), naming the base branch and its head SHA, instead of waiting out the timeout or failing at merge time.
+`mergeable: null` (GitHub still computing) is unknown and re-polled; `behind` is a printed note, not a failure. No existing exit code or
+green criterion changes, and a conflicting pull request is never reported green or merged. Without `--pr` nothing changes.
+Tests: `tests/test_wait_ci.py`.
+
 ### Fixed: the `ci-gate` composite action could not be loaded by a runner (issue #331)
 
 **The `.github/actions/ci-gate` composite action in v1.32.0 and v1.33.0 is unusable.** (It is not the reusable workflow

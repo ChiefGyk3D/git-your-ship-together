@@ -205,6 +205,7 @@ def protection_response(st, kind):
 FAKE_GH = r"""#!@PYTHON@
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -251,6 +252,11 @@ if argv[:1] == ["api"]:
         if st.get("head_warns"):
             sys.stderr.write("warning: a new gh is available\n")
         emit(body)
+        sys.exit(0)
+    if re.search(r"/repos/[^/]+/[^/]+/branches/[^/]+$", path):
+        st["branch_reads"] = st.get("branch_reads", 0) + 1
+        emit({"commit": {"sha": st.get("base_head", "d" * 40)}})
+        save()
         sys.exit(0)
     if "/rules/branches/" in path or "/protection/required_status_checks" in path:
         code, body = protection_response(st, "rules" if "/rules/branches/" in path else "classic")
@@ -419,6 +425,9 @@ class World:
 
                 if re.fullmatch(r"/api/v3/repos/[^/]+/[^/]+/pulls/\d+", url.path):
                     return finish(*pulls_response(st))
+                if re.fullmatch(r"/api/v3/repos/[^/]+/[^/]+/branches/[^/]+", url.path):
+                    st["branch_reads"] = st.get("branch_reads", 0) + 1
+                    return finish(200, {"commit": {"sha": st.get("base_head", "d" * 40)}})
                 if re.fullmatch(r"/api/v3/repos/[^/]+/[^/]+/rules/branches/[^/]+", url.path):
                     return finish(*protection_response(st, "rules"))
                 if re.fullmatch(
@@ -1553,6 +1562,105 @@ def test_merged_and_head_come_from_one_response(world):
     )
 
 
+# --- mergeability (issue #352) ---------------------------------------------------------------------------
+
+D = "d" * 40
+
+
+def pr_body(mergeable, state, head=A):
+    return {
+        "merged": False,
+        "head": {"sha": head},
+        "merge_commit_sha": None,
+        "base": {"ref": "main", "sha": D},
+        "mergeable": mergeable,
+        "mergeable_state": state,
+    }
+
+
+@ENGINES
+def test_conflicting_at_start_is_exit_7_naming_the_base_head(world, engine):
+    w = world(checks={A: [[running("CI green")]]}, pulls_script_repeat=pr_body(False, "dirty"))
+    p = w.run("--repo", SLUG, "--pr", "7", *FAST)
+    assert p.returncode == 7, shown(p)
+    assert "conflict" in p.stdout and "main" in p.stdout and D in p.stdout, shown(p)
+    assert w.outputs()["result"] == "conflict" and w.outputs()["merged"] == "false"
+    assert w.merges() == []
+
+
+def test_conflict_with_green_checks_is_never_green_or_merged(world):
+    w = world(checks={A: [GATE]}, pulls_script_repeat=pr_body(False, "dirty"))
+    p = w.run("--repo", SLUG, "--pr", "7", "--merge", *FAST)
+    assert p.returncode == 7, shown(p)
+    assert "verified" not in p.stdout
+    assert w.merges() == []
+
+
+def test_conflict_appearing_mid_wait_ends_the_wait_early(world):
+    clean = pr_body(True, "clean")
+    w = world(
+        checks={A: [[running("CI green")]]},
+        pulls_script=[clean, clean, clean],
+        pulls_script_repeat=pr_body(False, "dirty"),
+    )
+    p = w.run("--repo", SLUG, "--pr", "7", *FAST)
+    assert p.returncode == 7, shown(p)
+    assert w.load()["check_polls"] == 2, "two polls saw it clean; the third ended the wait, not the timeout"
+    assert "timeout" not in p.stdout
+
+
+def test_conflict_appearing_at_the_reread_after_green_is_exit_7(world):
+    clean = pr_body(True, "clean")
+    w = world(checks={A: [GATE]}, pulls_script=[clean, clean], pulls_script_repeat=pr_body(False, "dirty"))
+    p = w.run("--repo", SLUG, "--pr", "7", "--merge", *FAST)
+    assert p.returncode == 7, shown(p)
+    assert w.merges() == []
+
+
+@pytest.mark.parametrize("flag", [{"mergeable": False, "state": "unknown"}, {"mergeable": None, "state": "dirty"}])
+def test_either_signal_alone_is_a_conflict(world, flag):
+    w = world(checks={A: [[running("CI green")]]}, pulls_script_repeat=pr_body(flag["mergeable"], flag["state"]))
+    assert w.run("--repo", SLUG, "--pr", "7", *FAST).returncode == 7
+
+
+@ENGINES
+def test_null_then_clean_is_unknown_then_green(world, engine):
+    w = world(
+        checks={A: [[running("CI green")], GATE]},
+        pulls_script=[pr_body(None, "unknown"), pr_body(None, "unknown")],
+        pulls_script_repeat=pr_body(True, "clean"),
+    )
+    p = w.run("--repo", SLUG, "--pr", "7", *FAST)
+    assert p.returncode == 0, shown(p)
+    assert "conflict" not in p.stdout
+
+
+def test_null_forever_is_never_a_conflict_it_times_out(world):
+    w = world(checks={A: [[running("CI green")]]}, pulls_script_repeat=pr_body(None, "unknown"))
+    p = w.run("--repo", SLUG, "--pr", "7", *FAST)
+    assert p.returncode == 2, shown(p)
+
+
+def test_behind_is_a_note_not_a_failure(world):
+    w = world(checks={A: [GATE]}, pulls_script_repeat=pr_body(True, "behind"))
+    p = w.run("--repo", SLUG, "--pr", "7", *FAST)
+    assert p.returncode == 0, shown(p)
+    assert "behind" in p.stdout and p.stdout.count("is behind") == 1
+
+
+def test_without_pr_mergeability_is_not_read(world):
+    w = world(checks={A: [GATE]})
+    p = w.run("--repo", SLUG, "--sha", A, *FAST)
+    assert p.returncode == 0, shown(p)
+    assert not [c for c in w.calls() if "/pulls/" in c or "/branches/" in c]
+
+
+def test_a_malformed_mergeable_value_is_unknown_not_a_conflict(world):
+    body = pr_body("false-ish", "weird state!")
+    w = world(checks={A: [GATE]}, pulls_script_repeat=body)
+    assert w.run("--repo", SLUG, "--pr", "7", *FAST).returncode == 0
+
+
 # --- base64 must be canonical ---------------------------------------------------------------------------
 
 SPELLINGS = {
@@ -2468,7 +2576,7 @@ def test_the_action_takes_require_check_one_per_line(world):
 
 def test_the_page_documents_every_exit_code_and_input():
     text = PAGE.read_text()
-    for code in ("0", "1", "2", "3", "4", "5", "6", "64"):
+    for code in ("0", "1", "2", "3", "4", "5", "6", "7", "64"):
         assert re.search(rf"^\| `{code}` \|", text, re.M), f"exit code {code} is not in the page's table"
     for name in action()["inputs"]:
         assert f"`{name}`" in text, f"input {name} is not documented"
@@ -2477,7 +2585,7 @@ def test_the_page_documents_every_exit_code_and_input():
 
 def test_the_script_header_and_page_agree_on_the_exit_codes():
     header = {m.group(1) for m in re.finditer(r"^#\s+(\d+)\s{2,}", SCRIPT.read_text(), re.M)}
-    assert header == {"0", "1", "2", "3", "4", "5", "6", "64"}
+    assert header == {"0", "1", "2", "3", "4", "5", "6", "7", "64"}
 
 
 def test_the_action_is_listed_in_the_readme_and_repository_map():
