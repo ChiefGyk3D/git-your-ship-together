@@ -5,7 +5,22 @@ name what a caller sees after that.
 
 ## Unreleased
 
-Nothing yet.
+### New: opt-in CI speed-ups, `test-matrix`, `xdist` and the docs-only fast path (issue #331)
+
+All opt-in; a caller that sets nothing sees no change after it re-pins (re-pinning downstream repositories is separate work).
+The one visible difference for a `tofu-ci.yml` caller with `test: true` is an extra small job, `test directories`, that lists
+the legs; the `test` job keeps its name.
+
+- **`tofu-ci.yml` `test-matrix`** (default `false`). With `test`, `tofu test` runs as one job per directory (`fail-fast: false`)
+  instead of every directory in turn. `ci-green` still reports one result and now treats a skipped `test` or `test-dirs` as a
+  failure when `test` was asked for; a failed or cancelled leg already made `test` fail or cancel.
+- **`python-ci.yml` `xdist`, `xdist-workers`, `xdist-version`** (default off, `auto`, `3.8.0`). Installs `pytest-xdist` and sets
+  `PYTEST_ADDOPTS=-n <workers>` for the `test-command` step only, so a command that chains scripts before pytest is unchanged.
+- **`.github/actions/classify-changes` and `.github/actions/ci-gate`.** A pull request that changes only the caller's docs-only
+  paths leaves a named job out on purpose, and the caller's `CI green` counts that skip as a pass and every other skip as a
+  failure. The changed files come from the API and anything unconfirmed runs the job. Rules and threat notes:
+  [Docs-only fast path and parallel CI](docs/wiki/Docs-only-fast-path.md). Scripts: `scripts/classify_changes.py`,
+  `scripts/ci_gate.py`. Issue #330's static-site workflow should call the same actions.
 
 ## v1.31.0 (2026-11-07)
 

@@ -52,6 +52,18 @@ on:
         description: Shell that runs the test suite.
         type: string
         default: pytest
+      xdist:
+        description: Run the test job's pytest in parallel with pytest-xdist. Installs `pytest-xdist` after `install-command` and sets `PYTEST_ADDOPTS=-n <xdist-workers>` for the `test-command` step, so it reaches every `pytest` in the command and nothing else, whatever else the command chains (scripts, checks) and however pytest is spelled (`pytest`, `python -m pytest`, `python -I -m pytest`). Only the test job; the distro job runs the command as written. Off by default, so a caller that sets nothing is unchanged. Tests must not share state (a fixed port, one file path) to run under it.
+        type: boolean
+        default: false
+      xdist-workers:
+        description: Worker count with `xdist` - `auto` (one per CPU), `logical` (one per logical CPU) or a whole number. Anything else fails the job.
+        type: string
+        default: auto
+      xdist-version:
+        description: pytest-xdist release to install with `xdist`, pinned so a new release cannot change a run.
+        type: string
+        default: "3.8.0"
       coverage-file:
         description: Coverage report path uploaded as an artifact when present.
         type: string
@@ -795,9 +807,30 @@ jobs:
         shell: bash
         run: bash -eo pipefail -c "$COMMAND"
 
+      - name: Install pytest-xdist
+        if: inputs.xdist
+        env:
+          WORKERS: ${{ inputs.xdist-workers }}
+          VERSION: ${{ inputs.xdist-version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! [[ "$WORKERS" =~ ^(auto|logical|[1-9][0-9]*)$ ]]; then
+            echo "::error::xdist-workers must be auto, logical or a whole number"
+            exit 1
+          fi
+          if ! [[ "$VERSION" =~ ^[0-9]+(\.[0-9]+)*$ ]]; then
+            echo "::error::xdist-version must be a plain release number such as 3.8.0"
+            exit 1
+          fi
+          python -m pip install "pytest-xdist==$VERSION"
+
       - name: Run tests
         env:
           COMMAND: ${{ inputs.test-command }}
+          # pytest reads this itself, so `-n` reaches each pytest in the command
+          # and no other program; empty when xdist is off.
+          PYTEST_ADDOPTS: ${{ inputs.xdist && format('-n {0}', inputs.xdist-workers) || '' }}
         shell: bash
         run: bash -eo pipefail -c "$COMMAND"
 
