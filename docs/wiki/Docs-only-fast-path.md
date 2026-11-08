@@ -97,8 +97,10 @@ jobs:
 **The `needs` input.** `ci-gate` takes the calling job's `needs` as the input `needs`, and the caller supplies it with
 `needs: ${{ toJSON(needs) }}` in its own `with:` block, as above. The `needs` context exists in the caller's job and not inside
 an action, so the input has no default; the action fails with a clear message when it is empty, not JSON, or not a non-empty
-JSON object. **v1.32.0's `ci-gate` is unusable:** its manifest put an expression over `needs` in the input's description, which
-a runner evaluates when it loads the manifest, so the job died in Set up job. Use v1.32.1 or later. A caller that already
+JSON object. **The `ci-gate` action in v1.32.0 and v1.33.0 is unusable:** its manifest put an expression over `needs` in the
+input's description, which a runner evaluates when it loads the manifest, so the job died in Set up job. Use v1.33.1 or later.
+This is the composite action `.github/actions/ci-gate`, called as a step; the reusable workflow `ci-gate.yml`
+([ci-gate](Workflow-ci-gate.md)), called as a job, is a different thing and is unaffected. A caller that already
 passes `needs` as an input, as above, changes nothing but the pin. Do not write `${{ }}` in any description of an action's
 manifest; `tests/test_action_manifests.py` refuses it.
 
