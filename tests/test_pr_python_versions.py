@@ -84,7 +84,7 @@ def test_oldest_and_newest_is_accepted():
 
 @pytest.mark.parametrize(
     "pr",
-    ["not json", '"3.11"', "[]", '["3.99"]', '[3.11]', '["3.11", "3.11"]', '{"a": 1}'],
+    ["not json", '"3.11"', "[]", '["3.99"]', "[3.11]", '["3.11", "3.11"]', '{"a": 1}'],
 )
 def test_a_bad_list_is_rejected(pr):
     result = run_validation("pull_request", pr)
