@@ -5,6 +5,23 @@ name what a caller sees after that.
 
 ## Unreleased
 
+### Changed: this repository's `ci.yml` skips jobs a docs-only change cannot affect (issue #307)
+
+Only this repository's own CI changes; no reusable workflow and no input a caller uses.
+
+- A new `changes` job runs the `classify-changes` action over `docs/**`, `tests/**` and `*.md`. Every fixture job (all but
+  `actionlint`, `zizmor`, the test suite and `CI green`) now needs it and is left out on a pull request that changes only
+  those paths. Anything else (a path under `.github/`, `scripts/`, `fixture/`, a requirements file), a push, a schedule, a
+  manual run, a moved head and any doubt is `docs-only=false` and runs everything, as before.
+- `CI green` is now the `ci-gate` action instead of an inline `grep` for `failure|cancelled`. A skipped job used to count as a
+  pass whatever the reason; now it counts only when `changes` succeeded with `docs-only=true`, or (for the jobs that already
+  skipped on a fork's pull request) when the run is a fork's pull request. Any other skip, a failure, a cancellation or a job
+  dropped from `needs` fails.
+- `ci-gate` (action and `scripts/ci_gate.py`) gained two optional inputs, `fork-skippable-jobs` and `fork-pull-request`. Unset,
+  it behaves exactly as before.
+- `tests/test_path_aware_gating.py` holds the gated jobs, the gate's `skippable-jobs`, `required-jobs` and the fork list
+  together.
+
 ### New: `container-release.yml` `skip-secret-scan-in-site-packages` (issue #327)
 
 Opt-in, default `false`: a caller that sets nothing sees no change after it re-pins, and the Trivy step is byte for byte what it was.

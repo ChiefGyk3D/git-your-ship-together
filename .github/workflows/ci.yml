@@ -19,6 +19,40 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Which jobs this change can affect. The classify-changes action (the one callers use) reads the pull request's
+  # changed files from the API and says docs-only=true only when every path is documentation or a test file: a
+  # path under .github/, scripts/, fixture/, an action, a requirements file or anything else makes it false, and so
+  # do a push, a schedule, a manual run, a moved head and any doubt. The jobs that need `changes` leave the run on
+  # a docs-only change; actionlint, zizmor and the test suite never do (the suite reads tests/). `CI green` counts
+  # such a skip as a pass only through this job's explicit result (.github/actions/ci-gate, scripts/ci_gate.py); a
+  # skip for any other reason fails it. The rules and the threat notes: docs/wiki/Docs-only-fast-path.md.
+  changes:
+    name: changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read  # the changed-file list, which a fork's token can read
+    outputs:
+      docs-only: ${{ steps.c.outputs.docs-only }}
+    steps:
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - id: c
+        uses: ./.github/actions/classify-changes # zizmor: ignore[self-repository]
+        with:
+          # None of the fixture jobs reads docs/, tests/ or a root Markdown file. The suite does read tests/, and
+          # it is never skipped.
+          docs-only-patterns: |
+            docs/**
+            tests/**
+            *.md
+
   actionlint:
     name: actionlint
     runs-on: ubuntu-latest
@@ -102,6 +136,8 @@ jobs:
   # on every job but the coverage upload, which never runs on a pull request.
   fixture-ci:
     name: fixture
+    needs: changes
+    if: needs.changes.outputs.docs-only != 'true'
     # `$/.github/workflows/...` is the form zizmor asks for; actionlint still
     # rejects it (see security-self.yml).
     uses: ./.github/workflows/python-ci.yml # zizmor: ignore[self-repository]
@@ -151,6 +187,8 @@ jobs:
   # already run actionlint and zizmor over these files.
   fixture-bash:
     name: fixture shell
+    needs: changes
+    if: needs.changes.outputs.docs-only != 'true'
     uses: ./.github/workflows/bash-ci.yml # zizmor: ignore[self-repository]
     permissions:
       contents: read
@@ -179,6 +217,8 @@ jobs:
   # run red.
   fixture-fuzz:
     name: fixture fuzz
+    needs: changes
+    if: needs.changes.outputs.docs-only != 'true'
     uses: ./.github/workflows/python-fuzz.yml # zizmor: ignore[self-repository]
     permissions:
       contents: read
@@ -195,7 +235,8 @@ jobs:
   # list, so the build's hosts are measured here.
   fixture-package:
     name: fixture package
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    needs: changes
+    if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && needs.changes.outputs.docs-only != 'true'
     uses: ./.github/workflows/python-package-release.yml # zizmor: ignore[self-repository]
     permissions:
       contents: write  # the github-release job declares it for the publishing path it never takes here
@@ -217,7 +258,8 @@ jobs:
   # nothing, so what is measured here is the workflow's own overhead.
   fixture-artifact:
     name: fixture artifact
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    needs: changes
+    if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && needs.changes.outputs.docs-only != 'true'
     uses: ./.github/workflows/artifact-release.yml # zizmor: ignore[self-repository]
     permissions:
       contents: write  # the publish job declares it for the path it never takes here
@@ -239,6 +281,8 @@ jobs:
   # is the tool downloads and Trivy's checks bundle.
   fixture-tofu:
     name: fixture tofu
+    needs: changes
+    if: needs.changes.outputs.docs-only != 'true'
     uses: ./.github/workflows/tofu-ci.yml # zizmor: ignore[self-repository]
     permissions:
       contents: read
@@ -256,6 +300,8 @@ jobs:
   # and nothing else. Block mode with the default list.
   fixture-arduino:
     name: fixture firmware
+    needs: changes
+    if: needs.changes.outputs.docs-only != 'true'
     uses: ./.github/workflows/arduino-ci.yml # zizmor: ignore[self-repository]
     permissions:
       contents: read
@@ -270,7 +316,8 @@ jobs:
   # deploy job declares, which deploy: false skips.
   fixture-pages:
     name: fixture docs pages
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    needs: changes
+    if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && needs.changes.outputs.docs-only != 'true'
     uses: ./.github/workflows/docs-pages.yml # zizmor: ignore[self-repository]
     permissions:
       contents: read
@@ -289,7 +336,8 @@ jobs:
   # publish job declares for the path publish: false skips.
   fixture-wiki:
     name: fixture wiki
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    needs: changes
+    if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && needs.changes.outputs.docs-only != 'true'
     uses: ./.github/workflows/wiki-publish.yml # zizmor: ignore[self-repository]
     permissions:
       contents: write  # the publish job declares it for the path it never takes here
@@ -308,6 +356,8 @@ jobs:
   # end-to-end against a real board needs the maintainer's App (README).
   fixture-project-sync:
     name: fixture project sync
+    needs: changes
+    if: needs.changes.outputs.docs-only != 'true'
     uses: ./.github/workflows/project-sync.yml # zizmor: ignore[self-repository]
     permissions:
       contents: read
@@ -325,7 +375,8 @@ jobs:
   # fork's pull request, whose token could not carry them, skips the job.
   fixture-release:
     name: fixture release
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    needs: changes
+    if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && needs.changes.outputs.docs-only != 'true'
     uses: ./.github/workflows/python-docker-release.yml # zizmor: ignore[self-repository]
     permissions:
       contents: read
@@ -348,6 +399,8 @@ jobs:
   # check is the one star-daemon's own release runs on the built image.
   fixture-verify:
     name: fixture verify
+    needs: changes
+    if: needs.changes.outputs.docs-only != 'true'
     uses: ./.github/workflows/verify-published.yml # zizmor: ignore[self-repository]
     permissions:
       contents: read  # gh attestation verify reads with the workflow's own token
@@ -365,6 +418,8 @@ jobs:
   # the next job, against an SBOM that carries one.
   fixture-rescan:
     name: fixture rescan
+    needs: changes
+    if: needs.changes.outputs.docs-only != 'true'
     uses: ./.github/workflows/verify-published.yml # zizmor: ignore[self-repository]
     permissions:
       contents: read  # the call's own read grant
@@ -383,6 +438,8 @@ jobs:
   # failing job here would leave every run red.
   fixture-drift:
     name: fixture drift
+    needs: changes
+    if: needs.changes.outputs.docs-only != 'true'
     uses: ./.github/workflows/vendored-drift.yml # zizmor: ignore[self-repository]
     permissions:
       contents: read
@@ -396,6 +453,8 @@ jobs:
   # tests/test_base_image_digest.py and tests/test_base_image_workflow.py against fake docker and trivy.
   fixture-base-image:
     name: fixture base image
+    needs: changes
+    if: needs.changes.outputs.docs-only != 'true'
     uses: ./.github/workflows/base-image-digest.yml # zizmor: ignore[self-repository]
     permissions:
       contents: read
@@ -410,6 +469,8 @@ jobs:
   # tests/test_ci_gate.py; a deliberately failing check here would leave every run red.
   fixture-parallel:
     name: fixture parallel
+    needs: changes
+    if: needs.changes.outputs.docs-only != 'true'
     uses: ./.github/workflows/parallel-ci.yml # zizmor: ignore[self-repository]
     permissions:
       contents: read
@@ -445,8 +506,8 @@ jobs:
   # asked for is proved by tests/test_ci_gate.py against the script it inlines.
   fixture-gate:
     name: fixture gate
-    needs: [fixture-parallel]
-    if: always()
+    needs: [changes, fixture-parallel]
+    if: always() && needs.changes.outputs.docs-only != 'true'
     uses: ./.github/workflows/ci-gate.yml # zizmor: ignore[self-repository]
     permissions: {}
     with:
@@ -490,7 +551,8 @@ jobs:
   # would leave every run red.
   fixture-dast:
     name: fixture dast
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    needs: changes
+    if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && needs.changes.outputs.docs-only != 'true'
     uses: ./.github/workflows/dast.yml # zizmor: ignore[self-repository]
     permissions:
       contents: read
@@ -544,8 +606,8 @@ jobs:
   # artifact is in this run, so no token beyond the default is involved.
   fixture-sbom:
     name: fixture sbom
-    needs: fixture-package
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    needs: [changes, fixture-package]
+    if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && needs.changes.outputs.docs-only != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -581,7 +643,8 @@ jobs:
   # repositories in tests/test_threat_model.py.
   fixture-threat-model:
     name: fixture threat model
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    needs: changes
+    if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && needs.changes.outputs.docs-only != 'true'
     uses: ./.github/workflows/threat-model.yml # zizmor: ignore[self-repository]
     permissions:
       contents: read
@@ -597,7 +660,8 @@ jobs:
   # report (no alert is opened on this repository), but the caller still grants what the called workflow declares.
   fixture-agent-scan:
     name: fixture agent scan
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    needs: changes
+    if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && needs.changes.outputs.docs-only != 'true'
     uses: ./.github/workflows/agent-scan.yml # zizmor: ignore[self-repository]
     permissions:
       contents: read
@@ -612,7 +676,8 @@ jobs:
 
   fixture-agent-scan-planted:
     name: fixture agent scan (planted)
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    needs: changes
+    if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && needs.changes.outputs.docs-only != 'true'
     uses: ./.github/workflows/agent-scan.yml # zizmor: ignore[self-repository]
     permissions:
       contents: read
@@ -626,7 +691,8 @@ jobs:
 
   agent-scan-control:
     name: agent scan control
-    needs: fixture-agent-scan-planted
+    if: needs.changes.outputs.docs-only != 'true'
+    needs: [changes, fixture-agent-scan-planted]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}
@@ -657,21 +723,29 @@ jobs:
   ci-green:
     name: CI green
     if: always()
-    needs: [actionlint, zizmor, test, fixture-ci, fixture-bash, fixture-fuzz, fixture-tofu, fixture-arduino, fixture-package, fixture-sbom, fixture-artifact, fixture-pages, fixture-wiki, fixture-release, fixture-verify, fixture-rescan, fixture-drift, fixture-base-image, fixture-parallel, fixture-gate, rescan-live, fixture-project-sync, fixture-dast, dast-live, fixture-threat-model, fixture-agent-scan, fixture-agent-scan-planted, agent-scan-control]
+    needs: [changes, actionlint, zizmor, test, fixture-ci, fixture-bash, fixture-fuzz, fixture-package, fixture-artifact, fixture-tofu, fixture-arduino, fixture-pages, fixture-wiki, fixture-project-sync, fixture-release, fixture-verify, fixture-rescan, fixture-drift, fixture-base-image, fixture-parallel, fixture-gate, rescan-live, fixture-dast, dast-live, fixture-sbom, fixture-threat-model, fixture-agent-scan, fixture-agent-scan-planted, agent-scan-control]
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    permissions: {}
+    permissions:
+      contents: read  # the local ci-gate action is read from the checkout
     steps:
       - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
         with:
           egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Every needed job must be `success`. Two skips count, each by an explicit reason and only for the jobs named:
+      # `changes` said docs-only=true, or this is a pull request from a fork and the job needs a token a fork does
+      # not get. A skip for any other reason (an upstream failure, a mistyped `if:`, a `changes` that failed or said
+      # false), a failure, a cancellation or a job dropped from `needs` fails.
       - name: Every job passed
-        env:
-          RESULTS: ${{ toJSON(needs) }}
-        run: |
-          set -euo pipefail
-          echo "$RESULTS"
-          if echo "$RESULTS" | grep -Eq '"result": "(failure|cancelled)"'; then
-            echo "::error::a needed job failed"
-            exit 1
-          fi
+        uses: ./.github/actions/ci-gate # zizmor: ignore[self-repository]
+        with:
+          needs: ${{ toJSON(needs) }}
+          required-jobs: changes actionlint zizmor test fixture-ci fixture-bash fixture-fuzz fixture-package fixture-artifact fixture-tofu fixture-arduino fixture-pages fixture-wiki fixture-project-sync fixture-release fixture-verify fixture-rescan fixture-drift fixture-base-image fixture-parallel fixture-gate rescan-live fixture-dast dast-live fixture-sbom fixture-threat-model fixture-agent-scan fixture-agent-scan-planted agent-scan-control
+          skippable-jobs: fixture-ci fixture-bash fixture-fuzz fixture-package fixture-artifact fixture-tofu fixture-arduino fixture-pages fixture-wiki fixture-project-sync fixture-release fixture-verify fixture-rescan fixture-drift fixture-base-image fixture-parallel fixture-gate fixture-dast fixture-sbom fixture-threat-model fixture-agent-scan fixture-agent-scan-planted agent-scan-control
+          classifier-job: changes
+          fork-skippable-jobs: fixture-package fixture-artifact fixture-pages fixture-wiki fixture-release fixture-dast fixture-sbom fixture-threat-model fixture-agent-scan fixture-agent-scan-planted agent-scan-control
+          fork-pull-request: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}

@@ -138,6 +138,28 @@ route and what closes it.
 Not covered: a repository that does not require review on `.github/`. A pull request that rewrites `ci.yml` to skip a job
 needs a reviewer to see it, with or without this feature.
 
+## The fork excuse in `ci-gate`
+
+A job that needs a token a fork's pull request does not get (a publishing job's grants, a SARIF upload) is skipped on a fork
+by its own `if:`. Two optional inputs of `ci-gate` let the caller's `CI green` accept exactly that and nothing wider:
+`fork-skippable-jobs` names the jobs, and `fork-pull-request` is the caller's own expression,
+`${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}`. A named job
+may be `skipped` only when that is the string `true`; a failure or a cancellation still fails, and a job that is not named
+still fails when skipped. Unset, the action behaves as before.
+
+## This repository's own `ci.yml` (issues #307, #308)
+
+`ci.yml` runs about a hundred jobs. It uses the same two actions: a `changes` job runs `classify-changes` with
+`docs/**`, `tests/**` and `*.md`, and every job except `actionlint`, `zizmor`, `test` (the suite reads `tests/`), `changes`,
+`CI green` and the two live jobs `rescan-live` and `dast-live` carry `needs: changes` and `if: needs.changes.outputs.docs-only != 'true'`. `CI green` is the `ci-gate`
+action over all of them, with `skippable-jobs` set to exactly those jobs, `required-jobs` set to every job, and the
+fork excuse above for the jobs that already skipped on a fork. `tests/test_path_aware_gating.py` holds the three lists
+together: add a job to `ci.yml` without gating it and the test names it.
+
+Docs-only means every changed path is documentation or a test file nothing else reads. A change under `.github/`,
+`scripts/`, `fixture/`, `.github/actions/`, a requirements file, or any path the patterns do not name runs everything, as does a
+push to `main`, the nightly schedule and a manual run (the classifier is `false` for anything but a pull request).
+
 ## Where it runs
 
 `scripts/classify_changes.py` and `scripts/ci_gate.py` are the whole logic; the actions only pass the environment. Both are

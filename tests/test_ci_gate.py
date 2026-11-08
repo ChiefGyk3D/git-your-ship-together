@@ -200,5 +200,7 @@ def test_the_standalone_gate_has_no_default_excuse():
 def test_the_ci_gate_fixture_runs_always_so_it_can_judge_a_red_job():
     jobs = yaml.safe_load((WORKFLOWS / "ci.yml").read_text())["jobs"]
     gate = jobs["fixture-gate"]
-    assert gate["if"] == "always()" and gate["needs"] == ["fixture-parallel"]
+    # `changes` joins its needs (#307): the fixture is left out with the job it judges on a docs-only change.
+    assert gate["if"] == "always() && needs.changes.outputs.docs-only != 'true'"
+    assert gate["needs"] == ["changes", "fixture-parallel"]
     assert gate["with"] == {"needs-json": "${{ toJSON(needs) }}"}
