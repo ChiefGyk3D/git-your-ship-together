@@ -5,6 +5,10 @@ name what a caller sees after that.
 
 ## Unreleased
 
+### Changed: `container-release.yml` refusal notice names only the inputs that apply (issue #329)
+
+When `push: true` is refused, the warning annotation and job summary now follow the failed predicate instead of always naming both inputs: a pull-request event says no input can enable publishing; an event outside the allow-list names `allowed-publish-events`; a ref that is not a release tag names `require-tag-ref: false`; both failing names both. Message text only: the publish decision, outputs and inputs are unchanged.
+
 ### Fixed: the `ci-gate` composite action could not be loaded by a runner (issue #331)
 
 **The `.github/actions/ci-gate` composite action in v1.32.0 and v1.33.0 is unusable.** (It is not the reusable workflow

@@ -395,23 +395,44 @@ jobs:
           done
           ok=false
           reason=""
+          pr_event=false
+          event_blocked=false
+          tag_blocked=false
           case "$EVENT" in
-            pull_request | pull_request_target | "") reason="pull requests never publish (event '$EVENT')" ;;
+            pull_request | pull_request_target | "")
+              pr_event=true
+              reason="pull requests never publish (event '$EVENT')"
+              ;;
             *)
               case ",$ALLOWED_EVENTS," in ",*,") ok=true ;; *",$EVENT,"*) ok=true ;; esac
-              if [ "$ok" != true ]; then reason="event '$EVENT' is not in allowed-publish-events ('$ALLOWED_EVENTS')"; fi
+              if [ "$ok" != true ]; then
+                event_blocked=true
+                reason="event '$EVENT' is not in allowed-publish-events ('$ALLOWED_EVENTS')"
+              fi
               ;;
           esac
-          if [ "$ok" = true ] && [ "$REQUIRE_TAG" != "false" ] && ! is_semver_release_tag "$REF"; then
+          if [ "$pr_event" != true ] && [ "$REQUIRE_TAG" != "false" ] && ! is_semver_release_tag "$REF"; then
+            tag_blocked=true
             ok=false
-            reason="ref '$REF' is not a vMAJOR.MINOR.PATCH release tag (require-tag-ref is true)"
+            tag_reason="ref '$REF' is not a vMAJOR.MINOR.PATCH release tag (require-tag-ref is true)"
+            if [ -n "$reason" ]; then reason="$reason; and $tag_reason"; else reason="$tag_reason"; fi
           fi
           publish=false
           if [ "$PUSH" = "true" ]; then
             if [ "$ok" = true ]; then
               publish=true
             else
-              msg="push is true but this run did NOT publish: $reason. (event '$EVENT', ref '$REF'.) Publishing needs the event in allowed-publish-events and, while require-tag-ref is true, a vMAJOR.MINOR.PATCH tag ref. To publish from branches, schedules or manual runs, set allowed-publish-events (for example push,schedule,workflow_dispatch) and require-tag-ref: false in the caller. This run only built and scanned."
+              # Name only the inputs that would change this outcome.
+              if [ "$pr_event" = true ]; then
+                fix="No input can enable publishing from a pull request; publish from a push, tag or other non-pull-request event instead."
+              elif [ "$event_blocked" = true ] && [ "$tag_blocked" = true ]; then
+                fix="To publish from this run, add the event to allowed-publish-events (for example push,schedule,workflow_dispatch) and set require-tag-ref: false in the caller."
+              elif [ "$event_blocked" = true ]; then
+                fix="To publish from this event, add it to allowed-publish-events (for example push,schedule,workflow_dispatch) in the caller."
+              else
+                fix="To publish from a branch or other non-release ref, set require-tag-ref: false in the caller."
+              fi
+              msg="push is true but this run did NOT publish: $reason. (event '$EVENT', ref '$REF'.) $fix This run only built and scanned."
               echo "::warning title=publish skipped::$msg"
               { echo "### Publish skipped: this run did NOT publish"; echo; echo "$msg"; } >> "$GITHUB_STEP_SUMMARY"
             fi
