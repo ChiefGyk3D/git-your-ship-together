@@ -484,9 +484,42 @@ def test_a_push_true_caller_in_a_refused_context_gets_a_prominent_warning_and_do
     summary = (tmp_path / "summary").read_text()
     for text in (out, summary):
         assert reason in text
-        assert "allowed-publish-events" in text and "require-tag-ref" in text
     assert "### Publish skipped" in summary and "did NOT publish" in summary
     assert f"event '{env['EVENT']}'" in summary and f"ref '{env['REF']}'" in summary
+
+
+def _fix_hint(text):
+    """The remediation sentence of the notice: what follows the event/ref parenthesis."""
+    return text.split(".) ", 1)[1].split(" This run only built", 1)[0]
+
+
+FIX_CASES = [
+    # (env, names allowed-publish-events, names require-tag-ref)
+    ({"EVENT": "pull_request", "REF": "refs/pull/1/merge"}, False, False),
+    ({"EVENT": "pull_request_target", "REF": "refs/heads/main"}, False, False),
+    ({"EVENT": "pull_request", "REF": "refs/heads/main", "ALLOWED_EVENTS": "*", "REQUIRE_TAG": "false"}, False, False),
+    ({"EVENT": "schedule", "REF": "refs/tags/v1.2.3"}, True, False),
+    ({"EVENT": "workflow_dispatch", "REF": "refs/tags/v1.2.3"}, True, False),
+    ({"EVENT": "push", "REF": "refs/heads/main"}, False, True),
+    ({"EVENT": "schedule", "REF": "refs/heads/main", "ALLOWED_EVENTS": "schedule"}, False, True),
+    ({"EVENT": "schedule", "REF": "refs/heads/main"}, True, True),
+    ({"EVENT": "workflow_dispatch", "REF": "refs/tags/v1.2"}, True, True),
+]
+
+
+@pytest.mark.parametrize(
+    "env,names_events,names_tag", FIX_CASES, ids=lambda v: case_id(v) if isinstance(v, dict) else str(v)
+)
+def test_the_refusal_notice_names_only_the_inputs_that_apply(tmp_path, env, names_events, names_tag):
+    code, publish, out = decide(tmp_path, **env)
+    assert code == 0 and publish == "false"
+    summary = (tmp_path / "summary").read_text()
+    for text in (out, summary):
+        hint = _fix_hint(text)
+        assert ("allowed-publish-events" in hint) is names_events, hint
+        assert ("require-tag-ref" in hint) is names_tag, hint
+        if not names_events and not names_tag:
+            assert "pull request" in hint
 
 
 def test_the_allowed_direction_publishes_and_says_nothing_about_a_skip(tmp_path):
