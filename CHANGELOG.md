@@ -5,7 +5,26 @@ name what a caller sees after that.
 
 ## Unreleased
 
-Nothing yet.
+### New: `parallel-ci.yml` and `ci-gate.yml` (issue #330)
+
+Two new reusable workflows. Nothing existing changes: a caller sees them only by adding a job that calls one, after it
+re-pins.
+
+- **`parallel-ci.yml`.** One build, then caller-supplied checks as separate jobs that share it, ending in one `CI green`
+  gate. A caller passes `build-command`, `build-output-path` and a `jobs` JSON list (`name`, `command`, `timeout`, `areas`,
+  `pip-cache`, `tools`, `build`); the build is uploaded once as a one-day artifact named with the run attempt, and each check
+  leg downloads it. `areas` path rules (plain `git diff --no-renames --name-only`) skip the checks a change cannot affect and
+  **fail closed**: a push, a schedule, a manual run, an empty or unreadable diff, an unmatched path and an odd byte in a name
+  all run everything. The gate fails on any failed, cancelled or unexplained-skipped job; the only skip it accepts is the
+  whole `checks` job when the path rules selected nothing. Pip and tool-download caches are keyed on pin files the caller names
+  and are used only under `block`. Tool setup runs in the same shell as the command that needs it; nothing is written to
+  `$GITHUB_PATH` or `$GITHUB_ENV`. Every input is validated and reaches a script through the environment. Every job holds
+  `contents: read` and no secret. No `continue-on-error`. Scripts: `scripts/parallel_ci_plan.py`, `scripts/parallel_ci_gate.py`.
+- **`ci-gate.yml`.** The gate on its own, for a caller that runs several workflows side by side: `CI green` over a
+  `needs-json` it is handed, with `deliberate-skips` as the only excuse for a skip. No token.
+- Both run against `fixture/` in `ci.yml` and are in the `CI green` gate. `tests/test_egress_canary.py`'s expression
+  evaluator learned the two forms the new cache conditions use (a non-empty `needs` output, a matrix flag); the rule it pins
+  (no cache in an audit job) is unchanged.
 
 ## v1.32.0 (2026-11-08)
 

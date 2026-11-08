@@ -60,7 +60,7 @@ Read in this order. Each one is short.
 
 ## What is in the repository
 
-Twenty reusable workflows and one composite action:
+Twenty-three reusable workflows and six composite actions:
 
 | File | What it does |
 |---|---|
@@ -74,6 +74,8 @@ Twenty reusable workflows and one composite action:
 | `.github/workflows/verify-published.yml` | Consumer-side verification of a published image (cosign signature, SPDX SBOM attestation and build provenance verified from outside, then each platform pulled and checked) or of a GitHub release's assets (checksums, provenance, SBOMs). Read-only, no secret, no token beyond the default one |
 | `.github/workflows/vendored-drift.yml` | Opt-in drift check for a file vendored from another repository: each lock file (path, source repository, commit, sha256) must match the file's hash, and an optional generator run with `--check` must agree. Read-only, no secret |
 | `.github/workflows/base-image-digest.yml` | Opt-in scheduled check of a Dockerfile's `FROM image:tag@sha256:...` pins: resolves today's digest of each tag and fails when the pinned digest has a fixable HIGH or CRITICAL finding (Trivy, container-release.yml's flags) that the current digest does not. Read-only, no secret, no issue write |
+| `.github/workflows/parallel-ci.yml` | One build, then caller-supplied checks as separate jobs that share it: a matrix over a `jobs` list, each leg downloading the one-day build artifact, with path rules that skip checks a change cannot affect (failing closed: a push, a schedule, an unmatched path or an unreadable diff runs everything), pip and tool-download caches keyed on pin files, and one `CI green` gate that counts only deliberate skips as passed. Holds no token |
+| `.github/workflows/ci-gate.yml` | The gate on its own: `CI green` over the jobs a caller hands it (`parallel-ci.yml`, `bash-ci.yml`, `security.yml`, a job of its own), red on anything that failed, was cancelled or was skipped without being named. Holds no token |
 | `.github/workflows/python-package-release.yml` | Build the sdist and wheel, `twine check`, refuse a tag that disagrees with the packaged version, smoke-test from the wheel, then publish to the GitHub release with SHA256SUMS and build provenance; PyPI is published from a job in the caller's own workflow with a download step and the pypa publish action as direct steps (Trusted Publishing cannot use a reusable workflow). No secret anywhere |
 | `.github/workflows/artifact-release.yml` | For a file rather than an image (a `.deb`, a firmware binary, a bundle): build it with a command, then publish it to the GitHub release with SHA256SUMS, a keyless cosign signature bundle per file and build provenance. No secret anywhere |
 | `.github/workflows/docs-pages.yml` | Build a static documentation site with a command you supply (MkDocs strict by default) on every pull request; upload it and deploy it to GitHub Pages from the default branch only. The two Pages writes sit on the deploy job alone |
@@ -1391,6 +1393,151 @@ Inputs of `base-image-digest.yml`:
 | `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `block`, the measured list, empty | harden-runner; add the registry of a base image that is not on Docker Hub or GHCR |
 | `egress-policy-secretless` | `block` | harden-runner policy for this job, which holds no secret; exactly `audit` or `block` |
 | `timeout-minutes` | `20` | Job timeout |
+
+### Parallel CI
+
+`parallel-ci.yml` is for a project whose CI is one long job: a build, then a dozen checks and test scripts one after another.
+It runs the build once, then every check as its own job, so the wall time is the build plus the slowest check. Nothing is
+dropped: each command you used to run is a line in the `jobs` list.
+
+```yaml
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/parallel-ci.yml@<sha> # vX.Y.Z
+    permissions:
+      contents: read
+    with:
+      setup-command: scripts/install-tool.sh            # runs in the same shell as each command that sets "tools": true
+      build-command: hugo --minify --gc
+      build-output-path: public
+      areas: '{"docs": ["docs/*.md", "README.md"], "site": ["*"]}'
+      jobs: |
+        [
+          {"name": "output checks", "command": "scripts/check-output.sh public"},
+          {"name": "site tests", "command": "scripts/test-site.sh", "tools": true, "timeout": 25},
+          {"name": "size budget", "command": "scripts/check-budget.sh public", "areas": ["site"]}
+        ]
+```
+
+The check run is `ci / CI green`, the same shape as the other CI workflows. A caller that also runs `bash-ci.yml` or
+`security.yml` and wants one gate over all of it calls `ci-gate.yml` (below).
+
+**The jobs.** `changes` validates every input and decides which checks this change needs; `build` runs `build-command` and
+uploads `build-output-path` (hidden files included; an executable bit does not survive an artifact) as a one-day artifact named
+`<artifact-name>-<run attempt>`, so a re-run cannot collide; `checks` is a matrix over the selected `jobs`, each leg downloading
+the build to the same path and running its command; `ci-green` is the gate. A job listed with `"build": false` skips the
+download and starts at once.
+
+**The `jobs` list.** One object per check: `name` (required; letters, digits, space and `._()-`), `command` (required),
+`timeout` (minutes, default 15), `areas` (area names; absent or empty means always run), `pip-cache` (restore pip's download
+cache), `tools` (run `setup-command` first) and `build` (default true). A typo in a key, a duplicate name, an area `areas`
+does not define or an empty list fails the first job, before anything builds.
+
+**Which checks run.** `areas` maps an area name to shell-style glob patterns (`*` crosses `/`); the first area whose pattern
+matches a path wins. On a pull request the change is `git diff --no-renames --name-only` between the base and the merge result
+(so moving a file out of a protected path still shows the old path). A job with `areas` runs only when the change touches one
+of them. The decision **fails closed**: a push to any branch (the default branch included), a schedule, a manual run, a merge
+queue, a diff that cannot be taken or is empty, a path no rule matches, and a path with a control character or invalid UTF-8
+all run every job. End your rules with a catch-all (`"site": ["*"]`) so an unknown path is a named area, not a surprise. The
+`skipped-jobs` and `everything` outputs say what was chosen.
+
+**The gate.** `ci-green` runs `if: always()` and needs every other job. It is green when each is `success`; `failure`,
+`cancelled` and a skip nobody asked for (for example every check skipped because the build failed) fail it. The only skip it
+accepts is the whole `checks` job when `changes` succeeded and the path rules selected no check at all. There is no
+`continue-on-error` anywhere in the workflow.
+
+**Setup and PATH.** `setup-command` is written to the same shell script as the command that needs it, so
+`export PATH="$RUNNER_TEMP/tool:$PATH"` there is visible to that command and to nothing else. The workflow never writes to
+`$GITHUB_PATH` or `$GITHUB_ENV` (zizmor's `github-env` rule), and a setup that exits early cannot make the step pass: the
+command only counts after the setup has run to its end. Verify what you download (a checksum fetched fresh from the release,
+every run); the cache below holds the download, never the verified binary.
+
+**Caches.** `cache-pip-files` (pin files with hashes) keys pip's download cache, and `cache-tool-path` with
+`cache-tool-key-files` keys one tool download; the key is the hash of those files' contents, so a changed pin misses. Only
+downloads are cached, never the build output; keep `--require-hashes` on installs so a cached wheel that does not match its pin
+is rejected. A cache is used only where the job's egress policy is `block` (an audit job neither restores nor saves one).
+
+**What a caller grants and what the jobs hold.** `contents: read` and nothing else, in every job. No job has a secret, an OIDC
+token or a write; the artifact is generated output only. A check that needs a host (a package index, a release download) adds
+it to `extra-allowed-endpoints`, which applies to every job. The defaults are `block` with the checkout's two hosts: the
+runner's own infrastructure carries artifacts and caches.
+
+Inputs of `parallel-ci.yml`:
+
+| Input | Default | Meaning |
+|---|---|---|
+| `build-command` | required | Shell run once in the `build` job after `setup-command`, in the same shell |
+| `build-output-path` | required | Directory the build writes, relative to the workspace; uploaded, then downloaded to the same path |
+| `extra-output-path` | empty | Optional second directory to share (relative, or `RUNNER_TEMP/<path>`), uploaded and downloaded to the same absolute path |
+| `jobs` | required | JSON list of check jobs; fields above |
+| `areas` | `{}` | JSON object, area name to glob patterns |
+| `setup-command` | empty | Tool setup, run in the same shell as the build and as each command with `"tools": true` |
+| `cache-pip-files` | `[]` | JSON list of pin files keying pip's download cache |
+| `build-pip-cache` | `false` | Also restore the pip cache in the build job |
+| `cache-tool-path`, `cache-tool-key-files` | empty, `[]` | One cached tool download and the files that key it; given together |
+| `artifact-name` | `gyst-build` | Artifact name prefix; change it when one run calls the workflow twice |
+| `artifact-retention-days` | `1` | Days the artifact is kept, 1 to 7 |
+| `build-timeout-minutes` | `15` | Timeout of the build job |
+| `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `block`, the checkout's hosts, empty | harden-runner; add the hosts your build and checks reach |
+| `egress-policy-secretless` | `block` | harden-runner policy for every job here, none of which holds a secret; exactly `audit` or `block` |
+
+Outputs of `parallel-ci.yml`: `result` (`success` or `failure`, the gate's verdict), `skipped-jobs` (comma-separated names the
+path rules skipped) and `everything` (`true` when the change could not be narrowed).
+
+The planning script is `scripts/parallel_ci_plan.py` and the gate is `scripts/parallel_ci_gate.py`, both standard library only and
+inlined in the workflow byte for byte (`tests/test_parallel_ci.py` and `tests/test_ci_gate.py` hold the copies identical), so
+you can vendor them and run them locally.
+
+### CI gate
+
+`ci-gate.yml` is the gate without the build: one job, `CI green`, green only when every job you hand it succeeded or was
+skipped on purpose. Use it when several workflows run side by side (`parallel-ci.yml`, `bash-ci.yml`, `security.yml`, a job of
+your own) and branch protection should require one result.
+
+```yaml
+jobs:
+  ci:
+    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/parallel-ci.yml@<sha> # vX.Y.Z
+    # ... as above
+  drift:
+    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/vendored-drift.yml@<sha> # vX.Y.Z
+    permissions:
+      contents: read
+    with:
+      lock-files: vendor/tokens.lock.json
+  gate:
+    if: always()
+    needs: [ci, drift]
+    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/ci-gate.yml@<sha> # vX.Y.Z
+    permissions: {}
+    with:
+      needs-json: ${{ toJSON(needs) }}
+```
+
+`if: always()` on the calling job is what lets the gate run when a job it needs failed; without it the gate is skipped, and
+branch protection reads a skipped required check as passed. A job counts only with the result `success`; `skipped` counts only
+for a job named in `deliberate-skips` (a JSON list of job ids, empty by default); `failure`, `cancelled`, an unknown result,
+no jobs at all and a deliberate skip that names no needed job fail. Pass a small result map instead of `toJSON(needs)` when
+the needed jobs have large outputs: the value is read from an environment variable.
+
+Inputs of `ci-gate.yml`:
+
+| Input | Default | Meaning |
+|---|---|---|
+| `needs-json` | required | JSON object of the needed jobs: `toJSON(needs)`, or a map of job id to result |
+| `deliberate-skips` | `[]` | JSON list of job ids that may be skipped without failing the gate |
+| `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `block`, the canary's two hosts, empty | harden-runner; the gate reaches nothing |
+| `egress-policy-secretless` | `block` | harden-runner policy for the gate job, which holds no secret; exactly `audit` or `block` |
+
+Output: `result` (`success` or `failure`).
 
 ### Python package release
 
@@ -3023,6 +3170,8 @@ The tests are the contract, one file per thing they hold still:
 
 | File | Holds |
 |---|---|
+| `tests/test_parallel_ci.py` | `parallel-ci.yml`: the planning script run over ordinary and hostile inputs (the path rules fail closed on a push, a missing or empty diff, an unmatched path, an odd byte in a name; every invalid `jobs`, `areas`, path, artifact name, retention and pin file is refused with a passing twin), the `changes` step run under bash in a real repository with a real merge commit (a rename out of a code path counts as code), the build and check steps run under bash (a setup that exits early cannot pass, PATH changes stay in the step), and the YAML: no `continue-on-error`, no expression in a `run:`, nothing written to `$GITHUB_PATH` or `$GITHUB_ENV`, a one-day artifact named with the run attempt, caches off in audit and keyed on pins |
+| `tests/test_ci_gate.py` | `scripts/parallel_ci_gate.py` and the gates of `parallel-ci.yml` and `ci-gate.yml`: success only for `success`, a skip only when named, red on failure, cancellation, an unknown result, no jobs, unreadable input or a deliberate skip that names no job; the inlined copies are byte for byte the script |
 | `tests/test_workflows.py` | SHA pins with version comments; no reference to this repository by branch; no `pull_request_target`; the write-permission allow-list; per-job permissions and timeouts; harden-runner first in every job; `persist-credentials: false` on every checkout; no untrusted interpolation; the inlined Doppler script identical to the composite action and gated on the decide step; no OIDC token on a job a pull request can run, and none on the test job; every input declared, defaulted, used and documented here; `CI green` needing every other job; signing and attestation only after a push; no Actions cache on a publishing build; the allow-list defaults one sorted line; every reusable workflow run against the fixture from this repository at the pull request's ref, never publishing |
 | `tests/test_doppler_gate.py` | The decide script, run under bash for the push, schedule, dispatch, pull request and non-PR events and the ref shapes listed there: trusted refs fetch, untrusted refs get a notice and never fail, a fork's `pull_request` never fetches (`pull_request_target` with the gate off is pinned as it is), a refused tag fails a job that asked for a secret, the Service Token path is gated the same way |
 | `tests/test_audit_baseline.py` | The audit, fed a passing repository and a broken one per criterion; a 403 comes back UNKNOWN, never PASS; exit codes tell FAIL from UNKNOWN |

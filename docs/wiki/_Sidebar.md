@@ -33,6 +33,8 @@
 - [tofu-ci](Workflow-tofu-ci.md)
 - [arduino-ci](Workflow-arduino-ci.md)
 - [python-fuzz](Workflow-python-fuzz.md)
+- [parallel-ci](Workflow-parallel-ci.md)
+- [ci-gate](Workflow-ci-gate.md)
 
 **Security**
 
