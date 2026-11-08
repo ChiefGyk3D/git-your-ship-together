@@ -1031,7 +1031,9 @@ def test_a_run_at_the_branch_head_moves_every_tag(tmp_path, stub):
     assert done.returncode == 0, done.stdout + done.stderr
     assert create_order(stub) == [G_SHA, G_MAIN, G_LATEST]
     head = f"gh api repos/{REPO}/commits/main --jq .sha"
-    assert calls(stub, "gh api") == [head] * 4, "at the start, before main, before latest, and after the last moving write"
+    assert calls(stub, "gh api") == [head] * 4, (
+        "at the start, before main, before latest, and after the last moving write"
+    )
 
 
 def test_a_stale_run_publishes_only_the_immutable_tag_and_does_not_fail(tmp_path, stub):
@@ -1253,7 +1255,9 @@ def run_plan(tmp_path: Path, **env: str) -> tuple[subprocess.CompletedProcess, s
     out = tmp_path / "plan-hostile-out"
     out.write_text("")
     base = {"PATH": os.environ["PATH"], "PLATFORMS": "linux/amd64", "GITHUB_OUTPUT": str(out)}
-    done = subprocess.run(["bash", "-c", plan["run"]], env={**base, **env}, capture_output=True, text=True, timeout=TIMEOUT)
+    done = subprocess.run(
+        ["bash", "-c", plan["run"]], env={**base, **env}, capture_output=True, text=True, timeout=TIMEOUT
+    )
     return done, out.read_text()
 
 
