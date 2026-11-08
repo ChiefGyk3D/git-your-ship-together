@@ -5,6 +5,10 @@ name what a caller sees after that.
 
 ## Unreleased
 
+### Changed: `container-release.yml` refusal notice names only the inputs that apply (issue #329)
+
+When `push: true` is refused, the warning annotation and job summary now follow the failed predicate instead of always naming both inputs: a pull-request event says no input can enable publishing; an event outside the allow-list names `allowed-publish-events`; a ref that is not a release tag names `require-tag-ref: false`; both failing names both. Message text only: the publish decision, outputs and inputs are unchanged.
+
 ### New: `container-release.yml` `skip-secret-scan-in-site-packages` (issue #327)
 
 Opt-in, default `false`: a caller that sets nothing sees no change after it re-pins, and the Trivy step is byte for byte what it was.
