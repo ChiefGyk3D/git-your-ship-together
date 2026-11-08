@@ -1,0 +1,1254 @@
+# Reusable parallel CI: one build, then caller-supplied checks as separate jobs that share the build, and one
+# gate. The jobs a repository used to run one after another in a single job (build, output checks, test scripts,
+# budgets, a browser gate) run side by side, so the wall time is the build plus the slowest check.
+#
+#   changes   validates every input, then decides which checks this change needs (path rules, failing closed)
+#   build     runs `build-command` once and uploads the output as a one-day artifact
+#   checks    a matrix over the `jobs` list: each leg downloads the build and runs its command
+#   ci-green  `CI green`: fails on anything that failed, was cancelled or was skipped without a reason
+#
+# Call it from a repository with:
+#
+#   jobs:
+#     ci:
+#       uses: ChiefGyk3D/git-your-ship-together/.github/workflows/parallel-ci.yml@<sha> # vX.Y.Z
+#       permissions:
+#         contents: read
+#       with:
+#         build-command: hugo --minify --gc
+#         build-output-path: public
+#         jobs: |
+#           [
+#             {"name": "content checks", "command": "scripts/check-output.sh public"},
+#             {"name": "browser gate", "command": "scripts/browser-gate.py public", "areas": ["site"]}
+#           ]
+#         areas: '{"docs": ["docs/*.md", "README.md"], "site": ["*"]}'
+#
+# The check run is named `ci / CI green` (the caller's job id, then this gate), the same shape as the other CI
+# workflows (BASELINE.md section 2). A caller that also runs `bash-ci.yml` or `security.yml` needs one gate over
+# all of it: `ci-gate.yml` is that gate.
+#
+# Which checks run. On a pull request the change is the output of
+# `git diff --no-renames --name-only` between the base and the merge result, each path put in the first of the
+# caller's `areas` whose pattern matches it. A job with `areas` runs only if the change touches one of them; a job
+# without runs always. The classification fails CLOSED: a push, a schedule, a manual run, an empty or unreadable
+# diff, a path no rule matches and a path with an odd byte in its name all run every job. The gate counts a skipped
+# job as passed only when this decision skipped it.
+#
+# What the jobs hold. Every job has `contents: read` and no secret; the artifact is generated output only and lives
+# `artifact-retention-days` (one) day, named with the run attempt so a re-run cannot collide. Nothing is cached but
+# downloads (pip's download cache, one tool tarball), keyed on the hash of pin files the caller names, and only
+# where the egress policy is `block` (an audit job neither restores nor saves a cache). Caller commands reach the
+# shell through environment variables, never by template expansion, so a value can only be data. Tool setup runs
+# in the same shell as the command that needs it, so a PATH change lasts for that step and nothing is written to
+# $GITHUB_PATH or $GITHUB_ENV.
+#
+# The planning script is scripts/parallel_ci_plan.py and the gate is scripts/ci_gate.py in this repository,
+# inlined below byte for byte (a reusable workflow cannot name the commit it runs from, so it cannot read its own
+# repository's files); tests/test_parallel_ci.py holds the copies identical.
+
+name: Parallel CI (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      build-command:
+        description: Shell command that builds the project once, from the repository root. It must write the output into `build-output-path`. Runs after `setup-command`, in the same shell.
+        type: string
+        required: true
+      build-output-path:
+        description: Directory the build writes, relative to the workspace (plain path segments only). It is uploaded after the build and downloaded to the same path in every check job that needs the build.
+        type: string
+        required: true
+      extra-output-path:
+        description: Optional second directory to share, for a variant built elsewhere. Relative to the workspace, or `RUNNER_TEMP/<path>` for a directory under the runner's temporary directory. Uploaded and downloaded to the same absolute path.
+        type: string
+        default: ""
+      jobs:
+        description: 'JSON list of check jobs, one object each. `name` (required, letters, digits, space and ._()-), `command` (required shell), `timeout` (minutes, default 15), `areas` (list of area names; empty or absent means always run), `pip-cache` (true to restore pip''s download cache), `tools` (true to run `setup-command` first), `build` (false to skip the build download; default true). Unknown keys fail the job.'
+        type: string
+        required: true
+      areas:
+        description: 'JSON object mapping an area name to shell-style glob patterns (`*` matches across `/`), for example {"docs": ["docs/*.md", "README.md"], "site": ["*"]}. The first area whose pattern matches a path wins. A path that matches none runs every job, so end with a catch-all.'
+        type: string
+        default: "{}"
+      setup-command:
+        description: Shell run before `build-command` and before the command of every job with `tools` true, in the same shell, for installing a tool. Put the tool on PATH with `export PATH=...` there; nothing may write to the Actions PATH or environment files.
+        type: string
+        default: ""
+      cache-pip-files:
+        description: JSON list of pin files (requirements with hashes) whose contents key pip's download cache. Empty means no pip cache. Installs should keep `--require-hashes`, so a cached wheel that does not match its pin is rejected.
+        type: string
+        default: "[]"
+      build-pip-cache:
+        description: Also restore the pip download cache in the build job.
+        type: boolean
+        default: false
+      cache-tool-path:
+        description: Optional directory holding one cached tool download (the tarball, never the verified binary), relative to the workspace or `RUNNER_TEMP/<path>`. Used with `cache-tool-key-files`. The setup command must verify the download against a checksum fetched fresh from the release every run.
+        type: string
+        default: ""
+      cache-tool-key-files:
+        description: JSON list of files (a version pin) whose contents key the tool cache, so a changed pin misses it.
+        type: string
+        default: "[]"
+      artifact-name:
+        description: Prefix of the artifact names (`<prefix>-<run attempt>`, and `<prefix>-extra-<run attempt>`). Change it when one workflow run calls this workflow twice, so the two do not share an artifact.
+        type: string
+        default: gyst-build
+      artifact-retention-days:
+        description: Days the build artifact is kept, 1 to 7. It is generated output and no secret; one day is enough for the run and its re-runs.
+        type: number
+        default: 1
+      build-timeout-minutes:
+        description: Timeout of the build job.
+        type: number
+        default: 15
+      egress-policy:
+        description: harden-runner egress policy - `audit` logs outbound connections, `block` allows only `allowed-endpoints`. Jobs that hold no secret follow `egress-policy-secretless` instead (EX-0001); this workflow has none, so the input is only validated.
+        type: string
+        default: block
+      egress-policy-secretless:
+        description: harden-runner egress policy for every job here, none of which holds a stored secret, an OIDC token or a write-scoped token - exactly `audit` or `block`. Defaults to `block` since security exception EX-0001 was closed on 2026-11-02; see docs/security/exceptions/. Set `audit` to opt out if the defect recurs. Any other value fails the job.
+        type: string
+        default: block
+      allowed-endpoints:
+        description: harden-runner allow-list for `block`, space-separated host:port entries. The default is what the checkout needs; artifacts and the Actions cache use the runner's own infrastructure. Wildcards are not supported and a newline-separated list matches nothing.
+        type: string
+        default: "api.github.com:443 github.com:443"
+      extra-allowed-endpoints:
+        description: Appended to `allowed-endpoints`, for hosts only your build and checks reach (a package index, a release download). Same format. It applies to every job.
+        type: string
+        default: ""
+    outputs:
+      result:
+        description: "`success` or `failure`, the verdict of the gate."
+        value: ${{ jobs.ci-green.outputs.result }}
+      skipped-jobs:
+        description: Comma-separated names of the check jobs the path rules skipped on purpose.
+        value: ${{ jobs.changes.outputs.skipped-jobs }}
+      everything:
+        description: "`true` when every job was selected because the change could not or should not be narrowed (a push, an unmatched path), `false` when the path rules chose."
+        value: ${{ jobs.changes.outputs.everything }}
+
+permissions:
+  contents: read
+
+jobs:
+  changes:
+    name: Choose the checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read  # check out the caller's repository
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      count: ${{ steps.plan.outputs.count }}
+      skipped-jobs: ${{ steps.plan.outputs.skipped-jobs }}
+      everything: ${{ steps.plan.outputs.everything }}
+      areas: ${{ steps.plan.outputs.areas }}
+      output-path: ${{ steps.plan.outputs.output-path }}
+      extra-path: ${{ steps.plan.outputs.extra-path }}
+      artifact-name: ${{ steps.plan.outputs.artifact-name }}
+      pip-key: ${{ steps.plan.outputs.pip-key }}
+      build-pip-key: ${{ steps.plan.outputs.build-pip-key }}
+      tool-key: ${{ steps.plan.outputs.tool-key }}
+      tool-path: ${{ steps.plan.outputs.tool-path }}
+    steps:
+      - name: Validate the egress policy inputs (EX-0001)
+        timeout-minutes: 1
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        env:
+          POLICY_EGRESS_POLICY: ${{ inputs.egress-policy }}
+          POLICY_EGRESS_POLICY_SECRETLESS: ${{ inputs.egress-policy-secretless }}
+        run: |
+          set -u
+          bad=0
+          check() {
+            if [ "$2" = set ] && [ "$3" != audit ] && [ "$3" != block ]; then
+              echo "::error title=egress policy::the $1 input must be exactly 'audit' or 'block' (its value is ${#3} characters long)"
+              bad=1
+            fi
+          }
+          check egress-policy "${POLICY_EGRESS_POLICY+set}" "${POLICY_EGRESS_POLICY-}"
+          check egress-policy-secretless "${POLICY_EGRESS_POLICY_SECRETLESS+set}" "${POLICY_EGRESS_POLICY_SECRETLESS-}"
+          check distro-egress-policy "${POLICY_DISTRO_EGRESS_POLICY+set}" "${POLICY_DISTRO_EGRESS_POLICY-}"
+          check semgrep-egress-policy "${POLICY_SEMGREP_EGRESS_POLICY+set}" "${POLICY_SEMGREP_EGRESS_POLICY-}"
+          exit "$bad"
+
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: ${{ (inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block' }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
+          disable-sudo: true
+          # The agent may only stop reporting to StepSecurity in block mode.
+          disable-telemetry: ${{ ((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block') == 'block' }}
+
+      - name: Egress canary (EX-0001)
+        if: ${{ runner.os == 'Linux' && (((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block') == 'block') }}
+        timeout-minutes: 2
+        shell: bash
+        # The workspace root exists before checkout; a job default working-directory may not.
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -u
+          NAMES="github.com api.github.com results-receiver.actions.githubusercontent.com"
+          PORT=443
+          canary_resolve() { timeout 5 getent ahostsv4 "$1" 2>/dev/null | awk '$2 == "STREAM" { print $1 }'; }
+          canary_probe() { timeout 3 bash -c "exec 3<>\"/dev/tcp/\$0/\$1\"" "$1" "$PORT" 2>/dev/null; }
+          canary_reach() {
+            local i
+            for i in 1 2 3 4; do
+              canary_probe "$1" && return 0
+              [ "$i" -lt 4 ] && sleep 1
+            done
+            return 1
+          }
+          canary_show() { local n=$1; shift; echo "+ $*"; { timeout 10 "$@" 2>&1 || true; } | head -n "$n" || true; }
+          canary_diag() {
+            local name
+            echo "::group::egress canary diagnostics (EX-0001, for the GitHub Support ticket)"
+            canary_show 5 uname -srmo
+            canary_show 20 cat /etc/resolv.conf
+            canary_show 20 bash -c "resolvectl status 2>/dev/null | grep -E '^ *(Current DNS Server|DNS Servers?|DNS Domain):'"
+            canary_show 20 bash -c "ss -lun | grep ':53 '"
+            for name in $NAMES pipelines.actions.githubusercontent.com; do
+              canary_show 20 getent ahostsv4 "$name"
+              canary_show 5 curl -sS -o /dev/null -w '%{http_code} %{remote_ip} %{time_connect}\n' --max-time 8 "https://$name"
+            done
+            echo "::endgroup::"
+          }
+          canary_main() {
+            local tmp name addr n=0 bad
+            tmp=$(mktemp -d) || return 1
+            for _ in 1 2 3; do
+              for name in $NAMES; do canary_resolve "$name" >>"$tmp/res.$name" & done
+              wait
+              sleep 1
+            done
+            for name in $NAMES; do
+              if [ -s "$tmp/res.$name" ]; then sort -u "$tmp/res.$name"; else echo "-"; fi | sed "s|^|$name |" >>"$tmp/pairs"
+            done
+            while read -r name addr; do
+              n=$((n + 1))
+              ( { [ "$addr" != "-" ] && canary_reach "$addr"; } || echo "$name $addr" >"$tmp/bad.$n" ) </dev/null &
+            done <"$tmp/pairs"
+            wait
+            bad=$(cat "$tmp"/bad.* 2>/dev/null | sort || true)
+            rm -rf "$tmp"
+            if [ -z "$bad" ]; then
+              echo "egress canary: all $n addresses of $NAMES accept TCP $PORT"
+              return 0
+            fi
+            echo "::error title=egress canary::egress broken on this runner (known westus2 DNS issue, EX-0001): rerun the job"
+            echo "unreachable addresses (name address; '-' means the name did not resolve):"
+            printf '%s\n' "$bad"
+            canary_diag
+            echo "EX-0001 egress canary failed, unreachable: $(printf '%s' "$bad" | tr '\n' ';')" >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
+            return 1
+          }
+          set -m
+          canary_main &
+          main=$!
+          (sleep 90; kill -TERM -- "-$main"; sleep 2; kill -KILL -- "-$main") >/dev/null 2>&1 &
+          dog=$!
+          wait "$main" && rc=0 || rc=$?
+          kill -TERM -- "-$dog" >/dev/null 2>&1 || true
+          if kill -0 -- "-$main" >/dev/null 2>&1; then
+            kill -TERM -- "-$main" >/dev/null 2>&1 || true
+            sleep 1
+            kill -KILL -- "-$main" >/dev/null 2>&1 || true
+          fi
+          if [ "$rc" -eq 143 ] || [ "$rc" -eq 137 ]; then
+            echo "::error title=egress canary::the canary hit its 90 s deadline (EX-0001): rerun the job"
+            rc=124
+          fi
+          exit "$rc"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 2  # a pull request's merge commit and both parents, for the diff below
+
+      - name: Validate the inputs and choose the checks
+        id: plan
+        env:
+          PLAN_JOBS: ${{ inputs.jobs }}
+          PLAN_AREAS: ${{ inputs.areas }}
+          PLAN_BUILD_OUTPUT_PATH: ${{ inputs.build-output-path }}
+          PLAN_EXTRA_OUTPUT_PATH: ${{ inputs.extra-output-path }}
+          PLAN_ARTIFACT_NAME: ${{ inputs.artifact-name }}
+          PLAN_RETENTION_DAYS: ${{ inputs.artifact-retention-days }}
+          PLAN_CACHE_PIP_FILES: ${{ inputs.cache-pip-files }}
+          PLAN_BUILD_PIP_CACHE: ${{ inputs.build-pip-cache }}
+          PLAN_CACHE_TOOL_PATH: ${{ inputs.cache-tool-path }}
+          PLAN_CACHE_TOOL_KEY_FILES: ${{ inputs.cache-tool-key-files }}
+          PLAN_EVENT: ${{ github.event_name }}
+          PLAN_REF: ${{ github.ref }}
+          PLAN_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          args=()
+          if [ "$PLAN_EVENT" = pull_request ]; then
+            # HEAD is the pull request merged into its base, so its first parent is the base and the difference
+            # is the pull request's own change. Anything short of that - no second parent, a failed diff - leaves
+            # the list out, and the script then runs every job.
+            if git rev-parse --verify --quiet 'HEAD^2' >/dev/null \
+              && git diff --no-renames --name-only -z 'HEAD^1' HEAD >"$RUNNER_TEMP/changed.z"; then
+              args=(--changed "$RUNNER_TEMP/changed.z")
+            else
+              echo "::warning title=parallel-ci::the pull request's diff is unavailable, so every check runs"
+            fi
+          fi
+          python3 -I - --output "$GITHUB_OUTPUT" "${args[@]}" <<'PY'
+          #!/usr/bin/env python3
+          """Validate parallel-ci.yml's inputs and decide which check jobs run.
+
+          Standard library only; the workflow `parallel-ci.yml` carries a byte-identical copy of this file
+          (tests/test_parallel_ci.py holds the two together). Every value arrives through the environment, none is
+          interpolated into a shell script, and everything that reaches the step's outputs is either a validated
+          token or single-line JSON, so no caller input can add a line to $GITHUB_OUTPUT.
+
+          Environment:
+              PLAN_JOBS                  JSON list of check jobs (required)
+              PLAN_AREAS                 JSON object, area name -> list of glob patterns (default {})
+              PLAN_BUILD_OUTPUT_PATH     directory the build writes, relative to the workspace (required)
+              PLAN_EXTRA_OUTPUT_PATH     optional second directory; workspace-relative or RUNNER_TEMP/<path>
+              PLAN_ARTIFACT_NAME         prefix of the artifact names
+              PLAN_RETENTION_DAYS        artifact retention, 1 to 7
+              PLAN_CACHE_PIP_FILES       JSON list of pin files whose hash keys the pip download cache
+              PLAN_BUILD_PIP_CACHE       `true` to restore that cache in the build job too
+              PLAN_CACHE_TOOL_PATH       optional directory of one cached tool download
+              PLAN_CACHE_TOOL_KEY_FILES  JSON list of pin files whose hash keys that cache
+              PLAN_EVENT                 github.event_name
+              PLAN_REF                   github.ref
+              PLAN_DEFAULT_BRANCH        the repository's default branch
+              RUNNER_TEMP                absolute path, for RUNNER_TEMP/ output paths
+
+          Usage:
+              python3 -I parallel_ci_plan.py --output FILE [--changed FILE]
+
+          --changed is the NUL-separated output of `git diff --no-renames --name-only -z`. Passing it means the diff
+          worked; leaving it out means it did not (or the event is not a pull request).
+
+          Selecting jobs fails CLOSED: every job runs unless the event is a pull request that does not target the
+          default branch's own ref, the diff is present and non-empty, every changed path is plain text, and every
+          changed path matches one of the caller's area rules. A path that matches none, a path with a control character
+          or invalid UTF-8, an empty diff, no diff, a push (to any branch), a schedule, a manual run: all run everything.
+          A job with no `areas` runs whatever changed. Invalid inputs are an error, not a fail-closed run: the exit code
+          is 1 and nothing is written.
+          """
+
+          from __future__ import annotations
+
+          import argparse
+          import fnmatch
+          import hashlib
+          import json
+          import os
+          import re
+          import sys
+          from pathlib import Path
+
+          NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9 ._()-]{0,63}")
+          AREA = re.compile(r"[A-Za-z0-9_-]{1,32}")
+          ARTIFACT = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,48}")
+          BRANCH = re.compile(r"[A-Za-z0-9._/-]{1,200}")
+          SEGMENT = re.compile(r"[A-Za-z0-9._][A-Za-z0-9._-]*")
+          JOB_KEYS = {"name", "command", "timeout", "areas", "pip-cache", "tools", "build"}
+          MAX_JOBS = 32
+          MAX_COMMAND = 50_000
+          MAX_PATTERN = 200
+          MAX_PATTERNS = 200
+          MAX_PIN_BYTES = 64 << 20
+          TEMP_PREFIX = "RUNNER_TEMP/"
+
+
+          class PlanError(Exception):
+              """An input is invalid. The message names the input and never repeats the value in full."""
+
+
+          def q(value: object) -> str:
+              """A value safe to print: JSON-escaped, one line, bounded."""
+              text = value if isinstance(value, str) else repr(value)
+              return json.dumps(text[:80], ensure_ascii=True)
+
+
+          def reject_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
+              out: dict[str, object] = {}
+              for key, value in pairs:
+                  if key in out:
+                      raise ValueError(f"duplicate key {key!r}")
+                  out[key] = value
+              return out
+
+
+          def parse_json(label: str, text: str) -> object:
+              try:
+                  return json.loads(text, object_pairs_hook=reject_duplicates)
+              except (ValueError, RecursionError) as exc:
+                  raise PlanError(f"{label} is not valid JSON ({type(exc).__name__})") from exc
+
+
+          def json_list(label: str, text: str) -> list[object]:
+              value = parse_json(label, text)
+              if not isinstance(value, list):
+                  raise PlanError(f"{label} must be a JSON list")
+              return value
+
+
+          def json_object(label: str, text: str) -> dict[str, object]:
+              value = parse_json(label, text)
+              if not isinstance(value, dict):
+                  raise PlanError(f"{label} must be a JSON object")
+              return value
+
+
+          def plain_path(label: str, value: object, *, allow_temp: bool = False) -> str:
+              """A relative path of plain segments: no `..`, no leading `-`, no `.git`, no absolute or backslash form."""
+              if not isinstance(value, str) or not value or len(value) > 200:
+                  raise PlanError(f"{label} must be a non-empty relative path of at most 200 characters")
+              rest = value
+              if allow_temp and rest.startswith(TEMP_PREFIX):
+                  rest = rest[len(TEMP_PREFIX) :]
+              for segment in rest.split("/"):
+                  if not SEGMENT.fullmatch(segment) or segment in (".", "..", ".git") or segment.startswith("-"):
+                      raise PlanError(f"{label} must be a relative path of plain segments (got {q(value)})")
+              return value
+
+
+          def resolve_output(label: str, value: str) -> str:
+              """The path as the later steps use it: workspace-relative as is, RUNNER_TEMP/x as an absolute path."""
+              if not value.startswith(TEMP_PREFIX):
+                  return value
+              temp = os.environ.get("RUNNER_TEMP", "")
+              if not re.fullmatch(r"/[A-Za-z0-9._/-]{1,200}", temp):
+                  raise PlanError(f"{label} uses RUNNER_TEMP/ but RUNNER_TEMP is not a plain absolute path")
+              return f"{temp}/{value[len(TEMP_PREFIX) :]}"
+
+
+          def read_areas(text: str) -> dict[str, list[str]]:
+              raw = json_object("areas", text or "{}")
+              areas: dict[str, list[str]] = {}
+              for name, patterns in raw.items():
+                  if not AREA.fullmatch(name):
+                      raise PlanError(f"areas: the area name {q(name)} must match [A-Za-z0-9_-]{{1,32}}")
+                  if not isinstance(patterns, list) or not patterns or len(patterns) > MAX_PATTERNS:
+                      raise PlanError(f"areas: {q(name)} must be a non-empty list of glob patterns")
+                  checked: list[str] = []
+                  for pattern in patterns:
+                      if (
+                          not isinstance(pattern, str)
+                          or not pattern
+                          or len(pattern) > MAX_PATTERN
+                          or any(ord(c) < 0x20 or ord(c) == 0x7F for c in pattern)
+                      ):
+                          raise PlanError(f"areas: {q(name)} has a pattern that is not a short single-line string")
+                      checked.append(pattern)
+                  areas[name] = checked
+              return areas
+
+
+          def read_jobs(text: str, areas: dict[str, list[str]]) -> list[dict[str, object]]:
+              raw = json_list("jobs", text)
+              if not raw:
+                  raise PlanError("jobs is empty: a check list with nothing in it would pass with nothing checked")
+              if len(raw) > MAX_JOBS:
+                  raise PlanError(f"jobs has more than {MAX_JOBS} entries")
+              jobs: list[dict[str, object]] = []
+              seen: set[str] = set()
+              for index, entry in enumerate(raw):
+                  where = f"jobs[{index}]"
+                  if not isinstance(entry, dict):
+                      raise PlanError(f"{where} must be an object")
+                  unknown = set(entry) - JOB_KEYS
+                  if unknown:
+                      raise PlanError(f"{where} has unknown keys {sorted(map(str, unknown))} (allowed: {sorted(JOB_KEYS)})")
+                  name = entry.get("name")
+                  if not isinstance(name, str) or not NAME.fullmatch(name):
+                      raise PlanError(f"{where}.name must match [A-Za-z0-9][A-Za-z0-9 ._()-]{{0,63}}")
+                  if name.lower() in seen:
+                      raise PlanError(f"{where}.name {q(name)} is used twice")
+                  seen.add(name.lower())
+                  command = entry.get("command")
+                  if not isinstance(command, str) or not command.strip() or len(command) > MAX_COMMAND or "\x00" in command:
+                      raise PlanError(f"{where}.command must be a non-empty string without NUL, at most {MAX_COMMAND} characters")
+                  timeout = entry.get("timeout", 15)
+                  if isinstance(timeout, bool) or not isinstance(timeout, int) or not 1 <= timeout <= 360:
+                      raise PlanError(f"{where}.timeout must be an integer from 1 to 360 (minutes)")
+                  job_areas = entry.get("areas", [])
+                  if not isinstance(job_areas, list) or not all(isinstance(a, str) for a in job_areas):
+                      raise PlanError(f"{where}.areas must be a list of area names")
+                  for area in job_areas:
+                      if area not in areas:
+                          raise PlanError(f"{where}.areas names {q(area)}, which the areas input does not define")
+                  flags: dict[str, bool] = {}
+                  for key, default in (("pip-cache", False), ("tools", False), ("build", True)):
+                      value = entry.get(key, default)
+                      if not isinstance(value, bool):
+                          raise PlanError(f"{where}.{key} must be true or false")
+                      flags[key] = value
+                  jobs.append(
+                      {
+                          "name": name,
+                          "command": command,
+                          "timeout": timeout,
+                          "areas": list(job_areas),
+                          "pip-cache": flags["pip-cache"],
+                          "tools": flags["tools"],
+                          "build": flags["build"],
+                      }
+                  )
+              return jobs
+
+
+          def classify(path: str, areas: dict[str, list[str]]) -> str | None:
+              """The first area whose pattern matches the path, or None. Patterns are shell-style (`*` crosses `/`)."""
+              for name, patterns in areas.items():
+                  if any(fnmatch.fnmatchcase(path, pattern) for pattern in patterns):
+                      return name
+              return None
+
+
+          def read_changed(path: Path) -> list[str] | None:
+              """The changed paths, or None when the list cannot be trusted (any odd byte, an empty list)."""
+              try:
+                  data = path.read_bytes()
+              except OSError:
+                  return None
+              parts = data.split(b"\x00")
+              if parts and parts[-1] == b"":
+                  parts.pop()
+              if not parts:
+                  return None
+              names: list[str] = []
+              for part in parts:
+                  try:
+                      name = part.decode("utf-8")
+                  except UnicodeDecodeError:
+                      return None
+                  if not name or any(ord(c) < 0x20 or ord(c) == 0x7F for c in name):
+                      return None
+                  names.append(name)
+              return names
+
+
+          def changed_areas(
+              event: str, ref: str, default_branch: str, changed: list[str] | None, areas: dict[str, list[str]]
+          ) -> set[str] | None:
+              """The areas the change touches, or None for "run everything"."""
+              if event != "pull_request":
+                  return None
+              if not BRANCH.fullmatch(default_branch) or ref == f"refs/heads/{default_branch}":
+                  return None
+              if changed is None:
+                  return None
+              found: set[str] = set()
+              for name in changed:
+                  area = classify(name, areas)
+                  if area is None:
+                      return None
+                  found.add(area)
+              return found
+
+
+          def runs(job: dict[str, object], found: set[str] | None) -> bool:
+              """Whether a job is selected: everything when found is None, else only a job with no areas or a shared one."""
+              job_areas = job["areas"]
+              assert isinstance(job_areas, list)
+              return found is None or not job_areas or bool(found & set(job_areas))
+
+
+          def pin_key(label: str, text: str) -> str:
+              """A hash over the named pin files, or "" when none are named. A file that is missing is an error."""
+              files = json_list(label, text or "[]")
+              if len(files) > 50:
+                  raise PlanError(f"{label} has more than 50 files")
+              if not files:
+                  return ""
+              digest = hashlib.sha256()
+              root = Path.cwd().resolve()
+              for index, name in enumerate(files):
+                  plain_path(f"{label}[{index}]", name)
+                  path = root / str(name)
+                  resolved = path.resolve()
+                  if path.is_symlink() or not resolved.is_relative_to(root) or not resolved.is_file():
+                      raise PlanError(f"{label}[{index}] {q(name)} is not a regular file inside the workspace")
+                  if resolved.stat().st_size > MAX_PIN_BYTES:
+                      raise PlanError(f"{label}[{index}] {q(name)} is larger than {MAX_PIN_BYTES} bytes")
+                  inner = hashlib.sha256()
+                  with resolved.open("rb") as handle:
+                      for chunk in iter(lambda: handle.read(1 << 20), b""):
+                          inner.update(chunk)
+                  digest.update(f"{name}\x00{inner.hexdigest()}\n".encode())
+              return digest.hexdigest()
+
+
+          def plan(env: dict[str, str], changed_file: Path | None) -> dict[str, str]:
+              areas = read_areas(env.get("PLAN_AREAS", ""))
+              jobs = read_jobs(env.get("PLAN_JOBS", ""), areas)
+
+              output = plain_path("build-output-path", env.get("PLAN_BUILD_OUTPUT_PATH", ""))
+              extra_raw = env.get("PLAN_EXTRA_OUTPUT_PATH", "")
+              extra = ""
+              if extra_raw:
+                  extra = resolve_output("extra-output-path", plain_path("extra-output-path", extra_raw, allow_temp=True))
+              artifact = env.get("PLAN_ARTIFACT_NAME", "")
+              if not ARTIFACT.fullmatch(artifact):
+                  raise PlanError("artifact-name must match [A-Za-z0-9][A-Za-z0-9_-]{0,48}")
+              if not re.fullmatch(r"[1-7](\.0)?", env.get("PLAN_RETENTION_DAYS", "")):
+                  raise PlanError("artifact-retention-days must be a whole number from 1 to 7")
+
+              tool_raw = env.get("PLAN_CACHE_TOOL_PATH", "")
+              tool_key = pin_key("cache-tool-key-files", env.get("PLAN_CACHE_TOOL_KEY_FILES", ""))
+              if bool(tool_raw) != bool(tool_key):
+                  raise PlanError("cache-tool-path and cache-tool-key-files must be given together")
+              tool_path = ""
+              if tool_raw:
+                  tool_path = resolve_output("cache-tool-path", plain_path("cache-tool-path", tool_raw, allow_temp=True))
+              pip_key = pin_key("cache-pip-files", env.get("PLAN_CACHE_PIP_FILES", ""))
+
+              changed = read_changed(changed_file) if changed_file else None
+              found = changed_areas(
+                  env.get("PLAN_EVENT", ""), env.get("PLAN_REF", ""), env.get("PLAN_DEFAULT_BRANCH", ""), changed, areas
+              )
+              selected = [job for job in jobs if runs(job, found)]
+              skipped = [str(job["name"]) for job in jobs if not runs(job, found)]
+              matrix = [{k: job[k] for k in ("name", "command", "timeout", "pip-cache", "tools", "build")} for job in selected]
+              return {
+                  "matrix": json.dumps(matrix, separators=(",", ":"), ensure_ascii=True),
+                  "count": str(len(selected)),
+                  "skipped-jobs": ",".join(skipped),
+                  "everything": "true" if found is None else "false",
+                  "areas": "" if found is None else ",".join(sorted(found)),
+                  "output-path": output,
+                  "extra-path": extra,
+                  "artifact-name": artifact,
+                  "pip-key": pip_key,
+                  "build-pip-key": pip_key if env.get("PLAN_BUILD_PIP_CACHE", "") == "true" else "",
+                  "tool-key": tool_key,
+                  "tool-path": tool_path,
+              }
+
+
+          def main(argv: list[str]) -> int:
+              parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n")[0])
+              parser.add_argument("--output", type=Path, required=True)
+              parser.add_argument("--changed", type=Path)
+              args = parser.parse_args(argv)
+              try:
+                  result = plan(dict(os.environ), args.changed)
+              except PlanError as exc:
+                  print(f"::error title=parallel-ci input::{exc}")
+                  return 1
+              if any("\n" in value or "\r" in value for value in result.values()):
+                  print("::error title=parallel-ci::an output has a line break")
+                  return 1
+              with args.output.open("a", encoding="utf-8") as handle:
+                  for key, value in result.items():
+                      handle.write(f"{key}={value}\n")
+              scope = "everything" if result["everything"] == "true" else f"areas {result['areas']}"
+              print(f"plan: {result['count']} job(s) selected ({scope}); skipped: {result['skipped-jobs'] or 'none'}")
+              return 0
+
+
+          if __name__ == "__main__":
+              sys.exit(main(sys.argv[1:]))
+          PY
+
+  build:
+    name: Build
+    needs: changes
+    runs-on: ubuntu-24.04
+    timeout-minutes: ${{ inputs.build-timeout-minutes }}
+    permissions:
+      contents: read  # check out the caller's repository
+    steps:
+      - name: Validate the egress policy inputs (EX-0001)
+        timeout-minutes: 1
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        env:
+          POLICY_EGRESS_POLICY: ${{ inputs.egress-policy }}
+          POLICY_EGRESS_POLICY_SECRETLESS: ${{ inputs.egress-policy-secretless }}
+        run: |
+          set -u
+          bad=0
+          check() {
+            if [ "$2" = set ] && [ "$3" != audit ] && [ "$3" != block ]; then
+              echo "::error title=egress policy::the $1 input must be exactly 'audit' or 'block' (its value is ${#3} characters long)"
+              bad=1
+            fi
+          }
+          check egress-policy "${POLICY_EGRESS_POLICY+set}" "${POLICY_EGRESS_POLICY-}"
+          check egress-policy-secretless "${POLICY_EGRESS_POLICY_SECRETLESS+set}" "${POLICY_EGRESS_POLICY_SECRETLESS-}"
+          check distro-egress-policy "${POLICY_DISTRO_EGRESS_POLICY+set}" "${POLICY_DISTRO_EGRESS_POLICY-}"
+          check semgrep-egress-policy "${POLICY_SEMGREP_EGRESS_POLICY+set}" "${POLICY_SEMGREP_EGRESS_POLICY-}"
+          exit "$bad"
+
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: ${{ (inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block' }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
+          disable-sudo: true
+          # The agent may only stop reporting to StepSecurity in block mode.
+          disable-telemetry: ${{ ((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block') == 'block' }}
+
+      - name: Egress canary (EX-0001)
+        if: ${{ runner.os == 'Linux' && (((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block') == 'block') }}
+        timeout-minutes: 2
+        shell: bash
+        # The workspace root exists before checkout; a job default working-directory may not.
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -u
+          NAMES="github.com api.github.com results-receiver.actions.githubusercontent.com"
+          PORT=443
+          canary_resolve() { timeout 5 getent ahostsv4 "$1" 2>/dev/null | awk '$2 == "STREAM" { print $1 }'; }
+          canary_probe() { timeout 3 bash -c "exec 3<>\"/dev/tcp/\$0/\$1\"" "$1" "$PORT" 2>/dev/null; }
+          canary_reach() {
+            local i
+            for i in 1 2 3 4; do
+              canary_probe "$1" && return 0
+              [ "$i" -lt 4 ] && sleep 1
+            done
+            return 1
+          }
+          canary_show() { local n=$1; shift; echo "+ $*"; { timeout 10 "$@" 2>&1 || true; } | head -n "$n" || true; }
+          canary_diag() {
+            local name
+            echo "::group::egress canary diagnostics (EX-0001, for the GitHub Support ticket)"
+            canary_show 5 uname -srmo
+            canary_show 20 cat /etc/resolv.conf
+            canary_show 20 bash -c "resolvectl status 2>/dev/null | grep -E '^ *(Current DNS Server|DNS Servers?|DNS Domain):'"
+            canary_show 20 bash -c "ss -lun | grep ':53 '"
+            for name in $NAMES pipelines.actions.githubusercontent.com; do
+              canary_show 20 getent ahostsv4 "$name"
+              canary_show 5 curl -sS -o /dev/null -w '%{http_code} %{remote_ip} %{time_connect}\n' --max-time 8 "https://$name"
+            done
+            echo "::endgroup::"
+          }
+          canary_main() {
+            local tmp name addr n=0 bad
+            tmp=$(mktemp -d) || return 1
+            for _ in 1 2 3; do
+              for name in $NAMES; do canary_resolve "$name" >>"$tmp/res.$name" & done
+              wait
+              sleep 1
+            done
+            for name in $NAMES; do
+              if [ -s "$tmp/res.$name" ]; then sort -u "$tmp/res.$name"; else echo "-"; fi | sed "s|^|$name |" >>"$tmp/pairs"
+            done
+            while read -r name addr; do
+              n=$((n + 1))
+              ( { [ "$addr" != "-" ] && canary_reach "$addr"; } || echo "$name $addr" >"$tmp/bad.$n" ) </dev/null &
+            done <"$tmp/pairs"
+            wait
+            bad=$(cat "$tmp"/bad.* 2>/dev/null | sort || true)
+            rm -rf "$tmp"
+            if [ -z "$bad" ]; then
+              echo "egress canary: all $n addresses of $NAMES accept TCP $PORT"
+              return 0
+            fi
+            echo "::error title=egress canary::egress broken on this runner (known westus2 DNS issue, EX-0001): rerun the job"
+            echo "unreachable addresses (name address; '-' means the name did not resolve):"
+            printf '%s\n' "$bad"
+            canary_diag
+            echo "EX-0001 egress canary failed, unreachable: $(printf '%s' "$bad" | tr '\n' ';')" >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
+            return 1
+          }
+          set -m
+          canary_main &
+          main=$!
+          (sleep 90; kill -TERM -- "-$main"; sleep 2; kill -KILL -- "-$main") >/dev/null 2>&1 &
+          dog=$!
+          wait "$main" && rc=0 || rc=$?
+          kill -TERM -- "-$dog" >/dev/null 2>&1 || true
+          if kill -0 -- "-$main" >/dev/null 2>&1; then
+            kill -TERM -- "-$main" >/dev/null 2>&1 || true
+            sleep 1
+            kill -KILL -- "-$main" >/dev/null 2>&1 || true
+          fi
+          if [ "$rc" -eq 143 ] || [ "$rc" -eq 137 ]; then
+            echo "::error title=egress canary::the canary hit its 90 s deadline (EX-0001): rerun the job"
+            rc=124
+          fi
+          exit "$rc"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Downloads only, and only where the policy is block: code that runs in an audit job could write a cache
+      # that a later block job restores (tests/test_egress_canary.py holds this for every cache here).
+      - name: Restore the tool download cache
+        if: ${{ ((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block') == 'block' && needs.changes.outputs.tool-key != '' }}
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ needs.changes.outputs.tool-path }}
+          key: dl-${{ runner.os }}-${{ needs.changes.outputs.tool-key }}
+
+      - name: Restore pip's download cache
+        if: ${{ ((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block') == 'block' && needs.changes.outputs.build-pip-key != '' }}
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-${{ needs.changes.outputs.build-pip-key }}
+
+      - name: Build
+        env:
+          SETUP: ${{ inputs.setup-command }}
+          COMMAND: ${{ inputs.build-command }}
+        run: |
+          set -euo pipefail
+          script="$(mktemp "$RUNNER_TEMP/gyst-build.XXXXXX")"
+          started="$RUNNER_TEMP/gyst-build.started"
+          rm -f "$started"
+          # The setup and the command share one shell, so a tool the setup puts on PATH is found by the command
+          # and by nothing else. A setup that exits early would skip the command and pass, so the command only
+          # runs after the setup has written the marker, and the step fails without it.
+          {
+            printf '%s\n' "$SETUP"
+            printf ': >%q\n' "$started"
+            printf '%s\n' "$COMMAND"
+          } >"$script"
+          bash -eo pipefail "$script"
+          test -e "$started" || { echo "::error title=build::the setup command ended the step before the build ran"; exit 1; }
+
+      - name: Upload the build
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ needs.changes.outputs.artifact-name }}-${{ github.run_attempt }}
+          path: ${{ needs.changes.outputs.output-path }}
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: ${{ inputs.artifact-retention-days }}
+
+      - name: Upload the second output
+        if: ${{ needs.changes.outputs.extra-path != '' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ needs.changes.outputs.artifact-name }}-extra-${{ github.run_attempt }}
+          path: ${{ needs.changes.outputs.extra-path }}
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: ${{ inputs.artifact-retention-days }}
+
+  checks:
+    name: ${{ matrix.name }}
+    needs: [changes, build]
+    # An empty list cannot be a matrix; the gate accepts this skip only when the count says it is deliberate.
+    if: ${{ needs.changes.outputs.count != '0' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: ${{ matrix.timeout }}
+    permissions:
+      contents: read  # check out the caller's repository
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.changes.outputs.matrix) }}
+    steps:
+      - name: Validate the egress policy inputs (EX-0001)
+        timeout-minutes: 1
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        env:
+          POLICY_EGRESS_POLICY: ${{ inputs.egress-policy }}
+          POLICY_EGRESS_POLICY_SECRETLESS: ${{ inputs.egress-policy-secretless }}
+        run: |
+          set -u
+          bad=0
+          check() {
+            if [ "$2" = set ] && [ "$3" != audit ] && [ "$3" != block ]; then
+              echo "::error title=egress policy::the $1 input must be exactly 'audit' or 'block' (its value is ${#3} characters long)"
+              bad=1
+            fi
+          }
+          check egress-policy "${POLICY_EGRESS_POLICY+set}" "${POLICY_EGRESS_POLICY-}"
+          check egress-policy-secretless "${POLICY_EGRESS_POLICY_SECRETLESS+set}" "${POLICY_EGRESS_POLICY_SECRETLESS-}"
+          check distro-egress-policy "${POLICY_DISTRO_EGRESS_POLICY+set}" "${POLICY_DISTRO_EGRESS_POLICY-}"
+          check semgrep-egress-policy "${POLICY_SEMGREP_EGRESS_POLICY+set}" "${POLICY_SEMGREP_EGRESS_POLICY-}"
+          exit "$bad"
+
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: ${{ (inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block' }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
+          disable-sudo: true
+          # The agent may only stop reporting to StepSecurity in block mode.
+          disable-telemetry: ${{ ((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block') == 'block' }}
+
+      - name: Egress canary (EX-0001)
+        if: ${{ runner.os == 'Linux' && (((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block') == 'block') }}
+        timeout-minutes: 2
+        shell: bash
+        # The workspace root exists before checkout; a job default working-directory may not.
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -u
+          NAMES="github.com api.github.com results-receiver.actions.githubusercontent.com"
+          PORT=443
+          canary_resolve() { timeout 5 getent ahostsv4 "$1" 2>/dev/null | awk '$2 == "STREAM" { print $1 }'; }
+          canary_probe() { timeout 3 bash -c "exec 3<>\"/dev/tcp/\$0/\$1\"" "$1" "$PORT" 2>/dev/null; }
+          canary_reach() {
+            local i
+            for i in 1 2 3 4; do
+              canary_probe "$1" && return 0
+              [ "$i" -lt 4 ] && sleep 1
+            done
+            return 1
+          }
+          canary_show() { local n=$1; shift; echo "+ $*"; { timeout 10 "$@" 2>&1 || true; } | head -n "$n" || true; }
+          canary_diag() {
+            local name
+            echo "::group::egress canary diagnostics (EX-0001, for the GitHub Support ticket)"
+            canary_show 5 uname -srmo
+            canary_show 20 cat /etc/resolv.conf
+            canary_show 20 bash -c "resolvectl status 2>/dev/null | grep -E '^ *(Current DNS Server|DNS Servers?|DNS Domain):'"
+            canary_show 20 bash -c "ss -lun | grep ':53 '"
+            for name in $NAMES pipelines.actions.githubusercontent.com; do
+              canary_show 20 getent ahostsv4 "$name"
+              canary_show 5 curl -sS -o /dev/null -w '%{http_code} %{remote_ip} %{time_connect}\n' --max-time 8 "https://$name"
+            done
+            echo "::endgroup::"
+          }
+          canary_main() {
+            local tmp name addr n=0 bad
+            tmp=$(mktemp -d) || return 1
+            for _ in 1 2 3; do
+              for name in $NAMES; do canary_resolve "$name" >>"$tmp/res.$name" & done
+              wait
+              sleep 1
+            done
+            for name in $NAMES; do
+              if [ -s "$tmp/res.$name" ]; then sort -u "$tmp/res.$name"; else echo "-"; fi | sed "s|^|$name |" >>"$tmp/pairs"
+            done
+            while read -r name addr; do
+              n=$((n + 1))
+              ( { [ "$addr" != "-" ] && canary_reach "$addr"; } || echo "$name $addr" >"$tmp/bad.$n" ) </dev/null &
+            done <"$tmp/pairs"
+            wait
+            bad=$(cat "$tmp"/bad.* 2>/dev/null | sort || true)
+            rm -rf "$tmp"
+            if [ -z "$bad" ]; then
+              echo "egress canary: all $n addresses of $NAMES accept TCP $PORT"
+              return 0
+            fi
+            echo "::error title=egress canary::egress broken on this runner (known westus2 DNS issue, EX-0001): rerun the job"
+            echo "unreachable addresses (name address; '-' means the name did not resolve):"
+            printf '%s\n' "$bad"
+            canary_diag
+            echo "EX-0001 egress canary failed, unreachable: $(printf '%s' "$bad" | tr '\n' ';')" >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
+            return 1
+          }
+          set -m
+          canary_main &
+          main=$!
+          (sleep 90; kill -TERM -- "-$main"; sleep 2; kill -KILL -- "-$main") >/dev/null 2>&1 &
+          dog=$!
+          wait "$main" && rc=0 || rc=$?
+          kill -TERM -- "-$dog" >/dev/null 2>&1 || true
+          if kill -0 -- "-$main" >/dev/null 2>&1; then
+            kill -TERM -- "-$main" >/dev/null 2>&1 || true
+            sleep 1
+            kill -KILL -- "-$main" >/dev/null 2>&1 || true
+          fi
+          if [ "$rc" -eq 143 ] || [ "$rc" -eq 137 ]; then
+            echo "::error title=egress canary::the canary hit its 90 s deadline (EX-0001): rerun the job"
+            rc=124
+          fi
+          exit "$rc"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Restore the tool download cache
+        if: ${{ ((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block') == 'block' && matrix.tools && needs.changes.outputs.tool-key != '' }}
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ needs.changes.outputs.tool-path }}
+          key: dl-${{ runner.os }}-${{ needs.changes.outputs.tool-key }}
+
+      - name: Restore pip's download cache
+        if: ${{ ((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block') == 'block' && matrix.pip-cache && needs.changes.outputs.pip-key != '' }}
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-${{ needs.changes.outputs.pip-key }}
+
+      - name: Download the build
+        if: ${{ matrix.build }}
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ needs.changes.outputs.artifact-name }}-${{ github.run_attempt }}
+          path: ${{ needs.changes.outputs.output-path }}
+
+      - name: Download the second output
+        if: ${{ matrix.build && needs.changes.outputs.extra-path != '' }}
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ needs.changes.outputs.artifact-name }}-extra-${{ github.run_attempt }}
+          path: ${{ needs.changes.outputs.extra-path }}
+
+      - name: Run the check
+        env:
+          SETUP: ${{ matrix.tools && inputs.setup-command || '' }}
+          COMMAND: ${{ matrix.command }}
+        run: |
+          set -euo pipefail
+          script="$(mktemp "$RUNNER_TEMP/gyst-check.XXXXXX")"
+          started="$RUNNER_TEMP/gyst-check.started"
+          rm -f "$started"
+          # Same shape as the build step: one shell for setup and command, and no pass if the setup ended it.
+          {
+            printf '%s\n' "$SETUP"
+            printf ': >%q\n' "$started"
+            printf '%s\n' "$COMMAND"
+          } >"$script"
+          bash -eo pipefail "$script"
+          test -e "$started" || { echo "::error title=check::the setup command ended the step before the check ran"; exit 1; }
+
+  # The one job branch protection should require. `always()` so it runs when a needed job failed or was skipped;
+  # the script then decides what counts as green: success, or a skip the path rules asked for.
+  ci-green:
+    name: CI green
+    if: always()
+    needs: [changes, build, checks]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    outputs:
+      result: ${{ steps.gate.outputs.result }}
+    steps:
+      - name: Validate the egress policy inputs (EX-0001)
+        timeout-minutes: 1
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        env:
+          POLICY_EGRESS_POLICY: ${{ inputs.egress-policy }}
+          POLICY_EGRESS_POLICY_SECRETLESS: ${{ inputs.egress-policy-secretless }}
+        run: |
+          set -u
+          bad=0
+          check() {
+            if [ "$2" = set ] && [ "$3" != audit ] && [ "$3" != block ]; then
+              echo "::error title=egress policy::the $1 input must be exactly 'audit' or 'block' (its value is ${#3} characters long)"
+              bad=1
+            fi
+          }
+          check egress-policy "${POLICY_EGRESS_POLICY+set}" "${POLICY_EGRESS_POLICY-}"
+          check egress-policy-secretless "${POLICY_EGRESS_POLICY_SECRETLESS+set}" "${POLICY_EGRESS_POLICY_SECRETLESS-}"
+          check distro-egress-policy "${POLICY_DISTRO_EGRESS_POLICY+set}" "${POLICY_DISTRO_EGRESS_POLICY-}"
+          check semgrep-egress-policy "${POLICY_SEMGREP_EGRESS_POLICY+set}" "${POLICY_SEMGREP_EGRESS_POLICY-}"
+          exit "$bad"
+
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: ${{ (inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block' }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
+          disable-sudo: true
+          # The agent may only stop reporting to StepSecurity in block mode.
+          disable-telemetry: ${{ ((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block') == 'block' }}
+
+      - name: Egress canary (EX-0001)
+        if: ${{ runner.os == 'Linux' && (((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block') == 'block') }}
+        timeout-minutes: 2
+        shell: bash
+        # The workspace root exists before checkout; a job default working-directory may not.
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -u
+          NAMES="github.com api.github.com results-receiver.actions.githubusercontent.com"
+          PORT=443
+          canary_resolve() { timeout 5 getent ahostsv4 "$1" 2>/dev/null | awk '$2 == "STREAM" { print $1 }'; }
+          canary_probe() { timeout 3 bash -c "exec 3<>\"/dev/tcp/\$0/\$1\"" "$1" "$PORT" 2>/dev/null; }
+          canary_reach() {
+            local i
+            for i in 1 2 3 4; do
+              canary_probe "$1" && return 0
+              [ "$i" -lt 4 ] && sleep 1
+            done
+            return 1
+          }
+          canary_show() { local n=$1; shift; echo "+ $*"; { timeout 10 "$@" 2>&1 || true; } | head -n "$n" || true; }
+          canary_diag() {
+            local name
+            echo "::group::egress canary diagnostics (EX-0001, for the GitHub Support ticket)"
+            canary_show 5 uname -srmo
+            canary_show 20 cat /etc/resolv.conf
+            canary_show 20 bash -c "resolvectl status 2>/dev/null | grep -E '^ *(Current DNS Server|DNS Servers?|DNS Domain):'"
+            canary_show 20 bash -c "ss -lun | grep ':53 '"
+            for name in $NAMES pipelines.actions.githubusercontent.com; do
+              canary_show 20 getent ahostsv4 "$name"
+              canary_show 5 curl -sS -o /dev/null -w '%{http_code} %{remote_ip} %{time_connect}\n' --max-time 8 "https://$name"
+            done
+            echo "::endgroup::"
+          }
+          canary_main() {
+            local tmp name addr n=0 bad
+            tmp=$(mktemp -d) || return 1
+            for _ in 1 2 3; do
+              for name in $NAMES; do canary_resolve "$name" >>"$tmp/res.$name" & done
+              wait
+              sleep 1
+            done
+            for name in $NAMES; do
+              if [ -s "$tmp/res.$name" ]; then sort -u "$tmp/res.$name"; else echo "-"; fi | sed "s|^|$name |" >>"$tmp/pairs"
+            done
+            while read -r name addr; do
+              n=$((n + 1))
+              ( { [ "$addr" != "-" ] && canary_reach "$addr"; } || echo "$name $addr" >"$tmp/bad.$n" ) </dev/null &
+            done <"$tmp/pairs"
+            wait
+            bad=$(cat "$tmp"/bad.* 2>/dev/null | sort || true)
+            rm -rf "$tmp"
+            if [ -z "$bad" ]; then
+              echo "egress canary: all $n addresses of $NAMES accept TCP $PORT"
+              return 0
+            fi
+            echo "::error title=egress canary::egress broken on this runner (known westus2 DNS issue, EX-0001): rerun the job"
+            echo "unreachable addresses (name address; '-' means the name did not resolve):"
+            printf '%s\n' "$bad"
+            canary_diag
+            echo "EX-0001 egress canary failed, unreachable: $(printf '%s' "$bad" | tr '\n' ';')" >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
+            return 1
+          }
+          set -m
+          canary_main &
+          main=$!
+          (sleep 90; kill -TERM -- "-$main"; sleep 2; kill -KILL -- "-$main") >/dev/null 2>&1 &
+          dog=$!
+          wait "$main" && rc=0 || rc=$?
+          kill -TERM -- "-$dog" >/dev/null 2>&1 || true
+          if kill -0 -- "-$main" >/dev/null 2>&1; then
+            kill -TERM -- "-$main" >/dev/null 2>&1 || true
+            sleep 1
+            kill -KILL -- "-$main" >/dev/null 2>&1 || true
+          fi
+          if [ "$rc" -eq 143 ] || [ "$rc" -eq 137 ]; then
+            echo "::error title=egress canary::the canary hit its 90 s deadline (EX-0001): rerun the job"
+            rc=124
+          fi
+          exit "$rc"
+      - name: Every job passed, or was skipped on purpose
+        id: gate
+        env:
+          NEEDS: '{"changes": "${{ needs.changes.result }}", "build": "${{ needs.build.result }}", "checks": "${{ needs.checks.result }}"}'
+          # Only `checks`, only when `changes` succeeded and chose no check at all.
+          DELIBERATE: ${{ (needs.changes.result == 'success' && needs.changes.outputs.count == '0') && '["checks"]' || '[]' }}
+        run: |
+          python3 -I - --output "$GITHUB_OUTPUT" <<'PY'
+          #!/usr/bin/env python3
+          """The CI gate: green only when every needed job succeeded, or was skipped on purpose.
+
+          Standard library only; `parallel-ci.yml` and `ci-gate.yml` each carry a byte-identical copy of this file
+          (tests/test_ci_gate.py holds them together).
+
+          Environment:
+              NEEDS        JSON object, job id -> {"result": ...} or job id -> "result" (toJSON(needs) works as is)
+              DELIBERATE   JSON list of job ids that are allowed to be skipped (default [])
+
+          Usage:
+              python3 -I ci_gate.py [--output FILE]
+
+          A job passes only if its result is exactly `success`. A `skipped` job passes only if it is named in
+          DELIBERATE; `failure`, `cancelled`, an unknown result, a job with no result and a skip nobody asked for all
+          fail. No jobs at all fails (a gate over nothing is not a gate), and so does a DELIBERATE entry that names no
+          needed job (a typo there would otherwise let a real skip through unnoticed). Exit 0 green, 1 not green.
+          `result=success|failure` is appended to --output (the step's $GITHUB_OUTPUT) before exiting.
+          """
+
+          from __future__ import annotations
+
+          import argparse
+          import json
+          import os
+          import re
+          import sys
+          from pathlib import Path
+
+          JOB_ID = re.compile(r"[A-Za-z_][A-Za-z0-9_-]{0,99}")
+
+
+          def q(value: object) -> str:
+              text = value if isinstance(value, str) else repr(value)
+              return json.dumps(text[:100], ensure_ascii=True)
+
+
+          def reject_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
+              out: dict[str, object] = {}
+              for key, value in pairs:
+                  if key in out:
+                      raise ValueError(f"duplicate key {key!r}")
+                  out[key] = value
+              return out
+
+
+          def results_of(text: str) -> dict[str, str | None]:
+              """job id -> result string (None when the job carries none)."""
+              needs = json.loads(text, object_pairs_hook=reject_duplicates)
+              if not isinstance(needs, dict):
+                  raise ValueError("NEEDS must be a JSON object")
+              out: dict[str, str | None] = {}
+              for job, value in needs.items():
+                  if not JOB_ID.fullmatch(job):
+                      raise ValueError(f"job id {q(job)} is not a plain job id")
+                  if isinstance(value, dict):
+                      value = value.get("result")
+                  out[job] = value if isinstance(value, str) else None
+              return out
+
+
+          def deliberate_of(text: str) -> set[str]:
+              skips = json.loads(text, object_pairs_hook=reject_duplicates)
+              if not isinstance(skips, list) or not all(isinstance(s, str) and JOB_ID.fullmatch(s) for s in skips):
+                  raise ValueError("DELIBERATE must be a JSON list of job ids")
+              return set(skips)
+
+
+          def judge(results: dict[str, str | None], deliberate: set[str]) -> list[str]:
+              """One line per reason the gate is not green; empty when it is."""
+              problems: list[str] = []
+              if not results:
+                  problems.append("no needed jobs: a gate over nothing is not a gate")
+              for name in sorted(deliberate - set(results)):
+                  problems.append(f"deliberate skip {q(name)} names no needed job")
+              for job, result in results.items():
+                  if result == "success":
+                      continue
+                  if result == "skipped" and job in deliberate:
+                      continue
+                  if result == "skipped":
+                      problems.append(f"{q(job)} was skipped and nothing said it should be")
+                  else:
+                      problems.append(f"{q(job)} is {q(result)}")
+              return problems
+
+
+          def main(argv: list[str]) -> int:
+              parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n")[0])
+              parser.add_argument("--output", type=Path)
+              args = parser.parse_args(argv)
+              results: dict[str, str | None] = {}
+              deliberate: set[str] = set()
+              try:
+                  results = results_of(os.environ.get("NEEDS", ""))
+                  deliberate = deliberate_of(os.environ.get("DELIBERATE") or "[]")
+                  problems = judge(results, deliberate)
+              except (ValueError, RecursionError) as exc:
+                  problems = [f"cannot read the gate's inputs ({type(exc).__name__}: {q(str(exc))})"]
+                  results = {}
+                  deliberate = set()
+              for job, result in results.items():
+                  passed = result == "success" or (result == "skipped" and job in deliberate)
+                  print(f"{'ok  ' if passed else 'FAIL'} {q(job)}: {q(result)}")
+              for problem in problems:
+                  print(f"::error title=CI gate::{problem}")
+              if args.output:
+                  with args.output.open("a", encoding="utf-8") as handle:
+                      handle.write(f"result={'failure' if problems else 'success'}\n")
+              return 1 if problems else 0
+
+
+          if __name__ == "__main__":
+              sys.exit(main(sys.argv[1:]))
+          PY

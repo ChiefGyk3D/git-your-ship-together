@@ -401,6 +401,55 @@ jobs:
       dockerfile: fixture/Dockerfile
       exit-code: "0"
 
+  # parallel-ci.yml at this ref over the fixture's one-page site: one build, then five checks side by side (the
+  # plain one, a path-gated one, one that needs a tool the setup command installs, one with the pip cache, one
+  # that reads the second output), in block mode with the workflow's own default list. The path rules, the
+  # gate and the input validation are exercised against hostile values by tests/test_parallel_ci.py and
+  # tests/test_ci_gate.py; a deliberately failing check here would leave every run red.
+  fixture-parallel:
+    name: fixture parallel
+    uses: ./.github/workflows/parallel-ci.yml # zizmor: ignore[self-repository]
+    permissions:
+      contents: read
+    with:
+      setup-command: |
+        mkdir -p "$RUNNER_TEMP/fixture-bin" "$RUNNER_TEMP/fixture-dl"
+        echo download >"$RUNNER_TEMP/fixture-dl/note"
+        printf '#!/bin/sh\necho fixture-tool\n' >"$RUNNER_TEMP/fixture-bin/fixture-tool"
+        chmod +x "$RUNNER_TEMP/fixture-bin/fixture-tool"
+        export PATH="$RUNNER_TEMP/fixture-bin:$PATH"
+      build-command: |
+        mkdir -p fixture-site "$RUNNER_TEMP/fixture-extra"
+        cp fixture/site-src/index.html fixture-site/index.html
+        printf 'second output\n' >"$RUNNER_TEMP/fixture-extra/note.txt"
+        fixture-tool
+      build-output-path: fixture-site
+      extra-output-path: RUNNER_TEMP/fixture-extra
+      cache-tool-path: RUNNER_TEMP/fixture-dl
+      cache-tool-key-files: '["fixture/requirements.in"]'
+      cache-pip-files: '["fixture/requirements.txt"]'
+      areas: '{"docs": ["*.md", "docs/*"], "code": ["*"]}'
+      jobs: |
+        [
+          {"name": "site exists", "command": "test -s fixture-site/index.html"},
+          {"name": "code only", "command": "test -s fixture-site/index.html", "areas": ["code"], "timeout": 5},
+          {"name": "tool on path", "command": "test \"$(fixture-tool)\" = fixture-tool", "tools": true, "build": false},
+          {"name": "pip cache", "command": "mkdir -p ~/.cache/pip && echo fixture > ~/.cache/pip/fixture", "pip-cache": true, "build": false},
+          {"name": "second output", "command": "test \"$(cat \"$RUNNER_TEMP/fixture-extra/note.txt\")\" = 'second output'"}
+        ]
+
+  # ci-gate.yml at this ref over the job above: the gate a caller with several workflows side by side requires.
+  # `if: always()` is what lets it judge a red job; that it FAILS on a failure, a cancellation and a skip nobody
+  # asked for is proved by tests/test_ci_gate.py against the script it inlines.
+  fixture-gate:
+    name: fixture gate
+    needs: [fixture-parallel]
+    if: always()
+    uses: ./.github/workflows/ci-gate.yml # zizmor: ignore[self-repository]
+    permissions: {}
+    with:
+      needs-json: ${{ toJSON(needs) }}
+
   # The real Trivy, installed by the workflow's own pinned step, over an SBOM
   # naming a package with known critical advisories. tests/test_verify_published.py
   # skips these unless RESCAN_LIVE is set.
@@ -606,7 +655,7 @@ jobs:
   ci-green:
     name: CI green
     if: always()
-    needs: [actionlint, zizmor, test, fixture-ci, fixture-bash, fixture-fuzz, fixture-tofu, fixture-arduino, fixture-package, fixture-sbom, fixture-artifact, fixture-pages, fixture-wiki, fixture-release, fixture-verify, fixture-rescan, fixture-drift, fixture-base-image, rescan-live, fixture-project-sync, fixture-dast, dast-live, fixture-threat-model, fixture-agent-scan, fixture-agent-scan-planted, agent-scan-control]
+    needs: [actionlint, zizmor, test, fixture-ci, fixture-bash, fixture-fuzz, fixture-tofu, fixture-arduino, fixture-package, fixture-sbom, fixture-artifact, fixture-pages, fixture-wiki, fixture-release, fixture-verify, fixture-rescan, fixture-drift, fixture-base-image, fixture-parallel, fixture-gate, rescan-live, fixture-project-sync, fixture-dast, dast-live, fixture-threat-model, fixture-agent-scan, fixture-agent-scan-planted, agent-scan-control]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}

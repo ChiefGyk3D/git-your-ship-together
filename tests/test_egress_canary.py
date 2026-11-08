@@ -524,6 +524,9 @@ def evaluate(expression: str, values: dict[str, str], runner=None, environment="
 
     body = re.sub(r"contains\(fromJSON\('(\[[^']*\])'\), (?:matrix|inputs)\.runner\)", hosted, body)
     body = re.sub(r"hashFiles\([^)]*\) != ''", "T", body)  # a manifest exists: the cache is wanted
+    # parallel-ci.yml: a pin file was named (a needs output is not empty) and the matrix leg asks for the cache
+    body = re.sub(r"needs\.[\w.-]+ != ''", "T", body)
+    body = re.sub(r"matrix\.(?:pip-cache|tools)", "T", body)
     body = body.replace("runner.environment", "N")
     body = re.sub(r"runner\.os == ('[\w-]*')", r"Q(O, \1)", body)
     body = re.sub(r"inputs\.([\w-]+)", lambda m: f"V[{m.group(1)!r}]", body)

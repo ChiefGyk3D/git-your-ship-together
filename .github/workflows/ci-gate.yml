@@ -1,0 +1,307 @@
+# Reusable CI gate: one job, `CI green`, that is green only when every job it is given succeeded or was skipped on
+# purpose. For a caller that runs several workflows side by side (parallel-ci.yml, bash-ci.yml, security.yml, a job
+# of its own) and wants one result to require, or just wants the rule in one place.
+#
+# Call it from a repository with:
+#
+#   jobs:
+#     ci:      { uses: .../parallel-ci.yml@<sha> # vX.Y.Z, ... }
+#     shell:   { uses: .../bash-ci.yml@<sha> # vX.Y.Z, ... }
+#     gate:
+#       if: always()
+#       needs: [ci, shell]
+#       uses: ChiefGyk3D/git-your-ship-together/.github/workflows/ci-gate.yml@<sha> # vX.Y.Z
+#       permissions: {}
+#       with:
+#         needs-json: ${{ toJSON(needs) }}
+#
+# `if: always()` is what makes the gate run when a job it needs failed; without it a red job would leave the gate
+# skipped, and branch protection reads a skipped required check as passed. A job counts as green only when its
+# result is exactly `success`. `skipped` counts only for a job named in `deliberate-skips`, a JSON list of job ids
+# the caller works out from something it can trust (parallel-ci.yml's own gate does this with its `skipped-jobs`
+# decision). `failure`, `cancelled`, an unknown result, an unexpected skip, no jobs at all and a deliberate skip
+# that names no needed job all fail.
+#
+# `needs-json` is read from an environment variable, so keep it small: `toJSON(needs)` carries every output of
+# every needed job, and a result map is enough, e.g. {"ci": "${{ needs.ci.result }}", "shell": "${{ needs.shell.result }}"}.
+# The check run is named `<caller job> / CI green`. The script is scripts/ci_gate.py in this repository, inlined below
+# byte for byte; tests/test_ci_gate.py holds the copies identical. Nothing is checked out and no token is held.
+
+name: CI gate (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      needs-json:
+        description: 'JSON object of the needed jobs: the toJSON of the needs context, or a map of job id to result such as {"ci": "success"}. Required; an empty object fails.'
+        type: string
+        required: true
+      deliberate-skips:
+        description: JSON list of job ids that may be skipped without failing the gate. Empty by default, so every skip fails it.
+        type: string
+        default: "[]"
+      egress-policy:
+        description: harden-runner egress policy - `audit` logs outbound connections, `block` allows only `allowed-endpoints`. Jobs that hold no secret follow `egress-policy-secretless` instead (EX-0001); this workflow has none, so the input is only validated.
+        type: string
+        default: block
+      egress-policy-secretless:
+        description: harden-runner egress policy for the gate job, which holds no stored secret, no OIDC token and no write-scoped token - exactly `audit` or `block`. Defaults to `block` since security exception EX-0001 was closed on 2026-11-02; see docs/security/exceptions/. Set `audit` to opt out if the defect recurs. Any other value fails the job.
+        type: string
+        default: block
+      allowed-endpoints:
+        description: harden-runner allow-list for `block`, space-separated host:port entries. The gate reaches nothing; the default is what the egress canary connects to. Wildcards are not supported.
+        type: string
+        default: "api.github.com:443 github.com:443"
+      extra-allowed-endpoints:
+        description: Appended to `allowed-endpoints`. Same format.
+        type: string
+        default: ""
+    outputs:
+      result:
+        description: "`success` or `failure`, the verdict of the gate."
+        value: ${{ jobs.ci-green.outputs.result }}
+
+permissions:
+  contents: read
+
+jobs:
+  ci-green:
+    name: CI green
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    outputs:
+      result: ${{ steps.gate.outputs.result }}
+    steps:
+      - name: Validate the egress policy inputs (EX-0001)
+        timeout-minutes: 1
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        env:
+          POLICY_EGRESS_POLICY: ${{ inputs.egress-policy }}
+          POLICY_EGRESS_POLICY_SECRETLESS: ${{ inputs.egress-policy-secretless }}
+        run: |
+          set -u
+          bad=0
+          check() {
+            if [ "$2" = set ] && [ "$3" != audit ] && [ "$3" != block ]; then
+              echo "::error title=egress policy::the $1 input must be exactly 'audit' or 'block' (its value is ${#3} characters long)"
+              bad=1
+            fi
+          }
+          check egress-policy "${POLICY_EGRESS_POLICY+set}" "${POLICY_EGRESS_POLICY-}"
+          check egress-policy-secretless "${POLICY_EGRESS_POLICY_SECRETLESS+set}" "${POLICY_EGRESS_POLICY_SECRETLESS-}"
+          check distro-egress-policy "${POLICY_DISTRO_EGRESS_POLICY+set}" "${POLICY_DISTRO_EGRESS_POLICY-}"
+          check semgrep-egress-policy "${POLICY_SEMGREP_EGRESS_POLICY+set}" "${POLICY_SEMGREP_EGRESS_POLICY-}"
+          exit "$bad"
+
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: ${{ (inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block' }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
+          disable-sudo: true
+          # The agent may only stop reporting to StepSecurity in block mode.
+          disable-telemetry: ${{ ((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block') == 'block' }}
+
+      - name: Egress canary (EX-0001)
+        if: ${{ runner.os == 'Linux' && (((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block') == 'block') }}
+        timeout-minutes: 2
+        shell: bash
+        # The workspace root exists before checkout; a job default working-directory may not.
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -u
+          NAMES="github.com api.github.com results-receiver.actions.githubusercontent.com"
+          PORT=443
+          canary_resolve() { timeout 5 getent ahostsv4 "$1" 2>/dev/null | awk '$2 == "STREAM" { print $1 }'; }
+          canary_probe() { timeout 3 bash -c "exec 3<>\"/dev/tcp/\$0/\$1\"" "$1" "$PORT" 2>/dev/null; }
+          canary_reach() {
+            local i
+            for i in 1 2 3 4; do
+              canary_probe "$1" && return 0
+              [ "$i" -lt 4 ] && sleep 1
+            done
+            return 1
+          }
+          canary_show() { local n=$1; shift; echo "+ $*"; { timeout 10 "$@" 2>&1 || true; } | head -n "$n" || true; }
+          canary_diag() {
+            local name
+            echo "::group::egress canary diagnostics (EX-0001, for the GitHub Support ticket)"
+            canary_show 5 uname -srmo
+            canary_show 20 cat /etc/resolv.conf
+            canary_show 20 bash -c "resolvectl status 2>/dev/null | grep -E '^ *(Current DNS Server|DNS Servers?|DNS Domain):'"
+            canary_show 20 bash -c "ss -lun | grep ':53 '"
+            for name in $NAMES pipelines.actions.githubusercontent.com; do
+              canary_show 20 getent ahostsv4 "$name"
+              canary_show 5 curl -sS -o /dev/null -w '%{http_code} %{remote_ip} %{time_connect}\n' --max-time 8 "https://$name"
+            done
+            echo "::endgroup::"
+          }
+          canary_main() {
+            local tmp name addr n=0 bad
+            tmp=$(mktemp -d) || return 1
+            for _ in 1 2 3; do
+              for name in $NAMES; do canary_resolve "$name" >>"$tmp/res.$name" & done
+              wait
+              sleep 1
+            done
+            for name in $NAMES; do
+              if [ -s "$tmp/res.$name" ]; then sort -u "$tmp/res.$name"; else echo "-"; fi | sed "s|^|$name |" >>"$tmp/pairs"
+            done
+            while read -r name addr; do
+              n=$((n + 1))
+              ( { [ "$addr" != "-" ] && canary_reach "$addr"; } || echo "$name $addr" >"$tmp/bad.$n" ) </dev/null &
+            done <"$tmp/pairs"
+            wait
+            bad=$(cat "$tmp"/bad.* 2>/dev/null | sort || true)
+            rm -rf "$tmp"
+            if [ -z "$bad" ]; then
+              echo "egress canary: all $n addresses of $NAMES accept TCP $PORT"
+              return 0
+            fi
+            echo "::error title=egress canary::egress broken on this runner (known westus2 DNS issue, EX-0001): rerun the job"
+            echo "unreachable addresses (name address; '-' means the name did not resolve):"
+            printf '%s\n' "$bad"
+            canary_diag
+            echo "EX-0001 egress canary failed, unreachable: $(printf '%s' "$bad" | tr '\n' ';')" >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
+            return 1
+          }
+          set -m
+          canary_main &
+          main=$!
+          (sleep 90; kill -TERM -- "-$main"; sleep 2; kill -KILL -- "-$main") >/dev/null 2>&1 &
+          dog=$!
+          wait "$main" && rc=0 || rc=$?
+          kill -TERM -- "-$dog" >/dev/null 2>&1 || true
+          if kill -0 -- "-$main" >/dev/null 2>&1; then
+            kill -TERM -- "-$main" >/dev/null 2>&1 || true
+            sleep 1
+            kill -KILL -- "-$main" >/dev/null 2>&1 || true
+          fi
+          if [ "$rc" -eq 143 ] || [ "$rc" -eq 137 ]; then
+            echo "::error title=egress canary::the canary hit its 90 s deadline (EX-0001): rerun the job"
+            rc=124
+          fi
+          exit "$rc"
+      - name: Every job passed, or was skipped on purpose
+        id: gate
+        env:
+          NEEDS: ${{ inputs.needs-json }}
+          DELIBERATE: ${{ inputs.deliberate-skips }}
+        run: |
+          python3 -I - --output "$GITHUB_OUTPUT" <<'PY'
+          #!/usr/bin/env python3
+          """The CI gate: green only when every needed job succeeded, or was skipped on purpose.
+
+          Standard library only; `parallel-ci.yml` and `ci-gate.yml` each carry a byte-identical copy of this file
+          (tests/test_ci_gate.py holds them together).
+
+          Environment:
+              NEEDS        JSON object, job id -> {"result": ...} or job id -> "result" (toJSON(needs) works as is)
+              DELIBERATE   JSON list of job ids that are allowed to be skipped (default [])
+
+          Usage:
+              python3 -I ci_gate.py [--output FILE]
+
+          A job passes only if its result is exactly `success`. A `skipped` job passes only if it is named in
+          DELIBERATE; `failure`, `cancelled`, an unknown result, a job with no result and a skip nobody asked for all
+          fail. No jobs at all fails (a gate over nothing is not a gate), and so does a DELIBERATE entry that names no
+          needed job (a typo there would otherwise let a real skip through unnoticed). Exit 0 green, 1 not green.
+          `result=success|failure` is appended to --output (the step's $GITHUB_OUTPUT) before exiting.
+          """
+
+          from __future__ import annotations
+
+          import argparse
+          import json
+          import os
+          import re
+          import sys
+          from pathlib import Path
+
+          JOB_ID = re.compile(r"[A-Za-z_][A-Za-z0-9_-]{0,99}")
+
+
+          def q(value: object) -> str:
+              text = value if isinstance(value, str) else repr(value)
+              return json.dumps(text[:100], ensure_ascii=True)
+
+
+          def reject_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
+              out: dict[str, object] = {}
+              for key, value in pairs:
+                  if key in out:
+                      raise ValueError(f"duplicate key {key!r}")
+                  out[key] = value
+              return out
+
+
+          def results_of(text: str) -> dict[str, str | None]:
+              """job id -> result string (None when the job carries none)."""
+              needs = json.loads(text, object_pairs_hook=reject_duplicates)
+              if not isinstance(needs, dict):
+                  raise ValueError("NEEDS must be a JSON object")
+              out: dict[str, str | None] = {}
+              for job, value in needs.items():
+                  if not JOB_ID.fullmatch(job):
+                      raise ValueError(f"job id {q(job)} is not a plain job id")
+                  if isinstance(value, dict):
+                      value = value.get("result")
+                  out[job] = value if isinstance(value, str) else None
+              return out
+
+
+          def deliberate_of(text: str) -> set[str]:
+              skips = json.loads(text, object_pairs_hook=reject_duplicates)
+              if not isinstance(skips, list) or not all(isinstance(s, str) and JOB_ID.fullmatch(s) for s in skips):
+                  raise ValueError("DELIBERATE must be a JSON list of job ids")
+              return set(skips)
+
+
+          def judge(results: dict[str, str | None], deliberate: set[str]) -> list[str]:
+              """One line per reason the gate is not green; empty when it is."""
+              problems: list[str] = []
+              if not results:
+                  problems.append("no needed jobs: a gate over nothing is not a gate")
+              for name in sorted(deliberate - set(results)):
+                  problems.append(f"deliberate skip {q(name)} names no needed job")
+              for job, result in results.items():
+                  if result == "success":
+                      continue
+                  if result == "skipped" and job in deliberate:
+                      continue
+                  if result == "skipped":
+                      problems.append(f"{q(job)} was skipped and nothing said it should be")
+                  else:
+                      problems.append(f"{q(job)} is {q(result)}")
+              return problems
+
+
+          def main(argv: list[str]) -> int:
+              parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n")[0])
+              parser.add_argument("--output", type=Path)
+              args = parser.parse_args(argv)
+              results: dict[str, str | None] = {}
+              deliberate: set[str] = set()
+              try:
+                  results = results_of(os.environ.get("NEEDS", ""))
+                  deliberate = deliberate_of(os.environ.get("DELIBERATE") or "[]")
+                  problems = judge(results, deliberate)
+              except (ValueError, RecursionError) as exc:
+                  problems = [f"cannot read the gate's inputs ({type(exc).__name__}: {q(str(exc))})"]
+                  results = {}
+                  deliberate = set()
+              for job, result in results.items():
+                  passed = result == "success" or (result == "skipped" and job in deliberate)
+                  print(f"{'ok  ' if passed else 'FAIL'} {q(job)}: {q(result)}")
+              for problem in problems:
+                  print(f"::error title=CI gate::{problem}")
+              if args.output:
+                  with args.output.open("a", encoding="utf-8") as handle:
+                      handle.write(f"result={'failure' if problems else 'success'}\n")
+              return 1 if problems else 0
+
+
+          if __name__ == "__main__":
+              sys.exit(main(sys.argv[1:]))
+          PY

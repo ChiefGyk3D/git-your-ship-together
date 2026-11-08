@@ -53,6 +53,8 @@ REUSABLE = [
         "agent-scan.yml",
         "vendored-drift.yml",
         "base-image-digest.yml",
+        "parallel-ci.yml",
+        "ci-gate.yml",
     )
 ]
 # The subset that fetches CI secrets. The Doppler rules are about those steps,
@@ -80,6 +82,8 @@ DOPPLER = [
         "agent-scan.yml",
         "vendored-drift.yml",
         "base-image-digest.yml",
+        "parallel-ci.yml",
+        "ci-gate.yml",
     )
 ]
 # The language CI workflows: each ends in the `CI green` gate branch protection requires.
@@ -137,9 +141,15 @@ def all_steps(path: Path):
 
 
 def test_there_is_something_to_check():
-    assert len(REUSABLE) == 21, "expected the twenty-one callable workflows"
+    assert len(REUSABLE) == 23, "expected the twenty-three callable workflows"
     assert len(DOPPLER) == 5, "expected five of them to fetch CI secrets"
-    assert [p.name for p in LANGUAGE_CI] == ["arduino-ci.yml", "bash-ci.yml", "python-ci.yml", "tofu-ci.yml"]
+    assert [p.name for p in LANGUAGE_CI] == [
+        "arduino-ci.yml",
+        "bash-ci.yml",
+        "parallel-ci.yml",
+        "python-ci.yml",
+        "tofu-ci.yml",
+    ]
     assert ACTION_FILES, "no composite actions found"
 
 
