@@ -15,10 +15,21 @@ tested natively, so the arm64 image the test runs against is the arm64 image tha
 |---|---|---|
 | `plan` | `contents: read` | Works out the per-platform build matrix and the lower-cased GHCR image name |
 | `dockerfile-lint` | `contents: read` | hadolint, pinned version and per-architecture sha256, cached and hash-checked on disk |
-| `build` (per platform) | `contents: read`, `packages: write`, `security-events: write` | Builds and tests on a native runner (`ubuntu-24.04-arm` for arm64); non-root check; optional read-only probe; Trivy scan to SARIF. When publishing, pushes a temporary `<sha>-<arch>` tag |
-| `merge` | `contents: read`, `packages: write`, `id-token: write`, `attestations: write` | Joins the platform images into the index under the real tags, then signs, attaches the SBOM and records provenance. Only after a push, never on a pull request |
+| `build` (per platform, publishing runs only) | `contents: read`, `packages: write`, `security-events: write` | Builds once on a native runner (`ubuntu-24.04-arm` for arm64), pushes under a temporary `<sha>-<run id>-<attempt>-<arch>` tag, pulls it back by digest and runs the non-root check, the optional read-only probe and the Trivy scan (SARIF) on that image; records its digest |
+| `build-local` (per platform, runs that do not publish) | `contents: read`, `security-events: write` | The same checks on one local build. No package write, no login, no push |
+| `merge` | `contents: read`, `packages: write`, `id-token: write`, `attestations: write` | Stages an index per registry from the recorded digests (GHCR, and Docker Hub when enabled) under a tag of this run, checks each one's digest and contents and that the digests agree, promotes that exact digest to the real tags, then signs, attaches the SBOM and records provenance. Only after a push, never on a pull request |
 
 The build job pushes only its own temporary platform tags; the signing identity exists only in `merge`.
+
+**Publishing is an allow-list.** With `push: true` the run publishes only for a push of a `vMAJOR.MINOR.PATCH` tag (SemVer 2.0.0 pre-release and build parts allowed). Any other run builds and scans, and says so in a warning annotation and the step summary. `allowed-publish-events` (default `push`; `*` or comma-separated lowercase names, no spaces) and `require-tag-ref` (default `true`) widen it.
+
+**BREAKING CHANGE.** Publishing is an allow-list: only a push of a `vMAJOR.MINOR.PATCH` tag publishes unless the caller sets `allowed-publish-events` and `require-tag-ref: false`. A refused `push: true` run builds and scans, and prints a `publish skipped` warning annotation and a job summary with the reason and the inputs to set. Also in this release: the build is split into `build` (publishing) and `build-local`; each registry gets its own index built from verified digests; `platforms` is validated as written and a repeated platform is refused; the tag check is SemVer 2.0.0; `allowed-publish-events` is validated. `penguin-overlord` and `solarstorm_scout` (main, schedule and manual publishers) add `allowed-publish-events: push,schedule,workflow_dispatch` and `require-tag-ref: false`; `hypeman` calls `python-package-release.yml` instead and follows that workflow's publish inputs.
+
+**Docker Hub.** The per-registry index relies on buildx copying GHCR sources into Docker Hub. That is observed behavior of the previous version in production: `ChiefGyk3D/Stream-Daemon` run 41512180852 (2026-11-02, success) logged `copying ... from ghcr.io/... to docker.io/...`. Docker's documentation says sources must already exist in the destination registry; if buildx enforced that, the Docker Hub step would fail before signing.
+
+**Migrating.** A caller that published from `main`, a schedule or a manual run (for example `penguin-overlord` and `solarstorm_scout`, which pass `push: ${{ github.event_name != 'pull_request' }}`) sets `allowed-publish-events: push,schedule,workflow_dispatch` and `require-tag-ref: false`; a caller that releases only from `v*.*.*` tags changes nothing.
+
+**One build per platform.** A publishing leg builds once, pushes it, pulls it back by digest and runs the checks and the Trivy scan on that image; a non-publishing leg builds once, locally. `merge` stages the index under `stage-<sha>-<run id>-<attempt>`, verifies its digest and contents, and promotes that digest.
 
 ## A minimal caller
 

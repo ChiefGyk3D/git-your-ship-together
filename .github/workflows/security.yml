@@ -1,10 +1,11 @@
 # Reusable security checks for a Python repository.
 #
 #   codeql             SAST; findings land in the Security tab.
-#   gitleaks           Secret scan over the full history (or, on a pull request
-#                      with gitleaks-scope: pr-commits, the pull request's own
-#                      commits plus the tree), on top of what Doppler already
-#                      prevents by keeping secrets out of the tree.
+#   gitleaks           Secret scan: on a pull request, the pull request's own
+#                      commits plus the tree (gitleaks-scope: pr-commits, the
+#                      default; all-refs scans every ref); on a push or a
+#                      schedule, the full history. On top of what Doppler
+#                      already prevents by keeping secrets out of the tree.
 #   pip-audit          Known vulnerabilities in the pinned dependencies.
 #   dependency-review  On pull requests: what a dependency change brings in,
 #                      and any dependency under a denied licence.
@@ -59,13 +60,17 @@ on:
         type: string
         default: ""
       gitleaks:
-        description: Run gitleaks over the full history.
+        description: Run the gitleaks scan (what it covers is set by `gitleaks-scope`).
         type: boolean
         default: true
       gitleaks-scope:
-        description: What the gitleaks history scan covers - exactly `all-refs` (default, unchanged behavior - every ref in the clone) or `pr-commits`. `pr-commits` narrows only a `pull_request` run, to the commits of the pull request (base..head) plus a scan of the checked-out tree; a push, a schedule, a workflow_dispatch and any other event scan the full history whatever this is set to. Any other value fails the gitleaks job. On a `pull_request` event, in both scopes, the scan reads `.gitleaks.toml` and `.gitleaksignore` from the base commit rather than the pull request's tree.
+        description: What the gitleaks history scan covers - exactly `pr-commits` (default) or `all-refs` (opt-in, every ref in the clone). `pr-commits` narrows only a `pull_request` run, to the commits of the pull request (base..head) plus a scan of the checked-out tree, so a key on some other unmerged branch no longer fails every pull request; a push (the default branch included), a schedule, a workflow_dispatch and any other event scan the full history whatever this is set to. Any other value fails the gitleaks job. On a `pull_request` event, in both scopes, the scan reads `.gitleaks.toml` and `.gitleaksignore` from the base commit rather than the pull request's tree.
         type: string
-        default: all-refs
+        default: pr-commits
+      gitleaks-hash-manifest-paths:
+        description: Newline-separated repository-relative file paths of content-hash manifests (for example an asset manifest that records the SHA-256 of `discord.svg`), default empty (no allowlist). The default gitleaks rule `discord-api-token` reads a 64-hex SHA-256 on a line keyed `discord` as a token. For exactly the listed files, a finding of that one rule whose value is exactly 64 lowercase hex characters is allowed (an AND of path and value; each path is matched whole, anchored at both ends, with no globs); every other rule, path and value is still reported. The allowlist is layered on the configuration the scan already uses (on a pull request, the base commit's `.gitleaks.toml`), so a pull request cannot allowlist itself with its own tree. The list comes from the caller's workflow file. Each line must be a plain path of letters, digits, `_`, `.`, `-` and `/` with no `..`, at most 100 lines; anything else fails the gitleaks job.
+        type: string
+        default: ""
       gitleaks-version:
         description: gitleaks release to download (gitleaks/gitleaks), without the `v`. Changing it means changing `gitleaks-sha256`.
         type: string
@@ -620,7 +625,7 @@ jobs:
           fetch-depth: 0
 
       # Decide what the history scan covers. Only a `pull_request` run with
-      # `pr-commits` narrows, to the commits reachable from the head and not
+      # `pr-commits` (the default) narrows, to the commits reachable from the head and not
       # from the base (git's base..head), plus a scan of the checked-out tree.
       # Every other event, and `all-refs`, scans every ref. The SHAs come from
       # the event payload through env (never inline in this script) and must
@@ -642,6 +647,7 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HASH_MANIFEST_PATHS: ${{ inputs.gitleaks-hash-manifest-paths }}
         run: |
           set -euo pipefail
           fail() {
@@ -699,16 +705,78 @@ jobs:
             if [ "$has_base_ignore" = false ] && { [ -e "$workspace/.gitleaksignore" ] || [ -L "$workspace/.gitleaksignore" ]; }; then
               fail "the pull request's .gitleaksignore could not be removed"
             fi
-            scan_args="$scan_args --config=$cfg_dir/gitleaks.toml --gitleaks-ignore-path=$cfg_dir/ignore"
+            config_file="$cfg_dir/gitleaks.toml"
+            scan_args="$scan_args --gitleaks-ignore-path=$cfg_dir/ignore"
             config_source=base
           else
             workspace="${GITHUB_WORKSPACE:-$PWD}"
             if [ -f "$workspace/.gitleaks.toml" ]; then
               [[ "$workspace" =~ $safe_re ]] || fail "the workspace path holds a character the scan arguments cannot carry safely"
-              scan_args="$scan_args --config=$workspace/.gitleaks.toml"
+              config_file="$workspace/.gitleaks.toml"
             fi
           fi
-          echo "scope=$scope event=${EVENT_NAME-} log-opts=$log_opts tree-scan=$tree config-from=$config_source"
+          # The hash-manifest allowlist (gitleaks-hash-manifest-paths, default
+          # empty = no overlay, nothing changes). One path per line, each an
+          # exact repository-relative file name (letters, digits, `_ . -` and
+          # `/` between segments; no `..`, no globs), anchored at both ends in
+          # the generated regular expression. The overlay is a small config
+          # that EXTENDS the config chosen above (on a pull request: the
+          # base commit's copy, so a pull request still cannot allowlist
+          # itself) and adds one allowlist: rule discord-api-token only, AND
+          # of a path in the list and a value that is exactly 64 lowercase hex
+          # characters (the secret group of that rule; a SHA-256 in a manifest).
+          # Any other rule, any other path, any other value is still reported.
+          # The list comes from the caller's workflow file, never from the
+          # scanned tree.
+          hash_paths=0
+          if [ -n "${HASH_MANIFEST_PATHS-}" ]; then
+            # The C locale, so a bracket range means ASCII only (in a UTF-8
+            # locale `[A-Za-z]` can match accented letters).
+            export LC_ALL=C
+            overlay_dir="${RUNNER_TEMP:?}/gitleaks-overlay"
+            [[ "$overlay_dir" =~ $safe_re ]] || fail "the runner temp path holds a character the scan arguments cannot carry safely"
+            path_regexes=""
+            while IFS= read -r entry || [ -n "$entry" ]; do
+              [ -n "$entry" ] || continue
+              [[ "$entry" =~ ^[A-Za-z0-9_./-]+$ ]] || fail "gitleaks-hash-manifest-paths: each line must be one repository-relative file path of letters, digits, '_', '.', '-' and '/' (a line of ${#entry} characters is not)"
+              IFS=/ read -r -a segments <<< "$entry"
+              if ! { [ "${#segments[@]}" -ge 1 ] && [[ "$entry" != */ && "$entry" != /* && "$entry" != *//* ]]; }; then
+                fail "gitleaks-hash-manifest-paths: a path must not start or end with '/' or hold '//' (line of ${#entry} characters)"
+              fi
+              for segment in "${segments[@]}"; do
+                if [ "$segment" = . ] || [ "$segment" = .. ]; then
+                  fail "gitleaks-hash-manifest-paths: a path must not hold a '.' or '..' segment (line of ${#entry} characters)"
+                fi
+              done
+              escaped=${entry//./\\.}
+              path_regexes="${path_regexes:+$path_regexes, }'''^${escaped}\$'''"
+              hash_paths=$((hash_paths + 1))
+            done <<< "$HASH_MANIFEST_PATHS"
+            [ "$hash_paths" -le 100 ] || fail "gitleaks-hash-manifest-paths: at most 100 paths (got $hash_paths)"
+            if [ "$hash_paths" -gt 0 ]; then
+              rm -rf "$overlay_dir"
+              mkdir -p "$overlay_dir"
+              if [ -z "${config_file-}" ]; then
+                printf 'title = "gitleaks defaults"\n\n[extend]\nuseDefault = true\n' > "$overlay_dir/defaults.toml"
+                config_file="$overlay_dir/defaults.toml"
+              fi
+              {
+                printf 'title = "gitleaks hash-manifest overlay"\n\n'
+                printf "[extend]\npath = '%s'\n\n" "$config_file"
+                printf '[[allowlists]]\n'
+                printf 'description = "SHA-256 values in listed hash manifests (discord-api-token only)"\n'
+                printf 'targetRules = ["discord-api-token"]\n'
+                printf 'condition = "AND"\n'
+                printf "regexes = ['''^[a-f0-9]{64}\$''']\n"
+                printf 'paths = [%s]\n' "$path_regexes"
+              } > "$overlay_dir/overlay.toml"
+              config_file="$overlay_dir/overlay.toml"
+            fi
+          fi
+          if [ -n "${config_file-}" ]; then
+            scan_args="$scan_args --config=$config_file"
+          fi
+          echo "scope=$scope event=${EVENT_NAME-} log-opts=$log_opts tree-scan=$tree config-from=$config_source hash-manifest-paths=$hash_paths"
           {
             echo "log_opts=$log_opts"
             echo "tree=$tree"

@@ -5,7 +5,133 @@ name what a caller sees after that.
 
 ## Unreleased
 
-Nothing yet.
+### New: `parallel-ci.yml` and `ci-gate.yml` (issue #330)
+
+Two new reusable workflows. Nothing existing changes: a caller sees them only by adding a job that calls one, after it
+re-pins.
+
+- **`parallel-ci.yml`.** One build, then caller-supplied checks as separate jobs that share it, ending in one `CI green`
+  gate. A caller passes `build-command`, `build-output-path` and a `jobs` JSON list (`name`, `command`, `timeout`, `areas`,
+  `pip-cache`, `tools`, `build`); the build is uploaded once as a one-day artifact named with the run attempt, and each check
+  leg downloads it. `areas` path rules (plain `git diff --no-renames --name-only`) skip the checks a change cannot affect and
+  **fail closed**: a push, a schedule, a manual run, an empty or unreadable diff, an unmatched path and an odd byte in a name
+  all run everything. The gate fails on any failed, cancelled or unexplained-skipped job; the only skip it accepts is the
+  whole `checks` job when the path rules selected nothing. Pip and tool-download caches are keyed on pin files the caller names
+  and are used only under `block`. Tool setup runs in the same shell as the command that needs it; nothing is written to
+  `$GITHUB_PATH` or `$GITHUB_ENV`. Every input is validated and reaches a script through the environment. Every job holds
+  `contents: read` and no secret. No `continue-on-error`. Scripts: `scripts/parallel_ci_plan.py`, `scripts/parallel_ci_gate.py`.
+- **`ci-gate.yml`.** The gate on its own, for a caller that runs several workflows side by side: `CI green` over a
+  `needs-json` it is handed, with `deliberate-skips` as the only excuse for a skip. No token.
+- Both run against `fixture/` in `ci.yml` and are in the `CI green` gate. `tests/test_egress_canary.py`'s expression
+  evaluator learned the two forms the new cache conditions use (a non-empty `needs` output, a matrix flag); the rule it pins
+  (no cache in an audit job) is unchanged.
+
+## v1.32.0 (2026-11-08)
+
+### New: opt-in CI speed-ups, `test-matrix`, `xdist` and the docs-only fast path (issue #331)
+
+All opt-in; a caller that sets nothing sees no change after it re-pins (re-pinning downstream repositories is separate work).
+The one visible difference for a `tofu-ci.yml` caller with `test: true` is an extra small job, `test directories`, that lists
+the legs; the `test` job keeps its name.
+
+- **`tofu-ci.yml` `test-matrix`** (default `false`). With `test`, `tofu test` runs as one job per directory (`fail-fast: false`)
+  instead of every directory in turn. `ci-green` still reports one result and now treats a skipped `test` or `test-dirs` as a
+  failure when `test` was asked for; a failed or cancelled leg already made `test` fail or cancel.
+- **`python-ci.yml` `xdist`, `xdist-workers`** (default off, `auto`). Installs `pytest-xdist` 3.8.0 and `execnet` from a hash lock (`--require-hashes`, no version input) and sets
+  `PYTEST_ADDOPTS=-n <workers>` for the `test-command` step only, so a command that chains scripts before pytest is unchanged.
+- **`.github/actions/classify-changes` and `.github/actions/ci-gate`.** A pull request that changes only the caller's docs-only
+  paths leaves a named job out on purpose, and the caller's `CI green` counts that skip as a pass and every other skip as a
+  failure. The changed files come from the API and anything unconfirmed runs the job. Rules and threat notes:
+  [Docs-only fast path and parallel CI](docs/wiki/Docs-only-fast-path.md). Scripts: `scripts/classify_changes.py`,
+  `scripts/ci_gate.py`. Issue #330's static-site workflow should call the same actions.
+
+## v1.31.0 (2026-11-07)
+
+### Changed (BREAKING default for publishing callers): `container-release.yml` publishes only from a SemVer tag push (issues #325, #327, pull request #328)
+
+Callers pick this up when they re-pin (callers pin a commit; re-pinning downstream repositories is separate work).
+
+- **Breaking default.** With `push: true`, `container-release.yml` now publishes only for a push of a `vMAJOR.MINOR.PATCH` tag
+  (SemVer 2.0.0 pre-release and build parts allowed). Any other run with `push: true` builds and scans only, prints a
+  `publish skipped` warning annotation and writes a job summary naming the reason and the inputs to set.
+- **New inputs.** `allowed-publish-events` (default `push`; `*` or a comma-separated list of lowercase event names, no spaces;
+  validated) and `require-tag-ref` (default `true`).
+- **What a caller must do.** A caller that publishes from main, a schedule or a manual run adds
+  `allowed-publish-events: push,schedule,workflow_dispatch` and `require-tag-ref: false`. Without them its next run on those
+  events builds and scans but does not publish. A caller that publishes only from tag pushes changes nothing.
+- **Build split.** The build is split into `build` (publishing; `packages: write`) and `build-local` (no publish permission).
+- **Per-registry indexes.** Each registry gets its own multi-platform index, built from digests that are verified first.
+- **Strict `platforms`.** The list is validated as written and a repeated platform is refused. The tag check uses the SemVer
+  2.0.0 grammar, so `v1`, `v1.2` and `vnot-a-release` do not publish.
+
+### Changed: release workflows are stricter about publishing and assets (issues #325, #327, pull request #326)
+
+Applies to `artifact-release.yml` and `python-package-release.yml` (and the `python-docker-release.yml` name that forwards to
+them). Callers pick this up when they re-pin.
+
+- **Publish allow-list.** Publishing runs only for an event named in `allowed-publish-events` (default `push`) on a
+  `refs/tags/v<semver>` ref. A caller triggered by `release: published`, such as `hypeman` calling
+  `python-package-release.yml`, must set `allowed-publish-events: push,release`.
+- **Asset naming policy.** Every local file name must be ASCII letters, digits, `.`, `_` and `-`, starting and ending with a
+  letter or digit; checked before any release call. A build that produces another name (spaces, `+`, non-ASCII, a leading or
+  trailing `_` or `-`) must rename the file in its `build-command` before re-pinning.
+- **Hidden files refused.** Names beginning with `.` in the staging directory are rejected, no longer skipped.
+- **Case collisions refused.** Names that differ only in letter case are refused (a conservative policy).
+- **Prerelease tags create prereleases.** A new release for a SemVer prerelease tag (for example `v1.2.3-rc.1`) is created with
+  `--prerelease`. Earlier versions never set the flag.
+- **Existing release must match.** An existing release must carry the `prerelease` flag its tag implies, hold only assets that
+  are absent or identical by sha256, and hold exactly this build's files after the upload, or the run fails and the version is
+  burned. A draft release for the tag fails the run until it is published or deleted.
+- **Asset listing.** Read through the paginated listing, validated before use; every remote asset must be `uploaded` and no
+  name may repeat.
+
+## v1.30.0 (2026-11-06)
+
+### New: opt-in `vendored-drift.yml` and `base-image-digest.yml` (issue #296)
+
+Two new reusable workflows. Both are opt-in and existing callers are unchanged: a caller sees them only after it re-pins
+(re-pinning downstream repositories is separate work) and adds a job that calls one.
+
+- **`vendored-drift.yml`.** For a file vendored from another repository. Each lock file (path, source repository, commit,
+  SHA-256) must match the vendored file's hash, and an optional generator run with `--check` must agree. No lock file is a
+  failure. Read-only, no secret. Script: `scripts/check_vendored_drift.py`.
+- **`base-image-digest.yml`.** Scheduled check of `FROM image:tag@sha256:...` pins: resolves today's digest of each tag and
+  fails when the pinned digest has a fixable HIGH or CRITICAL finding that the current digest does not (the class that failed
+  the Reach Around v0.2.1 release scan at tag time). `exit-code: "0"` reports in the job summary only. Read-only, no secret,
+  no issue write. Script: `scripts/base_image_digest.py`.
+- Both run against `fixture/` in `ci.yml` and are in the `CI green` gate.
+
+## v1.29.0 (2026-11-05)
+
+### New: `gitleaks-hash-manifest-paths` input in `security.yml` (issue #290)
+
+Callers pick this up when they re-pin (re-pinning downstream repositories is separate work). The default is empty, so a
+caller that sets nothing sees no change.
+
+- **The false positive.** The default rule `discord-api-token` flags a SHA-256 on a line keyed `discord` (the hash of a
+  `discord.svg` in an asset manifest; seen 2026-11-05 in a static-site repository).
+- **New input.** Newline-separated repository-relative paths of hash manifests. For exactly those files the job allows a
+  finding of `discord-api-token` whose value is exactly 64 lowercase hex characters (`condition = "AND"` over rule, value and
+  path; each path anchored at both ends, no globs). Any other rule, path or value is still reported, in the history scan and
+  the tree scan.
+- **A pull request still cannot allowlist itself.** The allowlist is an overlay that `extend`s the configuration the scan
+  uses: on a pull request the base commit's `.gitleaks.toml` (or the scanner defaults), on other events the checked-out one.
+  The list is the caller's workflow input.
+- **Fails closed.** A line with a glob, space, quote, `..`, an absolute path or any character outside letters, digits,
+  `_ . - /`, or more than 100 paths, fails the gitleaks job; the error never echoes the value.
+- **Canary** runs with the overlay in its arguments: the planted key must still be caught.
+
+### Changed: `gitleaks-scope` now defaults to `pr-commits` (issue #260)
+
+Callers pick this up when they re-pin (callers pin a commit; re-pinning downstream repositories is separate work).
+
+- **The default flips from `all-refs` to `pr-commits`.** A `pull_request` run now scans only the pull request's commits
+  (`base..head`) plus the checked-out tree, so a key-shaped fixture on an unmerged branch no longer turns every other pull
+  request red. A push (the default branch included), a schedule, a `workflow_dispatch` and every other event still scan the
+  full history, so nothing entering the default branch is scanned less.
+- **Opt back in** with `gitleaks-scope: all-refs` on the workflow call to keep the old every-ref scan on pull requests.
+- **Unchanged:** the accepted values (`pr-commits`, `all-refs`; anything else fails the job), the base-commit configuration
+  on a pull request, the canary, and the residuals listed under the `gitleaks-scope` entry below.
 
 ## v1.28.1 (2026-11-02)
 

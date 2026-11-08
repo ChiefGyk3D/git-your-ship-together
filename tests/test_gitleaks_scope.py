@@ -1,16 +1,18 @@
 """security.yml `gitleaks-scope`: scope the secret scan of a pull request to the pull request (issue #260).
 
 The scan used to run over every ref, so one key-shaped fixture on an unmerged branch turned the scan red on every
-other pull request. `pr-commits` narrows a pull request's history scan to `base..head` and adds a scan of the
-checked-out tree; `all-refs` (the default) is today's behavior. Only the `pull_request` event ever narrows: push,
-schedule, workflow_dispatch and everything else scan the full history whatever the input says, so a branch protection
-against a leak entering the default branch never gets weaker. An unknown value fails the job (fail closed).
+other pull request. `pr-commits` (the default) narrows a pull request's history scan to `base..head` and adds a scan
+of the checked-out tree; `all-refs` is the opt-in for the old every-ref scan. Only the `pull_request` event ever
+narrows: push, schedule, workflow_dispatch and everything else scan the full history whatever the input says, so a
+branch protection against a leak entering the default branch never gets weaker. An unknown value fails the job
+(fail closed).
 """
 
 from __future__ import annotations
 
 import hashlib
 import io
+import json
 import os
 import subprocess
 import tarfile
@@ -113,6 +115,7 @@ def run_step(name: str, env: dict, cwd=None, out=None):
         "EVENT_NAME",
         "BASE_SHA",
         "HEAD_SHA",
+        "HASH_MANIFEST",
         "RUNNER_TEMP",
         "GITHUB_WORKSPACE",
     )
@@ -134,7 +137,7 @@ def core(out: dict) -> dict:
     return {k: out[k] for k in ("log_opts", "tree")}
 
 
-def resolve(repo_info, scope: str, event: str, tmp_path, base=None, head=None):
+def resolve(repo_info, scope: str, event: str, tmp_path, base=None, head=None, paths=None):
     r, b, h = repo_info
     out = tmp_path / "out"
     out.write_text("")
@@ -149,6 +152,7 @@ def resolve(repo_info, scope: str, event: str, tmp_path, base=None, head=None):
             "EVENT_NAME": event,
             "BASE_SHA": b if base is None else base,
             "HEAD_SHA": h if head is None else head,
+            **({} if paths is None else {"HASH_MANIFEST_PATHS": paths}),
         },
         cwd=r,
         out=out,
@@ -159,10 +163,10 @@ def resolve(repo_info, scope: str, event: str, tmp_path, base=None, head=None):
 # --- the input ----------------------------------------------------------------
 
 
-def test_the_input_is_a_string_that_defaults_to_all_refs():
+def test_the_input_is_a_string_that_defaults_to_the_pull_request_range():
     spec = INPUTS["gitleaks-scope"]
     assert spec["type"] == "string"
-    assert spec["default"] == "all-refs", "a caller that sets nothing must keep scanning every ref"
+    assert spec["default"] == "pr-commits", "a caller that sets nothing scans only its pull request's commits"
     assert "pr-commits" in spec["description"] and "all-refs" in spec["description"]
 
 
@@ -171,6 +175,7 @@ def test_the_input_is_documented_in_the_readme_and_the_default_is_stated():
     row = next((line for line in text.splitlines() if line.startswith("| `gitleaks-scope` |")), "")
     assert row, "gitleaks-scope is not documented in the README"
     assert "`all-refs`" in row and "pr-commits" in row and "default" in row.lower()
+    assert row.split("|")[2].strip() == "`pr-commits`", "the README states the real default"
 
 
 # --- the validate step ----------------------------------------------------------
@@ -232,6 +237,24 @@ def test_pr_commits_on_a_pull_request_scans_base_to_head_and_the_tree(repo, tmp_
     done, out = resolve(repo, "pr-commits", "pull_request", tmp_path)
     assert done.returncode == 0, done.stderr + done.stdout
     assert core(out) == {"log_opts": f"{base}..{head}", "tree": "true"}
+
+
+@pytest.mark.parametrize("event", EVENTS)
+def test_the_declared_default_resolves_like_pr_commits_for_every_event(event, repo, tmp_path):
+    # What a caller that sets nothing gets: the default value is fed to the resolve step as-is.
+    default = INPUTS["gitleaks-scope"]["default"]
+    _, base, head = repo
+    done, out = resolve(repo, default, event, tmp_path)
+    assert done.returncode == 0, done.stderr + done.stdout
+    if event == "pull_request":
+        assert core(out) == {"log_opts": f"{base}..{head}", "tree": "true"}
+    else:
+        assert core(out) == {"log_opts": "--all", "tree": "false"}, "push, schedule and the rest keep the full history"
+
+
+def test_all_refs_stays_available_as_the_opt_in(repo, tmp_path):
+    done, out = resolve(repo, "all-refs", "pull_request", tmp_path)
+    assert done.returncode == 0 and core(out) == {"log_opts": "--all", "tree": "false"}
 
 
 def test_the_decision_table_in_one_place(repo, tmp_path):
@@ -310,6 +333,7 @@ def test_the_new_steps_read_every_value_from_env_never_from_an_expression():
         "EVENT_NAME": "${{ github.event_name }}",
         "BASE_SHA": "${{ github.event.pull_request.base.sha }}",
         "HEAD_SHA": "${{ github.event.pull_request.head.sha }}",
+        "HASH_MANIFEST_PATHS": "${{ inputs.gitleaks-hash-manifest-paths }}",
     }
     assert step(COMMITS)["env"] == {
         "LOG_OPTS": "${{ steps.scope.outputs.log_opts }}",
@@ -632,8 +656,6 @@ def test_a_config_that_hides_the_planted_key_fails_the_canary(gitleaks, tmp_path
 
 def ignore_for(gitleaks: str, r) -> str:
     """The fingerprints that would hide leak.txt in `r` (commit-qualified for git, bare for dir), from the scanner."""
-    import json
-
     report = r / "fp.json"
     subprocess.run(
         [gitleaks, "git", "--no-banner", "--redact", "-f", "json", "-r", str(report), "."],
@@ -729,3 +751,223 @@ def test_other_events_leave_the_checkouts_ignore_file_alone(event, tmp_path):
     done, _ = resolve(info, "all-refs", event, tmp_path)
     assert done.returncode == 0
     assert (info[0] / ".gitleaksignore").read_text() == "head-line\n"
+
+
+# --- gitleaks-hash-manifest-paths: the narrow allowlist for content-hash manifests (issue #290) ----------------------
+
+MANIFEST = "assets/manifest.json"
+OTHER_MANIFEST = "assets/icons.json"
+# A SHA-256 in an asset manifest, on a line keyed "discord": what the default discord-api-token rule reads as a token.
+MANIFEST_BODY = '{\n  "discord.svg": "' + hashlib.sha256(b"discord.svg").hexdigest() + '"\n}\n'
+BASE_CONFIG = "title = 'base config'\n[extend]\nuseDefault = true\n"
+
+
+def manifest_repo(tmp_path, head_files: dict, base_files: dict | None = None):
+    (tmp_path / "assets").mkdir(exist_ok=True)
+    info = cfg_repo(tmp_path, {".gitleaks.toml": BASE_CONFIG} if base_files is None else base_files, {})
+    r = info[0]
+    for name, body in head_files.items():
+        (r / name).parent.mkdir(parents=True, exist_ok=True)
+        (r / name).write_text(body)
+        sh("git", "add", name, cwd=r)
+    sh("git", "-c", "user.email=ci@example.invalid", "-c", "user.name=ci", "commit", "-q", "-m", "manifests", cwd=r)
+    return r, info[1], sh("git", "rev-parse", "HEAD", cwd=r)
+
+
+def scan_codes(gitleaks: str, info, out: dict) -> list[int]:
+    """Exit codes of the resolved history scan and tree scan, built exactly as the job builds them."""
+    codes = []
+    for cmd in (["git", f"--log-opts={out['log_opts']}"], ["dir"]):
+        done = subprocess.run(
+            [gitleaks, cmd[0], *out["scan_args"].split(), *cmd[1:], "."], cwd=info[0], capture_output=True, text=True
+        )
+        codes.append(done.returncode)
+    return codes
+
+
+def findings(gitleaks: str, info, out: dict, tmp_path) -> list[dict]:
+    """The tree scan's findings as the job would run it (JSON report instead of the exit code)."""
+    report = tmp_path / "findings.json"
+    subprocess.run(
+        [gitleaks, "dir", *out["scan_args"].split(), "-f", "json", "-r", str(report), "."],
+        cwd=info[0],
+        capture_output=True,
+        text=True,
+    )
+    return json.loads(report.read_text())
+
+
+def test_the_hash_manifest_input_is_a_string_that_defaults_to_empty_and_is_documented():
+    spec = INPUTS["gitleaks-hash-manifest-paths"]
+    assert spec["type"] == "string" and spec["default"] == "", "no allowlist unless a caller asks for one"
+    row = next((x for x in README.read_text().splitlines() if x.startswith("| `gitleaks-hash-manifest-paths` |")), "")
+    assert row, "gitleaks-hash-manifest-paths is not documented in the README"
+    assert "discord-api-token" in row and "64" in row and "base" in row and "empty" in row.lower()
+
+
+def test_without_paths_there_is_no_overlay_and_the_arguments_are_what_they_were(repo, tmp_path):
+    _, plain = resolve(repo, "pr-commits", "pull_request", tmp_path)
+    for value in ("", "\n\n"):  # unset, empty, and blank lines only: nothing to allow
+        done, out = resolve(repo, "pr-commits", "pull_request", tmp_path, paths=value)
+        assert done.returncode == 0, done.stderr + done.stdout
+        assert out["scan_args"] == plain["scan_args"] and "overlay" not in out["scan_args"]
+        assert "hash-manifest-paths=0" in done.stdout
+
+
+def test_the_overlay_extends_the_base_commits_config_on_a_pull_request_and_allows_one_rule_only(tmp_path):
+    info = manifest_repo(tmp_path, {MANIFEST: MANIFEST_BODY, ".gitleaks.toml": ALLOW_ALL})
+    done, out = resolve(info, "pr-commits", "pull_request", tmp_path, paths=f"{MANIFEST}\n{OTHER_MANIFEST}\n")
+    assert done.returncode == 0, done.stderr + done.stdout
+    args = scan_args_of(out)
+    overlay = open(args["--config"]).read()
+    assert args["--config"].endswith("/gitleaks-overlay/overlay.toml")
+    base_copy = str(tmp_path / "runner" / "gitleaks-base-config" / "gitleaks.toml")
+    assert f"path = '{base_copy}'" in overlay, "layered on the base commit's copy, never the checkout's file"
+    assert open(base_copy).read() == BASE_CONFIG
+    assert str(info[0]) not in overlay
+    assert 'targetRules = ["discord-api-token"]' in overlay and 'condition = "AND"' in overlay
+    assert "regexes = ['''^[a-f0-9]{64}$''']" in overlay
+    assert "paths = ['''^assets/manifest\\.json$''', '''^assets/icons\\.json$''']" in overlay
+    assert overlay.count("[[allowlists]]") == 1
+
+
+@pytest.mark.parametrize("config", [None, "title = 'checkout'\n[extend]\nuseDefault = true\n"])
+@pytest.mark.parametrize("event", [e for e in EVENTS if e != "pull_request"])
+def test_other_events_layer_the_overlay_on_the_checkouts_config_or_the_defaults(event, config, tmp_path):
+    info = manifest_repo(tmp_path, {MANIFEST: MANIFEST_BODY, **({".gitleaks.toml": config} if config else {})}, {})
+    if not config:
+        assert not (info[0] / ".gitleaks.toml").exists()
+    done, out = resolve(info, "pr-commits", event, tmp_path, paths=MANIFEST)
+    assert done.returncode == 0, done.stderr + done.stdout
+    overlay = open(scan_args_of(out)["--config"]).read()
+    if config:
+        assert f"path = '{info[0] / '.gitleaks.toml'}'" in overlay
+    else:
+        defaults = tmp_path / "runner" / "gitleaks-overlay" / "defaults.toml"
+        assert f"path = '{defaults}'" in overlay and "useDefault = true" in defaults.read_text()
+
+
+INVALID_PATHS = [
+    "/assets/manifest.json",  # absolute
+    "assets/manifest.json/",  # directory form
+    "../assets/manifest.json",
+    "assets/../manifest.json",
+    "assets/./manifest.json",
+    "./manifest.json",
+    "assets//manifest.json",
+    ".",
+    "..",
+    "assets/*.json",  # no globs
+    "assets/manifest?.json",
+    "assets/[m].json",
+    "assets/(a|b).json",  # no regular expressions
+    "assets/manifest.json$",
+    "assets/ma nifest.json",
+    " assets/manifest.json",
+    "assets/manifest.json ",
+    " ",
+    "assets\\manifest.json",
+    "assets/manifest'.json",
+    'assets/manifest".json',
+    "''']\n[[allowlists]]\nregexes=['''.*",  # a try at breaking out of the generated TOML
+    "assets/$(id).json",
+    "assets/`id`.json",
+    "assets/${HOME}.json",
+    "assets/manifest.json\r",
+    "assets/mänifest.json",
+    "assets/manifest​.json",  # zero-width space
+]
+
+
+@pytest.mark.parametrize("bad", INVALID_PATHS)
+def test_an_unusable_path_fails_closed_with_no_overlay(bad, repo, tmp_path):
+    for value in (bad, f"{MANIFEST}\n{bad}\n"):  # alone, and behind a good line
+        done, out = resolve(repo, "pr-commits", "pull_request", tmp_path, paths=value)
+        assert done.returncode == 1, repr(value)
+        assert "::error title=gitleaks-scope::gitleaks-hash-manifest-paths" in done.stdout
+        assert "scan_args" not in out, "a bad list must not leave a scan configuration behind"
+
+
+def test_more_than_one_hundred_paths_fail_closed(repo, tmp_path):
+    ok = "\n".join(f"assets/m{i}.json" for i in range(100))
+    done, out = resolve(repo, "pr-commits", "pull_request", tmp_path, paths=ok)
+    assert done.returncode == 0, done.stderr + done.stdout
+    done, out = resolve(repo, "pr-commits", "pull_request", tmp_path, paths=ok + "\nassets/m100.json")
+    assert done.returncode == 1 and "scan_args" not in out
+
+
+def test_the_hash_manifest_value_is_read_from_env_never_from_an_expression():
+    assert "${{" not in step(RESOLVE)["run"]
+    assert "IFS= read -r entry" in step(RESOLVE)["run"] and "eval " not in step(RESOLVE)["run"]
+
+
+def test_premise_the_default_rule_flags_a_hash_in_a_manifest_and_the_overlay_allows_exactly_that(gitleaks, tmp_path):
+    info = manifest_repo(tmp_path, {MANIFEST: MANIFEST_BODY})
+    plain = resolve(info, "pr-commits", "pull_request", tmp_path)[1]
+    assert scan_codes(gitleaks, info, plain) == [1, 1], "the false positive of issue #290, with the defaults"
+    done, out = resolve(info, "pr-commits", "pull_request", tmp_path, paths=MANIFEST)
+    assert done.returncode == 0, done.stderr + done.stdout
+    assert scan_codes(gitleaks, info, out) == [0, 0], "...gone for the listed manifest, in the history and the tree"
+
+
+def test_every_listed_path_is_allowed(gitleaks, tmp_path):
+    info = manifest_repo(tmp_path, {MANIFEST: MANIFEST_BODY, OTHER_MANIFEST: MANIFEST_BODY})
+    done, out = resolve(info, "pr-commits", "pull_request", tmp_path, paths=f"{MANIFEST}\n{OTHER_MANIFEST}")
+    assert scan_codes(gitleaks, info, out) == [0, 0]
+    done, out = resolve(info, "pr-commits", "pull_request", tmp_path, paths=MANIFEST)
+    assert scan_codes(gitleaks, info, out) == [1, 1], "a file that is not listed is still reported"
+
+
+@pytest.mark.parametrize(
+    "where",
+    [
+        "other.json",  # not listed
+        "x/assets/manifest.json",  # the listed path as a suffix: the start anchor
+        "assets/manifest.json.bak",  # the listed path as a prefix: the end anchor
+        "assets/manifestXjson",  # the dot is a dot, not any character
+        "Assets/manifest.json",  # case
+        "assets/sub/manifest.json",
+    ],
+)
+def test_a_hash_anywhere_but_the_listed_path_is_still_reported(where, gitleaks, tmp_path):
+    info = manifest_repo(tmp_path, {where: MANIFEST_BODY})
+    done, out = resolve(info, "pr-commits", "pull_request", tmp_path, paths=MANIFEST)
+    assert done.returncode == 0, done.stderr + done.stdout
+    assert scan_codes(gitleaks, info, out) == [1, 1], where
+
+
+def test_another_rule_in_a_listed_file_is_still_reported(gitleaks, tmp_path):
+    # The allowlist is for the one rule: an AWS-shaped key in the same file is not hidden.
+    info = manifest_repo(tmp_path, {MANIFEST: MANIFEST_BODY + planted()})
+    done, out = resolve(info, "pr-commits", "pull_request", tmp_path, paths=MANIFEST)
+    assert scan_codes(gitleaks, info, out) == [1, 1]
+    # ...and the finding is the AWS key, not the hash.
+    rules = {f["RuleID"] for f in findings(gitleaks, info, out, tmp_path)}
+    assert rules and "discord-api-token" not in rules, rules
+
+
+def test_a_pull_request_cannot_allowlist_itself_with_its_own_config_or_ignore_file(gitleaks, tmp_path):
+    # The list is the caller's; the config that is layered is the base's. The head's own allowlist is not read, so a key
+    # it adds is reported even though the head's config (which the scanner would otherwise load) hides it.
+    info = manifest_repo(tmp_path, {"leak.txt": planted(), MANIFEST: MANIFEST_BODY, ".gitleaks.toml": ALLOW_ALL})
+    done, out = resolve(info, "pr-commits", "pull_request", tmp_path, paths=MANIFEST)
+    assert done.returncode == 0, done.stderr + done.stdout
+    assert scan_codes(gitleaks, info, out) == [1, 1]
+    found = {f["File"] for f in findings(gitleaks, info, out, tmp_path)}
+    assert found == {"leak.txt"}, "the key is reported; only the listed manifest's hash is allowed"
+
+
+@pytest.mark.parametrize("tree_scan", ["false", "true"])
+def test_the_canary_still_passes_with_the_overlay_in_the_arguments(tree_scan, gitleaks, tmp_path):
+    info = manifest_repo(tmp_path, {MANIFEST: MANIFEST_BODY})
+    done, out = resolve(info, "pr-commits", "pull_request", tmp_path, paths=MANIFEST)
+    env = {
+        **os.environ,
+        "PATH": f"{os.path.dirname(gitleaks)}:{os.environ['PATH']}",
+        "TREE_SCAN": tree_scan,
+        "SCAN_ARGS": out["scan_args"],
+    }
+    canary = subprocess.run(
+        ["bash", "-eo", "pipefail", "-c", step(CANARY)["run"]], env=env, capture_output=True, text=True, timeout=120
+    )
+    assert canary.returncode == 0, canary.stdout + canary.stderr

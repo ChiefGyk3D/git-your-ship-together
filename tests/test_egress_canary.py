@@ -524,6 +524,9 @@ def evaluate(expression: str, values: dict[str, str], runner=None, environment="
 
     body = re.sub(r"contains\(fromJSON\('(\[[^']*\])'\), (?:matrix|inputs)\.runner\)", hosted, body)
     body = re.sub(r"hashFiles\([^)]*\) != ''", "T", body)  # a manifest exists: the cache is wanted
+    # parallel-ci.yml: a pin file was named (a needs output is not empty) and the matrix leg asks for the cache
+    body = re.sub(r"needs\.[\w.-]+ != ''", "T", body)
+    body = re.sub(r"matrix\.(?:pip-cache|tools)", "T", body)
     body = body.replace("runner.environment", "N")
     body = re.sub(r"runner\.os == ('[\w-]*')", r"Q(O, \1)", body)
     body = re.sub(r"inputs\.([\w-]+)", lambda m: f"V[{m.group(1)!r}]", body)
@@ -674,6 +677,10 @@ KEPT_BLOCK = {
     ("artifact-release.yml", "publish"),  # contents: write, id-token, attestations
     ("container-release.yml", "plan"),  # its outputs choose the runners and the image name of the privileged build
     ("container-release.yml", "build"),  # packages: write
+    (
+        "container-release.yml",
+        "build-local",
+    ),  # runs the caller's Dockerfile and test command; keeps the operator's egress policy as `build` does
     ("container-release.yml", "merge"),  # packages: write, id-token, Doppler
     ("dast.yml", "scan"),  # its SARIF artifact is uploaded verbatim by the job that holds security-events: write
     ("dependabot-auto-merge.yml", "auto-merge"),  # contents and pull-requests: write

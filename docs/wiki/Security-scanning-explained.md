@@ -167,11 +167,11 @@ re-opens after a refactor moves the line was not measured for this page.
 
 ## Scoping the secret scan on a pull request
 
-By default the gitleaks scan reads every ref in the clone (`gitleaks-scope: all-refs`). One key-shaped fixture on an
-unmerged branch then fails the scan on every other pull request in the repository. A caller can set
-`gitleaks-scope: pr-commits` to scope a pull request's scan to that pull request:
+By default a pull request's gitleaks scan covers that pull request's own commits plus the tree
+(`gitleaks-scope: pr-commits`). The opt-in `gitleaks-scope: all-refs` reads every ref in the clone, and then one
+key-shaped fixture on an unmerged branch fails the scan on every other pull request in the repository:
 
-| Event | `all-refs` (default) | `pr-commits` |
+| Event | `all-refs` (opt-in) | `pr-commits` (default) |
 |---|---|---|
 | `pull_request` | every ref | the commits of the pull request (`base..head`) plus the checked-out tree |
 | `push` (the default branch included) | every ref | every ref |
@@ -195,6 +195,27 @@ What `pr-commits` does not see, so that nobody assumes more: a key in a commit t
 branch has its own pull request); a key that only a merge-conflict resolution introduces and a later commit removes (git
 shows no patch for a merge commit; the tree scan sees it only while it is still in the tree); and a commit force-pushed away
 before the scan ran. Also: an empty range (base equal to head, or a head already in the base) leaves only the tree scan; tags and notes outside `base..head`; a workflow re-run uses the original event payload; an inline `gitleaks:allow` comment in the pull request's own files is honored (the scanner's `--ignore-gitleaks-allow` would also fail legitimate allow comments, so it is not passed); the generated `gitleaks.sarif` lies in the workspace while the tree scan walks it (redacted); and the tree scanned is GitHub's merge-preview checkout, not the literal head tree. The tree scan reports in the job log and is not uploaded as SARIF. Protect `.gitleaks.toml` and `.gitleaksignore` with CODEOWNERS and branch protection, because a change to them takes effect after the merge.
+
+## Content-hash manifests and the `discord-api-token` rule
+
+The default gitleaks rule `discord-api-token` matches a 64-character hex value on a line that mentions `discord`. A
+SHA-256 in an asset manifest (`"discord.svg": "<sha256>"`) has exactly that shape, so any repository that records asset
+hashes can hit it (seen on 2026-11-05 in a static-site repository). `gitleaks-hash-manifest-paths` lists the manifest
+files, one repository-relative path per line (default empty: no allowlist), and the job adds one allowlist for them:
+
+| Condition (all must hold, `condition = "AND"`) | Value |
+|---|---|
+| rule | `discord-api-token` only (`targetRules`) |
+| value | exactly 64 lowercase hex characters (`^[a-f0-9]{64}$`) |
+| path | one of the listed files, matched whole (`^path$`, dots escaped, no globs) |
+
+So the same hash in an unlisted file and any other rule in a listed file are still reported, in the history scan and the
+tree scan. The allowlist is a small overlay config that `extend`s the configuration the scan
+already uses, which on a pull request is the base commit's `.gitleaks.toml` (see the table above): a pull request cannot
+allowlist itself by editing its own config. Note what it does not protect: the list is an input of the caller's workflow
+file, and a pull request can edit that file in the same-repository case, so protect the workflow files with CODEOWNERS and
+branch protection as for any other input. An unusable line (a glob, a space, `..`, an absolute path, a quote) or more than
+100 paths fails the job; the error never echoes the value.
 
 ## What this refuses to do
 
