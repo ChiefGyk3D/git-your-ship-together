@@ -60,7 +60,7 @@ Read in this order. Each one is short.
 
 ## What is in the repository
 
-Twenty-three reusable workflows and one composite action:
+Twenty-three reusable workflows and six composite actions:
 
 | File | What it does |
 |---|---|
@@ -90,6 +90,8 @@ Twenty-three reusable workflows and one composite action:
 | `.github/actions/doppler-secrets` | Fetches a Doppler config as masked environment variables (default), or with `export: outputs` as one masked JSON output only the steps you hand it to can read; `names` narrows either to an allow-list. Over OIDC or a Service Token. The workflows inline a copy of its decide step (see the design rules); this is the source |
 | `.github/actions/egress-canary` | Fails a job fast when any address of `github.com`, `api.github.com` or the Actions results receiver is unreachable under harden-runner `block` (security exception EX-0001). The workflows inline a copy of it; this is the source |
 | `.github/actions/wait-ci` | Pins a commit and waits for its required check (`CI green` by default, exact name) to pass, then optionally squash-merges exactly that commit with `--match-head-commit`. Also requires every other check run on that commit to be complete and not red, and waits while one is open (an optional `allow-red` list records a named exception, `require-check` names late workflows, and a green is believed only after two identical reads one interval apart). Exit codes: 0 green, 1 gate red, 2 timeout, 3 hung, 4 head moved, 5 queued, 6 another check red. Wraps `scripts/wait-ci.sh`; a monitor's tool, not a step of the run it waits on. See [wait-ci](docs/wiki/Action-wait-ci.md) |
+| `.github/actions/classify-changes` | Says whether a pull request changes only paths the caller calls docs only (`docs/**`, `tests/**`, `*.md`), from the changed-file list the API returns, never from the checkout. Output `docs-only=true` only when every path matches, none is under `.github/` or the caller's never-skip list, the head has not moved and the count matches the event's; anything unconfirmed is `false`, so the job runs. Wraps `scripts/classify_changes.py`. See [Docs-only fast path and parallel CI](docs/wiki/Docs-only-fast-path.md) |
+| `.github/actions/ci-gate` | The body of a caller's own `CI green` job: every needed job must be `success`, and the one exception is a named job `skipped` while the classify-changes job succeeded with `docs-only=true`. A skip for any other reason, a failure, a cancellation or a job missing from `needs` fails. Wraps `scripts/ci_gate.py`. See [Docs-only fast path and parallel CI](docs/wiki/Docs-only-fast-path.md) |
 | `.github/actions/egress-policy-check` | Fails a job unless every egress policy input is exactly `audit` or `block`. The workflows inline a copy of it; this is the source |
 
 This repository's own pipeline, which runs the workflows against a real
@@ -289,6 +291,8 @@ Inputs of `python-ci.yml`:
 | `coverage-python-version` | `3.13` | The matrix leg that uploads coverage |
 | `install-command` | upgrade pip, `pip install -r requirements.txt` | Run before tests on every leg |
 | `test-command` | `pytest` | The test suite |
+| `xdist` | `false` | Run the `test` job's pytest in parallel: installs `pytest-xdist` after `install-command` and sets `PYTEST_ADDOPTS=-n <xdist-workers>` for the `test-command` step only. The command runs as written, so a command that chains scripts before `pytest` is unchanged and every `pytest` in it is parallel. The `distro` job does not use it. Tests must not share state (a port, a file) to run under it, and test ids must be the same on every worker (no memory addresses in a parametrize id). See [Docs-only fast path and parallel CI](docs/wiki/Docs-only-fast-path.md) |
+| `xdist-workers` | `auto` | With `xdist`: `auto`, `logical` or a whole number of workers; anything else fails the job |
 | `coverage-file` | `coverage.xml` | Uploaded as an artifact when present |
 | `coverage-threshold` | empty (no check) | Minimum total line coverage as a percentage, e.g. `85`. The `test` job fails below it, judged from the `line-rate` of `coverage-file` (Cobertura XML, as coverage.py and pytest-cov write it) on the leg that uploads it; the test command must write that file |
 | `codecov` | `false` | Also upload to Codecov over GitHub OIDC; no token, the repository just has to be enabled in the Codecov GitHub App |
@@ -893,6 +897,7 @@ Inputs of `tofu-ci.yml`:
 | `tflint` | `true` | Run tflint over every directory |
 | `tflint-version`, `tflint-sha256` | `0.65.0` and its zip's hash | The tflint release downloaded from terraform-linters/tflint |
 | `test` | `false` | `tofu test` (or `terraform test`) in every directory after `init -backend=false`. Holds no credential, so turn it on when the tests use `mock_provider` |
+| `test-matrix` | `false` | With `test`: one job per directory, all at once and none cancelled by another's failure, instead of every directory one after another in one job. `ci-green` still reports one result: a failed, cancelled or skipped leg fails it. Off, the job is the single `test` job it always was. See [Docs-only fast path and parallel CI](docs/wiki/Docs-only-fast-path.md) |
 | `policy-directories` | empty (skips the job) | Space-separated directories of Rego policies with their `_test.rego` files; each gets `opa fmt --list --fail`, `opa check --strict` and `opa test` |
 | `opa-version`, `opa-sha256` | `1.22.0` and its binary's hash | The OPA release downloaded from open-policy-agent/opa (`opa_linux_amd64_static`) |
 | `trivy` | `true` | Trivy configuration scan over the repository |
@@ -1487,7 +1492,7 @@ Inputs of `parallel-ci.yml`:
 Outputs of `parallel-ci.yml`: `result` (`success` or `failure`, the gate's verdict), `skipped-jobs` (comma-separated names the
 path rules skipped) and `everything` (`true` when the change could not be narrowed).
 
-The planning script is `scripts/parallel_ci_plan.py` and the gate is `scripts/ci_gate.py`, both standard library only and
+The planning script is `scripts/parallel_ci_plan.py` and the gate is `scripts/parallel_ci_gate.py`, both standard library only and
 inlined in the workflow byte for byte (`tests/test_parallel_ci.py` and `tests/test_ci_gate.py` hold the copies identical), so
 you can vendor them and run them locally.
 
@@ -3166,7 +3171,7 @@ The tests are the contract, one file per thing they hold still:
 | File | Holds |
 |---|---|
 | `tests/test_parallel_ci.py` | `parallel-ci.yml`: the planning script run over ordinary and hostile inputs (the path rules fail closed on a push, a missing or empty diff, an unmatched path, an odd byte in a name; every invalid `jobs`, `areas`, path, artifact name, retention and pin file is refused with a passing twin), the `changes` step run under bash in a real repository with a real merge commit (a rename out of a code path counts as code), the build and check steps run under bash (a setup that exits early cannot pass, PATH changes stay in the step), and the YAML: no `continue-on-error`, no expression in a `run:`, nothing written to `$GITHUB_PATH` or `$GITHUB_ENV`, a one-day artifact named with the run attempt, caches off in audit and keyed on pins |
-| `tests/test_ci_gate.py` | `scripts/ci_gate.py` and the gates of `parallel-ci.yml` and `ci-gate.yml`: success only for `success`, a skip only when named, red on failure, cancellation, an unknown result, no jobs, unreadable input or a deliberate skip that names no job; the inlined copies are byte for byte the script |
+| `tests/test_ci_gate.py` | `scripts/parallel_ci_gate.py` and the gates of `parallel-ci.yml` and `ci-gate.yml`: success only for `success`, a skip only when named, red on failure, cancellation, an unknown result, no jobs, unreadable input or a deliberate skip that names no job; the inlined copies are byte for byte the script |
 | `tests/test_workflows.py` | SHA pins with version comments; no reference to this repository by branch; no `pull_request_target`; the write-permission allow-list; per-job permissions and timeouts; harden-runner first in every job; `persist-credentials: false` on every checkout; no untrusted interpolation; the inlined Doppler script identical to the composite action and gated on the decide step; no OIDC token on a job a pull request can run, and none on the test job; every input declared, defaulted, used and documented here; `CI green` needing every other job; signing and attestation only after a push; no Actions cache on a publishing build; the allow-list defaults one sorted line; every reusable workflow run against the fixture from this repository at the pull request's ref, never publishing |
 | `tests/test_doppler_gate.py` | The decide script, run under bash for the push, schedule, dispatch, pull request and non-PR events and the ref shapes listed there: trusted refs fetch, untrusted refs get a notice and never fail, a fork's `pull_request` never fetches (`pull_request_target` with the gate off is pinned as it is), a refused tag fails a job that asked for a secret, the Service Token path is gated the same way |
 | `tests/test_audit_baseline.py` | The audit, fed a passing repository and a broken one per criterion; a 403 comes back UNKNOWN, never PASS; exit codes tell FAIL from UNKNOWN |

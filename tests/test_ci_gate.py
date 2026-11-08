@@ -1,4 +1,4 @@
-"""scripts/ci_gate.py and the two workflows that inline it: the gate fails on anything but a real pass.
+"""scripts/parallel_ci_gate.py and the two workflows that inline it: the gate fails on anything but a real pass.
 
 The gate is the one check branch protection reads, so the cases that matter are the quiet ones: a job that
 was skipped because something upstream failed, a cancelled job, a result nobody expected, a typo in the list of
@@ -16,7 +16,7 @@ import pytest
 import yaml
 
 REPO = Path(__file__).resolve().parent.parent
-SCRIPT = REPO / "scripts" / "ci_gate.py"
+SCRIPT = REPO / "scripts" / "parallel_ci_gate.py"
 WORKFLOWS = REPO / ".github" / "workflows"
 GATE_WORKFLOWS = ["parallel-ci.yml", "ci-gate.yml"]
 

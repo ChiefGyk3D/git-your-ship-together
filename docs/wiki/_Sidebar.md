@@ -64,3 +64,4 @@
 **Tools**
 
 - [wait-ci](Action-wait-ci.md)
+- [Docs-only fast path and parallel CI](Docs-only-fast-path.md)

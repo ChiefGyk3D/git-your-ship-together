@@ -43,7 +43,7 @@
 # in the same shell as the command that needs it, so a PATH change lasts for that step and nothing is written to
 # $GITHUB_PATH or $GITHUB_ENV.
 #
-# The planning script is scripts/parallel_ci_plan.py and the gate is scripts/ci_gate.py in this repository,
+# The planning script is scripts/parallel_ci_plan.py and the gate is scripts/parallel_ci_gate.py in this repository,
 # inlined below byte for byte (a reusable workflow cannot name the commit it runs from, so it cannot read its own
 # repository's files); tests/test_parallel_ci.py holds the copies identical.
 
@@ -1149,7 +1149,7 @@ jobs:
               DELIBERATE   JSON list of job ids that are allowed to be skipped (default [])
 
           Usage:
-              python3 -I ci_gate.py [--output FILE]
+              python3 -I parallel_ci_gate.py [--output FILE]
 
           A job passes only if its result is exactly `success`. A `skipped` job passes only if it is named in
           DELIBERATE; `failure`, `cancelled`, an unknown result, a job with no result and a skip nobody asked for all

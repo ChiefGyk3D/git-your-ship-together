@@ -24,7 +24,7 @@
 #
 # `needs-json` is read from an environment variable, so keep it small: `toJSON(needs)` carries every output of
 # every needed job, and a result map is enough, e.g. {"ci": "${{ needs.ci.result }}", "shell": "${{ needs.shell.result }}"}.
-# The check run is named `<caller job> / CI green`. The script is scripts/ci_gate.py in this repository, inlined below
+# The check run is named `<caller job> / CI green`. The script is scripts/parallel_ci_gate.py in this repository, inlined below
 # byte for byte; tests/test_ci_gate.py holds the copies identical. Nothing is checked out and no token is held.
 
 name: CI gate (reusable)
@@ -202,7 +202,7 @@ jobs:
               DELIBERATE   JSON list of job ids that are allowed to be skipped (default [])
 
           Usage:
-              python3 -I ci_gate.py [--output FILE]
+              python3 -I parallel_ci_gate.py [--output FILE]
 
           A job passes only if its result is exactly `success`. A `skipped` job passes only if it is named in
           DELIBERATE; `failure`, `cancelled`, an unknown result, a job with no result and a skip nobody asked for all

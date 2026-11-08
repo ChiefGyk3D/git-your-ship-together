@@ -1,114 +1,82 @@
 #!/usr/bin/env python3
-"""The CI gate: green only when every needed job succeeded, or was skipped on purpose.
+"""The `CI green` verdict for a caller's own aggregate job, with deliberate skips.
 
-Standard library only; `parallel-ci.yml` and `ci-gate.yml` each carry a byte-identical copy of this file
-(tests/test_ci_gate.py holds them together).
+A job counts as passed only when its result is `success`. One exception, and
+only one: a job the caller lists in GATE_SKIPPABLE may be `skipped` when the
+classifier job (GATE_CLASSIFIER) itself succeeded and reported `docs-only=true`.
+A skip for any other reason (a failed upstream job, a typo in an `if:`, a
+classifier that did not run or said false) fails the gate, as do `failure`,
+`cancelled` and a job that is missing.
 
-Environment:
-    NEEDS        JSON object, job id -> {"result": ...} or job id -> "result" (toJSON(needs) works as is)
-    DELIBERATE   JSON list of job ids that are allowed to be skipped (default [])
+Inputs, all through the environment:
 
-Usage:
-    python3 -I ci_gate.py [--output FILE]
-
-A job passes only if its result is exactly `success`. A `skipped` job passes only if it is named in
-DELIBERATE; `failure`, `cancelled`, an unknown result, a job with no result and a skip nobody asked for all
-fail. No jobs at all fails (a gate over nothing is not a gate), and so does a DELIBERATE entry that names no
-needed job (a typo there would otherwise let a real skip through unnoticed). Exit 0 green, 1 not green.
-`result=success|failure` is appended to --output (the step's $GITHUB_OUTPUT) before exiting.
+  GATE_NEEDS       ${{ toJSON(needs) }} of the aggregate job
+  GATE_REQUIRED    space-separated job ids that must be present in it (so a job cannot be
+                   dropped from `needs:` and merge unchecked); empty means no such check
+  GATE_SKIPPABLE   space-separated job ids that a docs-only change may skip
+  GATE_CLASSIFIER  the job id of the classify-changes step's job; needed when GATE_SKIPPABLE is set
 """
 
 from __future__ import annotations
 
-import argparse
 import json
 import os
-import re
 import sys
-from pathlib import Path
-
-JOB_ID = re.compile(r"[A-Za-z_][A-Za-z0-9_-]{0,99}")
 
 
-def q(value: object) -> str:
-    text = value if isinstance(value, str) else repr(value)
-    return json.dumps(text[:100], ensure_ascii=True)
-
-
-def reject_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    out: dict[str, object] = {}
-    for key, value in pairs:
-        if key in out:
-            raise ValueError(f"duplicate key {key!r}")
-        out[key] = value
-    return out
-
-
-def results_of(text: str) -> dict[str, str | None]:
-    """job id -> result string (None when the job carries none)."""
-    needs = json.loads(text, object_pairs_hook=reject_duplicates)
-    if not isinstance(needs, dict):
-        raise ValueError("NEEDS must be a JSON object")
-    out: dict[str, str | None] = {}
-    for job, value in needs.items():
-        if not JOB_ID.fullmatch(job):
-            raise ValueError(f"job id {q(job)} is not a plain job id")
-        if isinstance(value, dict):
-            value = value.get("result")
-        out[job] = value if isinstance(value, str) else None
-    return out
-
-
-def deliberate_of(text: str) -> set[str]:
-    skips = json.loads(text, object_pairs_hook=reject_duplicates)
-    if not isinstance(skips, list) or not all(isinstance(s, str) and JOB_ID.fullmatch(s) for s in skips):
-        raise ValueError("DELIBERATE must be a JSON list of job ids")
-    return set(skips)
-
-
-def judge(results: dict[str, str | None], deliberate: set[str]) -> list[str]:
-    """One line per reason the gate is not green; empty when it is."""
+def verdict(needs: dict, required: list[str], skippable: list[str], classifier: str) -> tuple[list[str], list[str]]:
+    """Returns (problems, notes). No problems means green."""
     problems: list[str] = []
-    if not results:
-        problems.append("no needed jobs: a gate over nothing is not a gate")
-    for name in sorted(deliberate - set(results)):
-        problems.append(f"deliberate skip {q(name)} names no needed job")
-    for job, result in results.items():
+    notes: list[str] = []
+    for job in required:
+        if job not in needs:
+            problems.append(f"{job}: required but not in needs")
+    if skippable:
+        if not classifier or classifier not in needs:
+            problems.append("classifier: skippable jobs are named but the classifier job is not in needs")
+        if classifier in skippable:
+            problems.append(f"{classifier}: the classifier cannot skip itself")
+    cls = needs.get(classifier) if classifier else None
+    skip_allowed = (
+        isinstance(cls, dict)
+        and cls.get("result") == "success"
+        and (cls.get("outputs") or {}).get("docs-only") == "true"
+    )
+    for job, info in needs.items():
+        result = info.get("result") if isinstance(info, dict) else None
         if result == "success":
             continue
-        if result == "skipped" and job in deliberate:
+        if result == "skipped" and job in skippable and skip_allowed:
+            notes.append(f"{job}: skipped on purpose (docs only: {(cls.get('outputs') or {}).get('reason', '')})")
             continue
-        if result == "skipped":
-            problems.append(f"{q(job)} was skipped and nothing said it should be")
-        else:
-            problems.append(f"{q(job)} is {q(result)}")
-    return problems
+        problems.append(f"{job}: {result}")
+    return problems, notes
 
 
-def main(argv: list[str]) -> int:
-    parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n")[0])
-    parser.add_argument("--output", type=Path)
-    args = parser.parse_args(argv)
-    results: dict[str, str | None] = {}
-    deliberate: set[str] = set()
+def main() -> int:
     try:
-        results = results_of(os.environ.get("NEEDS", ""))
-        deliberate = deliberate_of(os.environ.get("DELIBERATE") or "[]")
-        problems = judge(results, deliberate)
-    except (ValueError, RecursionError) as exc:
-        problems = [f"cannot read the gate's inputs ({type(exc).__name__}: {q(str(exc))})"]
-        results = {}
-        deliberate = set()
-    for job, result in results.items():
-        passed = result == "success" or (result == "skipped" and job in deliberate)
-        print(f"{'ok  ' if passed else 'FAIL'} {q(job)}: {q(result)}")
-    for problem in problems:
-        print(f"::error title=CI gate::{problem}")
-    if args.output:
-        with args.output.open("a", encoding="utf-8") as handle:
-            handle.write(f"result={'failure' if problems else 'success'}\n")
-    return 1 if problems else 0
+        needs = json.loads(os.environ["GATE_NEEDS"])
+        if not isinstance(needs, dict) or not needs:
+            raise ValueError("needs is empty")
+    except (KeyError, ValueError) as err:
+        print(f"::error title=ci-gate::cannot read the needs of this job: {err}")
+        return 1
+    problems, notes = verdict(
+        needs,
+        os.environ.get("GATE_REQUIRED", "").split(),
+        os.environ.get("GATE_SKIPPABLE", "").split(),
+        os.environ.get("GATE_CLASSIFIER", "").strip(),
+    )
+    for job, info in sorted(needs.items()):
+        print(f"{job}: {info.get('result')}")
+    for note in notes:
+        print(f"::notice title=ci-gate::{note}")
+    if problems:
+        print("::error title=ci-gate::not green: " + "; ".join(problems))
+        return 1
+    print("every needed job passed or was deliberately skipped")
+    return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    sys.exit(main())

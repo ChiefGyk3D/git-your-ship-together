@@ -19,12 +19,69 @@ re-pins.
   whole `checks` job when the path rules selected nothing. Pip and tool-download caches are keyed on pin files the caller names
   and are used only under `block`. Tool setup runs in the same shell as the command that needs it; nothing is written to
   `$GITHUB_PATH` or `$GITHUB_ENV`. Every input is validated and reaches a script through the environment. Every job holds
-  `contents: read` and no secret. No `continue-on-error`. Scripts: `scripts/parallel_ci_plan.py`, `scripts/ci_gate.py`.
+  `contents: read` and no secret. No `continue-on-error`. Scripts: `scripts/parallel_ci_plan.py`, `scripts/parallel_ci_gate.py`.
 - **`ci-gate.yml`.** The gate on its own, for a caller that runs several workflows side by side: `CI green` over a
   `needs-json` it is handed, with `deliberate-skips` as the only excuse for a skip. No token.
 - Both run against `fixture/` in `ci.yml` and are in the `CI green` gate. `tests/test_egress_canary.py`'s expression
   evaluator learned the two forms the new cache conditions use (a non-empty `needs` output, a matrix flag); the rule it pins
   (no cache in an audit job) is unchanged.
+
+### New: opt-in CI speed-ups, `test-matrix`, `xdist` and the docs-only fast path (issue #331)
+
+All opt-in; a caller that sets nothing sees no change after it re-pins (re-pinning downstream repositories is separate work).
+The one visible difference for a `tofu-ci.yml` caller with `test: true` is an extra small job, `test directories`, that lists
+the legs; the `test` job keeps its name.
+
+- **`tofu-ci.yml` `test-matrix`** (default `false`). With `test`, `tofu test` runs as one job per directory (`fail-fast: false`)
+  instead of every directory in turn. `ci-green` still reports one result and now treats a skipped `test` or `test-dirs` as a
+  failure when `test` was asked for; a failed or cancelled leg already made `test` fail or cancel.
+- **`python-ci.yml` `xdist`, `xdist-workers`** (default off, `auto`). Installs `pytest-xdist` 3.8.0 and `execnet` from a hash lock (`--require-hashes`, no version input) and sets
+  `PYTEST_ADDOPTS=-n <workers>` for the `test-command` step only, so a command that chains scripts before pytest is unchanged.
+- **`.github/actions/classify-changes` and `.github/actions/ci-gate`.** A pull request that changes only the caller's docs-only
+  paths leaves a named job out on purpose, and the caller's `CI green` counts that skip as a pass and every other skip as a
+  failure. The changed files come from the API and anything unconfirmed runs the job. Rules and threat notes:
+  [Docs-only fast path and parallel CI](docs/wiki/Docs-only-fast-path.md). Scripts: `scripts/classify_changes.py`,
+  `scripts/ci_gate.py`. Issue #330's static-site workflow should call the same actions.
+
+## v1.31.0 (2026-11-07)
+
+### Changed (BREAKING default for publishing callers): `container-release.yml` publishes only from a SemVer tag push (issues #325, #327, pull request #328)
+
+Callers pick this up when they re-pin (callers pin a commit; re-pinning downstream repositories is separate work).
+
+- **Breaking default.** With `push: true`, `container-release.yml` now publishes only for a push of a `vMAJOR.MINOR.PATCH` tag
+  (SemVer 2.0.0 pre-release and build parts allowed). Any other run with `push: true` builds and scans only, prints a
+  `publish skipped` warning annotation and writes a job summary naming the reason and the inputs to set.
+- **New inputs.** `allowed-publish-events` (default `push`; `*` or a comma-separated list of lowercase event names, no spaces;
+  validated) and `require-tag-ref` (default `true`).
+- **What a caller must do.** A caller that publishes from main, a schedule or a manual run adds
+  `allowed-publish-events: push,schedule,workflow_dispatch` and `require-tag-ref: false`. Without them its next run on those
+  events builds and scans but does not publish. A caller that publishes only from tag pushes changes nothing.
+- **Build split.** The build is split into `build` (publishing; `packages: write`) and `build-local` (no publish permission).
+- **Per-registry indexes.** Each registry gets its own multi-platform index, built from digests that are verified first.
+- **Strict `platforms`.** The list is validated as written and a repeated platform is refused. The tag check uses the SemVer
+  2.0.0 grammar, so `v1`, `v1.2` and `vnot-a-release` do not publish.
+
+### Changed: release workflows are stricter about publishing and assets (issues #325, #327, pull request #326)
+
+Applies to `artifact-release.yml` and `python-package-release.yml` (and the `python-docker-release.yml` name that forwards to
+them). Callers pick this up when they re-pin.
+
+- **Publish allow-list.** Publishing runs only for an event named in `allowed-publish-events` (default `push`) on a
+  `refs/tags/v<semver>` ref. A caller triggered by `release: published`, such as `hypeman` calling
+  `python-package-release.yml`, must set `allowed-publish-events: push,release`.
+- **Asset naming policy.** Every local file name must be ASCII letters, digits, `.`, `_` and `-`, starting and ending with a
+  letter or digit; checked before any release call. A build that produces another name (spaces, `+`, non-ASCII, a leading or
+  trailing `_` or `-`) must rename the file in its `build-command` before re-pinning.
+- **Hidden files refused.** Names beginning with `.` in the staging directory are rejected, no longer skipped.
+- **Case collisions refused.** Names that differ only in letter case are refused (a conservative policy).
+- **Prerelease tags create prereleases.** A new release for a SemVer prerelease tag (for example `v1.2.3-rc.1`) is created with
+  `--prerelease`. Earlier versions never set the flag.
+- **Existing release must match.** An existing release must carry the `prerelease` flag its tag implies, hold only assets that
+  are absent or identical by sha256, and hold exactly this build's files after the upload, or the run fails and the version is
+  burned. A draft release for the tag fails the run until it is published or deleted.
+- **Asset listing.** Read through the paginated listing, validated before use; every remote asset must be `uploaded` and no
+  name may repeat.
 
 ## v1.30.0 (2026-11-06)
 
