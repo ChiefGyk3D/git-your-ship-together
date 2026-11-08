@@ -9,6 +9,12 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Nightly, on the default branch, the whole run: a scheduled run is never docs only (the classifier says `false`
+  # for anything but a pull request), so dast-live and rescan-live, which a docs-only or unrelated pull request
+  # skips, still run against the real ZAP image and the real Trivy every day, and so do the jobs that read the
+  # published star-daemon image and today's vulnerability database.
+  schedule:
+    - cron: '23 5 * * *'
   workflow_dispatch:
 
 permissions:
@@ -46,12 +52,22 @@ jobs:
       - id: c
         uses: ./.github/actions/classify-changes # zizmor: ignore[self-repository]
         with:
-          # None of the fixture jobs reads docs/, tests/ or a root Markdown file. The suite does read tests/, and
-          # it is never skipped.
+          # No gated job reads docs/ or CHANGELOG.md, and the tests/ files it does read are on the never-skip list
+          # below; the suite reads all of tests/ and is never skipped. README.md is not here: tests/test_sbom.py
+          # reads it. tests/test_path_aware_gating.py checks this list against what each gated job reads.
           docs-only-patterns: |
             docs/**
             tests/**
-            *.md
+            CHANGELOG.md
+          # The test files gated jobs run or import (.github/ and fixture/ are never docs only already):
+          # dast-live runs tests/test_dast.py, which imports tests/test_workflows.py; rescan-live runs
+          # tests/test_verify_published.py; fixture-sbom runs tests/test_sbom.py; tests/fixtures/ holds their samples.
+          never-skip-patterns: |
+            tests/test_dast.py
+            tests/test_verify_published.py
+            tests/test_workflows.py
+            tests/test_sbom.py
+            tests/fixtures/**
 
   actionlint:
     name: actionlint
@@ -518,6 +534,8 @@ jobs:
   # skips these unless RESCAN_LIVE is set.
   rescan-live:
     name: rescan fails when it should
+    needs: changes
+    if: needs.changes.outputs.docs-only != 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
@@ -576,6 +594,8 @@ jobs:
   # the job that holds the proof. The active scans take minutes each.
   dast-live:
     name: dast fails when it should
+    needs: changes
+    if: needs.changes.outputs.docs-only != 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     permissions:
@@ -745,7 +765,7 @@ jobs:
         with:
           needs: ${{ toJSON(needs) }}
           required-jobs: changes actionlint zizmor test fixture-ci fixture-bash fixture-fuzz fixture-package fixture-artifact fixture-tofu fixture-arduino fixture-pages fixture-wiki fixture-project-sync fixture-release fixture-verify fixture-rescan fixture-drift fixture-base-image fixture-parallel fixture-gate rescan-live fixture-dast dast-live fixture-sbom fixture-threat-model fixture-agent-scan fixture-agent-scan-planted agent-scan-control
-          skippable-jobs: fixture-ci fixture-bash fixture-fuzz fixture-package fixture-artifact fixture-tofu fixture-arduino fixture-pages fixture-wiki fixture-project-sync fixture-release fixture-verify fixture-rescan fixture-drift fixture-base-image fixture-parallel fixture-gate fixture-dast fixture-sbom fixture-threat-model fixture-agent-scan fixture-agent-scan-planted agent-scan-control
+          skippable-jobs: fixture-ci fixture-bash fixture-fuzz fixture-package fixture-artifact fixture-tofu fixture-arduino fixture-pages fixture-wiki fixture-project-sync fixture-release fixture-verify fixture-rescan fixture-drift fixture-base-image fixture-parallel fixture-gate fixture-dast fixture-sbom fixture-threat-model fixture-agent-scan fixture-agent-scan-planted agent-scan-control rescan-live dast-live
           classifier-job: changes
           fork-skippable-jobs: fixture-package fixture-artifact fixture-pages fixture-wiki fixture-release fixture-dast fixture-sbom fixture-threat-model fixture-agent-scan fixture-agent-scan-planted agent-scan-control
           fork-pull-request: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}

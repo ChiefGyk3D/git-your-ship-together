@@ -5,11 +5,21 @@ name what a caller sees after that.
 
 ## Unreleased
 
+### Changed: this repository's `dast-live` and `rescan-live` run when related files change, and nightly (issue #308)
+
+Only this repository's own CI changes. The two live jobs (the real ZAP image, about 450 seconds, and the real Trivy) are gated
+by the `changes` job from the entry below: they are left out of a pull request that changes only docs, the changelog or tests
+they do not read. `tests/test_dast.py`, `tests/test_verify_published.py`, `tests/test_sbom.py` (run by `fixture-sbom`, which also reads
+`README.md`, so that is not on the docs-only list), `tests/test_workflows.py` (which `test_dast.py`
+imports) and `tests/fixtures/**` are on the classifier's `never-skip-patterns`, so a change to any of them runs the live jobs
+even beside docs. `ci.yml` gains a nightly `schedule` (every day, default branch); the classifier is `false` for anything but a
+pull request, so the nightly run is the whole run, live jobs included. A test fails if any job opts out of the schedule, and another fails if any path a gated job reads or runs would alone be docs only.
+
 ### Changed: this repository's `ci.yml` skips jobs a docs-only change cannot affect (issue #307)
 
 Only this repository's own CI changes; no reusable workflow and no input a caller uses.
 
-- A new `changes` job runs the `classify-changes` action over `docs/**`, `tests/**` and `*.md`. Every fixture job (all but
+- A new `changes` job runs the `classify-changes` action over `docs/**`, `tests/**` and `CHANGELOG.md`. Every fixture job (all but
   `actionlint`, `zizmor`, the test suite and `CI green`) now needs it and is left out on a pull request that changes only
   those paths. Anything else (a path under `.github/`, `scripts/`, `fixture/`, a requirements file), a push, a schedule, a
   manual run, a moved head and any doubt is `docs-only=false` and runs everything, as before.

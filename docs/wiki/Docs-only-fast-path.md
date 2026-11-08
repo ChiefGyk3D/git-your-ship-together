@@ -150,11 +150,24 @@ still fails when skipped. Unset, the action behaves as before.
 ## This repository's own `ci.yml` (issues #307, #308)
 
 `ci.yml` runs about a hundred jobs. It uses the same two actions: a `changes` job runs `classify-changes` with
-`docs/**`, `tests/**` and `*.md`, and every job except `actionlint`, `zizmor`, `test` (the suite reads `tests/`), `changes`,
-`CI green` and the two live jobs `rescan-live` and `dast-live` carry `needs: changes` and `if: needs.changes.outputs.docs-only != 'true'`. `CI green` is the `ci-gate`
+`docs/**`, `tests/**` and `CHANGELOG.md` (not `README.md`: `tests/test_sbom.py` reads it), and every job except `actionlint`, `zizmor`, `test` (the suite reads `tests/`), `changes`
+and `CI green` carry `needs: changes` and `if: needs.changes.outputs.docs-only != 'true'`. `CI green` is the `ci-gate`
 action over all of them, with `skippable-jobs` set to exactly those jobs, `required-jobs` set to every job, and the
 fork excuse above for the jobs that already skipped on a fork. `tests/test_path_aware_gating.py` holds the three lists
 together: add a job to `ci.yml` without gating it and the test names it.
+
+**Tests a gated job runs (the rule that keeps this honest).** `tests/**` is on the docs-only list because the suite reads it
+and is never skipped, but a gated job also runs some test files: `fixture-sbom` runs `tests/test_sbom.py`, `rescan-live` runs
+`tests/test_verify_published.py`, and `dast-live` runs `tests/test_dast.py`, which imports `tests/test_workflows.py`. Those, and
+`tests/fixtures/**`, are on `never-skip-patterns`, so a change to one runs the jobs that depend on it even beside docs.
+`tests/test_path_aware_gating.py` reads every gated job, follows the test files it runs and the local modules and root Markdown
+files they name, and fails if any of those paths alone would be classified docs only.
+
+**The live jobs and the nightly run (issue #308).** `rescan-live` (real Trivy) and `dast-live` (real ZAP image, about 450
+seconds, the long pole) are gated the same way. `ci.yml` also has a `schedule` trigger, every
+night on the default branch. The classifier says `false` for anything but a pull request, so the nightly run is the full run:
+the live jobs, the jobs that read the published image and today's vulnerability database, everything. A job that wants to opt
+out of the nightly run is a test failure (`tests/test_path_aware_gating.py`).
 
 Docs-only means every changed path is documentation or a test file nothing else reads. A change under `.github/`,
 `scripts/`, `fixture/`, `.github/actions/`, a requirements file, or any path the patterns do not name runs everything, as does a

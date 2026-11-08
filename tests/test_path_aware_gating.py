@@ -8,6 +8,7 @@ is from a fork and the job is one that needs a token a fork does not get. Every 
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -18,6 +19,8 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "scripts"))
 
 import ci_gate  # noqa: E402
+import classify_changes as cc  # noqa: E402
+from test_docs_only_fast_path import files, run_classify  # noqa: E402
 
 WORKFLOWS = REPO / ".github" / "workflows"
 CI = yaml.safe_load((WORKFLOWS / "ci.yml").read_text())
@@ -34,7 +37,7 @@ FORK_RULE = "github.event_name != 'pull_request' || github.event.pull_request.he
 
 
 def gated() -> set[str]:
-    return set(JOBS) - ALWAYS - LIVE  # the live jobs join in the next commit (#308)
+    return set(JOBS) - ALWAYS
 
 
 def needs_of(job: dict) -> list[str]:
@@ -54,11 +57,12 @@ def test_changes_job_runs_the_classify_action_with_the_two_reads_it_needs_and_no
     assert "if" not in job and "continue-on-error" not in job
 
 
-def test_changes_patterns_name_only_paths_no_fixture_job_reads():
+def test_changes_patterns_are_the_narrow_list():
     job = JOBS["changes"]
     (classify,) = [s for s in job["steps"] if s.get("id") == "c"]
     patterns = classify["with"]["docs-only-patterns"].split()
-    assert patterns == ["docs/**", "tests/**", "*.md"]
+    # Not `*.md`: README.md is read by tests/test_sbom.py, which a gated job runs.
+    assert patterns == ["docs/**", "tests/**", "CHANGELOG.md"]
 
 
 def test_changes_is_not_skipped_by_anything():
@@ -120,7 +124,7 @@ def test_ci_green_may_skip_exactly_the_gated_jobs_and_never_the_always_set():
     with_ = ci_green_step()["with"]
     skippable = set(with_["skippable-jobs"].split())
     assert skippable == gated()
-    assert not skippable & (ALWAYS | LIVE)
+    assert not skippable & ALWAYS
 
 
 def test_fork_skips_are_excused_only_for_the_jobs_that_carry_the_fork_condition_or_follow_one():
@@ -181,3 +185,128 @@ def test_a_fork_job_skipped_on_a_docs_only_change_follows_the_classifier_when_it
 
 def test_the_default_gate_has_no_fork_excuse():
     assert ci_gate.verdict(n(a="success", b="skipped"), [], [], "")[0]
+
+
+# --- the live jobs and the nightly run (#308) -------------------------------------------------------------------
+
+
+def test_the_live_jobs_are_gated_like_every_other_fixture_job():
+    for name in sorted(LIVE):
+        assert "changes" in needs_of(JOBS[name]), name
+        assert str(JOBS[name]["if"]) == SKIP_RULE, name
+
+
+def changes_rule() -> tuple[list, list]:
+    (c,) = [s for s in JOBS["changes"]["steps"] if s.get("id") == "c"]
+    with_ = c["with"]
+    return (
+        cc.compile_patterns(with_["docs-only-patterns"], "patterns", True),
+        cc.compile_patterns(with_.get("never-skip-patterns", ""), "never-skip", False),
+    )
+
+
+def skips_live(*paths: str) -> bool:
+    patterns, never = changes_rule()
+    return cc.classify(files(*paths), patterns, never)[0]
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "tests/test_dast.py",  # what dast-live runs
+        "tests/test_verify_published.py",  # what rescan-live runs
+        "tests/test_workflows.py",  # test_dast imports it
+        "tests/test_sbom.py",  # what fixture-sbom runs
+        "README.md",  # tests/test_sbom.py reads it
+        "tests/fixtures/dast/baseline.json",
+        "fixture/dast/server.py",
+        "fixture/dast/login.context",
+        ".github/workflows/dast.yml",
+        ".github/workflows/verify-published.yml",
+        ".github/actions/classify-changes/action.yml",
+        "scripts/classify_changes.py",
+        "requirements-dev.txt",
+        "pyproject.toml",
+    ],
+)
+def test_a_file_a_live_job_reads_runs_the_live_jobs_even_beside_docs(path):
+    assert not skips_live(path)
+    assert not skips_live("docs/a.md", path)
+
+
+@pytest.mark.parametrize("path", ["docs/wiki/Home.md", "CHANGELOG.md", "tests/test_hygiene.py"])
+def test_a_change_no_live_job_reads_leaves_them_out(path):
+    assert skips_live(path)
+    assert skips_live("docs/a.md", path)
+
+
+def test_the_never_skip_list_is_what_keeps_a_live_test_from_being_skipped():
+    """The negative case: the same change with the never-skip list removed would be docs only."""
+    patterns, _ = changes_rule()
+    assert cc.classify(files("tests/test_dast.py"), patterns, [])[0]
+    assert not skips_live("tests/test_dast.py")
+
+
+def test_the_run_is_scheduled_nightly_and_the_schedule_is_not_filtered_out_of_any_job():
+    schedule = TRIGGERS["schedule"]
+    assert len(schedule) == 1 and len(schedule[0]["cron"].split()) == 5
+    day, month, weekday = schedule[0]["cron"].split()[2:]
+    assert (day, month, weekday) == ("*", "*", "*"), "nightly means every day"
+    for name, job in JOBS.items():
+        assert "schedule" not in str(job.get("if", "")), f"{name}: a job may not opt out of the nightly run"
+
+
+@pytest.mark.parametrize("event", ["schedule", "push", "workflow_dispatch"])
+def test_the_classifier_is_never_docs_only_off_a_pull_request_so_the_nightly_runs_everything(tmp_path, event):
+    done, out = run_classify(tmp_path, files("docs/a.md"), event=event)
+    assert done.returncode == 0 and out["docs-only"] == "false"
+
+
+# --- nothing a gated job reads may be on the docs-only list (the guard for the review finding) --------------------
+
+TEST_FILE = re.compile(r"(?<![\w/.-])tests/(test_\w+\.py)")
+LOCAL_IMPORT = re.compile(r"^(?:from|import) (test_\w+)", re.M)
+ROOT_MD = re.compile(r"""["']([A-Za-z_]+\.md)["']""")
+DOCS_DIR = re.compile(r"""["']docs["']""")
+
+
+def reads_of(job: dict) -> set[str]:
+    """Every repository path a gated job names in its YAML, or its pytest files read or import, as best text can say."""
+    text = yaml.safe_dump(job)
+    found = set(re.findall(r"(?<![\w/.-])(?:tests|docs)/[\w./*-]+", text)) | set(
+        re.findall(r"(?<![\w/])[A-Z_]+\.md\b", text)
+    )
+    queue = [f"tests/{m}" for m in TEST_FILE.findall(text)]
+    seen: set[str] = set()
+    while queue:
+        path = queue.pop()
+        if path in seen or not (REPO / path).is_file():
+            continue
+        seen.add(path)
+        found.add(path)
+        body = (REPO / path).read_text()
+        found |= set(ROOT_MD.findall(body))
+        if DOCS_DIR.search(body):
+            found.add("docs/x")
+        queue += [f"tests/{m}.py" for m in LOCAL_IMPORT.findall(body)]
+    return found
+
+
+def test_no_gated_job_reads_a_path_the_docs_only_list_would_let_it_skip():
+    checked = 0
+    for name in sorted(gated()):
+        for path in sorted(reads_of(JOBS[name])):
+            if "*" in path:
+                continue
+            checked += 1
+            assert not skips_live(path), f"{name} reads {path}, but a change to it alone would skip {name}"
+    assert checked >= 5, "the guard collected too few reads to mean anything"
+
+
+def test_the_read_guard_bites():
+    """Negative case: a job that runs a test file the list would skip, or a file that test reads, is caught."""
+    job = {"steps": [{"run": "pytest tests/test_hygiene.py"}]}
+    assert "tests/test_hygiene.py" in reads_of(job) and skips_live("tests/test_hygiene.py")
+    job = {"steps": [{"run": "pytest tests/test_sbom.py"}]}
+    assert "README.md" in reads_of(job)
+    assert skips_live("CHANGELOG.md") and "CHANGELOG.md" not in reads_of(job)
