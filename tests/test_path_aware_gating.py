@@ -310,3 +310,33 @@ def test_the_read_guard_bites():
     job = {"steps": [{"run": "pytest tests/test_sbom.py"}]}
     assert "README.md" in reads_of(job)
     assert skips_live("CHANGELOG.md") and "CHANGELOG.md" not in reads_of(job)
+
+
+# --- concurrency on the self-callers, and the auto-merge actor gate (#313) -----------------------------------------
+
+
+def self_caller(name: str) -> dict:
+    return yaml.safe_load((WORKFLOWS / name).read_text())
+
+
+def test_security_self_cancels_superseded_pull_request_runs_only():
+    assert self_caller("security-self.yml")["concurrency"] == {
+        "group": "${{ github.workflow }}-${{ github.ref }}",
+        "cancel-in-progress": "${{ github.event_name == 'pull_request' }}",
+    }
+
+
+def test_wiki_self_caller_never_cancels_a_publish_and_cannot_collide_with_the_reusable_groups_name():
+    declared = self_caller("wiki.yml")["concurrency"]
+    assert declared == {"group": "${{ github.workflow }}-${{ github.ref }}", "cancel-in-progress": False}
+    # wiki-publish.yml's publish job holds the literal group `wiki`; the same name here would deadlock the call.
+    assert declared["group"] != "wiki"
+
+
+def test_auto_merge_self_caller_has_one_run_per_pull_request_and_gates_by_actor():
+    doc = self_caller("dependabot-auto-merge-self.yml")
+    assert doc["concurrency"] == {
+        "group": "${{ github.workflow }}-${{ github.event.pull_request.number }}",
+        "cancel-in-progress": True,
+    }
+    assert doc["jobs"]["auto-merge"]["if"] == "github.event.pull_request.user.login == 'dependabot[bot]'"

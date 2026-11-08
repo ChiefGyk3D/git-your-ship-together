@@ -5,6 +5,14 @@ name what a caller sees after that.
 
 ## Unreleased
 
+### Changed: concurrency on the self-callers, and the auto-merge actor gate (issue #313)
+
+Only this repository's own workflows change. `security-self.yml` cancels a superseded pull request run (a push to main and the
+weekly schedule run to the end). `wiki.yml` serializes publishes on a group that is not the literal `wiki` (the reusable
+publish job holds that one) and never cancels one. `dependabot-auto-merge-self.yml` has one run per pull request and its job
+carries the same actor `if:` as the reusable workflow. GitHub still lists a skipped run of that workflow on every pull request:
+a `pull_request` trigger cannot filter on who opened it, so that entry cannot be removed, and a test pins what can be done.
+
 ### Changed: this repository's `dast-live` and `rescan-live` run when related files change, and nightly (issue #308)
 
 Only this repository's own CI changes. The two live jobs (the real ZAP image, about 450 seconds, and the real Trivy) are gated

@@ -9,8 +9,17 @@ on: pull_request
 permissions:
   contents: read
 
+# One run per pull request; a new push supersedes the one before it.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
   auto-merge:
+    # The reusable workflow checks the same actor; saying it here keeps the called job from starting for anyone else.
+    # GitHub still records a (skipped) run of this workflow on every pull request: a pull_request trigger cannot
+    # filter on who opened it, so that entry cannot be removed, only made cheap.
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
     # `$/.github/workflows/...` is the form zizmor asks for; actionlint still
     # rejects it, and the workflow-lint job runs both, so the `./` form stays
     # until actionlint parses `$/` (see security-self.yml).

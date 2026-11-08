@@ -17,6 +17,11 @@ on:
 permissions:
   contents: read
 
+# A new push to a pull request supersedes the run it started; a push to main and the weekly schedule run to the end.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   security:
     # `$/.github/workflows/security.yml` is the form GitHub recommends since
