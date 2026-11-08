@@ -54,11 +54,14 @@ def verdict(needs: dict, required: list[str], skippable: list[str], classifier: 
 
 
 def main() -> int:
+    raw = os.environ.get("GATE_NEEDS", "")
     try:
-        needs = json.loads(os.environ["GATE_NEEDS"])
+        if not raw.strip():
+            raise ValueError("the `needs` input is empty; pass `needs: ${{ toJSON(needs) }}` from the calling job")
+        needs = json.loads(raw)
         if not isinstance(needs, dict) or not needs:
-            raise ValueError("needs is empty")
-    except (KeyError, ValueError) as err:
+            raise ValueError("the `needs` input must be a non-empty JSON object (`toJSON(needs)`)")
+    except ValueError as err:
         print(f"::error title=ci-gate::cannot read the needs of this job: {err}")
         return 1
     problems, notes = verdict(
@@ -68,7 +71,7 @@ def main() -> int:
         os.environ.get("GATE_CLASSIFIER", "").strip(),
     )
     for job, info in sorted(needs.items()):
-        print(f"{job}: {info.get('result')}")
+        print(f"{job}: {info.get('result') if isinstance(info, dict) else info!r}")
     for note in notes:
         print(f"::notice title=ci-gate::{note}")
     if problems:

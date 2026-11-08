@@ -94,6 +94,14 @@ jobs:
           classifier-job: classify
 ```
 
+**The `needs` input.** `ci-gate` takes the calling job's `needs` as the input `needs`, and the caller supplies it with
+`needs: ${{ toJSON(needs) }}` in its own `with:` block, as above. The `needs` context exists in the caller's job and not inside
+an action, so the input has no default; the action fails with a clear message when it is empty, not JSON, or not a non-empty
+JSON object. **v1.32.0's `ci-gate` is unusable:** its manifest put an expression over `needs` in the input's description, which
+a runner evaluates when it loads the manifest, so the job died in Set up job. Use v1.32.1 or later. A caller that already
+passes `needs` as an input, as above, changes nothing but the pin. Do not write `${{ }}` in any description of an action's
+manifest; `tests/test_action_manifests.py` refuses it.
+
 **The decision rules.**
 
 1. A pull request is docs only when every path it changes matches `docs-only-patterns` and none is under `.github/` or on
@@ -141,4 +149,6 @@ needs a reviewer to see it, with or without this feature.
 ## Where it runs
 
 `scripts/classify_changes.py` and `scripts/ci_gate.py` are the whole logic; the actions only pass the environment. Both are
-tested in `tests/test_docs_only_fast_path.py` with a fake `gh`.
+tested in `tests/test_docs_only_fast_path.py` with a fake `gh`. `tests/test_action_manifests.py` checks every expression in
+every `.github/actions/*/action.yml` against the contexts that location can see, and GYST's own `ci.yml` runs both actions on
+a real runner (`fixture-ci-gate-action`, `fixture-classify-action`), so a manifest a runner cannot load fails GYST's `CI green`.

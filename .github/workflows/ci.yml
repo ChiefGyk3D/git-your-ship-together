@@ -654,10 +654,85 @@ jobs:
           fi
           exit "$bad"
 
+  # The composite actions a caller's `CI green` is built from, loaded and run by a real runner. v1.32.0 shipped a
+  # ci-gate manifest that no runner could load (an expression over `needs` in an input description), and nothing
+  # here ever ran it, so nothing noticed. This job runs the local action with stub `needs` JSON: the two cases that
+  # must pass are plain steps, so a manifest the runner cannot load, or a gate that refuses a good input, fails the
+  # job. The cases that must fail (a failed job, an unnamed skip, a missing input) are proved by
+  # tests/test_docs_only_fast_path.py against the script the action calls; a failing step cannot be asserted here
+  # without masking its result. tests/test_action_manifests.py is the static half.
+  fixture-ci-gate-action:
+    name: fixture ci-gate action
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: All needed jobs succeeded
+        uses: ./.github/actions/ci-gate # zizmor: ignore[self-repository]
+        with:
+          needs: '{"a": {"result": "success", "outputs": {}}, "b": {"result": "success", "outputs": {}}}'
+          required-jobs: a b
+
+      - name: A named job skipped on a docs-only change
+        uses: ./.github/actions/ci-gate # zizmor: ignore[self-repository]
+        with:
+          needs: '{"classify": {"result": "success", "outputs": {"docs-only": "true", "reason": "stub"}}, "tofu": {"result": "skipped", "outputs": {}}}'
+          required-jobs: classify tofu
+          skippable-jobs: tofu
+          classifier-job: classify
+
+  # classify-changes on the event this run has. On a pull request it reads the changed files through the API; on a
+  # push it says false, "not a pull request". Either way the action must load, run and produce its outputs, and
+  # that is all this asserts: the verdict depends on the pull request, so it is never compared. pull-requests: read
+  # is what the action documents it needs.
+  fixture-classify-action:
+    name: fixture classify action
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Classify this event
+        id: classify
+        uses: ./.github/actions/classify-changes # zizmor: ignore[self-repository]
+        with:
+          docs-only-patterns: |
+            docs/**
+            tests/**
+            *.md
+
+      - name: The action produced its outputs
+        env:
+          DOCS_ONLY: ${{ steps.classify.outputs.docs-only }}
+          REASON: ${{ steps.classify.outputs.reason }}
+          CHANGED: ${{ steps.classify.outputs.changed }}
+        run: |
+          set -euo pipefail
+          echo "docs-only=$DOCS_ONLY changed=$CHANGED reason=$REASON"
+          case "$DOCS_ONLY" in true | false) ;; *) echo "::error::docs-only is '$DOCS_ONLY'"; exit 1 ;; esac
+          test -n "$REASON" || { echo "::error::no reason output"; exit 1; }
+          case "$CHANGED" in '' | *[!0-9]*) echo "::error::changed is '$CHANGED'"; exit 1 ;; esac
+
   ci-green:
     name: CI green
     if: always()
-    needs: [actionlint, zizmor, test, fixture-ci, fixture-bash, fixture-fuzz, fixture-tofu, fixture-arduino, fixture-package, fixture-sbom, fixture-artifact, fixture-pages, fixture-wiki, fixture-release, fixture-verify, fixture-rescan, fixture-drift, fixture-base-image, fixture-parallel, fixture-gate, rescan-live, fixture-project-sync, fixture-dast, dast-live, fixture-threat-model, fixture-agent-scan, fixture-agent-scan-planted, agent-scan-control]
+    needs: [actionlint, zizmor, test, fixture-ci, fixture-bash, fixture-fuzz, fixture-tofu, fixture-arduino, fixture-package, fixture-sbom, fixture-artifact, fixture-pages, fixture-wiki, fixture-release, fixture-verify, fixture-rescan, fixture-drift, fixture-base-image, fixture-parallel, fixture-gate, fixture-ci-gate-action, fixture-classify-action, rescan-live, fixture-project-sync, fixture-dast, dast-live, fixture-threat-model, fixture-agent-scan, fixture-agent-scan-planted, agent-scan-control]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}
