@@ -70,6 +70,13 @@ jobs:
   `trivy-exit-code` now defaults to `"1"`, with `trivy-ignore-unfixed` so an advisory with no fix does not block. A caller with a
   fixable high or critical goes red until its base image or dependency moves; `trivyignores` takes a `.trivyignore` whose entries
   each carry a reason and a review date.
+- **Secret findings inside installed packages (2026-11-07).** Trivy's `gcp-service-account` rule matched docstring text about an
+  API enum value in the installed `anthropic` SDK (11 CRITICAL findings under `/opt/venv/lib/python3.14/site-packages/anthropic/`
+  on Boon-Tube-Daemon's image); the newest SDK has it and no fixed version exists. `skip-secret-scan-in-site-packages: true`
+  (default `false`) gives Trivy's secret scanner one `allow-rules` path entry for `lib/pythonX.Y/site-packages/`, in a
+  `trivy-secret.yaml` passed through `TRIVY_SECRET_CONFIG` (the `--secret-config` flag; trivy-action has no input for it). The
+  vulnerability scan, severity, `ignore-unfixed` and exit code are untouched, and secrets anywhere else in the image are still
+  found. Source: Trivy secret scanning docs, "Allow Rules", read 2026-11-07.
 - **Trivy's setuptools finding may be pip's.** pip vendors its own setuptools and msgpack under `pip/_vendor`, so upgrading
   setuptools in the image clears nothing; `pip uninstall -y pip` as the last build step does.
 - **Temporary tags stay in GHCR** beside the index; delete them when you no longer need them.
