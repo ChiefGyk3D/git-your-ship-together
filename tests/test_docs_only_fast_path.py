@@ -573,3 +573,33 @@ def test_a_default_caller_sees_an_empty_addopts():
     """With xdist off the expression is `false && ... || ''`: the empty string, so PYTEST_ADDOPTS adds nothing."""
     expr = step_named(python_ci()["jobs"]["test"], "Run tests")["env"]["PYTEST_ADDOPTS"]
     assert expr.startswith("${{ inputs.xdist && ") and expr.endswith(" || '' }}")
+
+
+def test_gate_an_empty_or_malformed_needs_input_fails_with_a_clear_message():
+    for raw, words in [
+        ("", "is empty"),
+        ("   ", "is empty"),
+        ("not json", "cannot read"),
+        ("[]", "JSON object"),
+        ("{}", "JSON object"),
+    ]:
+        done = subprocess.run(
+            [sys.executable, "-I", str(GATE)],
+            env={"PATH": os.environ["PATH"], "GATE_NEEDS": raw},
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert done.returncode == 1 and "::error title=ci-gate::" in done.stdout and words in done.stdout, raw
+
+
+def test_gate_a_needs_entry_that_is_not_an_object_fails_without_a_traceback():
+    done = run_gate({"a": "success"})
+    assert done.returncode == 1 and "Traceback" not in done.stderr
+
+
+def test_the_ci_gate_needs_input_has_no_default_and_no_expression():
+    doc = load(REPO / ".github" / "actions" / "ci-gate" / "action.yml")
+    spec = doc["inputs"]["needs"]
+    assert spec["required"] is True and "default" not in spec
+    assert "${{" not in spec["description"]
