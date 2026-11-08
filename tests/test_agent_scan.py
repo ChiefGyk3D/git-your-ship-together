@@ -190,7 +190,7 @@ def test_ci_runs_the_clean_fixture_with_a_threshold_and_the_planted_one_as_advis
         assert job["with"]["egress-policy"] == "block"
     assert clean["with"]["fail-on-severity"] == "info", "zero findings of any severity on the clean fixture"
     assert "fail-on-severity" not in planted["with"], "the planted fixture runs advisory: the job is green"
-    assert control["needs"] == "fixture-agent-scan-planted"
+    assert set(control["needs"]) == {"changes", "fixture-agent-scan-planted"}  # changes: the docs-only skip (#307)
     run = " ".join(step["run"] for step in control["steps"] if "run" in step)
     for needle in ("SKILL_MAX", "MCP_MAX", "critical", "high"):
         assert needle in run
