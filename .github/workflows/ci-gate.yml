@@ -61,8 +61,9 @@ on:
         description: "`success` or `failure`, the verdict of the gate."
         value: ${{ jobs.ci-green.outputs.result }}
 
-permissions:
-  contents: read
+# Nothing is checked out and no token is used, so the workflow asks for none: a caller grants `permissions: {}`, and a
+# called workflow that asks for more than its caller grants ends the run in `startup_failure`.
+permissions: {}
 
 jobs:
   ci-green:

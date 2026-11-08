@@ -150,6 +150,21 @@ def test_the_gate_job_is_named_ci_green_and_holds_nothing(name):
     assert "continue-on-error" not in (WORKFLOWS / name).read_text()
 
 
+def test_the_gate_workflow_asks_for_no_token_scope_at_any_level():
+    # A caller grants the gate `permissions: {}`. GitHub rejects the whole run as a startup_failure (no check run,
+    # no job) when the called workflow requests more than the caller grants, and the requirement is read from the
+    # workflow's top level too, not only from its jobs. ci-gate.yml holds nothing, so it must request nothing.
+    doc = yaml.safe_load((WORKFLOWS / "ci-gate.yml").read_text())
+    assert doc["permissions"] == {}
+    assert all(job.get("permissions") == {} for job in doc["jobs"].values())
+    assert doc["jobs"], "the guard collected no job"
+
+
+def test_the_gate_permission_guard_bites():
+    bad = yaml.safe_load("permissions:\n  contents: read\njobs:\n  g:\n    permissions: {}\n")
+    assert bad["permissions"] != {}
+
+
 def test_the_parallel_gate_runs_always_and_needs_every_other_job():
     doc = yaml.safe_load((WORKFLOWS / "parallel-ci.yml").read_text())
     gate = doc["jobs"]["ci-green"]
