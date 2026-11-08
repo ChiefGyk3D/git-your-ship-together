@@ -5,6 +5,11 @@ name what a caller sees after that.
 
 ## Unreleased
 
+### Changed: harden the CI green gate and the docs-only classification (issues #307, #325)
+
+Only this repository's own CI changes. The aggregate `CI green` job now reads its gate code from the base commit on a pull request
+instead of the pull request itself, and the docs-only list is by file type with shell files on the never-skip list. Tests pin both.
+
 ### Changed: concurrency on the self-callers, and the auto-merge actor gate (issue #313)
 
 Only this repository's own workflows change. `security-self.yml` cancels a superseded pull request run (a push to main and the

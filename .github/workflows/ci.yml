@@ -54,15 +54,21 @@ jobs:
         with:
           # No gated job reads docs/ or CHANGELOG.md, and the tests/ files it does read are on the never-skip list
           # below; the suite reads all of tests/ and is never skipped. README.md is not here: tests/test_sbom.py
-          # reads it. tests/test_path_aware_gating.py checks this list against what each gated job reads.
+          # reads it. The list is by file type, because bash-ci takes every tracked file with a shell name or a shell
+          # shebang repo-wide; shell names are also never-skip below. tests/test_path_aware_gating.py checks this list
+          # against what each gated job reads or enumerates.
           docs-only-patterns: |
-            docs/**
-            tests/**
+            docs/**/*.md
+            tests/**/*.py
+            tests/**/*.json
+            tests/**/*.txt
             CHANGELOG.md
           # The test files gated jobs run or import (.github/ and fixture/ are never docs only already):
           # dast-live runs tests/test_dast.py, which imports tests/test_workflows.py; rescan-live runs
           # tests/test_verify_published.py; fixture-sbom runs tests/test_sbom.py; tests/fixtures/ holds their samples.
           never-skip-patterns: |
+            **/*.sh
+            **/*.bash
             tests/test_dast.py
             tests/test_verify_published.py
             tests/test_workflows.py
@@ -747,13 +753,21 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
-      contents: read  # the local ci-gate action is read from the checkout
+      contents: read  # the gate action and script are read from the trusted checkout below
     steps:
       - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
         with:
           egress-policy: audit
+      # The code that judges a pull request must not come from the pull request: on a pull request this reads the gate
+      # action and script from the base commit, otherwise from the commit that triggered the run. The verdict inputs
+      # still come from `needs` and the changes job.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.sha }}
+          sparse-checkout: |
+            .github/actions/ci-gate
+            scripts/ci_gate.py
+          sparse-checkout-cone-mode: false
           persist-credentials: false
 
       # Every needed job must be `success`. Two skips count, each by an explicit reason and only for the jobs named:

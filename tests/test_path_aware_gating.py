@@ -62,7 +62,15 @@ def test_changes_patterns_are_the_narrow_list():
     (classify,) = [s for s in job["steps"] if s.get("id") == "c"]
     patterns = classify["with"]["docs-only-patterns"].split()
     # Not `*.md`: README.md is read by tests/test_sbom.py, which a gated job runs.
-    assert patterns == ["docs/**", "tests/**", "CHANGELOG.md"]
+    # By file type, not by directory: bash-ci also picks up any tracked file with a shell shebang, so an extensionless
+    # or odd-suffixed file under docs/ or tests/ must not be docs only.
+    assert patterns == [
+        "docs/**/*.md",
+        "tests/**/*.py",
+        "tests/**/*.json",
+        "tests/**/*.txt",
+        "CHANGELOG.md",
+    ]
 
 
 def test_changes_is_not_skipped_by_anything():
@@ -144,6 +152,39 @@ def test_ci_green_checks_out_nothing_it_could_not_trust_and_keeps_no_credentials
     steps = JOBS["ci-green"]["steps"]
     (checkout,) = [s for s in steps if str(s.get("uses", "")).startswith("actions/checkout@")]
     assert checkout["with"]["persist-credentials"] is False
+
+
+def test_ci_green_runs_the_verdict_code_from_the_trusted_base_not_the_pull_request():
+    """The code that judges a pull request must not come from the pull request."""
+    job = JOBS["ci-green"]
+    (checkout,) = [s for s in job["steps"] if str(s.get("uses", "")).startswith("actions/checkout@")]
+    with_ = checkout["with"]
+    ref = " ".join(str(with_.get("ref", "")).split())
+    assert ref == ("${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.sha }}"), (
+        "the verdict code must come from the base commit on a pull request, github.sha otherwise"
+    )
+    for forbidden in ("head", "github.head_ref", "refs/pull", "merge"):
+        assert forbidden not in ref, forbidden
+    # Minimal: only the gate action and its script are materialized.
+    assert set(str(with_.get("sparse-checkout", "")).split()) == {".github/actions/ci-gate", "scripts/ci_gate.py"}
+    assert with_.get("sparse-checkout-cone-mode") is False
+    assert with_["persist-credentials"] is False
+    assert job["permissions"] == {"contents": "read"}
+    # The gate is a local action read from that trusted checkout; no `run` step comes before the checkout.
+    idx = [i for i, s in enumerate(job["steps"]) if s is checkout][0]
+    gate = [i for i, s in enumerate(job["steps"]) if str(s.get("uses", "")).startswith("./.github/actions/ci-gate")]
+    assert gate and min(gate) > idx
+    assert all("run" not in s for s in job["steps"][:idx])
+
+
+def test_no_other_step_of_ci_green_checks_out_or_executes_pull_request_code():
+    job = JOBS["ci-green"]
+    text = yaml.safe_dump(job)
+    assert text.count("actions/checkout@") == 1
+    assert "head_ref" not in text and "head.sha" not in text and "refs/pull" not in text
+    # head.repo.full_name is event metadata for the fork flag, not code; it may appear only in that input
+    assert text.count("pull_request.head.") == 1 and "head.repo.full_name" in text
+    assert not [s for s in job["steps"] if "run" in s], "the verdict job executes only the gate action"
 
 
 # --- the fork excuse in the gate script ------------------------------------------------------------------------
@@ -340,3 +381,77 @@ def test_auto_merge_self_caller_has_one_run_per_pull_request_and_gates_by_actor(
         "cancel-in-progress": True,
     }
     assert doc["jobs"]["auto-merge"]["if"] == "github.event.pull_request.user.login == 'dependabot[bot]'"
+
+
+# --- implicit repo-wide inputs of the gated jobs (the guard for the second review finding) -------------------------
+
+BASH_CI = (WORKFLOWS / "bash-ci.yml").read_text()
+# Where a gated workflow enumerates files itself rather than naming paths: bash-ci runs `git ls-files` over its
+# default pathspec (the whole repository) and takes every `*.sh`/`*.bash` file and any file with a shell shebang.
+SCRIPT_SUFFIXES = sorted(set(re.findall(r"\*(\.\w+)", re.search(r'case "\$f" in ([^)]*)\)', BASH_CI).group(1))))
+SPOTS = ["x", "docs/x", "tests/x", "docs/a/b/x", "tests/fixtures/x", "fixture/x", "tests/fixtures/dast/x"]
+
+
+def spots(suffix: str) -> list[str]:
+    return [f"{d}{suffix}" for d in SPOTS]
+
+
+def test_the_script_suffixes_bash_ci_enumerates_were_collected():
+    assert SCRIPT_SUFFIXES == [".bash", ".sh"]
+    assert re.search(r'^ {6}paths:\n(?: {8}.*\n)*? {8}default: "\."', BASH_CI, re.M), (
+        "bash-ci must scan the whole repository"
+    )
+
+
+@pytest.mark.parametrize("suffix", SCRIPT_SUFFIXES)
+@pytest.mark.parametrize("path_index", range(len(SPOTS)))
+def test_adding_deleting_or_renaming_a_script_anywhere_is_never_docs_only(suffix, path_index):
+    path = spots(suffix)[path_index]
+    # added or modified, alone and beside docs
+    assert not skips_live(path)
+    assert not skips_live("docs/a.md", path)
+    # deleted: the API still lists the filename, with status removed
+    assert not cc.classify([{"filename": path, "status": "removed"}], *changes_rule())[0]
+    # renamed into the script name from a docs file, and out of it into a docs file
+    assert not skips_live_files(files(**{path: "docs/old.md"}))
+    assert not skips_live_files(files(**{"docs/new.md": path}))
+
+
+def skips_live_files(file_list) -> bool:
+    patterns, never = changes_rule()
+    return cc.classify(file_list, patterns, never)[0]
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["docs/helper", "tests/helper", "docs/a/run", "tests/fixtures/tool", "docs/x.txt", "tests/x.yml", "tests/x.cfg"],
+)
+def test_a_file_bash_ci_would_find_by_shebang_or_that_is_no_known_doc_type_is_never_docs_only(path):
+    assert not skips_live(path)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "docs/a.md",
+        "docs/wiki/Home.md",
+        "tests/test_hygiene.py",
+        "tests/test_a.json",
+        "tests/safo-release-commit.txt",
+        "CHANGELOG.md",
+    ],
+)
+def test_plain_docs_and_tests_still_skip(path):
+    assert skips_live(path)
+
+
+def test_the_shell_globs_are_on_the_never_skip_list_and_the_guard_bites():
+    """Negative case: the old broad docs list plus a never-skip list without the shell globs would skip a script."""
+    (c,) = [s for s in JOBS["changes"]["steps"] if s.get("id") == "c"]
+    never_text = c["with"]["never-skip-patterns"].split()
+    assert "**/*.sh" in never_text and "**/*.bash" in never_text
+    broad = cc.compile_patterns("docs/**\ntests/**\n", "patterns", True)
+    without = cc.compile_patterns("\n".join(p for p in never_text if not p.startswith("**/*.")), "never-skip", False)
+    assert cc.classify(files("tests/x.sh"), broad, without)[0], "the old shape lets a script skip"
+    assert not cc.classify(files("tests/x.sh"), broad, changes_rule()[1])[0]
+    assert not cc.classify(files("docs/x.bash"), broad, changes_rule()[1])[0]
