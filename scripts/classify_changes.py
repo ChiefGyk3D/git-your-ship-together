@@ -16,7 +16,6 @@ Inputs reach the script through the environment, never through its text:
   CC_NEVER_SKIP      newline-separated globs that always run the job, on top of `.github/**`
   GH_TOKEN           a token that can read the pull request (pull-requests: read)
   GITHUB_OUTPUT      where `docs-only`, `reason` and `changed` are written
-  CC_FILES_JSON      tests only: a file holding the API's answer, in place of calling it
 
 Glob syntax (anchored at the repository root, matched against the whole path):
 `*` any characters but `/`, `?` one such character, `**` anything including `/`,
@@ -120,18 +119,28 @@ def gh_json(args: list[str]) -> object:
 def fetch_files(repo: str, pr: str, head_sha: str, changed: str) -> list[dict]:
     """The pull request's files from the API, checked against what the event itself says.
 
+    The pull request is read before the file pages and again after the last one; the head must be the commit the
+    run started for both times and the count must agree three ways (event, listing, final read), so a push or a
+    rewrite while the pages were fetched cannot leave a list of no particular commit standing.
     Raises RuntimeError on any mismatch; the caller turns that into docs-only=false."""
-    if os.environ.get("CC_FILES_JSON"):
-        with open(os.environ["CC_FILES_JSON"], encoding="utf-8") as fh:
-            files = json.load(fh)
-    else:
+
+    def read_meta() -> dict:
         meta = gh_json([f"repos/{repo}/pulls/{pr}"])
-        if not isinstance(meta, dict) or meta.get("head", {}).get("sha") != head_sha:
-            raise RuntimeError("the pull request head is no longer the commit this run was started for")
-        pages = gh_json(["--paginate", "--slurp", f"repos/{repo}/pulls/{pr}/files?per_page=100"])
-        files = [f for page in pages for f in page]
-    if not changed.isdigit() or int(changed) != len(files):
-        raise RuntimeError(f"the API listed {len(files)} files but the event says {changed!r}")
+        if not isinstance(meta, dict):
+            raise RuntimeError("the pull request could not be read")
+        return meta
+
+    if read_meta().get("head", {}).get("sha") != head_sha:
+        raise RuntimeError("the pull request head is no longer the commit this run was started for")
+    pages = gh_json(["--paginate", "--slurp", f"repos/{repo}/pulls/{pr}/files?per_page=100"])
+    files = [f for page in pages for f in page]
+    final = read_meta()
+    if final.get("head", {}).get("sha") != head_sha:
+        raise RuntimeError("the pull request head moved while its files were being listed")
+    if not changed.isdigit() or int(changed) != len(files) or final.get("changed_files") != len(files):
+        raise RuntimeError(
+            f"file counts disagree: listing {len(files)}, event {changed!r}, final read {final.get('changed_files')!r}"
+        )
     if len(files) >= API_FILE_LIMIT:
         raise RuntimeError("the file list may be cut short by the API limit")
     return files

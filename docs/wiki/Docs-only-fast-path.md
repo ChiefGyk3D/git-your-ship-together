@@ -32,12 +32,16 @@ many stacks and modules.
 
 ## `xdist` in python-ci
 
-With `xdist: true` the `test` job installs `pytest-xdist` (pinned by `xdist-version`) after `install-command` and sets
+With `xdist: true` the `test` job installs `pytest-xdist` after `install-command` and sets
 `PYTEST_ADDOPTS=-n <xdist-workers>` for the `test-command` step. `PYTEST_ADDOPTS` is read by pytest itself, so:
 
 - the caller's `test-command` runs exactly as written: a command that chains scripts and gates before `pytest` keeps its
   semantics, and the `-n` reaches every `pytest` in it (`pytest`, `python -m pytest`, `python -I -m pytest`) and no other program;
 - the `distro` job runs the command as written, without it;
+- the install is `pip install --require-hashes --no-deps --only-binary=:all:` from a lock that travels inside `python-ci.yml`
+  (source: `.github/requirements/pytest-xdist.{in,txt}`, copied in by `scripts/tool_locks.py`), holding `pytest-xdist` and its
+  one dependency `execnet` with hashes. There is no version input: a free-form version cannot coexist with a hash lock, so the
+  locked release is the only one and a bump is a change to the lock. pytest itself is the caller's and is not locked here;
 - `xdist-workers` is `auto`, `logical` or a whole number, checked before it can reach pytest.
 
 Under xdist, tests must not share state (a fixed port, one scratch path), and test ids must be identical on every worker.
@@ -122,6 +126,9 @@ route and what closes it.
 | A rename that moves code into a docs path | Both the old and the new name are classified |
 | A path with `..`, `.`, an empty segment or a leading `/` | Not a normal repository path; the classification is `false` |
 | A pattern that widens the list to everything | Catch-all patterns, a leading `/` or `!`, and `..` fail the step. A narrower but wrong list (for example `scripts/**`) is a caller decision, and only reachable by editing `.github/`, which runs everything |
+| A push lands while the file pages are being fetched | The pull request is read again after the last page. The head must still be the commit the run started for, and the file count must agree three ways (the event, the listing, the final read). Same count and paths on a different head still fail closed |
+| A test hook that ships in the action | There is none. The script reads the API through `gh` only; an environment variable cannot substitute a file list (`CC_FILES_JSON` was removed, and a test pins that setting it changes nothing) |
+| A `directories` entry that leaves the repository (tofu-ci `test-matrix`) | Each entry is checked before any leg exists: no absolute path, no leading `-`, no `..` or empty segment, only `A-Z a-z 0-9 _ . / -`. The same check runs with `test-matrix` off |
 | A fork pull request | The step needs only `pull-requests: read`, which a fork's token has. It checks out nothing and runs none of the fork's code. A fork cannot reach a secret through it |
 | A skipped job passes for the wrong reason | The gate counts a skip only for a named job and only when the classifier succeeded with `docs-only=true`. Skipped because an upstream failed, skipped by a typo, or skipped with a `false` verdict all fail |
 | Output injection through a file name | Values go to `$GITHUB_OUTPUT` on one line each, with whitespace collapsed and the path quoted |

@@ -637,9 +637,16 @@ jobs:
           if not dirs:
               print("::error::directories is empty, so there is nothing for tofu test to run in")
               sys.exit(1)
+          # Each entry is a path below the repository root: the leg runs `cd` into it.
           for d in dirs:
-              if not re.fullmatch(r"[A-Za-z0-9_./-]+", d) or d.startswith("-"):
+              if not re.fullmatch(r"[A-Za-z0-9_./-]+", d):
                   print("::error::a directory name has characters outside A-Z a-z 0-9 _ . / -")
+                  sys.exit(1)
+              if d.startswith(("/", "-")):
+                  print("::error::a directory must be relative to the repository root and not start with - (no absolute path)")
+                  sys.exit(1)
+              if any(part in ("", "..") for part in d.split("/")):
+                  print("::error::a directory must not contain .. or an empty path segment (a//b, a trailing /)")
                   sys.exit(1)
           if os.environ["PER_DIRECTORY"] == "true":
               legs = [{"dirs": d, "name": "test (" + d + ")"} for d in dirs]

@@ -291,7 +291,6 @@ Inputs of `python-ci.yml`:
 | `test-command` | `pytest` | The test suite |
 | `xdist` | `false` | Run the `test` job's pytest in parallel: installs `pytest-xdist` after `install-command` and sets `PYTEST_ADDOPTS=-n <xdist-workers>` for the `test-command` step only. The command runs as written, so a command that chains scripts before `pytest` is unchanged and every `pytest` in it is parallel. The `distro` job does not use it. Tests must not share state (a port, a file) to run under it, and test ids must be the same on every worker (no memory addresses in a parametrize id). See [Docs-only fast path and parallel CI](docs/wiki/Docs-only-fast-path.md) |
 | `xdist-workers` | `auto` | With `xdist`: `auto`, `logical` or a whole number of workers; anything else fails the job |
-| `xdist-version` | `3.8.0` | The `pytest-xdist` release installed with `xdist`, pinned so a new release cannot change a run |
 | `coverage-file` | `coverage.xml` | Uploaded as an artifact when present |
 | `coverage-threshold` | empty (no check) | Minimum total line coverage as a percentage, e.g. `85`. The `test` job fails below it, judged from the `line-rate` of `coverage-file` (Cobertura XML, as coverage.py and pytest-cov write it) on the leg that uploads it; the test command must write that file |
 | `codecov` | `false` | Also upload to Codecov over GitHub OIDC; no token, the repository just has to be enabled in the Codecov GitHub App |

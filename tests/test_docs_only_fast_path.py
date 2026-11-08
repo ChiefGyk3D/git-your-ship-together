@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -149,24 +150,54 @@ def test_a_filename_cannot_break_out_of_the_output_file(tmp_path):
 # --- the script as the step runs it, with a fake gh ------------------------------------------------------------
 
 
-def fake_gh(tmp_path: Path, pr_head: str, listing: list[dict], fail: bool = False) -> dict:
-    """A `gh` on PATH that answers the two calls the script makes."""
+def fake_gh(
+    tmp_path: Path,
+    pr_head: str,
+    listing: list[dict],
+    fail: bool = False,
+    later_head: str | None = None,
+    later_changed: int | None = None,
+) -> dict:
+    """A `gh` on PATH that answers the calls the script makes.
+
+    The pull request metadata is read twice (before and after the file pages); `later_head` and `later_changed`
+    are what the second and later reads return, to model a push or a rewrite during the listing."""
     bindir = tmp_path / "bin"
     bindir.mkdir()
-    (tmp_path / "meta.json").write_text(json.dumps({"head": {"sha": pr_head}}))
+    first = {"head": {"sha": pr_head}, "changed_files": len(listing)}
+    later = {
+        "head": {"sha": later_head or pr_head},
+        "changed_files": len(listing) if later_changed is None else later_changed,
+    }
+    (tmp_path / "meta1.json").write_text(json.dumps(first))
+    (tmp_path / "meta2.json").write_text(json.dumps(later))
     (tmp_path / "files.json").write_text(json.dumps([listing]))  # --slurp: a list of pages
     gh = bindir / "gh"
     gh.write_text(
         "#!/bin/sh\n"
         + ("echo boom >&2; exit 1\n" if fail else "")
-        + 'case "$*" in *--slurp*) cat "$FAKE_DIR/files.json" ;; *) cat "$FAKE_DIR/meta.json" ;; esac\n'
+        + 'case "$*" in *--slurp*) cat "$FAKE_DIR/files.json"; exit 0 ;; esac\n'
+        + 'n=$(cat "$FAKE_DIR/meta.count" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "$FAKE_DIR/meta.count"\n'
+        + 'if [ "$n" -eq 1 ]; then cat "$FAKE_DIR/meta1.json"; else cat "$FAKE_DIR/meta2.json"; fi\n'
     )
     gh.chmod(gh.stat().st_mode | stat.S_IXUSR)
     return {"PATH": f"{bindir}:{os.environ['PATH']}", "FAKE_DIR": str(tmp_path)}
 
 
-def run_classify(tmp_path, listing, *, event="pull_request", head="a" * 40, pr_head="a" * 40, count=None, fail=False):
-    extra = fake_gh(tmp_path, pr_head, listing, fail)
+def run_classify(
+    tmp_path,
+    listing,
+    *,
+    event="pull_request",
+    head="a" * 40,
+    pr_head="a" * 40,
+    count=None,
+    fail=False,
+    later_head=None,
+    later_changed=None,
+    extra_env=None,
+):
+    extra = fake_gh(tmp_path, pr_head, listing, fail, later_head, later_changed)
     out = tmp_path / "gh_output"
     env = {
         **extra,
@@ -179,6 +210,7 @@ def run_classify(tmp_path, listing, *, event="pull_request", head="a" * 40, pr_h
         "CC_PATTERNS": DOCS,
         "CC_NEVER_SKIP": "",
         "GH_TOKEN": "x",
+        **(extra_env or {}),
     }
     done = subprocess.run([sys.executable, "-I", str(CLASSIFY)], env=env, capture_output=True, text=True, timeout=60)
     values = dict(ln.split("=", 1) for ln in out.read_text().splitlines()) if out.exists() else {}
@@ -215,6 +247,34 @@ def test_script_a_count_that_disagrees_with_the_event_runs_everything(tmp_path):
 def test_script_an_unreadable_api_runs_everything_and_does_not_fail_the_job(tmp_path):
     done, out = run_classify(tmp_path, files("docs/a.md"), fail=True)
     assert done.returncode == 0 and out["docs-only"] == "false" and "::warning" in done.stdout
+
+
+def test_script_a_head_that_moves_during_the_listing_runs_everything(tmp_path):
+    """The head read before the pages was right; a push landed while they were fetched: the list is of no commit."""
+    done, out = run_classify(tmp_path, files("docs/a.md"), later_head="b" * 40)
+    assert out["docs-only"] == "false" and "head" in done.stdout
+
+
+def test_script_same_count_and_paths_on_a_different_final_head_still_fails_closed(tmp_path):
+    listing = files("docs/a.md", "tests/t.py")
+    done, out = run_classify(tmp_path, listing, later_head="c" * 40, later_changed=len(listing))
+    assert out["docs-only"] == "false"
+
+
+def test_script_a_final_count_that_differs_from_the_listing_runs_everything(tmp_path):
+    done, out = run_classify(tmp_path, files("docs/a.md"), later_changed=2)
+    assert out["docs-only"] == "false" and "files" in done.stdout
+
+
+def test_script_the_test_only_files_override_is_gone(tmp_path):
+    """CC_FILES_JSON used to replace the API answer; it must now be ignored, so the real (fake gh) answer decides."""
+    forged = tmp_path / "forged.json"
+    forged.write_text(json.dumps(files("docs/a.md")))
+    done, out = run_classify(
+        tmp_path, files("docs/a.md", "stacks/00-foundation/main.tf"), extra_env={"CC_FILES_JSON": str(forged)}
+    )
+    assert out["docs-only"] == "false"
+    assert "CC_FILES_JSON" not in CLASSIFY.read_text()
 
 
 def test_script_a_list_at_the_api_limit_runs_everything(tmp_path):
@@ -370,6 +430,18 @@ def run_plan(directories: str, per_directory: str, tmp_path: Path):
     return done, legs
 
 
+@pytest.mark.parametrize("per_directory", ["true", "false"])
+@pytest.mark.parametrize("bad", ["/tmp", "..", "a/../b", "./a/..", "a//b", "-x", "ok /tmp", "a/"])
+def test_tofu_directories_must_stay_inside_the_repository_in_both_modes(tmp_path, bad, per_directory):
+    done, legs = run_plan(bad, per_directory, tmp_path)
+    assert done.returncode != 0 and legs is None and "::error::" in done.stdout
+
+
+def test_tofu_the_default_and_nested_directories_are_accepted(tmp_path):
+    done, legs = run_plan(". stacks/aws/00-foundation modules/a_b.c", "true", tmp_path)
+    assert done.returncode == 0 and [leg["dirs"] for leg in legs] == [".", "stacks/aws/00-foundation", "modules/a_b.c"]
+
+
 def test_tofu_off_is_one_leg_named_test_holding_every_directory(tmp_path):
     done, legs = run_plan("a b  c", "false", tmp_path)
     assert done.returncode == 0 and legs == [{"dirs": "a b c", "name": "test"}]
@@ -446,7 +518,7 @@ def test_xdist_is_off_by_default_with_a_pinned_version():
     inputs = python_ci()[True]["workflow_call"]["inputs"]
     assert inputs["xdist"]["default"] is False and inputs["xdist"]["type"] == "boolean"
     assert inputs["xdist-workers"]["default"] == "auto"
-    assert inputs["xdist-version"]["default"].replace(".", "").isdigit()
+    assert "xdist-version" not in inputs, "a free-form version cannot coexist with the hash lock"
 
 
 def test_xdist_reaches_pytest_through_the_environment_not_the_callers_command():
@@ -457,47 +529,44 @@ def test_xdist_reaches_pytest_through_the_environment_not_the_callers_command():
     assert "inputs.xdist" in expr and "format('-n {0}', inputs.xdist-workers)" in expr and expr.endswith("|| '' }}")
     install = step_named(job, "Install pytest-xdist")
     assert install["if"] == "inputs.xdist"
-    assert "pytest-xdist==$VERSION" in install["run"]
     names = [s.get("name") for s in job["steps"]]
     assert names.index("Install dependencies") < names.index("Install pytest-xdist") < names.index("Run tests")
 
 
+def run_xdist_install(tmp_path, workers):
+    """The real step under bash, with a `python` that records its arguments and the requirements file it was given."""
+    step = step_named(python_ci()["jobs"]["test"], "Install pytest-xdist")
+    stub = 'python() { echo "pip: $*"; cat "$RUNNER_TEMP/xdist-requirements.txt"; }; export -f python;'
+    env = {**os.environ, **step["env"], "WORKERS": workers, "RUNNER_TEMP": str(tmp_path)}
+    return subprocess.run(["bash", "-c", stub + step["run"]], env=env, capture_output=True, text=True, timeout=60)
+
+
 @pytest.mark.parametrize("workers", ["auto", "logical", "4", "16"])
-def test_xdist_accepts_a_worker_count(workers):
-    step = step_named(python_ci()["jobs"]["test"], "Install pytest-xdist")["run"]
-    stub = 'python() { echo "pip: $*"; }; export -f python;'
-    done = subprocess.run(
-        ["bash", "-c", stub + step],
-        env={**os.environ, "WORKERS": workers, "VERSION": "3.8.0"},
-        capture_output=True,
-        text=True,
-        timeout=60,
-    )
-    assert done.returncode == 0 and "pytest-xdist==3.8.0" in done.stdout
+def test_xdist_accepts_a_worker_count_and_installs_only_from_the_hash_lock(tmp_path, workers):
+    done = run_xdist_install(tmp_path, workers)
+    assert done.returncode == 0
+    assert "pip: -m pip install --require-hashes --no-deps --only-binary=:all: -r" in done.stdout
+    assert "pytest-xdist==3.8.0" in done.stdout and "execnet==" in done.stdout
 
 
-@pytest.mark.parametrize(
-    ("workers", "version"),
-    [
-        ("0", "3.8.0"),
-        ("auto --foo", "3.8.0"),
-        ("-n 4", "3.8.0"),
-        ("", "3.8.0"),
-        ("auto", "3.8.0 --index-url x"),
-        ("auto", ""),
-    ],
-)
-def test_xdist_refuses_anything_pytest_could_read_as_another_option(workers, version):
-    step = step_named(python_ci()["jobs"]["test"], "Install pytest-xdist")["run"]
-    stub = "python() { echo RAN; }; export -f python;"
-    done = subprocess.run(
-        ["bash", "-c", stub + step],
-        env={**os.environ, "WORKERS": workers, "VERSION": version},
-        capture_output=True,
-        text=True,
-        timeout=60,
-    )
-    assert done.returncode == 1 and "RAN" not in done.stdout
+@pytest.mark.parametrize("workers", ["0", "auto --foo", "-n 4", "", "4;id", "$(id)"])
+def test_xdist_refuses_anything_pytest_could_read_as_another_option(tmp_path, workers):
+    done = run_xdist_install(tmp_path, workers)
+    assert done.returncode == 1 and "pip:" not in done.stdout
+
+
+def test_xdist_is_installed_with_require_hashes_from_the_lock_and_no_input_reaches_pip():
+    step = step_named(python_ci()["jobs"]["test"], "Install pytest-xdist")
+    run = step["run"]
+    assert "--require-hashes" in run and "--no-deps" in run and "--only-binary=:all:" in run
+    assert "inputs." not in run and "VERSION" not in str(step["env"]) and "REQUESTED" not in str(step["env"])
+    lock = (REPO / ".github" / "requirements" / "pytest-xdist.txt").read_text()
+    assert step["env"]["REQUIREMENTS"] == lock, "run scripts/tool_locks.py"
+    assert (REPO / ".github" / "requirements" / "pytest-xdist.in").read_text().strip() == "pytest-xdist==3.8.0"
+    entries = [e for e in re.split(r"\n(?=[A-Za-z0-9])", "\n".join(ln for ln in lock.splitlines() if ln[:1] != "#"))]
+    assert {e.split("==")[0] for e in entries} == {"pytest-xdist", "execnet"}, "xdist and its one dependency, no pytest"
+    for entry in entries:
+        assert re.search(r"--hash=sha256:[0-9a-f]{64}", entry), f"no hash: {entry.splitlines()[0]}"
 
 
 def test_a_default_caller_sees_an_empty_addopts():

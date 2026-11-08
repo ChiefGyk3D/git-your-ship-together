@@ -14,7 +14,7 @@ the legs; the `test` job keeps its name.
 - **`tofu-ci.yml` `test-matrix`** (default `false`). With `test`, `tofu test` runs as one job per directory (`fail-fast: false`)
   instead of every directory in turn. `ci-green` still reports one result and now treats a skipped `test` or `test-dirs` as a
   failure when `test` was asked for; a failed or cancelled leg already made `test` fail or cancel.
-- **`python-ci.yml` `xdist`, `xdist-workers`, `xdist-version`** (default off, `auto`, `3.8.0`). Installs `pytest-xdist` and sets
+- **`python-ci.yml` `xdist`, `xdist-workers`** (default off, `auto`). Installs `pytest-xdist` 3.8.0 and `execnet` from a hash lock (`--require-hashes`, no version input) and sets
   `PYTEST_ADDOPTS=-n <workers>` for the `test-command` step only, so a command that chains scripts before pytest is unchanged.
 - **`.github/actions/classify-changes` and `.github/actions/ci-gate`.** A pull request that changes only the caller's docs-only
   paths leaves a named job out on purpose, and the caller's `CI green` counts that skip as a pass and every other skip as a
