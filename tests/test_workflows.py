@@ -302,6 +302,12 @@ ALLOWED_WRITES = {
     ("ci.yml", "fixture-release", "packages"),
     ("ci.yml", "fixture-release", "attestations"),
     ("ci.yml", "fixture-release", "security-events"),
+    # The one image this repository publishes, for its own fixture jobs: the caller of container-release.yml, on a
+    # manual run or a push to main only (tests/test_fixture_image.py), granting what the called jobs declare.
+    ("fixture-image.yml", "publish", "packages"),
+    ("fixture-image.yml", "publish", "id-token"),
+    ("fixture-image.yml", "publish", "attestations"),
+    ("fixture-image.yml", "publish", "security-events"),
     # And python-package-release.yml on the fixture: the grants its two
     # publishing jobs declare, which publish: false skips.
     ("ci.yml", "fixture-package", "contents"),

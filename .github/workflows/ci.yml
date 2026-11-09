@@ -418,22 +418,76 @@ jobs:
       probe-command: --version
       trivyignores: fixture/.trivyignore
 
+  # Which image the two jobs below check, read from ONE file: fixture/gyst-fixture/DIGEST. While it says
+  # `unpublished` they keep checking the star-daemon image; once it holds a sha256 they check
+  # ghcr.io/chiefgyk3d/gyst-fixture@<that digest>, the image fixture-image.yml publishes through container-release.yml.
+  # The digest appears nowhere else (tests/test_fixture_image.py). A value that is neither fails here, so a typo cannot
+  # fall back to the old image.
+  fixture-pin:
+    name: fixture pin
+    needs: changes
+    if: needs.changes.outputs.docs-only != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      image: ${{ steps.pin.outputs.image }}
+      source-repository: ${{ steps.pin.outputs.source-repository }}
+      identity-regexp: ${{ steps.pin.outputs.identity-regexp }}
+      test-command: ${{ steps.pin.outputs.test-command }}
+    steps:
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: fixture/gyst-fixture/DIGEST
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - name: Read the pin
+        id: pin
+        env:
+          DIGEST_FILE: fixture/gyst-fixture/DIGEST
+        run: |
+          set -euo pipefail
+          pin="$(tr -d '[:space:]' < "$DIGEST_FILE")"
+          if [ "$pin" = unpublished ]; then
+            cat >> "$GITHUB_OUTPUT" << 'EOF'
+          image=ghcr.io/chiefgyk3d/star-daemon:latest
+          source-repository=ChiefGyk3D/Star-Daemon
+          identity-regexp=^https://github.com/ChiefGyk3D/
+          test-command=docker run --rm "$IMAGE" sh -c "python -m py_compile /app/star-daemon.py /app/star_daemon.py /app/star_announcer.py /app/github_stars.py /app/config.py /app/platforms.py"
+          EOF
+          elif [[ "$pin" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            cat >> "$GITHUB_OUTPUT" << EOF
+          image=ghcr.io/chiefgyk3d/gyst-fixture@$pin
+          source-repository=ChiefGyk3D/git-your-ship-together
+          identity-regexp=^https://github\\.com/ChiefGyk3D/git-your-ship-together/\\.github/workflows/container-release\\.yml@refs/heads/main\$
+          test-command=docker run --rm "\$IMAGE" | grep -Eqx '[0-9]+\\.[0-9]+\\.[0-9]+'
+          EOF
+          else
+            echo "::error::$DIGEST_FILE must hold 'unpublished' or one sha256:<64 lowercase hex> digest"
+            exit 1
+          fi
+
   # verify-published.yml against the image this account publishes through
   # container-release.yml: signature, SBOM attestation and provenance verified
   # from outside, then each platform pulled and its entrypoint checked. The
   # check is the one star-daemon's own release runs on the built image.
   fixture-verify:
     name: fixture verify
-    needs: changes
+    needs: [changes, fixture-pin]
     if: needs.changes.outputs.docs-only != 'true'
     uses: ./.github/workflows/verify-published.yml # zizmor: ignore[self-repository]
     permissions:
       contents: read  # gh attestation verify reads with the workflow's own token
       packages: read  # pull the public image from GHCR
     with:
-      image: ghcr.io/chiefgyk3d/star-daemon:latest
-      source-repository: ChiefGyk3D/Star-Daemon  # the repository that built it, not this one
-      test-command: docker run --rm "$IMAGE" sh -c "python -m py_compile /app/star-daemon.py /app/star_daemon.py /app/star_announcer.py /app/github_stars.py /app/config.py /app/platforms.py"
+      image: ${{ needs.fixture-pin.outputs.image }}
+      source-repository: ${{ needs.fixture-pin.outputs.source-repository }}  # the repository that built it
+      identity-regexp: ${{ needs.fixture-pin.outputs.identity-regexp }}
+      test-command: ${{ needs.fixture-pin.outputs.test-command }}
 
   # verify-published.yml's rescan over the same published image: Trivy,
   # pinned by hash, against today's database, in block mode with the workflow's
@@ -443,15 +497,16 @@ jobs:
   # the next job, against an SBOM that carries one.
   fixture-rescan:
     name: fixture rescan
-    needs: changes
+    needs: [changes, fixture-pin]
     if: needs.changes.outputs.docs-only != 'true'
     uses: ./.github/workflows/verify-published.yml # zizmor: ignore[self-repository]
     permissions:
       contents: read  # the call's own read grant
       packages: read  # the verify job pulls the public image from GHCR
     with:
-      image: ghcr.io/chiefgyk3d/star-daemon:latest
-      source-repository: ChiefGyk3D/Star-Daemon  # the repository that built it, not this one
+      image: ${{ needs.fixture-pin.outputs.image }}
+      source-repository: ${{ needs.fixture-pin.outputs.source-repository }}  # the repository that built it
+      identity-regexp: ${{ needs.fixture-pin.outputs.identity-regexp }}
       platforms: linux/amd64
       rescan: true
       rescan-severity: CRITICAL
@@ -938,7 +993,7 @@ jobs:
   ci-green:
     name: CI green
     if: always()
-    needs: [changes, actionlint, zizmor, test, fixture-ci, fixture-bash, fixture-fuzz, fixture-tofu, fixture-arduino, fixture-package, fixture-sbom, fixture-artifact, fixture-pages, fixture-wiki, fixture-release, fixture-verify, fixture-rescan, fixture-drift, fixture-token-drift, fixture-token-drift-live, fixture-token-drift-planted-pin, fixture-token-drift-planted-live, token-drift-control, fixture-pin-comments, fixture-base-image, fixture-repin, fixture-parallel, fixture-gate, fixture-ci-gate-action, fixture-classify-action, rescan-live, fixture-project-sync, fixture-dast, dast-live, fixture-threat-model, fixture-agent-scan, fixture-agent-scan-planted, agent-scan-control]
+    needs: [changes, actionlint, zizmor, test, fixture-ci, fixture-bash, fixture-fuzz, fixture-tofu, fixture-arduino, fixture-package, fixture-sbom, fixture-artifact, fixture-pages, fixture-wiki, fixture-release, fixture-pin, fixture-verify, fixture-rescan, fixture-drift, fixture-token-drift, fixture-token-drift-live, fixture-token-drift-planted-pin, fixture-token-drift-planted-live, token-drift-control, fixture-pin-comments, fixture-base-image, fixture-repin, fixture-parallel, fixture-gate, fixture-ci-gate-action, fixture-classify-action, rescan-live, fixture-project-sync, fixture-dast, dast-live, fixture-threat-model, fixture-agent-scan, fixture-agent-scan-planted, agent-scan-control]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -967,8 +1022,8 @@ jobs:
         uses: ./.github/actions/ci-gate # zizmor: ignore[self-repository]
         with:
           needs: ${{ toJSON(needs) }}
-          required-jobs: changes actionlint zizmor test fixture-ci fixture-bash fixture-fuzz fixture-package fixture-artifact fixture-tofu fixture-arduino fixture-pages fixture-wiki fixture-project-sync fixture-release fixture-verify fixture-rescan fixture-drift fixture-token-drift fixture-token-drift-live fixture-token-drift-planted-pin fixture-token-drift-planted-live token-drift-control fixture-pin-comments fixture-repin fixture-base-image fixture-parallel fixture-gate fixture-ci-gate-action fixture-classify-action rescan-live fixture-dast dast-live fixture-sbom fixture-threat-model fixture-agent-scan fixture-agent-scan-planted agent-scan-control
-          skippable-jobs: fixture-ci fixture-bash fixture-fuzz fixture-package fixture-artifact fixture-tofu fixture-arduino fixture-pages fixture-wiki fixture-project-sync fixture-release fixture-verify fixture-rescan fixture-drift fixture-token-drift fixture-token-drift-live fixture-token-drift-planted-pin fixture-token-drift-planted-live token-drift-control fixture-pin-comments fixture-repin fixture-base-image fixture-parallel fixture-gate fixture-ci-gate-action fixture-classify-action fixture-dast fixture-sbom fixture-threat-model fixture-agent-scan fixture-agent-scan-planted agent-scan-control rescan-live dast-live
+          required-jobs: changes actionlint zizmor test fixture-ci fixture-bash fixture-fuzz fixture-package fixture-artifact fixture-tofu fixture-arduino fixture-pages fixture-wiki fixture-project-sync fixture-release fixture-pin fixture-verify fixture-rescan fixture-drift fixture-token-drift fixture-token-drift-live fixture-token-drift-planted-pin fixture-token-drift-planted-live token-drift-control fixture-pin-comments fixture-repin fixture-base-image fixture-parallel fixture-gate fixture-ci-gate-action fixture-classify-action rescan-live fixture-dast dast-live fixture-sbom fixture-threat-model fixture-agent-scan fixture-agent-scan-planted agent-scan-control
+          skippable-jobs: fixture-ci fixture-bash fixture-fuzz fixture-package fixture-artifact fixture-tofu fixture-arduino fixture-pages fixture-wiki fixture-project-sync fixture-release fixture-pin fixture-verify fixture-rescan fixture-drift fixture-token-drift fixture-token-drift-live fixture-token-drift-planted-pin fixture-token-drift-planted-live token-drift-control fixture-pin-comments fixture-repin fixture-base-image fixture-parallel fixture-gate fixture-ci-gate-action fixture-classify-action fixture-dast fixture-sbom fixture-threat-model fixture-agent-scan fixture-agent-scan-planted agent-scan-control rescan-live dast-live
           classifier-job: changes
           fork-skippable-jobs: fixture-package fixture-artifact fixture-pages fixture-wiki fixture-release fixture-dast fixture-sbom fixture-threat-model fixture-agent-scan fixture-agent-scan-planted agent-scan-control
           fork-pull-request: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
