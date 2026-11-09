@@ -46,6 +46,7 @@ BUILD_UNGATED = {
     "Probe with a read-only root filesystem",
     "Suppress Trivy secret findings under installed Python package roots",
     "Scan the image with Trivy",
+    "Summarize a failed Trivy scan",  # prints rule ids and paths from the scan's SARIF; holds no push ability
     "Upload Trivy results to the Security tab",
 }
 BUILD_UNGATED_USES = (
