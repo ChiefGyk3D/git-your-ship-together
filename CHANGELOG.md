@@ -55,6 +55,14 @@ On 2026-11-09 commit 52592bc, a Dependabot bump merged by the auto-merge token, 
 - **`requirements-dev.in` / `.txt`.** `pytest-xdist==3.8.0` (and its `execnet`) added; the lock was regenerated with `pip-compile --generate-hashes --strip-extras`, which also drops the `[extras]` brackets pip-compile now strips from two existing lines.
 - **Guard.** `tests/test_workflows.py` fails if the step loses `-n auto` or the lock loses `pytest-xdist`.
 
+### Changed: every job has a measured time cap (issue #247)
+
+On 2026-10-30 fixture jobs finished in seconds and then sat idle for 20 to 35 minutes until a cap; each cost a re-run. A caller sees nothing until it re-pins, and nothing changes in a reusable workflow's inputs or defaults.
+
+- **Fixture calls and self jobs.** `ci.yml`, `security-self.yml`, `wiki.yml` and `dependabot-auto-merge-self.yml` now pass each reusable workflow's `timeout-minutes` input (5, or 10 for the Python CI fixture and the security scan, from the last 30 green runs: p95 under 3 minutes everywhere). `actionlint`, `zizmor`, `fixture sbom`, the two action fixtures and `rescan fails when it should` drop to 5; `dast fails when it should` drops from 60 to 30. `Test the workflows` stays at 20. Every cap has a `# normal: ~N min` comment above it.
+- **Not changed.** The reusable workflows' defaults (a caller's job can be much slower than the fixture) and the container builds' 60.
+- **Test and page.** `tests/test_job_timeouts.py` fails a job with no cap, a cap above 90 minutes without a written reason, an `inputs.` expression that names no number input, and a caller that leaves a called workflow's default in place. [Job timeouts](docs/wiki/Job-timeouts.md) holds the measurements, what the logs of runs 41035462015 and 41065673856 show (the hang is after the last step, not in the harden-runner post step or the artifact upload) and the effect of the docs-only gating.
+
 ### Fixed: tool installs survive a GitHub download outage (issue #372, refs)
 
 On 2026-11-09 a GitHub incident timed out anonymous traffic (HTTP 504, curl exit 22) and every plain `curl -sSfL` tool install failed on its first try. A caller sees this after it re-pins; no input changes and no egress host is added.

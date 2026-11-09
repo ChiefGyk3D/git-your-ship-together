@@ -81,6 +81,7 @@ jobs:
   drift:
     name: Vendored files match their pins
     runs-on: ubuntu-24.04
+    # normal: ~1 min (p50 0.3, p95 0.5; last ~30 green runs)
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read  # check out the caller's repository

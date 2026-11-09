@@ -249,6 +249,7 @@ jobs:
   lint:
     name: Lint
     runs-on: ubuntu-latest
+    # normal: ~1 min (p50 0.4, p95 0.5; last ~30 green runs)
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read
@@ -391,6 +392,7 @@ jobs:
     name: Type check
     if: inputs.typecheck-command != ''
     runs-on: ubuntu-latest
+    # normal: ~1 min (p50 0.4, p95 0.6; last ~30 green runs)
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read
@@ -533,6 +535,7 @@ jobs:
     name: Workflow lint (actionlint, zizmor)
     if: inputs.workflow-lint
     runs-on: ubuntu-latest
+    # normal: ~1 min (p50 0.6, p95 0.8; last ~30 green runs)
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read
@@ -669,6 +672,7 @@ jobs:
   test:
     name: Test (Python ${{ matrix.python-version }}, ${{ matrix.runner }})
     runs-on: ${{ matrix.runner }}
+    # normal: ~1 min (p50 0.6, p95 0.8; last ~30 green runs)
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read  # no id-token here: this job runs the caller's own code
@@ -925,6 +929,7 @@ jobs:
     name: Distro (${{ matrix.image }}, ${{ matrix.runner }})
     if: inputs.distros != '[]'
     runs-on: ${{ matrix.runner }}
+    # normal: ~1 min (p50 0.8, p95 2.8; last ~30 green runs)
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read  # no id-token here: this job runs the caller's own code
@@ -1072,6 +1077,7 @@ jobs:
     if: inputs.codecov && github.event_name != 'pull_request'
     needs: test
     runs-on: ubuntu-latest
+    # normal: no fixture history
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read
@@ -1336,6 +1342,7 @@ jobs:
     name: Smoke test
     if: inputs.smoke-command != ''
     runs-on: ubuntu-latest
+    # normal: ~1 min (p50 0.4, p95 0.9; last ~30 green runs)
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read
@@ -1477,6 +1484,7 @@ jobs:
     name: Container build
     if: inputs.docker-build
     runs-on: ubuntu-latest
+    # normal: ~1 min (p50 0.6, p95 1.2; last ~30 green runs)
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read
@@ -1624,6 +1632,7 @@ jobs:
     name: Changelog fragment
     if: github.event_name == 'pull_request' && inputs.fragment-check-command != ''
     runs-on: ubuntu-latest
+    # normal: ~1 min (p50 0.3, p95 0.9; last ~30 green runs)
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read
@@ -1755,6 +1764,7 @@ jobs:
     name: Commit claims
     if: github.event_name == 'pull_request' && inputs.commit-claims-command != ''
     runs-on: ubuntu-latest
+    # normal: ~1 min (p50 0.3, p95 0.5; last ~30 green runs)
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read
@@ -1890,6 +1900,7 @@ jobs:
     if: always()
     needs: [lint, typecheck, workflow-lint, test, distro, coverage, smoke, docker, fragment-check, commit-claims]
     runs-on: ubuntu-latest
+    # normal: ~1 min (p50 0.3, p95 0.4; last ~30 green runs)
     timeout-minutes: 5
     permissions: {}
     steps:

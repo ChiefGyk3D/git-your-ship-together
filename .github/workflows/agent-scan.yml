@@ -130,6 +130,7 @@ jobs:
     name: Skill scan
     if: inputs.skill-paths != ''
     runs-on: ubuntu-latest
+    # normal: ~1 min (p50 0.9, p95 1.1; last ~30 green runs)
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read  # this job reads the repository's content and holds nothing else
@@ -1078,6 +1079,7 @@ jobs:
       always() && inputs.upload-sarif && needs.skill-scan.outputs.sarif == 'true' &&
       (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
+    # normal: no fixture history
     timeout-minutes: 10
     permissions:
       contents: read
@@ -1208,6 +1210,7 @@ jobs:
     name: MCP tool scan
     if: inputs.mcp-tool-files != ''
     runs-on: ubuntu-latest
+    # normal: ~1 min (p50 0.8, p95 1.0; last ~30 green runs)
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read  # this job reads the repository's content and holds nothing else
@@ -2126,6 +2129,7 @@ jobs:
       always() && inputs.upload-sarif && needs.mcp-scan.outputs.sarif == 'true' &&
       (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
+    # normal: no fixture history
     timeout-minutes: 10
     permissions:
       contents: read

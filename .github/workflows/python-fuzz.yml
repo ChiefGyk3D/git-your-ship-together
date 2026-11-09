@@ -93,6 +93,7 @@ jobs:
   fuzz:
     name: Fuzz
     runs-on: ${{ inputs.runner }}
+    # normal: ~1 min (p50 0.5, p95 0.7; last ~30 green runs)
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read  # this job runs the caller's own code; it holds nothing else

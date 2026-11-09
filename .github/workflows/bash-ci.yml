@@ -201,6 +201,7 @@ jobs:
   shellcheck:
     name: shellcheck
     runs-on: ubuntu-latest
+    # normal: ~1 min (p50 0.3, p95 0.5; last ~30 green runs)
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read
@@ -454,6 +455,7 @@ jobs:
     name: shfmt
     if: inputs.shfmt
     runs-on: ubuntu-latest
+    # normal: ~1 min (p50 0.3, p95 0.5; last ~30 green runs)
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read
@@ -704,6 +706,7 @@ jobs:
     name: Test (${{ matrix.runner }})
     if: inputs.test-command != ''
     runs-on: ${{ matrix.runner }}
+    # normal: ~1 min (p50 0.3, p95 0.5; last ~30 green runs)
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read  # this job runs the caller's own code; it holds nothing else
@@ -847,6 +850,7 @@ jobs:
     name: Distro (${{ matrix.image }}, ${{ matrix.runner }})
     if: inputs.distros != '[]' && inputs.test-command != ''
     runs-on: ${{ matrix.runner }}
+    # normal: ~1 min (p50 0.5, p95 0.6; last ~30 green runs)
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read  # this job runs the caller's own code; it holds nothing else
@@ -990,6 +994,7 @@ jobs:
     name: Config lint
     if: inputs.config-lint-command != ''
     runs-on: ubuntu-latest
+    # normal: ~1 min (p50 0.4, p95 1.0; last ~30 green runs)
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read
@@ -1128,6 +1133,7 @@ jobs:
     name: Workflow lint (actionlint, zizmor)
     if: inputs.workflow-lint
     runs-on: ubuntu-latest
+    # normal: no fixture history
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read
@@ -1268,6 +1274,7 @@ jobs:
     name: Changelog fragment
     if: github.event_name == 'pull_request' && inputs.fragment-check-command != ''
     runs-on: ubuntu-latest
+    # normal: ~1 min (p50 0.3, p95 0.9; last ~30 green runs)
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read
@@ -1399,6 +1406,7 @@ jobs:
     name: Commit claims
     if: github.event_name == 'pull_request' && inputs.commit-claims-command != ''
     runs-on: ubuntu-latest
+    # normal: ~1 min (p50 0.3, p95 0.9; last ~30 green runs)
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read
@@ -1534,6 +1542,7 @@ jobs:
     if: always()
     needs: [shellcheck, shfmt, test, distro, config-lint, workflow-lint, fragment-check, commit-claims]
     runs-on: ubuntu-latest
+    # normal: ~1 min (p50 0.3, p95 0.5; last ~30 green runs)
     timeout-minutes: 5
     permissions: {}
     steps:

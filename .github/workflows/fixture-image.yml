@@ -45,6 +45,9 @@ jobs:
       attestations: write  # SLSA build provenance
       security-events: write  # the Trivy SARIF upload
     with:
+      # normal: ~1 min (the first run's two build legs reached the Trivy scan in 0.8 to 1.0 min; the fixture release
+      # builds in ci.yml succeed in p50 1.1, p95 1.3, longest 1.3 min). 5 is 3 x p95 rounded up, over 1.5 x the longest.
+      timeout-minutes: 5
       push: true
       # Only the two events that start this workflow may publish, and only from main (the job's `if:`), so the tag-ref
       # requirement is relaxed for this caller and no other.
