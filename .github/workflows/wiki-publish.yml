@@ -86,6 +86,7 @@ jobs:
   generate:
     name: Generate the wiki pages
     runs-on: ubuntu-latest
+    # normal: ~1 min (p50 0.5, p95 0.7; last ~30 green runs)
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read  # no write token here: this job runs the caller's own code
@@ -247,6 +248,7 @@ jobs:
     if: inputs.publish && github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     needs: generate
     runs-on: ubuntu-latest
+    # normal: ~1 min (p50 0.3, p95 0.9; last ~30 green runs)
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: write  # the wiki is a git repository of this one; no caller code and no checkout here

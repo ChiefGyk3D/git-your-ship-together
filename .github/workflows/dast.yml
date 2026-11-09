@@ -183,6 +183,7 @@ jobs:
   scan:
     name: ZAP baseline scan
     runs-on: ubuntu-24.04
+    # normal: ~1 min (p50 1.1, p95 1.4; last ~30 green runs)
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read  # this job runs the caller's own service; it holds nothing else
@@ -1311,6 +1312,7 @@ jobs:
       always() && inputs.upload-sarif && needs.scan.outputs.sarif == 'true' &&
       (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-24.04
+    # normal: ~1 min (p50 0.4, p95 0.6; last ~30 green runs)
     timeout-minutes: 10
     permissions:
       contents: read

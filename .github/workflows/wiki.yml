@@ -38,6 +38,8 @@ jobs:
     permissions:
       contents: write  # the publish job only; the generate job holds contents: read
     with:
+      # normal: ~1 min (p50 0.5, p95 0.9; last ~30 green runs)
+      timeout-minutes: 5
       publish: true
       python-version: "3.13"
       install-command: pip install --require-hashes -r requirements-dev.txt

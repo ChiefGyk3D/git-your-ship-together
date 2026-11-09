@@ -67,6 +67,7 @@ jobs:
   audit:
     name: Audit the baseline
     runs-on: ubuntu-24.04
+    # normal: no fixture history
     timeout-minutes: 15
     permissions:
       contents: read
@@ -340,6 +341,7 @@ jobs:
   register-issues:
     name: Open issues for expiring risk-register entries
     runs-on: ubuntu-24.04
+    # normal: no fixture history
     timeout-minutes: 10
     permissions:
       contents: read

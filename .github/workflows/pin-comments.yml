@@ -65,6 +65,7 @@ jobs:
   pin-comments:
     name: Version comments match their pins
     runs-on: ubuntu-24.04
+    # normal: ~1 min (p50 0.5, p95 0.6; last ~30 green runs)
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read  # check out the caller's repository
