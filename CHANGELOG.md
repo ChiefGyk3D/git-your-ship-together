@@ -5,6 +5,46 @@ name what a caller sees after that.
 
 ## Unreleased
 
+### Changed: harden the CI green gate and the docs-only classification (issues #307, #325)
+
+Only this repository's own CI changes. The aggregate `CI green` job now reads its gate code from the base commit on a pull request
+instead of the pull request itself, and the docs-only list is by file type with shell files on the never-skip list. Tests pin both.
+
+### Changed: concurrency on the self-callers, and the auto-merge actor gate (issue #313)
+
+Only this repository's own workflows change. `security-self.yml` cancels a superseded pull request run (a push to main and the
+weekly schedule run to the end). `wiki.yml` serializes publishes on a group that is not the literal `wiki` (the reusable
+publish job holds that one) and never cancels one. `dependabot-auto-merge-self.yml` has one run per pull request and its job
+carries the same actor `if:` as the reusable workflow. GitHub still lists a skipped run of that workflow on every pull request:
+a `pull_request` trigger cannot filter on who opened it, so that entry cannot be removed, and a test pins what can be done.
+
+### Changed: this repository's `dast-live` and `rescan-live` run when related files change, and nightly (issue #308)
+
+Only this repository's own CI changes. The two live jobs (the real ZAP image, about 450 seconds, and the real Trivy) are gated
+by the `changes` job from the entry below: they are left out of a pull request that changes only docs, the changelog or tests
+they do not read. `tests/test_dast.py`, `tests/test_verify_published.py`, `tests/test_sbom.py` (run by `fixture-sbom`, which also reads
+`README.md`, so that is not on the docs-only list), `tests/test_workflows.py` (which `test_dast.py`
+imports) and `tests/fixtures/**` are on the classifier's `never-skip-patterns`, so a change to any of them runs the live jobs
+even beside docs. `ci.yml` gains a nightly `schedule` (every day, default branch); the classifier is `false` for anything but a
+pull request, so the nightly run is the whole run, live jobs included. A test fails if any job opts out of the schedule, and another fails if any path a gated job reads or runs would alone be docs only.
+
+### Changed: this repository's `ci.yml` skips jobs a docs-only change cannot affect (issue #307)
+
+Only this repository's own CI changes; no reusable workflow and no input a caller uses.
+
+- A new `changes` job runs the `classify-changes` action over `docs/**`, `tests/**` and `CHANGELOG.md`. Every fixture job (all but
+  `actionlint`, `zizmor`, the test suite and `CI green`) now needs it and is left out on a pull request that changes only
+  those paths. Anything else (a path under `.github/`, `scripts/`, `fixture/`, a requirements file), a push, a schedule, a
+  manual run, a moved head and any doubt is `docs-only=false` and runs everything, as before.
+- `CI green` is now the `ci-gate` action instead of an inline `grep` for `failure|cancelled`. A skipped job used to count as a
+  pass whatever the reason; now it counts only when `changes` succeeded with `docs-only=true`, or (for the jobs that already
+  skipped on a fork's pull request) when the run is a fork's pull request. Any other skip, a failure, a cancellation or a job
+  dropped from `needs` fails.
+- `ci-gate` (action and `scripts/ci_gate.py`) gained two optional inputs, `fork-skippable-jobs` and `fork-pull-request`. Unset,
+  it behaves exactly as before.
+- `tests/test_path_aware_gating.py` holds the gated jobs, the gate's `skippable-jobs`, `required-jobs` and the fork list
+  together.
+
 ### New: `scripts/repin.sh` and `examples/dependabot-gyst.yml` (issue #310)
 
 Tooling only: no workflow changes, so a caller sees nothing after it re-pins. `scripts/repin.sh status|apply|pr` moves a

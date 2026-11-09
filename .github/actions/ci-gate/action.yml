@@ -28,6 +28,14 @@ inputs:
     description: The job id of the job that ran classify-changes and exposes its `docs-only` output. Required with `skippable-jobs`, and it must be in `needs`.
     required: false
     default: ""
+  fork-skippable-jobs:
+    description: Space-separated job ids that a pull request from a fork may leave out, because they need a token a fork does not get. They count as skipped on purpose only when `fork-pull-request` is `true`. Empty means none.
+    required: false
+    default: ""
+  fork-pull-request:
+    description: "`true` when the run is a pull request from a fork. Compute it from the event (`github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository`); anything but the string `true` means it is not."
+    required: false
+    default: "false"
 runs:
   using: composite
   steps:
@@ -38,6 +46,8 @@ runs:
         GATE_REQUIRED: ${{ inputs.required-jobs }}
         GATE_SKIPPABLE: ${{ inputs.skippable-jobs }}
         GATE_CLASSIFIER: ${{ inputs.classifier-job }}
+        GATE_FORK_SKIPPABLE: ${{ inputs.fork-skippable-jobs }}
+        GATE_FORK_PR: ${{ inputs.fork-pull-request }}
       run: |
         set -euo pipefail
         exec python3 -I "$GITHUB_ACTION_PATH/../../../scripts/ci_gate.py"

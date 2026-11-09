@@ -148,6 +148,52 @@ route and what closes it.
 Not covered: a repository that does not require review on `.github/`. A pull request that rewrites `ci.yml` to skip a job
 needs a reviewer to see it, with or without this feature.
 
+## The fork excuse in `ci-gate`
+
+A job that needs a token a fork's pull request does not get (a publishing job's grants, a SARIF upload) is skipped on a fork
+by its own `if:`. Two optional inputs of `ci-gate` let the caller's `CI green` accept exactly that and nothing wider:
+`fork-skippable-jobs` names the jobs, and `fork-pull-request` is the caller's own expression,
+`${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}`. A named job
+may be `skipped` only when that is the string `true`; a failure or a cancellation still fails, and a job that is not named
+still fails when skipped. Unset, the action behaves as before.
+
+## This repository's own `ci.yml` (issues #307, #308)
+
+`ci.yml` runs about a hundred jobs. It uses the same two actions: a `changes` job runs `classify-changes` with
+Markdown under `docs/`, the Python, JSON and text files under `tests/`, and `CHANGELOG.md` (not `README.md`: `tests/test_sbom.py` reads it; by file type, not by directory, see below), and every job except `actionlint`, `zizmor`, `test` (the suite reads `tests/`), `changes`
+and `CI green` carry `needs: changes` and `if: needs.changes.outputs.docs-only != 'true'`. `CI green` is the `ci-gate`
+action over all of them, with `skippable-jobs` set to exactly those jobs, `required-jobs` set to every job, and the
+fork excuse above for the jobs that already skipped on a fork. `tests/test_path_aware_gating.py` holds the three lists
+together: add a job to `ci.yml` without gating it and the test names it.
+
+**Tests a gated job runs (the rule that keeps this honest).** `tests/**` is on the docs-only list because the suite reads it
+and is never skipped, but a gated job also runs some test files: `fixture-sbom` runs `tests/test_sbom.py`, `rescan-live` runs
+`tests/test_verify_published.py`, and `dast-live` runs `tests/test_dast.py`, which imports `tests/test_workflows.py`. Those, and
+`tests/fixtures/**`, are on `never-skip-patterns`, so a change to one runs the jobs that depend on it even beside docs.
+`tests/test_path_aware_gating.py` reads every gated job, follows the test files it runs and the local modules and root Markdown
+files they name, and fails if any of those paths alone would be classified docs only.
+
+**Implicit inputs.** Some gated jobs choose their own files instead of naming them: `bash-ci` runs `git ls-files` over the
+whole repository and lints every tracked `.sh` or `.bash` file and any file with a shell shebang. So the docs-only list is by
+file type, `**/*.sh` and `**/*.bash` are on `never-skip-patterns`, and a test models adding, deleting and renaming such files in
+every directory. Residual: a file of a docs-only type (a `.md` or `.py`) that starts with a shell shebang is still treated as docs
+only.
+
+**Who judges `CI green`.** The aggregate job checks out the gate action and `scripts/ci_gate.py` from the base commit on a pull
+request (`github.sha` otherwise), sparse and without credentials, so the code under review cannot change its own verdict. A
+test pins that. Residual: a pull request can still edit `ci.yml` itself, because a workflow file runs from the pull request;
+only a repository ruleset or a required workflow can pin that. Tracked as a follow-up.
+
+**The live jobs and the nightly run (issue #308).** `rescan-live` (real Trivy) and `dast-live` (real ZAP image, about 450
+seconds, the long pole) are gated the same way. `ci.yml` also has a `schedule` trigger, every
+night on the default branch. The classifier says `false` for anything but a pull request, so the nightly run is the full run:
+the live jobs, the jobs that read the published image and today's vulnerability database, everything. A job that wants to opt
+out of the nightly run is a test failure (`tests/test_path_aware_gating.py`).
+
+Docs-only means every changed path is documentation or a test file nothing else reads. A change under `.github/`,
+`scripts/`, `fixture/`, `.github/actions/`, a requirements file, or any path the patterns do not name runs everything, as does a
+push to `main`, the nightly schedule and a manual run (the classifier is `false` for anything but a pull request).
+
 ## Where it runs
 
 `scripts/classify_changes.py` and `scripts/ci_gate.py` are the whole logic; the actions only pass the environment. Both are

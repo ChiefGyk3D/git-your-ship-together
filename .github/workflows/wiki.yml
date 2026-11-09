@@ -26,6 +26,12 @@ on:
 permissions:
   contents: read
 
+# Two pushes to main publish one after the other, never one over the other, and a publish is never cancelled halfway.
+# Not the literal group `wiki`: wiki-publish.yml's publish job holds that one, and the same name here would block the call.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   wiki:
     uses: ./.github/workflows/wiki-publish.yml # zizmor: ignore[self-repository]
