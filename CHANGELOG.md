@@ -13,6 +13,7 @@ poll and again at the re-read after green. `mergeable: false` or state `dirty` e
 `mergeable: null` (GitHub still computing) is unknown and re-polled; `behind` is a printed note, not a failure. No existing exit code or
 green criterion changes, and a conflicting pull request is never reported green or merged. Without `--pr` nothing changes.
 Tests: `tests/test_wait_ci.py`.
+
 ### New: opt-in `pin-comments.yml` (issue #318)
 
 Checks that the `# vX.Y.Z` comment on every SHA-pinned `uses:` line (workflows and composite actions) names the commit it is
