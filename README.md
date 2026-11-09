@@ -60,7 +60,7 @@ Read in this order. Each one is short.
 
 ## What is in the repository
 
-Twenty-three reusable workflows and six composite actions:
+Twenty-four reusable workflows and six composite actions:
 
 | File | What it does |
 |---|---|
@@ -73,6 +73,7 @@ Twenty-three reusable workflows and six composite actions:
 | `.github/workflows/python-docker-release.yml` | The old name of the above: a thin caller that forwards every input, the secret and the outputs through a `./` reference at its own commit, so an existing pin keeps working. New callers use `container-release.yml` |
 | `.github/workflows/verify-published.yml` | Consumer-side verification of a published image (cosign signature, SPDX SBOM attestation and build provenance verified from outside, then each platform pulled and checked) or of a GitHub release's assets (checksums, provenance, SBOMs). Read-only, no secret, no token beyond the default one |
 | `.github/workflows/vendored-drift.yml` | Opt-in drift check for a file vendored from another repository: each lock file (path, source repository, commit, sha256) must match the file's hash, and an optional generator run with `--check` must agree. Read-only, no secret |
+| `.github/workflows/repin.yml` | Opt-in scheduled re-pin: when a caller's pins of these workflows are behind the latest release, opens ONE pin-only pull request (SHA and `# vX.Y.Z` comment only), refuses and names it when the release changes an input the caller uses, never merges. Needs a GitHub App (Contents, Pull requests, Workflows: write) whose private key is fetched from Doppler; without one it reports only. See [Scheduled re-pin](#scheduled-re-pin) |
 | `.github/workflows/pin-comments.yml` | Opt-in check that the `# vX.Y.Z` comment on each SHA-pinned `uses:` line names the pinned commit (GitHub API lookup, bounded; an unverifiable lookup fails unless `unverified: warn`). Script: `scripts/check_pin_comments.py`. |
 | `.github/workflows/base-image-digest.yml` | Opt-in scheduled check of a Dockerfile's `FROM image:tag@sha256:...` pins: resolves today's digest of each tag and fails when the pinned digest has a fixable HIGH or CRITICAL finding (Trivy, container-release.yml's flags) that the current digest does not. Read-only, no secret, no issue write |
 | `.github/workflows/parallel-ci.yml` | One build, then caller-supplied checks as separate jobs that share it: a matrix over a `jobs` list, each leg downloading the one-day build artifact, with path rules that skip checks a change cannot affect (failing closed: a push, a schedule, an unmatched path or an unreadable diff runs everything), pip and tool-download caches keyed on pin files, and one `CI green` gate that counts only deliberate skips as passed. Holds no token |
@@ -122,6 +123,7 @@ And what keeps the callers honest:
 | `baseline/risk-register.yaml` | Every advisory a pipeline is told to ignore, with the reason, the mitigation, an owner and an expiry. See [Risk register](#risk-register) |
 | `scripts/audit_baseline.py` | Reads each repository's settings and workflows from the API and reports PASS, FAIL or UNKNOWN per baseline item. Exit 0 only when every check passed |
 | `scripts/new-repo.sh` | Adopts a repository, or starts one: reads what it holds, writes the caller workflows and `dependabot.yml` from that, commits on a branch and opens the pull request, applies every BASELINE setting, appends to `baseline/repos.txt`. `--dry-run` writes the files somewhere else and prints the settings instead; that is what its test runs |
+| `scripts/repin.sh` | Moves a repository's pins of these workflows to a release, changing only the SHA and the `# vX.Y.Z` comment: `status` (pinned against latest, with ages), `apply`, and `pr` (branch, push, pull request; never merges). A Dependabot template with a GYST group is in `examples/dependabot-gyst.yml`. See [repin](docs/wiki/Script-repin.md) |
 | `scripts/wait-ci.sh` | The CI watcher behind `.github/actions/wait-ci`: pins the head SHA, waits for the required check and every other check on that commit, optionally squash-merges it. A second line only: the atomic guarantee is GitHub-enforced required checks or a merge queue (`--require-protection` fails when the base branch has none). Tested against a fake `gh` in `tests/test_wait_ci.py` |
 | `scripts/doppler-ci-set.sh` | Sets one secret in the shared Doppler `ci` config. The value is typed twice with echo off and never reaches a command line, shell history or the terminal |
 | `docs/wiki/` | The source of the [GitHub wiki](https://github.com/ChiefGyk3D/git-your-ship-together/wiki), a generated mirror: edit here, never on github.com. A change that alters what a person would read changes the page in the same pull request |
@@ -1405,6 +1407,55 @@ Inputs of `verify-published.yml`:
 | `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `block`, the measured list, empty | harden-runner; the list covers the GHCR pull, Sigstore, and GitHub's attestation store |
 | `egress-policy-secretless` | `block` | harden-runner policy for the jobs that hold no stored secret, no OIDC token and no write-scoped token, and whose output no privileged job consumes; exactly `audit` or `block`. Security exception EX-0001 is closed (2026-11-02), see [Known CI platform issue: westus2 (EX-0001)](#known-ci-platform-issue-westus2-ex-0001). `audit` opts out if the defect recurs |
 | `timeout-minutes` | `20` | Job timeout |
+
+### Scheduled re-pin
+
+`repin.yml` keeps a caller's pins current. On a schedule it runs `scripts/repin.sh` (inlined byte for byte) and, when any
+`uses: ChiefGyk3D/git-your-ship-together/...@<sha> # vX.Y.Z` pin is behind the latest release, opens ONE pull request that
+changes the SHA and the version comment of every pin and nothing else, with the release and changelog links in the body. It
+never merges. It stops without a pull request, and fails the job naming them, when the new release drops or retypes an input
+the caller sets or adds a required input it does not set. Writing a branch that changes workflow files takes a GitHub App
+installation token (the job token cannot hold the `workflows` permission, and a pull request it opened would start no checks):
+Contents, Pull requests and Workflows set to write, limited to the calling repository, minted at the start of the job. Without
+the App, on a pull request, off the default branch, or with `dry-run: true`, it only reports. The App's private key is never a
+GitHub secret: the job fetches it from Doppler at run time over its own OIDC identity (the Doppler secret `REPIN_APP_PRIVATE_KEY`,
+same steps as `project-sync.yml`). No personal access token is accepted.
+
+```yaml
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  repin:
+    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/repin.yml@<sha> # vX.Y.Z
+    permissions:
+      contents: read
+      id-token: write        # the Doppler OIDC fetch of the App key
+    with:
+      client-id: ${{ vars.REPIN_APP_CLIENT_ID }}
+      doppler-project: <doppler project>
+      doppler-config: <doppler config>
+      doppler-identity-id: ${{ vars.REPIN_DOPPLER_IDENTITY_ID }}
+```
+
+Inputs of `repin.yml`:
+
+| Input | Default | Meaning |
+|---|---|---|
+| `client-id` | empty | The App's Client ID (an identifier); empty makes the run report only |
+| `dry-run` | `false` | Report and open nothing |
+| `doppler-project`, `doppler-config` | empty | Where the Doppler secret `REPIN_APP_PRIVATE_KEY` (the App's private key) lives; empty makes the run report only |
+| `doppler-identity-id` | empty | Doppler Service Account Identity UUID for OIDC |
+| `doppler-trusted-refs-only` | `true` | Fetch the key only on the default branch, a version tag or a schedule |
+| `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `block`, Doppler and GitHub only, empty | harden-runner |
+| `timeout-minutes` | `10` | Job timeout |
+
+The optional secret `DOPPLER_TOKEN` is a fallback for a caller without OIDC; leave it unset, the key is never a GitHub secret. The same tool by hand, and a Dependabot template with a GYST group, are in the
+[repin wiki page](docs/wiki/Script-repin.md).
 
 ### Vendored-file drift check
 

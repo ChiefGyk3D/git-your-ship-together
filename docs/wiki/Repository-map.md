@@ -68,6 +68,7 @@ publish).
 | `parallel-ci.yml` | [CI](Workflow-parallel-ci.md) | One build, checks as parallel jobs sharing it, path rules that fail closed, `CI green` |
 | `ci-gate.yml` | [CI](Workflow-ci-gate.md) | `CI green` over the jobs a caller hands it |
 | `vendored-drift.yml` | [Automation](Which-workflow-do-I-need.md) | Fail when a vendored file or its generated output no longer matches its lock |
+| `repin.yml` | [Automation](Which-workflow-do-I-need.md) | Scheduled: open one pin-only pull request when a caller's GYST pins are behind the latest release ([repin](Workflow-repin.md)) |
 | `pin-comments.yml` | [Automation](Which-workflow-do-I-need.md) | Fail when a `# vX.Y.Z` comment on a SHA-pinned `uses:` does not name the pinned commit |
 | `base-image-digest.yml` | [Release](Which-workflow-do-I-need.md) | Scheduled: fail when a pinned base-image digest has a fixable finding its tag's current digest fixes |
 | `python-package-release.yml` | [Release](Which-workflow-do-I-need.md) | Build, check, publish to the GitHub release (PyPI via a direct pypa publish step in the caller's own job) |
@@ -113,6 +114,8 @@ publish).
 | `.githooks/pre-commit` | The gitleaks hook on staged changes, same pin as `security.yml`; copied byte for byte by `new-repo.sh` |
 | `.githooks/pre-commit` | The gitleaks hook on staged changes, same pin as `security.yml`; copied byte for byte by `new-repo.sh` |
 | `scripts/new-repo.sh` | Adopt or start a repository: writes callers, opens the PR, applies settings |
+| `scripts/repin.sh` | Re-pins a repository's GYST references to a release, pin-only, optionally as a pull request ([repin](Script-repin.md)) |
+| `examples/dependabot-gyst.yml` | Dependabot template for a caller: a group for GYST references and a short cooldown ([repin](Script-repin.md)) |
 | `scripts/wait-ci.sh` | The CI watcher: pinned head SHA, exit codes 0 to 6, optional pinned squash merge ([wait-ci](Action-wait-ci.md)) |
 | `scripts/parallel_ci_plan.py` | The input validation and path rules `parallel-ci.yml` inlines byte for byte; also runnable locally |
 | `scripts/parallel_ci_gate.py` | The gate rule `parallel-ci.yml` and `ci-gate.yml` inline byte for byte |

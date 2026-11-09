@@ -5,6 +5,14 @@ name what a caller sees after that.
 
 ## Unreleased
 
+### New: `scripts/repin.sh` and `examples/dependabot-gyst.yml` (issue #310)
+
+Tooling only: no workflow changes, so a caller sees nothing after it re-pins. `scripts/repin.sh status|apply|pr` moves a
+repository's `uses: ChiefGyk3D/git-your-ship-together/...@<sha> # vX.Y.Z` pins to a release, changing only the SHA and the
+version comment (checked before anything is written), refusing a non-canonical reference or a downgrade, and, in `pr` mode, opening
+one pull request on `repin/gyst-<tag>` without merging. `examples/dependabot-gyst.yml` is a `dependabot.yml` template with a group
+for GYST references and a 2-day cooldown. See the [repin wiki page](docs/wiki/Script-repin.md).
+
 ### Added: `wait-ci` ends early on a merge conflict, exit 7 (issue #352)
 
 With `--pr`, `scripts/wait-ci.sh` (and the `wait-ci` action) now reads the pull request's `mergeable` and `mergeable_state` on every
@@ -92,6 +100,19 @@ dependency under those roots will **not** be detected (a supply-chain tradeoff).
 Fork pull requests: a caller that passes this input on `pull_request` events lets an untrusted pull request's image weaken only its own secret detection; publishing is already gated off for pull requests.
 Why: a package's docstring text can match a secret rule when nothing is a credential; the installed `anthropic` SDK trips
 `gcp-service-account` (11 CRITICAL findings on Boon-Tube-Daemon's image, no fixed version). Source: Trivy secret scanning docs, "Allow Rules".
+
+### New: `repin.yml`, scheduled pin-only re-pin (issue #334)
+
+Opt-in, new file: a caller sees nothing until it adds a job that calls it. It runs `scripts/repin.sh` (inlined byte for byte) on
+the caller's schedule and, when the caller's pins of these workflows are behind the latest release, opens ONE pull request that
+changes the pin SHA and the `# vX.Y.Z` comment and nothing else. It never merges, and it stops without a pull request, naming
+them, when the release drops or retypes an input the caller sets or adds a required input it does not set. `repin.sh` gains
+that input check (exit 5, `--allow-input-changes` to override). Opening the pull request takes a GitHub App token limited to the
+calling repository (Contents, Pull requests, Workflows: write); the job's own token stays `contents: read`, and with no App the
+run only reports. The App's private key is never a GitHub secret: it is fetched at run time over the job's OIDC
+identity (the secret `REPIN_APP_PRIVATE_KEY`, the same steps as `project-sync.yml`), so the caller grants `id-token: write`.
+Inputs: `client-id`, `dry-run`, `doppler-project`, `doppler-config`, `doppler-identity-id`, `doppler-trusted-refs-only`, the egress
+trio (the default allow-list adds `api.doppler.com:443`), `timeout-minutes`; secret: `DOPPLER_TOKEN` (optional fallback, leave unset).
 
 ### Fixed: sign and attest before the release tags move (issue #286)
 
