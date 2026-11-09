@@ -13,6 +13,13 @@ On 2026-11-09 a GitHub incident timed out anonymous traffic (HTTP 504, curl exit
 - **Inlined, held identical.** A reusable workflow cannot call a file of its own commit, so the marked block is copied into each step; `tests/test_fetch_release.py` holds every copy byte-identical to the script, runs the function against a fake curl (retry bounds, mandatory checksum, token never in argv or logs, even under `set -x`), and fails if any step curls a release URL outside the helper.
 - **Not changed.** The `sigstore/cosign-installer` (3 steps), `aquasecurity/trivy-action` (3 steps) and `anchore/sbom-action` (1 step) steps download inside third-party actions and still do so; see issue #372.
 
+### Fix: `repin.sh` could not read workflow inputs (issue #374)
+
+- **`scripts/repin.sh`.** `apply`, `status` and `pr` read each called workflow's inputs through the contents API, and
+  passed the ref with `gh api -f`, which makes gh send a POST; GitHub rejected it, so every caller exited 5 with
+  "cannot read <workflow> at the old pin". The ref now rides in the query string (a GET). A genuine input drop still
+  exits 5.
+
 ### Hardening: credential scope of `repin.yml` (issue #370)
 
 - **`repin.yml`.** The Doppler fetch no longer injects secrets into the job environment (`inject-env-vars: false`); the

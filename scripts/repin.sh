@@ -226,7 +226,8 @@ fetch_def() {
   local p=$1 sha=$2 out=$3
   case $p in *.yml | *.yaml) ;; *) p="$p/action.yml" ;; esac
   case $p in *..* | /*) return 1 ;; esac
-  "$gh_bin" api "repos/$SRC/contents/$p" -f ref="$sha" -H 'Accept: application/vnd.github.raw' >"$out" 2>/dev/null
+  # ref rides in the query string: -f would make gh send a POST, which the contents endpoint rejects.
+  "$gh_bin" api "repos/$SRC/contents/$p?ref=$sha" -H 'Accept: application/vnd.github.raw' >"$out" 2>/dev/null
 }
 
 # check_inputs DIR TAG ALLOW NOTES: exit 5 on a refused change unless ALLOW is 1; appends the findings to NOTES.
