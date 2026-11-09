@@ -9,7 +9,12 @@ name: CI gate
 description: Fail unless every needed job succeeded; a skip counts only when the classifier ruled it deliberate.
 inputs:
   needs:
-    description: "`${{ toJSON(needs) }}` of the calling job."
+    description: >-
+      The needs of the calling job as JSON, passed by the caller in its own with block as
+      needs set to toJSON of needs (see docs/wiki/Docs-only-fast-path.md for the exact line). The needs context
+      exists in the caller's job and not inside an action, so this input has no default, and the action fails when it
+      is empty or not a JSON object. Do not write an expression in this text: a runner evaluates it when it loads the
+      manifest, where needs is unknown.
     required: true
   required-jobs:
     description: Space-separated job ids that must appear in `needs`; one missing fails. Guards against a job being dropped from `needs:`. Empty skips the check.
