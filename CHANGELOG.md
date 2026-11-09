@@ -13,6 +13,12 @@ On 2026-11-09 a GitHub incident timed out anonymous traffic (HTTP 504, curl exit
 - **Inlined, held identical.** A reusable workflow cannot call a file of its own commit, so the marked block is copied into each step; `tests/test_fetch_release.py` holds every copy byte-identical to the script, runs the function against a fake curl (retry bounds, mandatory checksum, token never in argv or logs, even under `set -x`), and fails if any step curls a release URL outside the helper.
 - **Not changed.** The `sigstore/cosign-installer` (3 steps), `aquasecurity/trivy-action` (3 steps) and `anchore/sbom-action` (1 step) steps download inside third-party actions and still do so; see issue #372.
 
+### Hardening: credential scope of `repin.yml` (issue #370)
+
+- **`repin.yml`.** The Doppler fetch no longer injects secrets into the job environment (`inject-env-vars: false`); the
+  App key now reaches only the token step, through the fetch step's masked outputs. The job's harden-runner also sets
+  `disable-sudo: true`. No input, secret or permission changes.
+
 ### New: opt-in `token-drift.yml` (issue #342)
 
 A new reusable workflow. Nothing existing changes: a caller sees it only by adding a job that calls it, after it re-pins.
