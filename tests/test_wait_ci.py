@@ -253,6 +253,9 @@ if argv[:1] == ["api"]:
             sys.stderr.write("warning: a new gh is available\n")
         emit(body)
         sys.exit(0)
+    if re.fullmatch(r"/?repos/[^/]+/[^/]+", path):
+        emit({"default_branch": st.get("default_branch", "main")})
+        sys.exit(0)
     if re.search(r"/repos/[^/]+/[^/]+/branches/[^/]+$", path):
         st["branch_reads"] = st.get("branch_reads", 0) + 1
         emit({"commit": {"sha": st.get("base_head", "d" * 40)}})
@@ -423,6 +426,8 @@ class World:
                         return self.reply(code, {"message": "boom"})
                     return self.reply(200, body, headers)
 
+                if re.fullmatch(r"/api/v3/repos/[^/]+/[^/]+", url.path):
+                    return finish(200, {"default_branch": st.get("default_branch", "main")})
                 if re.fullmatch(r"/api/v3/repos/[^/]+/[^/]+/pulls/\d+", url.path):
                     return finish(*pulls_response(st))
                 if re.fullmatch(r"/api/v3/repos/[^/]+/[^/]+/branches/[^/]+", url.path):
@@ -2645,3 +2650,176 @@ def test_no_thousand_run_test_takes_the_engine_argument():
     assert oversized_engine_tests(slow, GH_ENGINE_MAX_RUNS) == (["test_x"], ["test_x"])
     fast = "def test_x(world):\n    runs = [n for n in range(999)]\n"
     assert oversized_engine_tests(fast, GH_ENGINE_MAX_RUNS) == (["test_x"], [])
+
+
+# --- fail fast on a gate name that never reports, and --from-protection (issue #378) -----------------------------
+
+
+def test_a_gate_that_never_reports_while_everything_else_is_done_fails_fast_and_lists_what_did_report(world):
+    # The nested name is the classic mistake: the repo reports "ci / CI green", the default is a bare "CI green".
+    w = world(checks={A: [[ok("lint"), ok("ci / CI green")]]})
+    p = w.run("--repo", SLUG, "--pr", "7", "--interval", "10", "--timeout", "1800", "--hung-after", "600")
+    assert p.returncode == 2, shown(p)
+    assert "'CI green' not reported" in p.stdout
+    assert "ci / CI green" in p.stdout.split("missing:")[1]
+    assert "lint" in p.stdout.split("missing:")[1]
+    assert w.outputs()["result"] == "missing"
+    assert "timeout:" not in p.stdout and "hung:" not in p.stdout
+    assert sum(w.sleeps()) < 600  # well before the hung timer
+
+
+def test_fail_fast_waits_while_any_other_run_is_still_open(world):
+    w = world(checks={A: [[ok("lint"), running("test")]]})
+    p = w.run("--repo", SLUG, "--pr", "7", "--interval", "10", "--timeout", "200", "--hung-after", "1000")
+    assert p.returncode == 2, shown(p)
+    assert "missing:" not in p.stdout
+    assert "timeout:" in p.stdout
+
+
+def test_fail_fast_waits_for_a_gate_that_starts_after_a_quiet_spell(world):
+    quiet = [ok("lint"), ok("test")]
+    w = world(checks={A: [quiet, quiet, quiet, GATE]})
+    p = w.run("--repo", SLUG, "--pr", "7", *FAST)
+    assert p.returncode == 0, shown(p)
+
+
+def test_fail_fast_names_only_the_missing_one_of_several(world):
+    w = world(checks={A: [[ok("CI green"), ok("lint")]]})
+    p = w.run("--repo", SLUG, "--pr", "7", "--context", "CI green", "--context", "Security", *FAST)
+    assert p.returncode == 2, shown(p)
+    assert "'Security' not reported" in p.stdout and "missing:" in p.stdout
+
+
+def test_a_context_in_progress_is_not_a_missing_one(world):
+    w = world(checks={A: [[ok("lint"), running("CI green")]]})
+    p = w.run("--repo", SLUG, "--pr", "7", "--interval", "10", "--timeout", "200", "--hung-after", "1000")
+    assert p.returncode == 2, shown(p)
+    assert "missing:" not in p.stdout
+
+
+def test_help_documents_from_protection(world):
+    p = subprocess.run(["bash", str(SCRIPT), "--help"], capture_output=True, text=True, check=False)
+    assert p.returncode == 0, shown(p)
+    assert "--from-protection" in p.stdout and "Usage:" in p.stdout
+
+
+PROT_NESTED = {"contexts": [], "checks": [{"context": "ci / CI green", "app_id": 15368}]}
+RULE_NESTED = [
+    {
+        "type": "required_status_checks",
+        "parameters": {"required_status_checks": [{"context": "gate / CI green", "integration_id": 15368}]},
+    }
+]
+NESTED = [ok("lint"), ok("ci / CI green")]
+
+
+def test_from_protection_gates_on_the_classic_required_contexts(world):
+    w = world(checks={A: [NESTED]}, classic=PROT_NESTED)
+    p = w.run("--repo", SLUG, "--pr", "7", "--from-protection", *FAST)
+    assert p.returncode == 0, shown(p)
+    assert "gate: ci / CI green" in p.stdout
+    assert any("branches/main/protection/required_status_checks" in c for c in w.calls())
+    assert any(c.startswith("api repos/N0TST/widgets ") or c == "api repos/N0TST/widgets" for c in w.calls()) or any(
+        "default_branch" in c for c in w.calls()
+    )
+
+
+def test_from_protection_falls_back_to_rulesets_when_protection_is_absent(world):
+    w = world(checks={A: [[ok("lint"), ok("gate / CI green")]]}, rules=RULE_NESTED, default_branch="trunk")
+    p = w.run("--repo", SLUG, "--sha", A, "--from-protection", *FAST)
+    assert p.returncode == 0, shown(p)
+    assert "gate: gate / CI green" in p.stdout
+    assert any("rules/branches/trunk" in c for c in w.calls())
+
+
+def test_from_protection_still_fails_fast_when_the_protected_name_never_reports(world):
+    w = world(checks={A: [[ok("lint"), ok("CI green")]]}, classic=PROT_NESTED)
+    p = w.run("--repo", SLUG, "--pr", "7", "--from-protection", *FAST)
+    assert p.returncode == 2, shown(p)
+    assert "'ci / CI green' not reported" in p.stdout and "CI green" in p.stdout.split("missing:")[1]
+
+
+def test_from_protection_with_neither_protection_nor_rules_is_a_usage_error(world):
+    w = world(checks={A: [GATE]})
+    p = w.run("--repo", SLUG, "--pr", "7", "--from-protection", *FAST)
+    assert p.returncode == 64, shown(p)
+    assert "--from-protection" in p.stderr and "main" in p.stderr
+    assert w.load()["check_polls"] == 0
+    assert w.outputs()["result"] == "usage"
+
+
+def test_from_protection_with_protection_that_requires_nothing_is_a_usage_error(world):
+    w = world(checks={A: [GATE]}, classic={"contexts": [], "checks": []})
+    p = w.run("--repo", SLUG, "--pr", "7", "--from-protection", *FAST)
+    assert p.returncode == 64, shown(p)
+
+
+@pytest.mark.parametrize("ctx", ["CI green", ""])
+def test_from_protection_and_context_are_mutually_exclusive(world, ctx):
+    w = world(checks={A: [GATE]}, classic=PROT_NESTED)
+    p = w.run("--repo", SLUG, "--pr", "7", "--from-protection", "--context", ctx, *FAST)
+    assert p.returncode == 64, shown(p)
+    assert "mutually exclusive" in p.stderr
+    assert w.calls() == []
+
+
+def test_from_protection_honors_the_app_id_of_the_requirement(world):
+    prot = {"contexts": [], "checks": [{"context": "CI green", "app_id": 57789}]}
+    w = world(checks={A: [[ok("lint"), ok("CI green", 15368)]]}, classic=prot)
+    p = w.run("--repo", SLUG, "--pr", "7", "--from-protection", *FAST)
+    assert p.returncode == 2, shown(p)  # the run is from Actions (15368); protection wants app 57789
+    assert "verified" not in p.stdout
+    w2 = world(checks={A: [[ok("lint"), ok("CI green", 57789)]]}, classic=prot)
+    q = w2.run("--repo", SLUG, "--pr", "7", "--from-protection", *FAST)
+    assert q.returncode == 0, shown(q)
+
+
+def test_from_protection_legacy_contexts_have_no_app_so_any_app_satisfies_them(world):
+    prot = {"contexts": ["CI green"], "checks": []}
+    for app in (15368, 57789):
+        w = world(checks={A: [[ok("lint"), ok("CI green", app)]]}, classic=prot)
+        assert w.run("--repo", SLUG, "--pr", "7", "--from-protection", *FAST).returncode == 0
+
+
+def test_from_protection_app_minus_one_means_any_app(world):
+    prot = {"contexts": [], "checks": [{"context": "CI green", "app_id": -1}]}
+    w = world(checks={A: [[ok("lint"), ok("CI green", 57789)]]}, classic=prot)
+    assert w.run("--repo", SLUG, "--pr", "7", "--from-protection", *FAST).returncode == 0
+
+
+def test_from_protection_adds_require_check_and_keeps_its_semantics(world):
+    w = world(checks={A: [NESTED]}, classic=PROT_NESTED)
+    p = w.run("--repo", SLUG, "--pr", "7", "--from-protection", "--require-check", "Security / scan", *FAST)
+    assert p.returncode == 2, shown(p)
+    assert "'Security / scan' not reported" in p.stdout
+    w2 = world(checks={A: [NESTED + [ok("Security / scan")]]}, classic=PROT_NESTED)
+    assert (
+        w2.run("--repo", SLUG, "--pr", "7", "--from-protection", "--require-check", "Security / scan", *FAST).returncode
+        == 0
+    )
+
+
+def test_from_protection_takes_the_union_of_protection_and_rulesets(world):
+    w = world(checks={A: [NESTED]}, classic=PROT_NESTED, rules=RULE_NESTED)
+    p = w.run("--repo", SLUG, "--pr", "7", "--from-protection", *FAST)
+    assert p.returncode == 2, shown(p)
+    assert "'gate / CI green' not reported" in p.stdout
+    w2 = world(checks={A: [NESTED + [ok("gate / CI green")]]}, classic=PROT_NESTED, rules=RULE_NESTED)
+    assert w2.run("--repo", SLUG, "--pr", "7", "--from-protection", *FAST).returncode == 0
+
+
+def test_from_protection_cannot_be_allowed_red(world):
+    w = world(checks={A: [NESTED]}, classic=PROT_NESTED)
+    p = w.run(
+        "--repo",
+        SLUG,
+        "--pr",
+        "7",
+        "--from-protection",
+        "--allow-red",
+        "ci / CI green",
+        "--allow-red-reason",
+        "x",
+        *FAST,
+    )
+    assert p.returncode == 64, shown(p)

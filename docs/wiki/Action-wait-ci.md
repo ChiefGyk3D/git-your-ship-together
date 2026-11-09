@@ -39,6 +39,20 @@ race seen on GYST #218), and a push that moved the head under the loop. This scr
   runs (id, status, conclusion, app, name). A name that appears between the polls restarts the wait and is then judged like any
   other check. The settle adds one interval to every green. Neither measure proves that a check which never appears does not exist:
   `--require-check` and branch protection or a ruleset are the real controls for that.
+- **A name that never reports fails fast (issue #378).** If a requested context (the default, `--context`, `--from-protection` or
+  `--require-check`) has not been reported by the expected app, every other check run on the pinned commit is complete, and the
+  list read identical on three polls spanning at least 60 seconds, the wait ends at once with exit `2` and `result` `missing`,
+  instead of running to the hung timer. The message names the missing context and lists the check names that did report, so a
+  wrong nested name (`CI green` for `ci / CI green`) is obvious. Any run still open, or the context itself still in progress,
+  keeps the wait going as before.
+- **`--from-protection`: the gate from the branch (issue #378).** Names are the common mistake, so the flag reads them instead.
+  It reads the default branch (`repos/R`), then its classic required status checks
+  (`branches/<default>/protection/required_status_checks`) and its active rulesets (`rules/branches/<default>`); both are enforced by
+  GitHub, so the gate is their union. Those contexts replace the default `CI green`; `--require-check` still adds to them. An
+  app id on a requirement is honored: such a context is satisfied only by a run from that app (`-1` or none means any app;
+  `--any-app` still accepts any). It is mutually exclusive with `--context` (also `--context ''`). A branch with neither
+  protection nor rulesets, or none requiring a check, is exit `64` with a message naming the branch. Not available as an action
+  input yet; the action takes `context`.
 - **Allow-list, a recorded exception.** `--allow-red NAME[@APP]` (repeatable; input `allow-red`, one name per line) lets a named
   non-gate check be red. A bare `NAME` matches that name from **any** app and workflow. `NAME@APP` (APP is the reporting
   app's slug: lowercase letters, digits and hyphens, for example `github-actions`) matches only the run reported by that
@@ -163,7 +177,7 @@ race seen on GYST #218), and a push that moved the head under the loop. This scr
 |---|---|
 | `0` | Green. With `--merge`, merged (or already merged at the verified commit). |
 | `1` | Red: the gate (a required context) failed or was cancelled, or a check run name holds a control character. Also: `--merge` could not merge (the output says `merge blocked`: a non-policy failure, or a policy block that outlasted the retries), or the head could not be read or was not a full SHA, or the pull request could not be read after the merge call (`result` is `error`, `merged` stays `false`). |
-| `2` | Timeout: no verdict after `--timeout` seconds. |
+| `2` | Timeout: no verdict after `--timeout` seconds. Also `result` `missing`: a requested check name never reported while every run on the commit is complete and the list is stable (see "A name that never reports fails fast"). |
 | `3` | Hung: no check changed for `--hung-after` seconds. |
 | `4` | Head moved: the pull request head is no longer the pinned SHA (at the start, while waiting, between the last check and the merge, or during the merge). |
 | `5` | Queued: the merge was accepted and the pull request, read back, is positively not merged yet at the verified head (a merge queue or auto-merge). Not reported as merged. A pull request that cannot be read back is exit `1`, never `5`. |
@@ -183,7 +197,7 @@ echo "exit=$?"
 Run it from a checkout of this repository at a pinned commit, or fetch the file at that commit. It needs `bash`, `gh` and `cksum`.
 `GH_BIN` names a different `gh` (the tests use a fake). When `GITHUB_OUTPUT` is set it appends `result`, `sha` and `merged`.
 
-Options: `--repo`, `--pr`, `--sha`, `--context` (repeatable; `--context ''` means no named gate), `--require-check`, `--app-id`, `--any-app`, `--min-checks`, `--timeout`,
+Options: `--repo`, `--pr`, `--sha`, `--context` (repeatable; `--context ''` means no named gate), `--from-protection` (gate from the default branch's required checks; exclusive with `--context`), `--require-check`, `--help`, `--app-id`, `--any-app`, `--min-checks`, `--timeout`,
 `--hung-after`, `--interval`, `--allow-red`, `--allow-red-reason`, `--on-push`, `--merge`, `--delete-branch`, `--require-protection`, `--merge-retries`, `--merge-retry-delay`. The header of
 the script lists the defaults.
 
@@ -235,7 +249,7 @@ branch is supposed to trigger a deploy; pass a different `token` when it does.
 | `merge-retry-delay` | Seconds between merge attempts. |
 | `token` | Token for `gh`; default the workflow token. |
 
-Outputs: `result` (`green`, `red`, `other-red`, `conflict`, `timeout`, `hung`, `head-moved`, `merge-blocked`, `queued`, `error` or `usage`), `sha` (the verified commit: set
+Outputs: `result` (`green`, `red`, `other-red`, `conflict`, `timeout`, `missing`, `hung`, `head-moved`, `merge-blocked`, `queued`, `error` or `usage`), `sha` (the verified commit: set
 whenever the commit verified green, so also for `merge-blocked` and `queued`; empty otherwise) and `merged` (`true` only when the pull request
 is merged at that commit). The outputs are written even when the step fails, so a later `if: always()` step can read them.
 
@@ -246,7 +260,7 @@ is merged at that commit). The outputs are written even when the step fails, so 
   `<caller job> / <called job>` (for example `ci / CI green`), which the default does not match; pass the full name
   (`--context 'ci / CI green'`, or one line of the `context` input). The gate in this repository is a direct job named exactly
   `CI green`. There is no prefix option, on purpose: a prefix is a looser match.
-- It does not rerun failed jobs and it does not read branch protection; name the contexts you require.
+- It does not rerun failed jobs. It reads branch protection only when asked (`--from-protection`) or to warn before a merge; otherwise name the contexts you require.
 - It only sees check runs that exist when it reads. A workflow that has not started yet (for example one triggered late) has no
   check run, so it cannot be waited for unless you name it: add it with `--require-check` (or `context`) to make the commit not
   green until it reports. The settle rule narrows the window but cannot close it.
