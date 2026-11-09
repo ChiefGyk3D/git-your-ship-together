@@ -95,6 +95,7 @@ def test_a_digest_pins_the_gyst_fixture_image_with_its_own_signer(tmp_path):
     assert outputs["image"] == f"ghcr.io/chiefgyk3d/gyst-fixture@{digest}"
     assert outputs["source-repository"] == "ChiefGyk3D/git-your-ship-together"
     assert "star-daemon" not in "".join(outputs.values()).lower()
+    assert outputs["test-command"] == "docker run --rm \"$IMAGE\" | grep -Eqx '[0-9]+\\.[0-9]+\\.[0-9]+'"
 
 
 def test_unpublished_keeps_the_existing_target_working(tmp_path):
@@ -103,6 +104,7 @@ def test_unpublished_keeps_the_existing_target_working(tmp_path):
     assert outputs["image"] == "ghcr.io/chiefgyk3d/star-daemon:latest"
     assert outputs["source-repository"] == "ChiefGyk3D/Star-Daemon"
     assert outputs["identity-regexp"] == "^https://github.com/ChiefGyk3D/"
+    assert outputs["test-command"].startswith('docker run --rm "$IMAGE" sh -c "python -m py_compile ')
 
 
 def test_the_fixture_jobs_take_everything_from_the_pin_job_and_name_no_image():
@@ -211,13 +213,14 @@ def test_the_version_tag_follows_the_version_file_and_latest_is_kept():
     assert len([t for t in tags if re.fullmatch(r"type=raw,value=\d+\.\d+\.\d+", t)]) == 1
 
 
-def test_the_verify_fixture_identity_matches_the_signing_workflow_path():
+def test_the_verify_fixture_identity_matches_the_signing_workflow_path(tmp_path):
     """The certificate subject is the reusable workflow that signs (container-release.yml, called from
     fixture-image.yml on main), as container-release.yml documents: `SAN = https://github.com/<repo>/.github/workflows/
     container-release.yml@<ref>`. The regexp the pin step hands to the verify fixture must match that subject on main,
     and nothing else a stranger could produce."""
-    published = pin_step()["run"].split("elif", 1)[1]
-    raw = re.search(r"echo 'identity-regexp=(.*?)'\n", published).group(1)
+    result, outputs = run_pin(tmp_path, "sha256:" + "ab" * 32 + "\n")
+    assert result.returncode == 0, result.stderr
+    raw = outputs["identity-regexp"]
     regexp = re.compile(raw)
     base = "https://github.com/ChiefGyk3D/git-your-ship-together/.github/workflows/"
     assert WF["jobs"]["publish"]["uses"].startswith("./.github/workflows/container-release.yml")

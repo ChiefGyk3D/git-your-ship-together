@@ -450,19 +450,19 @@ jobs:
           set -euo pipefail
           pin="$(tr -d '[:space:]' < "$DIGEST_FILE")"
           if [ "$pin" = unpublished ]; then
-            {
-              echo "image=ghcr.io/chiefgyk3d/star-daemon:latest"
-              echo "source-repository=ChiefGyk3D/Star-Daemon"
-              echo "identity-regexp=^https://github.com/ChiefGyk3D/"
-              echo 'test-command=docker run --rm "$IMAGE" sh -c "python -m py_compile /app/star-daemon.py /app/star_daemon.py /app/star_announcer.py /app/github_stars.py /app/config.py /app/platforms.py"'
-            } >> "$GITHUB_OUTPUT"
+            cat >> "$GITHUB_OUTPUT" << 'EOF'
+          image=ghcr.io/chiefgyk3d/star-daemon:latest
+          source-repository=ChiefGyk3D/Star-Daemon
+          identity-regexp=^https://github.com/ChiefGyk3D/
+          test-command=docker run --rm "$IMAGE" sh -c "python -m py_compile /app/star-daemon.py /app/star_daemon.py /app/star_announcer.py /app/github_stars.py /app/config.py /app/platforms.py"
+          EOF
           elif [[ "$pin" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-            {
-              echo "image=ghcr.io/chiefgyk3d/gyst-fixture@$pin"
-              echo "source-repository=ChiefGyk3D/git-your-ship-together"
-              echo 'identity-regexp=^https://github\.com/ChiefGyk3D/git-your-ship-together/\.github/workflows/container-release\.yml@refs/heads/main$'
-              echo 'test-command=docker run --rm "$IMAGE" | grep -Eqx '"'"'[0-9]+\.[0-9]+\.[0-9]+'"'"
-            } >> "$GITHUB_OUTPUT"
+            cat >> "$GITHUB_OUTPUT" << EOF
+          image=ghcr.io/chiefgyk3d/gyst-fixture@$pin
+          source-repository=ChiefGyk3D/git-your-ship-together
+          identity-regexp=^https://github\\.com/ChiefGyk3D/git-your-ship-together/\\.github/workflows/container-release\\.yml@refs/heads/main\$
+          test-command=docker run --rm "\$IMAGE" | grep -Eqx '[0-9]+\\.[0-9]+\\.[0-9]+'
+          EOF
           else
             echo "::error::$DIGEST_FILE must hold 'unpublished' or one sha256:<64 lowercase hex> digest"
             exit 1
