@@ -58,6 +58,9 @@ SAFO_INPUTS = {
     "python-version",
     "status-body-file",
     "status-state",
+    "trusted-ref",
+    "allow-fork-pull-request-target",
+    "allow-fork-repository",
     "project-url",
     "status-field",
     "status-open-issue",
@@ -88,7 +91,7 @@ def test_every_input_a_caller_passes_today_is_still_accepted():
 
 
 def test_safo_is_called_by_commit_with_a_version_comment():
-    match = re.search(r"uses: ChiefGyk3D/scrum-around-and-find-out@([0-9a-f]{40}) # v0\.1\.2\n", WORKFLOW.read_text())
+    match = re.search(r"uses: ChiefGyk3D/scrum-around-and-find-out@([0-9a-f]{40}) # v0\.2\.0\n", WORKFLOW.read_text())
     assert match and match[1] != "0123456789abcdef0123456789abcdef01234567"
     expected = (REPO / "tests" / "safo-release-commit.txt").read_text().strip()
     assert re.fullmatch(r"[0-9a-f]{40}", expected) and match[1] == expected
@@ -147,3 +150,52 @@ def test_harden_runner_runs_first_and_the_default_list_lets_safo_install_pyyaml(
     assert first["uses"].startswith("step-security/harden-runner@")
     default = doc()[True]["workflow_call"]["inputs"]["allowed-endpoints"]["default"].split()
     assert {"api.github.com:443", "api.doppler.com:443", "pypi.org:443", "files.pythonhosted.org:443"} <= set(default)
+
+
+SAFO_ACTION_PREFIX = "ChiefGyk3D/scrum-around-and-find-out@"
+FILE_INPUTS = ("board-file", "status-body-file")
+
+
+def checkout_missing_before_safo(workflow: dict) -> list[str]:
+    """Jobs that pass board-file or status-body-file to safo without an actions/checkout step before it.
+
+    From v0.2.0 safo reads those files from git at the trusted revision, so the repository must be checked out
+    first. Collects every job of the workflow loosely; the caller asserts strictly.
+    """
+    bad = []
+    for name, job in (workflow.get("jobs") or {}).items():
+        seen_checkout = False
+        for step in job.get("steps") or []:
+            uses = str(step.get("uses", ""))
+            if uses.startswith("actions/checkout@"):
+                seen_checkout = True
+            elif uses.startswith(SAFO_ACTION_PREFIX):
+                passed = step.get("with") or {}
+                if any(passed.get(i) for i in FILE_INPUTS) and not seen_checkout:
+                    bad.append(name)
+    return bad
+
+
+def test_checkout_precedes_safo_wherever_a_file_input_is_passed():
+    seen = 0
+    for path in sorted((REPO / ".github" / "workflows").glob("*.yml")):
+        data = yaml.safe_load(path.read_text())
+        seen += sum(
+            str(s.get("uses", "")).startswith(SAFO_ACTION_PREFIX)
+            for job in (data.get("jobs") or {}).values()
+            for s in job.get("steps") or []
+        )
+        assert checkout_missing_before_safo(data) == [], path.name
+    assert seen >= 1, "no safo step collected; the guard looked at nothing"
+
+
+def test_the_checkout_guard_bites():
+    safo = {"uses": SAFO_ACTION_PREFIX + "0" * 40, "with": {"mode": "status", "status-body-file": "body.md"}}
+    checkout = {"uses": "actions/checkout@" + "1" * 40}
+    assert checkout_missing_before_safo({"jobs": {"j": {"steps": [safo]}}}) == ["j"]
+    assert checkout_missing_before_safo({"jobs": {"j": {"steps": [safo, checkout]}}}) == ["j"]
+    assert checkout_missing_before_safo({"jobs": {"j": {"steps": [checkout, safo]}}}) == []
+    board = {"uses": safo["uses"], "with": {"mode": "validate", "board-file": "board.yaml"}}
+    assert checkout_missing_before_safo({"jobs": {"j": {"steps": [board]}}}) == ["j"]
+    boardless = {"uses": safo["uses"], "with": {"mode": "sync", "project-url": "u"}}
+    assert checkout_missing_before_safo({"jobs": {"j": {"steps": [boardless]}}}) == []

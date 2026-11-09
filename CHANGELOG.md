@@ -5,6 +5,17 @@ name what a caller sees after that.
 
 ## Unreleased
 
+### Changed: `project-sync.yml` calls safo v0.2.0 (issue #398)
+
+The Action behind `project-sync.yml` moves from `v0.1.2` to `v0.2.0` (commit `180002332e359b883c33aa4d512b5ba29b2c7657`, the signed annotated tag). Its release hardens which events may use a credential. Callers re-pin and change nothing else: this workflow passes neither `board-file` nor `status-body-file`, so the new rule that those files must be committed and checked out does not apply, and no checkout step or permission was added (`contents: read` and `id-token: write` stay).
+
+What you see after you re-pin:
+
+- **Same-repository events work as before**: `issues`, `pull_request_target` (default branch, pull request from this repository), `schedule` and `workflow_dispatch`. The run now prints one notice naming the event, the ref and the trusted revision it used.
+- **A pull request from a fork is refused under `pull_request_target`.** safo now gives a credential to a fork's pull request only when the Action input `allow-fork-pull-request-target` is `"true"`; this workflow does not pass it, so the sync job fails with a message naming the event, and that card is not added until the next scheduled reconcile. A repository that is itself a fork gets no credential either (`allow-fork-repository`). Neither switch is exposed here on purpose; ask in an issue if a caller needs one.
+- **Any event not on safo's allow-list** (for example `pull_request` from a fork) is refused for the same reason.
+- **Test.** `tests/test_project_sync_wrapper.py` pins the new commit and asserts, for every workflow, that a checkout precedes a safo step that passes `board-file` or `status-body-file`, with a negative case.
+
 ### New: `wait-ci.sh --from-protection` and a fail-fast on a gate name that never reports (issue #378)
 
 Five merge captains hit a 10-minute hang or gated on the wrong thing: the default gate is a bare `CI green`, `--require-check` only adds to it, and a nested name (`ci / CI green`, `gate / CI green`) needed `--context`, which replaces the default. Nothing existing changes unless a caller uses the new flag; the fail-fast changes only how a wait that could never end is reported.
