@@ -503,7 +503,7 @@ jobs:
   fixture-token-drift:
     name: fixture token drift
     needs: changes
-    if: needs.changes.outputs.docs-only != \'true\'
+    if: needs.changes.outputs.docs-only != 'true'
     uses: ./.github/workflows/token-drift.yml # zizmor: ignore[self-repository]
     permissions:
       contents: read
@@ -516,7 +516,7 @@ jobs:
   fixture-token-drift-live:
     name: fixture token drift (live)
     needs: changes
-    if: needs.changes.outputs.docs-only != \'true\'
+    if: needs.changes.outputs.docs-only != 'true'
     uses: ./.github/workflows/token-drift.yml # zizmor: ignore[self-repository]
     permissions:
       contents: read
@@ -527,7 +527,7 @@ jobs:
   fixture-token-drift-planted-pin:
     name: fixture token drift (planted pin)
     needs: changes
-    if: needs.changes.outputs.docs-only != \'true\'
+    if: needs.changes.outputs.docs-only != 'true'
     uses: ./.github/workflows/token-drift.yml # zizmor: ignore[self-repository]
     permissions:
       contents: read
@@ -538,7 +538,7 @@ jobs:
   fixture-token-drift-planted-live:
     name: fixture token drift (planted live)
     needs: changes
-    if: needs.changes.outputs.docs-only != \'true\'
+    if: needs.changes.outputs.docs-only != 'true'
     uses: ./.github/workflows/token-drift.yml # zizmor: ignore[self-repository]
     permissions:
       contents: read
