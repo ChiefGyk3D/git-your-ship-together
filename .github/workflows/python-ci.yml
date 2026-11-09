@@ -38,6 +38,10 @@ on:
         description: JSON array of Python versions for the test matrix. The default is the CPython versions still in security support (.github/python-support.json in this repository).
         type: string
         default: '["3.11", "3.12", "3.13", "3.14", "3.15"]'
+      pr-python-versions:
+        description: JSON array of Python versions the `test` matrix runs on a pull request (for example `["3.11", "3.15"]`, the oldest and the newest). Empty, the default, runs `python-versions` on every event. Push, schedule and dispatch always run the full `python-versions`, so a caller wanting the full matrix weekly adds a `schedule` trigger. Every entry must be in `python-versions`; with `coverage-threshold` set, `coverage-python-version` must be an entry too.
+        type: string
+        default: ""
       coverage-python-version:
         description: The matrix leg that uploads the coverage report.
         type: string
@@ -671,7 +675,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ${{ fromJSON(inputs.python-versions) }}
+        python-version: ${{ fromJSON(startsWith(github.event_name, 'pull_request') && inputs.pr-python-versions != '' && inputs.pr-python-versions || inputs.python-versions) }}
         runner: ${{ fromJSON(inputs.runners) }}
     steps:
       - name: Validate the egress policy inputs (EX-0001)
@@ -825,6 +829,44 @@ jobs:
           fi
           printf '%s\n' "$REQUIREMENTS" > "$RUNNER_TEMP/xdist-requirements.txt"
           python -m pip install --require-hashes --no-deps --only-binary=:all: -r "$RUNNER_TEMP/xdist-requirements.txt"
+
+      - name: Check the pull request Python versions
+        if: inputs.pr-python-versions != ''
+        timeout-minutes: 1
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_VERSIONS: ${{ inputs.pr-python-versions }}
+          ALL_VERSIONS: ${{ inputs.python-versions }}
+          COVERAGE_VERSION: ${{ inputs.coverage-python-version }}
+          COVERAGE_THRESHOLD: ${{ inputs.coverage-threshold }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+
+          def fail(message):
+              print(f"::error title=pr-python-versions::{message}")
+              sys.exit(1)
+
+          try:
+              pr = json.loads(os.environ["PR_VERSIONS"])
+              full = json.loads(os.environ["ALL_VERSIONS"])
+          except ValueError:
+              fail("pr-python-versions and python-versions must each be a JSON array of version strings")
+          if not isinstance(pr, list) or not pr or not all(isinstance(v, str) and v for v in pr):
+              fail("pr-python-versions must be a non-empty JSON array of version strings")
+          if len(set(pr)) != len(pr):
+              fail("pr-python-versions lists a version twice")
+          unknown = [v for v in pr if v not in full]
+          if unknown:
+              fail(f"pr-python-versions entries not in python-versions: {', '.join(unknown)}")
+          on_pr = os.environ["EVENT_NAME"].startswith("pull_request")
+          if on_pr and os.environ["COVERAGE_THRESHOLD"] != "" and os.environ["COVERAGE_VERSION"] not in pr:
+              fail("coverage-threshold is set, so coverage-python-version must be in pr-python-versions or no leg checks it on a pull request")
+          print(f"test matrix on this event: {pr if on_pr else full}")
+          PY
 
       - name: Run tests
         env:
