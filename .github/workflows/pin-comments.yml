@@ -1,0 +1,397 @@
+# Reusable pin-comment check: the `# vX.Y.Z` comment on each SHA-pinned `uses:` line must name the commit
+# it is pinned to. zizmor's ref-version-mismatch audit checks this only for callers that run zizmor; this
+# job checks it for every caller that wants it, and fails closed. Nothing is built or published; the job
+# reads the caller's repository and fails.
+#
+# What it checks, in .github/workflows/*.yml|yaml and .github/actions/**/action.yml|yaml:
+#   1. every `uses: owner/repo@<40 hex>` line carries a version comment (`# v1.2.3`, `# v4`);
+#   2. that tag exists in owner/repo and resolves to the pinned commit (GitHub API, one lookup per repository
+#      and tag, 10 s per request, 120 s and 200 lookups in all, the job's own read-only token).
+# A lookup that fails, times out or is rate limited is reported UNVERIFIED and fails the job (input
+# `unverified: warn` prints it and passes, never for a real mismatch). Local `./` and `docker://` references
+# and references not pinned to a full commit are not this check's business.
+#
+# The checking script is scripts/check_pin_comments.py in this repository, inlined below byte for byte
+# (a reusable workflow cannot name the commit it runs from, so it cannot read its own repository's files);
+# tests/test_pin_comments.py holds the copy identical. A caller can vendor that file and run it locally.
+#
+# It is opt-in: nothing in an existing caller changes. Call it with:
+#
+#   on:
+#     pull_request:
+#     push:
+#       branches: [main]
+#
+#   jobs:
+#     pin-comments:
+#       uses: ChiefGyk3D/git-your-ship-together/.github/workflows/pin-comments.yml@<sha> # vX.Y.Z
+#       permissions:
+#         contents: read
+
+name: Pin-comment check (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      unverified:
+        description: What a lookup that could not be completed (network error, timeout, rate limit, unreadable answer) does - `fail` fails the job, `warn` prints it and passes. A tag that does not exist or points at another commit always fails.
+        type: string
+        default: fail
+      egress-policy:
+        description: harden-runner egress policy - `audit` logs outbound connections, `block` allows only `allowed-endpoints`.
+        type: string
+        default: block
+      egress-policy-secretless:
+        description: Accepted and validated (exactly `audit` or `block`) for parity with the other workflows, but unused - this job holds the job token for its API lookups, so it follows `egress-policy`.
+        type: string
+        default: block
+      allowed-endpoints:
+        description: harden-runner allow-list for `block`, space-separated host:port entries. The default is what the checkout needs; wildcards are not supported.
+        type: string
+        default: "api.github.com:443 github.com:443"
+      extra-allowed-endpoints:
+        description: Appended to `allowed-endpoints`, for hosts the check must reach beyond the GitHub API. Same format.
+        type: string
+        default: ""
+      timeout-minutes:
+        description: Job timeout.
+        type: number
+        default: 10
+
+permissions:
+  contents: read
+
+jobs:
+  pin-comments:
+    name: Version comments match their pins
+    runs-on: ubuntu-24.04
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read  # check out the caller's repository
+    steps:
+      - name: Validate the egress policy inputs (EX-0001)
+        timeout-minutes: 1
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        env:
+          POLICY_EGRESS_POLICY: ${{ inputs.egress-policy }}
+          POLICY_EGRESS_POLICY_SECRETLESS: ${{ inputs.egress-policy-secretless }}
+        run: |
+          set -u
+          bad=0
+          check() {
+            if [ "$2" = set ] && [ "$3" != audit ] && [ "$3" != block ]; then
+              echo "::error title=egress policy::the $1 input must be exactly 'audit' or 'block' (its value is ${#3} characters long)"
+              bad=1
+            fi
+          }
+          check egress-policy "${POLICY_EGRESS_POLICY+set}" "${POLICY_EGRESS_POLICY-}"
+          check egress-policy-secretless "${POLICY_EGRESS_POLICY_SECRETLESS+set}" "${POLICY_EGRESS_POLICY_SECRETLESS-}"
+          check distro-egress-policy "${POLICY_DISTRO_EGRESS_POLICY+set}" "${POLICY_DISTRO_EGRESS_POLICY-}"
+          check semgrep-egress-policy "${POLICY_SEMGREP_EGRESS_POLICY+set}" "${POLICY_SEMGREP_EGRESS_POLICY-}"
+          exit "$bad"
+
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: ${{ inputs.egress-policy == 'audit' && 'audit' || 'block' }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
+          disable-sudo: true
+          # The agent may only stop reporting to StepSecurity in block mode.
+          disable-telemetry: ${{ (inputs.egress-policy == 'audit' && 'audit' || 'block') == 'block' }}
+
+      - name: Egress canary (EX-0001)
+        if: ${{ runner.os == 'Linux' && ((inputs.egress-policy == 'audit' && 'audit' || 'block') == 'block') }}
+        timeout-minutes: 2
+        shell: bash
+        # The workspace root exists before checkout; a job default working-directory may not.
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -u
+          NAMES="github.com api.github.com results-receiver.actions.githubusercontent.com"
+          PORT=443
+          canary_resolve() { timeout 5 getent ahostsv4 "$1" 2>/dev/null | awk '$2 == "STREAM" { print $1 }'; }
+          canary_probe() { timeout 3 bash -c "exec 3<>\"/dev/tcp/\$0/\$1\"" "$1" "$PORT" 2>/dev/null; }
+          canary_reach() {
+            local i
+            for i in 1 2 3 4; do
+              canary_probe "$1" && return 0
+              [ "$i" -lt 4 ] && sleep 1
+            done
+            return 1
+          }
+          canary_show() { local n=$1; shift; echo "+ $*"; { timeout 10 "$@" 2>&1 || true; } | head -n "$n" || true; }
+          canary_diag() {
+            local name
+            echo "::group::egress canary diagnostics (EX-0001, for the GitHub Support ticket)"
+            canary_show 5 uname -srmo
+            canary_show 20 cat /etc/resolv.conf
+            canary_show 20 bash -c "resolvectl status 2>/dev/null | grep -E '^ *(Current DNS Server|DNS Servers?|DNS Domain):'"
+            canary_show 20 bash -c "ss -lun | grep ':53 '"
+            for name in $NAMES pipelines.actions.githubusercontent.com; do
+              canary_show 20 getent ahostsv4 "$name"
+              canary_show 5 curl -sS -o /dev/null -w '%{http_code} %{remote_ip} %{time_connect}\n' --max-time 8 "https://$name"
+            done
+            echo "::endgroup::"
+          }
+          canary_main() {
+            local tmp name addr n=0 bad
+            tmp=$(mktemp -d) || return 1
+            for _ in 1 2 3; do
+              for name in $NAMES; do canary_resolve "$name" >>"$tmp/res.$name" & done
+              wait
+              sleep 1
+            done
+            for name in $NAMES; do
+              if [ -s "$tmp/res.$name" ]; then sort -u "$tmp/res.$name"; else echo "-"; fi | sed "s|^|$name |" >>"$tmp/pairs"
+            done
+            while read -r name addr; do
+              n=$((n + 1))
+              ( { [ "$addr" != "-" ] && canary_reach "$addr"; } || echo "$name $addr" >"$tmp/bad.$n" ) </dev/null &
+            done <"$tmp/pairs"
+            wait
+            bad=$(cat "$tmp"/bad.* 2>/dev/null | sort || true)
+            rm -rf "$tmp"
+            if [ -z "$bad" ]; then
+              echo "egress canary: all $n addresses of $NAMES accept TCP $PORT"
+              return 0
+            fi
+            echo "::error title=egress canary::egress broken on this runner (known westus2 DNS issue, EX-0001): rerun the job"
+            echo "unreachable addresses (name address; '-' means the name did not resolve):"
+            printf '%s\n' "$bad"
+            canary_diag
+            echo "EX-0001 egress canary failed, unreachable: $(printf '%s' "$bad" | tr '\n' ';')" >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
+            return 1
+          }
+          set -m
+          canary_main &
+          main=$!
+          (sleep 90; kill -TERM -- "-$main"; sleep 2; kill -KILL -- "-$main") >/dev/null 2>&1 &
+          dog=$!
+          wait "$main" && rc=0 || rc=$?
+          kill -TERM -- "-$dog" >/dev/null 2>&1 || true
+          if kill -0 -- "-$main" >/dev/null 2>&1; then
+            kill -TERM -- "-$main" >/dev/null 2>&1 || true
+            sleep 1
+            kill -KILL -- "-$main" >/dev/null 2>&1 || true
+          fi
+          if [ "$rc" -eq 143 ] || [ "$rc" -eq 137 ]; then
+            echo "::error title=egress canary::the canary hit its 90 s deadline (EX-0001): rerun the job"
+            rc=124
+          fi
+          exit "$rc"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check the version comments
+        env:
+          UNVERIFIED: ${{ inputs.unverified }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          case "$UNVERIFIED" in fail|warn) ;; *) echo "::error title=unverified::the unverified input must be exactly 'fail' or 'warn'"; exit 1 ;; esac
+          python3 -I - --root "$GITHUB_WORKSPACE" --unverified "$UNVERIFIED" <<'PY'
+          #!/usr/bin/env python3
+          """Fail when a `# vX.Y.Z` comment on a SHA-pinned `uses:` line does not name the pinned commit.
+
+          Stdlib only. The workflow `pin-comments.yml` carries a byte-identical copy of this file
+          (tests/test_pin_comments.py holds the two together); a caller can also run it locally.
+
+          Usage:
+              python3 -I check_pin_comments.py [--root DIR] [--unverified fail|warn] [--api-base URL]
+
+          Scans `.github/workflows/*.yml|yaml` and `.github/actions/**/action.yml|yaml` under --root for
+          `uses: owner/repo[/path]@<40 hex>` lines. Each needs a version comment (`# v1.2.3`, `# v4`), and that
+          tag, looked up once per repository and tag through the GitHub API (`GITHUB_TOKEN` is sent when set, and
+          only over https), must resolve to the pinned commit. Local `./` and `docker://` references and
+          references that are not pinned to a full commit are not this check's business.
+
+          Outcomes, one line each: `FAIL` (missing comment, no such tag, a different commit), `UNVERIFIED` (the lookup
+          failed, timed out, was rate limited, answered something unreadable, or the lookup budget ran out). Unverified
+          is never green: exit 1 unless `--unverified warn`, which still prints every line and exits 0 only when
+          nothing FAILed. Exit 2 on bad usage. Nothing is skipped silently: no workflow file at all is a failure.
+
+          Lookups are bounded: 10 s per request, 1 MiB per answer, 200 lookups and 120 s in all.
+          Values taken from files are printed JSON-escaped so they cannot forge a log line or a workflow command.
+          """
+
+          from __future__ import annotations
+
+          import argparse
+          import json
+          import os
+          import re
+          import sys
+          import time
+          import urllib.error
+          import urllib.request
+          from collections.abc import Callable
+          from pathlib import Path
+          from urllib.parse import urlsplit
+
+          USES = re.compile(
+              r"^\s*(?:-\s+)?uses:\s*['\"]?([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)(/[^\s@'\"#]*)?"
+              r"@([0-9a-f]{40})['\"]?(?P<rest>.*)$"
+          )
+          VERSION = re.compile(r"^\s*#\s*(v?\d+(?:\.\d+){0,3}(?:[-+][0-9A-Za-z.-]+)?)(?:\s|$)")
+          COMMIT = re.compile(r"[0-9a-f]{40}")
+          REQUEST_TIMEOUT = 10
+          MAX_BODY = 1 << 20
+          MAX_FILE = 4 << 20
+          MAX_LOOKUPS = 200
+          TOTAL_SECONDS = 120.0
+          DEFAULT_API = "https://api.github.com"
+
+
+          def q(value: object) -> str:
+              """A value from a file or a process, safe to print: JSON-escaped, one line, bounded."""
+              text = value if isinstance(value, str) else repr(value)
+              return json.dumps(text[:200], ensure_ascii=True)
+
+
+          def files_under(root: Path) -> list[Path]:
+              found: list[Path] = []
+              for pattern in ("*.yml", "*.yaml"):
+                  found += (root / ".github" / "workflows").glob(pattern)
+                  found += (root / ".github" / "actions").glob("**/action" + pattern[1:])
+              return sorted(p for p in found if p.is_file() and not p.is_symlink())
+
+
+          def scan(path: Path) -> list[tuple[int, str, str, str | None]]:
+              """(line number, owner/repo, sha, version comment or None) for each SHA-pinned uses line."""
+              if path.stat().st_size > MAX_FILE:
+                  raise ValueError(f"larger than {MAX_FILE} bytes")
+              out = []
+              for number, line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+                  if line.lstrip().startswith("#"):
+                      continue
+                  match = USES.match(line)
+                  if match:
+                      version = VERSION.match(match.group("rest"))
+                      out.append((number, match.group(1), match.group(3), version.group(1) if version else None))
+              return out
+
+
+          class NoSuchTag(Exception):
+              pass
+
+
+          def make_resolver(api_base: str, token: str | None) -> Callable[[str, str], str | None]:
+              """repo, tag -> the commit id the tag points at, None when there is no such tag; raises on anything else."""
+              base = urlsplit(api_base)
+              if base.scheme not in ("http", "https") or not base.netloc:
+                  raise ValueError("--api-base must be an http(s) URL")
+
+              class SameHostOnly(urllib.request.HTTPRedirectHandler):
+                  def redirect_request(self, req, fp, code, msg, headers, newurl):
+                      target = urlsplit(newurl)
+                      if (target.scheme, target.netloc) != (base.scheme, base.netloc):
+                          raise urllib.error.URLError("redirect off the API host refused")
+                      return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+              opener = urllib.request.build_opener(SameHostOnly)
+
+              def resolve(repo: str, tag: str) -> str | None:
+                  request = urllib.request.Request(
+                      f"{api_base.rstrip('/')}/repos/{repo}/commits/refs/tags/{tag}",
+                      headers={"Accept": "application/vnd.github+json", "User-Agent": "gyst-pin-comments"},
+                  )
+                  if token and base.scheme == "https":
+                      request.add_header("Authorization", f"Bearer {token}")
+                  try:
+                      with opener.open(request, timeout=REQUEST_TIMEOUT) as reply:
+                          body = reply.read(MAX_BODY + 1)
+                  except urllib.error.HTTPError as exc:
+                      if exc.code in (404, 422):
+                          return None
+                      raise OSError(f"HTTP {exc.code}") from exc
+                  if len(body) > MAX_BODY:
+                      raise ValueError("answer too large")
+                  sha = json.loads(body).get("sha") if body else None
+                  if not isinstance(sha, str) or not COMMIT.fullmatch(sha):
+                      raise ValueError("answer has no commit id")
+                  return sha
+
+              return resolve
+
+
+          def run(
+              root: Path,
+              resolve: Callable[[str, str], str | None],
+              max_lookups: int = MAX_LOOKUPS,
+              deadline: float = TOTAL_SECONDS,
+          ) -> tuple[list[str], list[str]]:
+              """(failures, unverified notes)."""
+              problems: list[str] = []
+              notes: list[str] = []
+              files = files_under(root)
+              if not files:
+                  return ["no workflow or action file found; nothing to check"], notes
+              pending: dict[tuple[str, str], list[tuple[str, int, str]]] = {}
+              for path in files:
+                  name = q(str(path.relative_to(root)))
+                  try:
+                      entries = scan(path)
+                  except (OSError, ValueError) as exc:
+                      problems.append(f"{name}: cannot read the file ({type(exc).__name__}: {q(str(exc))})")
+                      continue
+                  for number, repo, sha, version in entries:
+                      if version is None:
+                          problems.append(f"{name}:{number}: {q(repo)} is pinned to {sha} with no version comment (# vX.Y.Z)")
+                      else:
+                          pending.setdefault((repo, version), []).append((name, number, sha))
+              start = time.monotonic()
+              lookups = 0
+              for (repo, tag), places in sorted(pending.items()):
+                  where = ", ".join(f"{n}:{i}" for n, i, _ in places[:3])
+                  if lookups >= max_lookups or time.monotonic() - start > deadline:
+                      notes.append(f"unverified: {q(repo)} {q(tag)} at {where}: lookup budget or deadline used up")
+                      continue
+                  lookups += 1
+                  try:
+                      actual = resolve(repo, tag)
+                  except Exception as exc:  # noqa: BLE001 - any failure to look up is "unverified", never a pass
+                      notes.append(f"unverified: {q(repo)} {q(tag)} at {where}: {type(exc).__name__}: {q(str(exc))}")
+                      continue
+                  for name, number, sha in places:
+                      if actual is None:
+                          problems.append(f"{name}:{number}: no such tag: {q(repo)} has no tag {q(tag)}")
+                      elif actual != sha:
+                          problems.append(f"{name}:{number}: mismatch: {q(repo)} {q(tag)} is {actual}, the pin is {sha}")
+              return problems, notes
+
+
+          def exit_code(problems: list[str], notes: list[str], unverified: str) -> int:
+              if problems:
+                  return 1
+              return 1 if notes and unverified != "warn" else 0
+
+
+          def main(argv: list[str]) -> int:
+              parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n")[0])
+              parser.add_argument("--root", type=Path, default=Path.cwd())
+              parser.add_argument("--unverified", choices=("fail", "warn"), default="fail")
+              parser.add_argument("--api-base", default=DEFAULT_API)
+              args = parser.parse_args(argv)
+              root = args.root.resolve()
+              if not root.is_dir():
+                  parser.error(f"--root {str(args.root)!r} is not a directory")
+              try:
+                  resolve = make_resolver(args.api_base, os.environ.get("GITHUB_TOKEN"))
+              except ValueError as exc:
+                  parser.error(str(exc))
+              problems, notes = run(root, resolve)
+              for problem in problems:
+                  print(f"FAIL {problem}")
+              for note in notes:
+                  print(f"UNVERIFIED {note}")
+              code = exit_code(problems, notes, args.unverified)
+              if code == 0:
+                  print(f"ok   every version comment names its pinned commit{' (some unverified)' if notes else ''}")
+              return code
+
+
+          if __name__ == "__main__":
+              sys.exit(main(sys.argv[1:]))
+          PY

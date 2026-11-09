@@ -183,6 +183,15 @@ pull request is in that range, so it stays caught. The narrowing never applies t
 branch is still scanned in full. If the base or head is not a full commit id present in the clone, the job fails rather
 than scanning less.
 
+### Ignore entries and the tree scan
+
+A tree scan has no commit, so it matches only the path-and-rule form of a `.gitleaksignore` entry (`file:rule:line`). The form
+gitleaks writes for a history finding, `commit:file:rule:line`, hides the finding in the history scan but not in the tree scan,
+and a rebase or squash changes the commit id. The scan is as strict as before; what changed is which entries can match. The
+job lists the commit-bound entries it finds in the base commit's `.gitleaksignore` (line number, file, rule; never the commit
+or a value) and never rewrites them. Migrate by dropping the commit id, by allowlisting the path and rule in `.gitleaks.toml`
+with a reason, or by setting `gitleaks-scope: all-refs`.
+
 | Event | Configuration and ignore file the scans use | Root `.gitleaksignore` of the checkout |
 |---|---|---|
 | `pull_request` (either scope) | the base commit's `.gitleaks.toml` (scanner defaults if none) and `.gitleaksignore`, copied outside the workspace | replaced by the base's copy, or removed |

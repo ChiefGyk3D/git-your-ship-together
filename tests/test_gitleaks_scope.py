@@ -971,3 +971,196 @@ def test_the_canary_still_passes_with_the_overlay_in_the_arguments(tree_scan, gi
         ["bash", "-eo", "pipefail", "-c", step(CANARY)["run"]], env=env, capture_output=True, text=True, timeout=120
     )
     assert canary.returncode == 0, canary.stdout + canary.stderr
+
+
+# --- commit-bound .gitleaksignore entries under the narrowed scan (issue #336) ----------------------------------------
+#
+# gitleaks writes a history finding as `commit:file:rule:line`. The tree scan has no commit, so it can only match the
+# `file:rule:line` form: with the default `pr-commits` scope a commit-bound entry no longer hides anything there. The
+# job cannot rewrite the entries (that would let an old review hide a new finding on a reused line), so it says which
+# lines are affected, by line number, file and rule only, and the docs name the two forms that work.
+
+IGNORE_NOTE = "Report commit-bound .gitleaksignore entries"
+COMMIT_A = "0123456789abcdef0123456789abcdef01234567"
+COMMIT_B = "fedcba9876543210fedcba9876543210fedcba98"
+
+
+def ignore_note(tmp_path, body: bytes | None, tree: str = "true"):
+    ws = tmp_path / "ws"
+    ws.mkdir(exist_ok=True)
+    if body is not None:
+        (ws / ".gitleaksignore").write_bytes(body)
+    summary = tmp_path / "summary.md"
+    done = run_step(
+        IGNORE_NOTE,
+        {"TREE_SCAN": tree, "GITHUB_WORKSPACE": str(ws), "GITHUB_STEP_SUMMARY": str(summary)},
+        cwd=ws,
+    )
+    return done, (summary.read_text() if summary.exists() else "")
+
+
+def test_the_ignore_note_step_sits_between_the_resolve_step_and_the_scans_and_reads_only_env():
+    names = [x.get("name") for x in steps_of(GITLEAKS)]
+    assert names.index(RESOLVE) < names.index(IGNORE_NOTE) < names.index(COMMITS)
+    s = step(IGNORE_NOTE)
+    assert s["env"] == {"TREE_SCAN": "${{ steps.scope.outputs.tree }}"}
+    assert "${{" not in s["run"] and "eval " not in s["run"]
+    assert "continue-on-error" not in s, "the note is informational and must not be the thing that hides a failure"
+
+
+def test_commit_bound_entries_are_reported_by_line_file_and_rule_never_by_commit(tmp_path):
+    body = (
+        "# reviewed 2026-11-01\n"
+        f"{COMMIT_A}:docs/example.md:generic-api-key:12\n"
+        "\n"
+        "docs/example.md:generic-api-key:12\n"
+        f"{COMMIT_B}:src/fixture.py:aws-access-token:7\r\n"
+    )
+    done, summary = ignore_note(tmp_path, body.encode())
+    assert done.returncode == 0, done.stdout + done.stderr
+    out = done.stdout
+    assert "::warning title=gitleaks::" in out
+    assert "2 commit-bound" in out
+    assert "line 2" in out and "docs/example.md" in out and "generic-api-key" in out
+    assert "line 5" in out and "src/fixture.py" in out and "aws-access-token" in out
+    assert "line 4" not in out, "the tree-form entry works under both scopes and is not reported"
+    for text in (out, summary):
+        assert COMMIT_A not in text and COMMIT_B not in text and COMMIT_A[:7] not in text, "commits are never printed"
+    assert "2 commit-bound" in summary
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        None,
+        b"",
+        b"# only a comment\n",
+        b"docs/example.md:generic-api-key:12\nsrc/a.py:aws-access-token:3\n",
+        b"not a fingerprint at all\n",
+    ],
+)
+def test_no_commit_bound_entry_means_no_note(body, tmp_path):
+    done, summary = ignore_note(tmp_path, body)
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "::warning" not in done.stdout and summary == ""
+
+
+def test_the_note_is_for_the_narrowed_scan_only(tmp_path):
+    done, summary = ignore_note(tmp_path, f"{COMMIT_A}:a.md:generic-api-key:1\n".encode(), tree="false")
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "::warning" not in done.stdout and summary == "", "a full-history scan still matches the entries"
+
+
+def test_an_odd_byte_in_an_entry_is_not_echoed_into_a_workflow_command(tmp_path):
+    body = f"{COMMIT_A}:evil%0A::error::x.md:rule:3\n{COMMIT_B}:ok.md:rule-b:4\n"
+    done, _ = ignore_note(tmp_path, body.encode())
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "::error" not in done.stdout and "%0A" not in done.stdout
+    assert "2 commit-bound" in done.stdout and "ok.md" in done.stdout
+
+
+def test_the_note_never_fails_the_job_on_a_large_or_odd_file(tmp_path):
+    body = "".join(f"{COMMIT_A}:f{i}.md:generic-api-key:{i}\n" for i in range(1, 400)).encode() + bytes([0, 255, 10])
+    done, _ = ignore_note(tmp_path, body)
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "399 commit-bound" in done.stdout
+    assert done.stdout.count("line ") <= 50, "the list is capped so a huge file cannot flood the log"
+
+
+def detail_repo(gitleaks: str, tmp_path):
+    """A repo whose only commit holds a reviewed fixture key; returns the repo, its commit-bound and tree-form ids."""
+    r = tmp_path / "repo"
+    r.mkdir()
+    sh("git", "init", "-q", "-b", "main", cwd=r)
+    commit(r, "leak.txt", planted(), "reviewed fixture key")
+    report = r / "fp.json"
+    subprocess.run(
+        [gitleaks, "git", "--no-banner", "--redact", "-f", "json", "-r", str(report), "."], cwd=r, capture_output=True
+    )
+    fp = json.loads(report.read_text())[0]["Fingerprint"]
+    report.unlink()
+    return r, fp, fp.split(":", 1)[1]
+
+
+def run_scans(gitleaks: str, r, log_opts: str, ignore_dir) -> tuple[int, int]:
+    tail = ["--no-banner", "--redact", "--exit-code", "1", f"--gitleaks-ignore-path={ignore_dir}"]
+    hist = subprocess.run(
+        [gitleaks, "git", *tail, f"--log-opts={log_opts}", "."], cwd=r, capture_output=True, text=True
+    )
+    tree = subprocess.run([gitleaks, "dir", *tail, "."], cwd=r, capture_output=True, text=True)
+    return hist.returncode, tree.returncode
+
+
+def test_premise_a_commit_bound_entry_hides_the_history_finding_but_not_the_tree_finding(gitleaks, tmp_path):
+    r, commit_form, tree_form = detail_repo(gitleaks, tmp_path)
+    assert commit_form.count(":") == 3 and tree_form.count(":") == 2
+    ign = tmp_path / "ign"
+    ign.mkdir()
+    (ign / ".gitleaksignore").write_text(commit_form + "\n")
+    assert not (r / ".gitleaksignore").exists()
+    assert run_scans(gitleaks, r, "--all", ign) == (0, 1), "reviewed in history, failing in the tree scan (#336)"
+
+
+def test_the_tree_form_entry_hides_the_finding_in_both_scans_and_survives_a_squash(gitleaks, tmp_path):
+    r, commit_form, tree_form = detail_repo(gitleaks, tmp_path)
+    old = sh("git", "rev-parse", "HEAD", cwd=r)
+    ign = tmp_path / "ign"
+    ign.mkdir()
+    (ign / ".gitleaksignore").write_text(tree_form + "\n")
+    assert run_scans(gitleaks, r, "--all", ign) == (0, 0)
+    # a squash: the same tree under a brand new commit id; the old id is gone from the history
+    sh("git", "checkout", "-q", "--orphan", "squashed", cwd=r)
+    sh("git", "-c", "user.email=ci@example.invalid", "-c", "user.name=ci", "commit", "-q", "-m", "squash", cwd=r)
+    assert sh("git", "rev-parse", "HEAD", cwd=r) != old and commit_form.split(":", 1)[0] == old
+    assert run_scans(gitleaks, r, "--all", ign) == (0, 0), "the tree form does not name a commit"
+    (ign / ".gitleaksignore").write_text(commit_form + "\n")
+    assert run_scans(gitleaks, r, "--all", ign)[0] == 1, "the commit-bound entry is orphaned by the squash"
+
+
+def test_the_tree_form_entry_hides_nothing_else_a_new_leak_in_a_pull_request_commit_is_still_caught(gitleaks, tmp_path):
+    r, _, tree_form = detail_repo(gitleaks, tmp_path)
+    base = sh("git", "rev-parse", "HEAD", cwd=r)
+    sh("git", "checkout", "-q", "-b", "pr", cwd=r)
+    other = planted().replace("AKIA", "ASIA")
+    commit(r, "new_leak.txt", other, "a new key in the pull request")
+    commit(r, "new_leak.txt", "gone\n", "removed again")
+    head = sh("git", "rev-parse", "HEAD", cwd=r)
+    ign = tmp_path / "ign"
+    ign.mkdir()
+    (ign / ".gitleaksignore").write_text(tree_form + "\n")
+    hist, tree = run_scans(gitleaks, r, f"{base}..{head}", ign)
+    assert hist == 1, "the key added and removed inside the pull request is caught by the range scan"
+    assert tree == 0, "the reviewed file stays ignored in the tree and the removed one is gone"
+    commit(r, "new_leak.txt", other, "and back again")
+    assert run_scans(gitleaks, r, f"{base}..HEAD", ign)[1] == 1, "a leak left in the tree is caught by the tree scan"
+
+
+def test_a_toml_allowlist_by_path_and_rule_works_in_the_tree_scan_and_hides_only_that_pair(gitleaks, tmp_path):
+    r, _, _ = detail_repo(gitleaks, tmp_path)
+    cfg = tmp_path / "gitleaks.toml"
+    cfg.write_text(
+        '[extend]\nuseDefault = true\n\n[[allowlists]]\ndescription = "documented placeholder key"\n'
+        "targetRules = [\"generic-api-key\"]\npaths = ['''^leak\\.txt$''']\n"
+    )
+    empty = tmp_path / "empty"
+    empty.mkdir()
+
+    def tree_code(config):
+        args = ["--no-banner", "--redact", "--exit-code", "1", f"--config={config}", f"--gitleaks-ignore-path={empty}"]
+        done = subprocess.run([gitleaks, "dir", *args, "."], cwd=r, capture_output=True, text=True)
+        return done.returncode
+
+    assert tree_code(cfg) == 0, "the path and rule pair is allowed in the tree scan, whatever the commit"
+    other_path = tmp_path / "other.toml"
+    other_path.write_text(cfg.read_text().replace("^leak", "^elsewhere"))
+    assert tree_code(other_path) == 1, "another path is not allowed"
+    other_rule = tmp_path / "rule.toml"
+    other_rule.write_text(cfg.read_text().replace("generic-api-key", "aws-access-token"))
+    assert tree_code(other_rule) == 1, "another rule is not allowed"
+
+
+def test_the_readme_and_the_changelog_carry_the_migration_note():
+    readme = README.read_text()
+    assert "commit-bound" in readme and "all-refs" in readme
+    unreleased = (REPO / "CHANGELOG.md").read_text().split("\n## v", 1)[0]
+    assert "commit-bound" in unreleased and "issue #336" in unreleased

@@ -48,10 +48,11 @@ REQUIRED_CHECK = f"ci / {GATE}"  # what a caller with no derivable gate is held 
 SHARED_REPO = "ChiefGyk3D/git-your-ship-together"
 SHARED_REPO_CHECK = GATE  # this repository runs the gate directly, so the check has no `ci /` prefix
 REUSABLE_PREFIX = "ChiefGyk3D/git-your-ship-together/"
-# A caller job that uses one of the shared CI workflows. The release and
-# security workflows have no gate, so a job calling them is not a check.
+# A caller job that uses one of the shared CI workflows, or the gate on its own
+# (`ci-gate.yml`, which is how a security-only caller gets a `CI green`). The
+# release and security workflows have no gate, so a job calling them is not a check.
 SHARED_CI_CALL = re.compile(
-    r"^\s+uses:\s*" + re.escape(REUSABLE_PREFIX) + r"\.github/workflows/[A-Za-z0-9_-]+-ci\.ya?ml@"
+    r"^\s+uses:\s*" + re.escape(REUSABLE_PREFIX) + r"\.github/workflows/(?:[A-Za-z0-9_-]+-ci|ci-gate)\.ya?ml@"
 )
 JOB_KEY = re.compile(r"^  ([A-Za-z0-9_-]+):\s*$")
 SHA = re.compile(r"^[0-9a-f]{40}$")

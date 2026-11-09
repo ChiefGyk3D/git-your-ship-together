@@ -687,6 +687,7 @@ KEPT_BLOCK = {
     ("docs-pages.yml", "build"),  # runs caller code; its artifact is deployed verbatim by `deploy`
     ("docs-pages.yml", "deploy"),  # pages: write, id-token
     ("lory-audit.yml", "audit"),  # LORY_PIPELINE_TOKEN, a third-party bearer token
+    ("pin-comments.yml", "pin-comments"),  # the job token goes to the GitHub API lookups
     ("project-sync.yml", "sync"),  # id-token, Doppler, a GitHub App token
     ("python-ci.yml", "coverage"),  # id-token, Doppler, the Codecov upload
     ("python-package-release.yml", "build"),  # builds the distribution that is published
