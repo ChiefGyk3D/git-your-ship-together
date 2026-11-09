@@ -59,6 +59,12 @@
 #     required status checks (branch protection or a ruleset) or a merge queue. This script is the second line.
 #     Before merging it reads the base branch's rules and warns loudly when none cover the required contexts;
 #     --require-protection makes that an error (exit 1).
+#   * Mergeability (issue #352), only with --pr. Every poll, and the re-read after green, also reads the pull request's
+#     mergeable and mergeable_state (the same response as the head). mergeable false or state dirty (a merge conflict
+#     with the base branch) ends the wait at once with exit 7, naming the base branch and its head SHA, instead of
+#     waiting out the timeout or failing at merge time. mergeable null means GitHub is still computing it: unknown,
+#     re-polled, never a conflict. State behind is a printed note, not a failure. None of this changes the green
+#     criteria or any other exit code; a conflicting pull request is never reported green and never merged.
 #   * It prints the SHA it verified. It never prints a token (output from gh is redacted).
 #
 # Exit codes:
@@ -73,6 +79,8 @@
 #       verified head (merge queue or auto-merge); a pull request that cannot be read back is exit 1
 #   6   other checks red: the gate did not fail, but another check run on the pinned SHA failed, was
 #       cancelled, timed out, needed action, failed to start or went stale (and is not in --allow-red)
+#   7   conflict: the pull request cannot be merged cleanly into its base branch (mergeable false / state dirty);
+#       checked only with --pr, nothing is merged
 #   64  usage error (bad flag or value); nothing was waited on
 #
 # Numbers are plain base-10 integers, no sign, space or leading zero (0 only where it is legal), and
@@ -342,20 +350,30 @@ PR_MERGED=""
 PR_HEAD=""
 PR_MERGE_SHA=""
 PR_BASE=""
+PR_BASE_SHA=""
+PR_MERGEABLE=""
+PR_MSTATE=""
 pr_state() {
   local out
   out="$(gh_try api "repos/${repo}/pulls/${pr}" \
-    --jq '[(.merged | tostring), (.head.sha // "" | tostring), (.merge_commit_sha // "" | tostring), (.base.ref // "" | tostring)] | join("\u001f")')" || return 1
+    --jq '[(.merged | tostring), (.head.sha // "" | tostring), (.merge_commit_sha // "" | tostring), (.base.ref // "" | tostring), (.mergeable | tostring), (.mergeable_state // "" | tostring), (.base.sha // "" | tostring)] | join("\u001f")')" || return 1
   PR_MERGED=""
   PR_BASE=""
   PR_HEAD=""
   PR_MERGE_SHA=""
+  PR_MERGEABLE=""
+  PR_MSTATE=""
+  PR_BASE_SHA=""
   if [[ "$out" == *$'\n'* ]]; then
     say "the API returned a malformed pull request state for ${repo}#${pr}" >&2
     return 1
   fi
-  IFS=$'\x1f' read -r PR_MERGED PR_HEAD PR_MERGE_SHA PR_BASE <<<"$out"
+  IFS=$'\x1f' read -r PR_MERGED PR_HEAD PR_MERGE_SHA PR_BASE PR_MERGEABLE PR_MSTATE PR_BASE_SHA <<<"$out"
   [[ "$PR_BASE" =~ ^[A-Za-z0-9._/-]{1,200}$ ]] || PR_BASE=""
+  # Mergeability is advisory input for exit 7 only: anything unexpected reads as unknown, never as a conflict.
+  [[ "$PR_MERGEABLE" == true || "$PR_MERGEABLE" == false ]] || PR_MERGEABLE=""
+  [[ "$PR_MSTATE" =~ ^[a-z_]{1,40}$ ]] || PR_MSTATE=""
+  [[ "$PR_BASE_SHA" =~ ^[0-9a-f]{40}$ ]] || PR_BASE_SHA=""
   if [[ "$PR_MERGED" != true && "$PR_MERGED" != false ]] || [[ ! "$PR_HEAD" =~ ^[0-9a-f]{40}$ ]] ||
     [[ -n "$PR_MERGE_SHA" && ! "$PR_MERGE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
     say "the API returned something that is not a pull request state with a full commit SHA for ${repo}#${pr}" >&2
@@ -366,6 +384,29 @@ pr_state() {
 pr_head() {
   pr_state || return 1
   printf '%s' "$PR_HEAD"
+}
+
+# Mergeability (issue #352) from the pull request state just read by pr_state. A conflict (mergeable false or
+# state dirty) on an unmerged pull request ends the run with exit 7 and names the base branch head. null/unknown
+# is not a conflict. behind is noted once, not a failure.
+BEHIND_NOTED=0
+check_mergeable() {
+  local base_head=""
+  [[ "$PR_MERGED" == false ]] || return 0
+  if [[ "$PR_MERGEABLE" == false || "$PR_MSTATE" == dirty ]]; then
+    if [[ -n "$PR_BASE" ]]; then
+      base_head="$(gh_try api "repos/${repo}/branches/${PR_BASE}" --jq '.commit.sha // ""' 2>/dev/null || true)"
+    fi
+    [[ "$base_head" =~ ^[0-9a-f]{40}$ ]] || base_head="$PR_BASE_SHA"
+    say "conflict: ${repo}#${pr} cannot be merged cleanly into ${PR_BASE:-its base branch} (base head ${base_head:-unknown}); rebase or merge the base branch into it. Nothing merged."
+    result="conflict"
+    exit 7
+  fi
+  if [[ "$PR_MSTATE" == behind && $BEHIND_NOTED -eq 0 ]]; then
+    BEHIND_NOTED=1
+    say "note: ${repo}#${pr} is behind ${PR_BASE:-its base branch}; not a failure"
+  fi
+  return 0
 }
 
 # One page of the check runs of a commit as lines, every free-text value crossing as base64 so a hostile
@@ -719,7 +760,8 @@ while :; do
   # The head first: a push makes everything below about a stale commit.
   poll_failed=0
   if [[ -n "$pr" ]]; then
-    if cur="$(pr_head)"; then
+    if pr_state; then
+      cur="$PR_HEAD"
       if [[ "$cur" != "$pin" ]]; then
         if [[ "$on_push" == abort || -n "$want_sha" ]]; then
           say "head moved: ${repo}#${pr} was ${pin}, now ${cur}"
@@ -732,6 +774,7 @@ while :; do
         last_sig=""
         last_change="$t"
       fi
+      check_mergeable
     else
       poll_failed=1
     fi
@@ -850,6 +893,7 @@ if [[ -n "$pr" ]]; then
     result="head-moved"
     exit 4
   fi
+  check_mergeable
 fi
 
 verified="$pin"

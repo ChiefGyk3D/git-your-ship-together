@@ -168,6 +168,7 @@ race seen on GYST #218), and a push that moved the head under the loop. This scr
 | `4` | Head moved: the pull request head is no longer the pinned SHA (at the start, while waiting, between the last check and the merge, or during the merge). |
 | `5` | Queued: the merge was accepted and the pull request, read back, is positively not merged yet at the verified head (a merge queue or auto-merge). Not reported as merged. A pull request that cannot be read back is exit `1`, never `5`. |
 | `6` | Other checks red: the gate did not fail, but another check run on the pinned commit failed, was cancelled, timed out, needed action, failed to start or went stale, and is not in `--allow-red`. `result` is `other-red`. Nothing is merged. |
+| `7` | Conflict (only with `--pr`): the pull request reads `mergeable: false` or `mergeable_state: dirty`, so it cannot be merged cleanly into its base branch. The wait ends at once, the output names the base branch and its head SHA, `result` is `conflict`, nothing is merged. `mergeable: null` (GitHub still computing) is unknown and re-polled, never a conflict; `behind` is a printed note, not a failure. |
 | `64` | Bad input; nothing was waited on and `gh` was not called. |
 
 The timeout is tested before hung, so a run that is past both reports `2`.
@@ -234,7 +235,7 @@ branch is supposed to trigger a deploy; pass a different `token` when it does.
 | `merge-retry-delay` | Seconds between merge attempts. |
 | `token` | Token for `gh`; default the workflow token. |
 
-Outputs: `result` (`green`, `red`, `other-red`, `timeout`, `hung`, `head-moved`, `merge-blocked`, `queued`, `error` or `usage`), `sha` (the verified commit: set
+Outputs: `result` (`green`, `red`, `other-red`, `conflict`, `timeout`, `hung`, `head-moved`, `merge-blocked`, `queued`, `error` or `usage`), `sha` (the verified commit: set
 whenever the commit verified green, so also for `merge-blocked` and `queued`; empty otherwise) and `merged` (`true` only when the pull request
 is merged at that commit). The outputs are written even when the step fails, so a later `if: always()` step can read them.
 
