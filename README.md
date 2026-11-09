@@ -288,6 +288,7 @@ Inputs of `python-ci.yml`:
 | `distro-egress-policy` | `block` | harden-runner policy for the `distro` job only; `audit` for a distribution whose mirrors are not on the list |
 | `distro-allowed-endpoints` | the measured list | The `distro` job's own allow-list, kept apart from `allowed-endpoints`: Docker Hub's image pull (registry, auth, CDN and the S3 blob host), the Debian, Ubuntu, Kali and Parrot mirrors, and PyPI. `extra-allowed-endpoints` is appended to it |
 | `distro-continue-on-error` | `false` | Let a failing distro run leave the gate green, for a suite that assumes a non-root user or a newer Python than the distribution ships. |
+| `pr-python-versions` | `""` (off) | JSON array of versions the `test` matrix runs on a pull request, e.g. `'["3.11", "3.15"]'` (oldest and newest). Empty runs `python-versions` on every event, so a caller that sets nothing sees no change. Push, schedule and dispatch always run the full `python-versions`; add a `schedule` trigger for a weekly full run. Entries must be in `python-versions`, and with `coverage-threshold` set `coverage-python-version` must be one of them (a bad value fails the job). `CI green` is unchanged |
 | `coverage-python-version` | `3.13` | The matrix leg that uploads coverage |
 | `install-command` | upgrade pip, `pip install -r requirements.txt` | Run before tests on every leg |
 | `test-command` | `pytest` | The test suite |
@@ -1077,13 +1078,13 @@ When publishing, each leg builds once, pushes that build under the temporary
 tag, pulls it back by digest and runs the non-root check, the probe and the Trivy
 scan against it; `merge` receives exactly the digest that passed. The index is
 staged under a tag of this run, its digest and contents are checked against the
-recorded digests, and only that digest is promoted to the final tags, signed and
-attested. The Trivy scan and checks therefore run after the image is pushed under
-its temporary tag; a failing check fails the job before `merge` runs.
+recorded digests, and that digest is signed, attested and verified before any
+release tag is written. The Trivy scan and checks therefore run after the image is
+pushed under its temporary tag; a failing check fails the job before `merge` runs.
 
-What the final-tag checks prove, and what they do not. After promotion, and
-again just before signing and after attestation, `merge` reads each final tag
-and requires it to resolve to the staged digest. That shows each tag pointed
+What the tag checks prove, and what they do not. After each release tag is
+written, and once more for every tag after the last write, `merge` reads the tag
+and requires it to resolve to the signed digest. That shows each tag pointed
 at the digest at the moment it was read. It does not make a tag immutable, it
 does not make the tags change together, and it cannot stop another writer with
 registry access from moving a tag afterwards. Signatures, the SBOM and the
@@ -1111,13 +1112,120 @@ workflow relied on it too, and it is observed behavior in production:
 before signing one digest in both registries. Docker's documentation says sources
 must already exist in the destination registry, so this stays a documented risk:
 if buildx ever enforces that, the Docker Hub step fails before anything is signed), checks each registry's index against the recorded
-digests, requires the two index digests to be equal, promotes that digest to the
-registry's tags, and signs and attests it. The build jobs never hold Docker Hub
+digests, requires the two index digests to be equal, and signs and attests that
+digest in both registries. The registry's release tags are written last, by the
+tag step, from that registry's own copy. The build jobs never hold Docker Hub
 credentials. A temporary `stage-...` tag is left in each registry.
 
 Platforms are `linux/<arch>` or `linux/<arch>/v<N>` entries separated by commas,
 with no spaces and no empty entries (anything else fails the plan job), each
 platform once (`linux/arm64` and `linux/arm64/v8` are the same platform).
+
+**Order of a publish.** Each platform job records the digest it pushed. The
+`merge` job builds the index from those digests only (never from a tag), checks
+that each registry's index lists exactly those platform manifests, and pushes it
+under an immutable staging tag (`stage-<sha>-<run id>-<attempt>`) on each
+registry. It then signs it, attests the SBOM, records provenance and verifies the
+signature and the SBOM attestation of that exact digest. Only then does the tag
+step write `latest` and every other tag in `tags`, immutable `sha-` tags first
+and `latest` last, one tag at a time, from that tag's own registry. If any
+earlier step fails, no release tag is written and the job fails with a message
+saying so; the staging tags (`stage-...` on the index, `<sha>-<run id>-<attempt>-<arch>`
+per platform) stay and are safe to delete; after a failed run they point at images
+that may not be signed.
+
+**The tag step is bounded, not atomic.** A registry cannot write several tags in
+one step, so the step cannot promise that all tags move or none. What it does:
+before writing anything it checks that the staged index reads back at its digest
+in each registry and records the digest every release tag holds now (a tag the
+registry reports as not found counts as new; any other read failure stops the
+step with nothing moved). It then writes one tag at a time and reads each back,
+and reads every tag again after the last write. Every registry call is retried
+up to 4 attempts in all, waiting 5, 10 and 20 seconds, but only for HTTP 408, 425,
+429, any 5xx or a timeout or reset; a write that returns an error is judged by
+reading the tag back, not by its exit status. Every digest a tag is moved to is
+already signed, attested and verified by the steps before it, and `latest` is
+written last.
+
+On a failure the restore is best effort and never overwrites another writer. A
+tag is written back to its previous digest only while it still holds the digest
+this run wrote. A tag that holds any other digest was changed by someone else: it
+is left alone, and the step fails with a "rollback failed" error naming the tag,
+the digest it holds, the digest this run promoted and the recorded previous
+digest. A tag already back on its previous digest needs no write. A restore needs
+the previous manifest to still exist. The previous digest is whatever the tag held
+before the run; this workflow does not verify it again, so a tag that is restored
+(or left in place) is not vouched for by this release. A tag that did not exist
+before cannot be deleted, so it may remain on the new digest; the step names it.
+If a restore is refused or fails, the step fails and names every tag and digest
+left behind. Between a write and a restore a tag holds the new, verified digest;
+the step does not stop another writer with registry access. A registry has no
+compare-and-swap on a tag, so the last read before a restore write cannot be made
+atomic with it: this window cannot be closed, only narrowed by the group and the
+immediate re-read.
+
+**One publish per GHCR image, and release order.** Runs that publish the same
+GHCR image run one at a time, whether or not Docker Hub is on, whatever their
+ref, and a running one is never cancelled midway. The group key is the GHCR
+image, from the plan job's repository owner and image name, never the ref, the
+commit or other event data. A job has one group, so Docker Hub is not in the key:
+callers with different GHCR images that share a Hub repository are not queued
+behind each other. The image name and `dockerhub-repository` may contain only
+letters, digits, `.`, `_`, `-` and `/`, on one line; anything else fails the plan.
+The ref is checked again before each moving tag and once after the last one; a run
+that is no longer the newest is rolled back and fails.
+It serializes runs in the order they reach the job, not in commit order, so the
+tag step also checks order itself. On a branch ref it reads the head through the
+API, and a run whose commit is no longer the head publishes only its immutable
+`sha-` tags, with a warning, and leaves `latest` and the branch tag alone. On a
+`vMAJOR.MINOR.PATCH` tag ref it lists the repository's `v*` tags through the API
+(`contents: read`, which the job already holds) and compares SemVer 2.0.0
+precedence (a stable release is ordered against stable releases only): if any
+existing release is newer, it publishes only its version tag and the `sha-` tags
+and leaves the mutable tags (`latest`, the major and minor tags) alone, with a
+notice. A tag ref that is not a SemVer release has no order, so it publishes only
+its own tag name and the `sha-` tags. If the head or the tag list cannot be read,
+the job fails and nothing moves. The version and `sha-` tags of an older release
+are still published. The tradeoff: GitHub keeps one pending run per group, so a
+pending run is replaced by a newer pending run for the same image; re-run
+the replaced run. A backport such as `v1.9.1` after `v2.0.0` therefore does not
+move `1.9` or `1`. The `merge` job never runs on `pull_request` or
+`pull_request_target`.
+
+A run that publishes with `sign`, `sbom` or `provenance` off fails before it
+builds, and the tag step refuses too, unless `allow-unsigned-publish: true` is
+set. A run that does not publish (a pull request, a ref the allow-list refuses)
+is not affected.
+
+**Rekor conflicts and retries.** A Rekor `409` (`an equivalent entry already
+exists`) on `cosign sign` or `cosign attest` is success only when
+`cosign verify` (or `verify-attestation`) of that digest passes with
+`signer-identity-regexp`, the GitHub OIDC issuer, the calling repository and
+the commit of this run; if it does not, the job fails. A transient Rekor or
+Fulcio error (HTTP 408, 425, 429 and every 5xx, a timeout, a reset connection)
+is retried 4 times in total, waiting 5, 10 and 20 seconds. Any other error fails
+at once.
+
+**`signer-identity-regexp`** is validated in the plan job, before any build leg pushes (and checked again in `merge`). It must be
+`^https://github\.com/<owner>/<repo>/\.github/workflows/<file>@` made of
+letters, digits, `_`, `-`, `/` and escaped dots only; a wildcard, alternation,
+group, class, unescaped dot or missing anchor fails the job. The default names
+this repository's `container-release.yml`; a fork sets its own. The accepted
+identity matches any ref of the named reusable workflow, so callers pin the
+reusable workflow by commit SHA: that pin is the ref the certificate carries.
+
+**First real release.** Three things could not be measured before the first
+real release and it is their canary: the `--certificate-github-workflow-sha`
+constraint and the read-back of the staged index and of each release tag with
+`docker buildx imagetools inspect`, which the tag step treats as absent only on
+a not-found reply. Each fails closed: the job fails and the release tags stay
+where they were. If the sha flag misbehaves, delete the one line
+`--certificate-github-workflow-sha "$WORKFLOW_SHA"` from each verify (the
+helper script and the final verify step).
+
+The final verify does not re-check the GitHub provenance attestation: that
+needs a verifier and hosts this job's allow-list does not carry, and the
+provenance step already fails the job on error before the tags move.
 
 Verify a published image:
 
@@ -1157,6 +1265,8 @@ Inputs of `container-release.yml`:
 | `image-name` | repository name, lower-cased | Name under `ghcr.io/<owner>/` |
 | `push` | `false` | Publish. `false` builds, tests and scans only |
 | `tags` | branch, pr, semver ×3, sha, `latest` on the default branch | `docker/metadata-action` tag rules |
+| `signer-identity-regexp` | `^https://github\.com/ChiefGyk3D/git-your-ship-together/\.github/workflows/container-release\.yml@` | Certificate identity the job's own signature and SBOM attestation must match after a Rekor conflict and before the tags move; strictly validated, see above |
+| `allow-unsigned-publish` | `false` | `true` lets a publishing run move the release tags with `sign`, `sbom` or `provenance` off |
 | `docker-test-command` | empty | Run against the locally built image; `$IMAGE` names it |
 | `hadolint` | `true` | Lint the Dockerfile with hadolint before building |
 | `hadolint-version` | `2.15.1` | hadolint release, downloaded as a pinned binary and cached |
@@ -2215,7 +2325,7 @@ Inputs of `security.yml`:
 | `snyk-on` | `schedule` | When Snyk runs: `schedule` is the weekly cron and `workflow_dispatch` only; `push` adds every push to the default branch and every tag. Snyk's free plan meters tests per month across the whole account, one Code and one Open Source test per run, and ten repositories on `push` spent a month's Code tests in a day. Never on a pull request |
 | `snyk-install-command` | empty | For a repository with no lock (`pip-audit-requirements: ""`) that declares its dependencies in `pyproject.toml`: the install Snyk Open Source scans a freeze of, such as `pip install .`. Empty with no lock leaves Snyk's discovery, which reads no PEP 621 `pyproject.toml` and ends in a "nothing to scan" warning |
 | `scorecard` | `false` | OpenSSF Scorecard, published; runs only on the default branch (push or schedule) |
-| `python-version` | `3.13` | Python for pip-audit, Semgrep and Snyk. The tool locks cover CPython 3.10 through 3.14 |
+| `python-version` | `3.13` | Python for pip-audit, Semgrep and Snyk. The tool locks cover CPython 3.11 through 3.14 |
 | `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `audit`, the measured list, empty | harden-runner, as in `python-ci.yml` |
 | `egress-policy-secretless` | `block` | harden-runner policy for the jobs that hold no stored secret, no OIDC token and no write-scoped token (`dependency-review` also holds its comment-scoped pull-requests write grant, a stated EX-0001 deviation), and whose output no privileged job consumes; exactly `audit` or `block`. Security exception EX-0001 is closed (2026-11-02), see [Known CI platform issue: westus2 (EX-0001)](#known-ci-platform-issue-westus2-ex-0001). `audit` opts out if the defect recurs |
 | `doppler-project`, `doppler-config`, `doppler-identity-id` | empty | See [Doppler setup](#doppler-setup) |
@@ -2294,7 +2404,7 @@ check out its own commit, so there is no file to read at run time. Scorecard's
 hash, and a workflow every caller pins by commit should not run unchecked
 code in all of them. The source of each is `.github/requirements/<tool>.in`
 (one exact version) and `<tool>.txt` (its lock: universal, so it covers every
-marker, pruned to the x86_64 and aarch64 Linux and CPython 3.10 to 3.14 wheels the jobs
+marker, pruned to the x86_64 and aarch64 Linux and CPython 3.11 to 3.14 wheels the jobs
 use). `python scripts/tool_locks.py` copies the files into `security.yml`,
 `--check` fails on a difference and `--relock` resolves again with `uv` (the
 script's docstring has the throwaway-venv commands). Dependabot watches the
