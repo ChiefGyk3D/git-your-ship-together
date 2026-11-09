@@ -47,15 +47,28 @@ SHA_ERE='^[0-9a-f]{40}$'
 TMPS=()
 trap 'rm -rf -- "${TMPS[@]}"' EXIT
 # mktmp NAME [mktemp args]: sets the variable NAME to a new temporary path (not in a subshell, so it registers).
-mktmp() { local p; p=$(mktemp "${@:2}") || exit 1; TMPS+=("$p"); printf -v "$1" '%s' "$p"; }
+mktmp() {
+  local p
+  p=$(mktemp "${@:2}") || exit 1
+  TMPS+=("$p")
+  printf -v "$1" '%s' "$p"
+}
 
-die() { local rc=$1; shift; echo "repin: $*" >&2; exit "$rc"; }
+die() {
+  local rc=$1
+  shift
+  echo "repin: $*" >&2
+  exit "$rc"
+}
 
-usage() { sed -n '/^# Usage:/,/^# Files read/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2; exit 64; }
+usage() {
+  sed -n '/^# Usage:/,/^# Files read/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
+  exit 64
+}
 
 now_epoch() { date -u -d "${REPIN_NOW:-now}" +%s; }
 epoch() { date -u -d "$1" +%s; }
-days_old() { echo $(( ($(now_epoch) - $(epoch "$1")) / 86400 )); }
+days_old() { echo $((($(now_epoch) - $(epoch "$1")) / 86400)); }
 
 declare -A TAG_SHA TAG_DATE
 
@@ -64,8 +77,8 @@ tag_info() {
   local tag=$1 line sha date
   [[ $tag =~ $TAG_ERE ]] || die 1 "refusing a release tag that is not vMAJOR.MINOR.PATCH: $(printf '%q' "$tag")"
   [ -n "${TAG_SHA[$tag]:-}" ] && return 0
-  line=$("$gh_bin" api "repos/$SRC/commits/$tag" --jq '[.sha, .commit.committer.date] | @tsv') \
-    || die 1 "no commit for $tag in $SRC"
+  line=$("$gh_bin" api "repos/$SRC/commits/$tag" --jq '[.sha, .commit.committer.date] | @tsv') ||
+    die 1 "no commit for $tag in $SRC"
   IFS=$'\t' read -r sha date <<<"$line"
   [[ $sha =~ $SHA_ERE ]] || die 1 "the API gave $tag a commit that is not 40 hex characters"
   [[ $date =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z$ ]] || die 1 "the API gave $tag a date that is not an ISO timestamp"
@@ -116,9 +129,9 @@ non_canonical() {
 pins() {
   local f
   while IFS= read -r f; do
-    { grep -nE "^[[:space:]]*(-[[:space:]]+)?$PIN_ERE" "$f" || true; } \
-      | sed -E 's|^([0-9]+):.*git-your-ship-together/([A-Za-z0-9_./-]+)@([0-9a-f]{40})[[:space:]]+#[[:space:]]*(v[0-9]+\.[0-9]+\.[0-9]+).*$|\1\t\3\t\4\t\2|' \
-      | F="$f" awk -F'\t' '{ print ENVIRON["F"] "\t" $1 "\t" $2 "\t" $3 "\t" $4 }'
+    { grep -nE "^[[:space:]]*(-[[:space:]]+)?$PIN_ERE" "$f" || true; } |
+      sed -E 's|^([0-9]+):.*git-your-ship-together/([A-Za-z0-9_./-]+)@([0-9a-f]{40})[[:space:]]+#[[:space:]]*(v[0-9]+\.[0-9]+\.[0-9]+).*$|\1\t\3\t\4\t\2|' |
+      F="$f" awk -F'\t' '{ print ENVIRON["F"] "\t" $1 "\t" $2 "\t" $3 "\t" $4 }'
   done < <(files_of "$1")
 }
 
@@ -128,7 +141,10 @@ norm() {
 }
 
 # tag_known TAG: success when the release exists (fills the caches); never exits.
-tag_known() { ( tag_info "$1" ) >/dev/null 2>&1 || return 1; tag_info "$1"; }
+tag_known() {
+  (tag_info "$1") >/dev/null 2>&1 || return 1
+  tag_info "$1"
+}
 
 # --- the input check ---------------------------------------------------------------------------------------------
 # A re-pin must not change what a caller passes. For each pin that moves, the called workflow (or composite action)
@@ -272,7 +288,7 @@ cmd_status() {
   tag_info "$latest"
   for dir in "$@"; do
     [ -d "$dir/.github" ] || die 64 "not a repository with a .github directory: $dir"
-  check_names "$dir"
+    check_names "$dir"
     if [ -n "$(non_canonical "$dir")" ]; then
       echo "$dir: references to $SRC that are not canonical pins:"
       non_canonical "$dir" | sed 's/^/  /'
@@ -320,8 +336,8 @@ rewrite() {
     exit 3
   fi
   while IFS=$'\t' read -r _ _ _ old _; do
-    [ "$(printf '%s\n%s\n' "$old" "$tag" | sort -V | tail -1)" = "$tag" ] \
-      || die 3 "refusing a downgrade: a pin says $old and the target is $tag (nothing was written)"
+    [ "$(printf '%s\n%s\n' "$old" "$tag" | sort -V | tail -1)" = "$tag" ] ||
+      die 3 "refusing a downgrade: a pin says $old and the target is $tag (nothing was written)"
   done < <(pins "$dir")
   check_inputs "$dir" "$tag" "$allow" "$notes"
   mktmp tmp -d
@@ -347,11 +363,25 @@ cmd_apply() {
   local to="" dry=0 allow=0 dir="" changed list
   while [ $# -gt 0 ]; do
     case $1 in
-      --to) [ $# -ge 2 ] || usage; to=$2; shift 2 ;;
-      --dry-run) dry=1; shift ;;
-      --allow-input-changes) allow=1; shift ;;
+      --to)
+        [ $# -ge 2 ] || usage
+        to=$2
+        shift 2
+        ;;
+      --dry-run)
+        dry=1
+        shift
+        ;;
+      --allow-input-changes)
+        allow=1
+        shift
+        ;;
       -*) usage ;;
-      *) [ -z "$dir" ] || usage; dir=$1; shift ;;
+      *)
+        [ -z "$dir" ] || usage
+        dir=$1
+        shift
+        ;;
     esac
   done
   [ -n "$dir" ] || usage
@@ -376,12 +406,30 @@ cmd_pr() {
   local -a files=()
   while [ $# -gt 0 ]; do
     case $1 in
-      --to) [ $# -ge 2 ] || usage; to=$2; shift 2 ;;
-      --base) [ $# -ge 2 ] || usage; base=$2; shift 2 ;;
-      --watch) watch=1; shift ;;
-      --allow-input-changes) allow=1; shift ;;
+      --to)
+        [ $# -ge 2 ] || usage
+        to=$2
+        shift 2
+        ;;
+      --base)
+        [ $# -ge 2 ] || usage
+        base=$2
+        shift 2
+        ;;
+      --watch)
+        watch=1
+        shift
+        ;;
+      --allow-input-changes)
+        allow=1
+        shift
+        ;;
       -*) usage ;;
-      *) [ -z "$dir" ] || usage; dir=$1; shift ;;
+      *)
+        [ -z "$dir" ] || usage
+        dir=$1
+        shift
+        ;;
     esac
   done
   [ -n "$dir" ] || usage
