@@ -12,6 +12,7 @@ and no fixed `filelock` exists for it. Locked bumps: `filelock` 4.2.7 to 4.2.9 (
 **A caller whose `security` job passes `python-version: "3.10"` must change it** (the default `3.13` is unaffected); on 3.10 the install now fails, since the locked wheels no longer resolve.
 The 3.10 grace entry in `.github/python-support.json` is deleted. The weekly audit (`audit.yml`) now runs `scripts/python_support.py`, so a listed version past its security end
 or a lapsed grace entry turns it red.
+
 ### New: `python-ci.yml` `pr-python-versions` (issue #309)
 
 Opt-in, default empty: a caller that sets nothing sees no change after it re-pins, and the `test` matrix is `python-versions` on every event.
