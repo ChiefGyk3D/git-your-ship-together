@@ -304,7 +304,7 @@ def test_the_rescan_job_runs_only_when_asked_and_only_after_a_good_verification(
     assert "contains(needs.*.result, 'failure')" in job["if"]
     assert "contains(needs.*.result, 'cancelled')" in job["if"]
     assert job["permissions"] == {"contents": "read"}
-    assert steps("rescan")[0]["name"] == "Validate the egress policy inputs (EX-0001)"
+    assert steps("rescan")[0]["name"] == "Validate the egress policy inputs"
     assert steps("rescan")[1]["with"]["disable-sudo"] is True
     assert JOBS["verified"]["permissions"] == {}
 

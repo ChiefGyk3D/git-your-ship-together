@@ -91,7 +91,7 @@ Twenty-four reusable workflows and six composite actions:
 | `.github/workflows/security.yml` | CodeQL (the `actions` language included by default), gitleaks, a dependency audit (pip-audit, and any other tool by command), Semgrep, dependency review on pull requests (with a licence denylist), optional Snyk, optional OpenSSF Scorecard |
 | `.github/workflows/dependabot-auto-merge.yml` | Queues a Dependabot bump to merge itself once the required checks pass, up to a size you choose |
 | `.github/actions/doppler-secrets` | Fetches a Doppler config as masked environment variables (default), or with `export: outputs` as one masked JSON output only the steps you hand it to can read; `names` narrows either to an allow-list. Over OIDC or a Service Token. The workflows inline a copy of its decide step (see the design rules); this is the source |
-| `.github/actions/egress-canary` | Fails a job fast when any address of `github.com`, `api.github.com` or the Actions results receiver is unreachable under harden-runner `block` (security exception EX-0001). The workflows inline a copy of it; this is the source |
+| `.github/actions/egress-canary` | Fails a job fast when any address of `github.com`, `api.github.com` or the Actions results receiver is unreachable under harden-runner `block`. The workflows inline a copy of it; this is the source |
 | `.github/actions/wait-ci` | Pins a commit and waits for its required check (`CI green` by default, exact name) to pass, then optionally squash-merges exactly that commit with `--match-head-commit`. Also requires every other check run on that commit to be complete and not red, and waits while one is open (an optional `allow-red` list records a named exception, `require-check` names late workflows, and a green is believed only after two identical reads one interval apart). Exit codes: 0 green, 1 gate red, 2 timeout, 3 hung, 4 head moved, 5 queued, 6 another check red. Wraps `scripts/wait-ci.sh`; a monitor's tool, not a step of the run it waits on. See [wait-ci](docs/wiki/Action-wait-ci.md) |
 | `.github/actions/classify-changes` | Says whether a pull request changes only paths the caller calls docs only (for example `docs/**`, `tests/**`, `*.md`), from the changed-file list the API returns, never from the checkout. Output `docs-only=true` only when every path matches, none is under `.github/` or the caller's never-skip list, the head has not moved and the count matches the event's; anything unconfirmed is `false`, so the job runs. Wraps `scripts/classify_changes.py`. See [Docs-only fast path and parallel CI](docs/wiki/Docs-only-fast-path.md) |
 | `.github/actions/ci-gate` | The body of a caller's own `CI green` job: every needed job must be `success`, and the one exception is a named job `skipped` while the classify-changes job succeeded with `docs-only=true`. A pull request from a fork may also skip the jobs named in the optional `fork-skippable-jobs` (they need a token a fork does not get), only when the caller's `fork-pull-request` is `true`. A skip for any other reason, a failure, a cancellation or a job missing from `needs` fails. The caller passes `needs: ${{ toJSON(needs) }}` as an input (it has no default, and an empty or non-JSON value fails); v1.32.0's and v1.33.0's copies cannot be loaded by a runner, use v1.33.1 or later. A composite action called as a step, not the reusable workflow `ci-gate.yml` above. Wraps `scripts/ci_gate.py`. See [Docs-only fast path and parallel CI](docs/wiki/Docs-only-fast-path.md) |
@@ -3229,7 +3229,8 @@ script (a reusable workflow cannot name the commit it runs from), and `tests/tes
 copies identical. The same holds for `.github/actions/egress-policy-check`, the input validation that runs
 just before it. The canary step runs only when the runner is Linux (`runner.os == 'Linux'`) **and** the job's
 effective policy is `block`; it uses no secret and reads no input. It is Linux-only because it needs `timeout`
-and `getent`, which macOS lacks (and Git Bash on Windows lacks `getent`), and because EX-0001 concerns
+and `getent`, which macOS lacks (and Git Bash on Windows lacks `getent`), and because the westus2 defect (see
+[Known CI platform issue: westus2 (EX-0001)](#known-ci-platform-issue-westus2-ex-0001)) concerned
 harden-runner `block` on Linux runners. On a macOS or Windows matrix leg the step is skipped; it is a diagnostic,
 so skipping it weakens no control (v1.25.1, issue #196).
 
@@ -3242,7 +3243,7 @@ connection to another answer of the same name is refused in a few milliseconds. 
 or times out four times in a row, a second apart, and a name that does not resolve, fail the step with:
 
 ```
-egress broken on this runner (known westus2 DNS issue, EX-0001): rerun the job
+egress broken on this runner (known westus2 DNS issue): rerun the job
 ```
 
 The per-address rule is deliberate: it is what detects the defect. Its cost is a false-positive risk: a
@@ -3261,7 +3262,7 @@ When it fails it prints, straight to the live job log (not to a file, which a hu
 port 53 (no process names), and for the three hosts plus
 `pipelines.actions.githubusercontent.com` the `getent ahostsv4` answer and the status, remote address and
 connect time of a `curl` request, each bounded by `timeout 10`; and the list of unreachable addresses. It
-also writes a one-line step summary naming EX-0001 and the addresses. These lines are what to attach to a
+also writes a one-line step summary naming the addresses. These lines are what to attach to a
 GitHub Support ticket; they contain resolver and host addresses, so read them before attaching. It prints no
 environment variable and reads no credential.
 

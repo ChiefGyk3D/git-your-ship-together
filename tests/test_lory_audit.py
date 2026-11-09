@@ -93,8 +93,8 @@ def test_there_is_no_checkout_and_the_steps_are_the_expected_ones():
     uses = [str(s.get("uses", "")) for s in JOB["steps"] if "uses" in s]
     assert not [u for u in uses if u.startswith("actions/checkout@")], "nothing here needs the tree"
     assert [s.get("name") for s in JOB["steps"] if "name" in s] == [
-        "Validate the egress policy inputs (EX-0001)",
-        "Egress canary (EX-0001)",
+        "Validate the egress policy inputs",
+        "Egress canary",
         "Call the Lory pipeline scan API",
         "Judge the Lory response",
     ]
@@ -122,7 +122,7 @@ def test_no_input_can_add_an_endpoint_or_change_where_the_job_may_connect():
         "lorikeetsecurity.com:443",
         "results-receiver.actions.githubusercontent.com:443",
     }
-    assert JOB["steps"][2]["name"] == "Egress canary (EX-0001)"
+    assert JOB["steps"][2]["name"] == "Egress canary"
     egress = CALL["inputs"]["egress-policy"]
     assert egress["type"] == "string" and egress["default"] == "audit"
 

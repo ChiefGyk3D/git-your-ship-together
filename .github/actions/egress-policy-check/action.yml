@@ -19,11 +19,11 @@
 # the inputs they declare (see egress-canary for why);
 # tests/test_egress_canary.py holds every copy byte-identical to this file.
 name: Egress policy check
-description: Fail unless every egress policy input is exactly audit or block (EX-0001).
+description: Fail unless every egress policy input is exactly audit or block.
 runs:
   using: composite
   steps:
-    - name: Validate the egress policy inputs (EX-0001)
+    - name: Validate the egress policy inputs
       shell: bash
       working-directory: ${{ github.workspace }}
       env:

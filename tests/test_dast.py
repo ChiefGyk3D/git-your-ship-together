@@ -136,8 +136,8 @@ def test_the_upload_job_holds_the_one_write_and_runs_none_of_the_callers_code():
     # The one shell is the egress canary: a fixed script that reads no input and no caller file.
     assert [s["name"] for s in shells] in (
         [],
-        ["Egress canary (EX-0001)"],
-        ["Validate the egress policy inputs (EX-0001)", "Egress canary (EX-0001)"],
+        ["Egress canary"],
+        ["Validate the egress policy inputs", "Egress canary"],
     ), "the upload job runs no shell but the canary"
     sarif = steps_of(upload)[-1]
     assert sarif["uses"].startswith("github/codeql-action/upload-sarif@")

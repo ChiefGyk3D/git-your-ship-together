@@ -39,7 +39,7 @@ APPROVED_TERMS = {
 # Steps that may run without the gate: they hold no push, signing or attestation ability, or are gated by an
 # output that only a gated step sets. A new step must be gated or be added here on purpose.
 BUILD_UNGATED = {
-    "Egress canary (EX-0001)",
+    "Egress canary",
     "Image metadata",
     "Require a non-root user",
     "Check the image",
@@ -55,8 +55,8 @@ BUILD_UNGATED_USES = (
     "docker/setup-buildx-action@",
 )
 MERGE_UNGATED = {
-    "Validate the egress policy inputs (EX-0001)",
-    "Egress canary (EX-0001)",
+    "Validate the egress policy inputs",
+    "Egress canary",
     "Fetch CI secrets from Doppler (OIDC)",  # gated by steps.doppler, which only a gated step sets
     "Fetch CI secrets from Doppler (Service Token)",
     "Resolve image names",
@@ -227,7 +227,7 @@ def test_the_local_only_job_has_no_package_write_and_no_publish_step():
 
 # The checks are one copy of text in two jobs; this holds them identical so they cannot drift.
 SHARED_STEPS = (
-    "Egress canary (EX-0001)",
+    "Egress canary",
     "Image metadata",
     "Require a non-root user",
     "Check the image",
@@ -245,7 +245,7 @@ def test_the_check_steps_are_identical_in_the_publishing_and_the_local_job(name)
 
 def test_the_egress_policy_check_is_identical_in_both_build_jobs():
     first = [jobs(load(RELEASE))[j]["steps"][0] for j in ("build", "build-local")]
-    assert first[0]["name"] == "Validate the egress policy inputs (EX-0001)" and first[0] == first[1]
+    assert first[0]["name"] == "Validate the egress policy inputs" and first[0] == first[1]
 
 
 def test_the_setup_steps_are_identical_in_both_build_jobs():
