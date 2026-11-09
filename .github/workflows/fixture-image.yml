@@ -1,0 +1,64 @@
+# Publishes the image fixture verify and fixture rescan (ci.yml) check: ghcr.io/chiefgyk3d/gyst-fixture, built from
+# fixture/gyst-fixture/ and signed, SBOM-attested and provenance-attested by this repository's own container-release.yml.
+# It replaces a third-party image on a moving tag as the fixture target (issues #285, #315, #381).
+#
+# Not a reusable workflow and not part of `CI green`: it publishes. It runs on a manual dispatch or on a push to main that
+# changes the image source, never on a pull request (container-release.yml refuses to publish from one in any case).
+# The release path stays strict for every caller: the two inputs below are set here, for this one image, and the
+# defaults of container-release.yml (push events only, a vX.Y.Z tag ref only) are untouched.
+#
+# After a run, the published digest is in the merge job's summary (container-release.yml writes it there). Put it in
+# fixture/gyst-fixture/DIGEST (the only place it is written); tests/test_fixture_image.py checks the file.
+
+name: Fixture image
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - fixture/gyst-fixture/**
+      # The DIGEST file records the result of a run; changing it must not start another.
+      - '!fixture/gyst-fixture/DIGEST'
+      - .github/workflows/fixture-image.yml
+
+permissions:
+  contents: read
+
+# One publish at a time, and a started one runs to the end: cancelling it half way could leave the tags moved
+# without the signature.
+concurrency:
+  group: fixture-image
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: publish gyst-fixture
+    # The image belongs to this repository's main branch; a manual run from another branch would sign an image
+    # whose certificate names that branch.
+    if: github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/container-release.yml # zizmor: ignore[self-repository]
+    permissions:
+      contents: read
+      packages: write  # the temporary-tag push and the index
+      id-token: write  # keyless cosign signature and the provenance attestation
+      attestations: write  # SLSA build provenance
+      security-events: write  # the Trivy SARIF upload
+    with:
+      # normal: ~1 min (the first run's two build legs reached the Trivy scan in 0.8 to 1.0 min; the fixture release
+      # builds in ci.yml succeed in p50 1.1, p95 1.3, longest 1.3 min). 5 is 3 x p95 rounded up, over 1.5 x the longest.
+      timeout-minutes: 5
+      push: true
+      # Only the two events that start this workflow may publish, and only from main (the job's `if:`), so the tag-ref
+      # requirement is relaxed for this caller and no other.
+      allowed-publish-events: push,workflow_dispatch
+      require-tag-ref: false
+      dockerfile: fixture/gyst-fixture/Dockerfile
+      context: fixture/gyst-fixture
+      image-name: gyst-fixture
+      # The version is fixture/gyst-fixture/VERSION (tests/test_fixture_image.py holds the two equal).
+      tags: |
+        type=raw,value=1.0.0
+        type=raw,value=latest
+        type=sha
+      docker-test-command: docker run --rm "$IMAGE" | grep -Eqx '[0-9]+\.[0-9]+\.[0-9]+'

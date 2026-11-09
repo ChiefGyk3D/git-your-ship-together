@@ -302,6 +302,12 @@ ALLOWED_WRITES = {
     ("ci.yml", "fixture-release", "packages"),
     ("ci.yml", "fixture-release", "attestations"),
     ("ci.yml", "fixture-release", "security-events"),
+    # The one image this repository publishes, for its own fixture jobs: the caller of container-release.yml, on a
+    # manual run or a push to main only (tests/test_fixture_image.py), granting what the called jobs declare.
+    ("fixture-image.yml", "publish", "packages"),
+    ("fixture-image.yml", "publish", "id-token"),
+    ("fixture-image.yml", "publish", "attestations"),
+    ("fixture-image.yml", "publish", "security-events"),
     # And python-package-release.yml on the fixture: the grants its two
     # publishing jobs declare, which publish: false skips.
     ("ci.yml", "fixture-package", "contents"),
@@ -322,6 +328,9 @@ ALLOWED_WRITES = {
     # This repository's own wiki: the caller of the above, granting what the called
     # job declares. The generate job it runs holds contents: read.
     ("wiki.yml", "wiki", "contents"),
+    # Verify main: the dispatch job alone holds the write, `actions: write` for one workflow_dispatch of the CI workflow
+    # on the default branch (the one event the job token may start); the jobs that read the checks hold read only.
+    ("main-verify.yml", "dispatch", "actions"),
     # And both on the fixture, whose callers pass deploy/publish: false.
     ("ci.yml", "fixture-dast", "security-events"),  # dast.yml's SARIF upload, which does run on the fixture
     # agent-scan.yml's upload jobs, which upload-sarif: false skips on the fixture; a caller still grants the scope
@@ -1246,3 +1255,24 @@ def test_the_distro_default_allows_every_host_a_docker_pull_reaches(name):
     ].split()
     assert DOCKER_PULL_HOSTS <= set(endpoints), f"{name}: the distro image pull is blocked under block"
     assert not any("*" in e for e in endpoints), f"{name}: allow-list has a wildcard"
+
+
+# The suite is the longest serial job (issue #306): ci.yml runs it with pytest-xdist, which the lock must carry.
+def _suite_command(doc: dict) -> str:
+    steps = steps_of(jobs(doc)["test"])
+    return next(s["run"] for s in steps if s.get("name") == "Run the tests")
+
+
+def _lock_names(text: str) -> set[str]:
+    return {m.group(1).lower() for m in re.finditer(r"^([A-Za-z0-9_.-]+)(?:\[[^\]]*\])?==", text, re.M)}
+
+
+def test_ci_runs_the_suite_in_parallel_with_a_locked_xdist():
+    assert re.search(r"\bpytest\b.* -n auto\b", _suite_command(load(WORKFLOWS / "ci.yml")))
+    assert "pytest-xdist" in _lock_names((REPO / "requirements-dev.txt").read_text())
+    assert "pytest-xdist" in _lock_names((REPO / "requirements-dev.in").read_text())
+
+
+def test_the_parallel_suite_guard_bites():
+    assert not re.search(r"\bpytest\b.* -n auto\b", "pytest -q")
+    assert "pytest-xdist" not in _lock_names("pytest==9.1.1 \\\n    --hash=sha256:aa\n")

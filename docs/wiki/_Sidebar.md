@@ -24,6 +24,7 @@
 - [Testing and the contract](Testing-and-the-contract.md)
 - [Contributing and developing](Contributing-and-developing.md)
 - [Maintaining this wiki](Maintaining-this-wiki.md)
+- [Verify main](Verify-main.md)
 - [FAQ](FAQ.md)
 
 **CI**

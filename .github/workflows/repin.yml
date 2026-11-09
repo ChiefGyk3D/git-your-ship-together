@@ -406,17 +406,25 @@ jobs:
           #   * The release is read from the GitHub API only: the tag name must be vMAJOR.MINOR.PATCH and the commit a
           #     full 40-hex SHA, or the run stops. Nothing else is fetched, and no value from the API reaches a shell.
           #   * A symlinked workflow file is reported and skipped, never followed.
+          #   * Other copies of the old pin are never silent. After the pins are rewritten (and in `status` and `--dry-run`), the
+          #     tracked files of a git checkout are searched for the old full 40-hex SHA as a whole word, and every hit outside
+          #     the rewritten workflow refs is listed as path:line (a test that asserts the pin, a script constant, a template).
+          #     `--also-update-literals` rewrites those exact copies too (and a `# vX.Y.Z` comment that directly follows the SHA (a closing quote may sit between),
+          #     nothing else), prints each rewrite, and never touches a binary file, a symlink, an untracked file, a longer hex
+          #     string that merely contains the SHA, or a release-history file (CHANGELOG*, HISTORY*, NEWS*, RELEASES*, RELEASE_NOTES*).
+          #     Without the flag the pins are rewritten, the copies are only listed, and the run exits 11.
           #   * `pr` never merges and never enables auto-merge. `--watch` only waits (scripts/wait-ci.sh without --merge).
           #
           # Usage:
           #   repin.sh status DIR...                       pinned against latest, with ages, per repository
-          #   repin.sh apply [--to TAG] [--dry-run] [--allow-input-changes] DIR    rewrite the pins in DIR (default: the latest release)
-          #   repin.sh pr [--to TAG] [--base BRANCH] [--watch] [--allow-input-changes] DIR
+          #   repin.sh apply [--to TAG] [--dry-run] [--allow-input-changes] [--also-update-literals] DIR    rewrite the pins in DIR (default: the latest release)
+          #   repin.sh pr [--to TAG] [--base BRANCH] [--watch] [--allow-input-changes] [--also-update-literals] DIR
           #                                                apply on a branch repin/gyst-<tag>, push, open a pull request
           #
           # Files read: DIR/.github/workflows/*.yml and *.yaml, DIR/.github/actions/*/action.yml and *.yaml.
           # Exit codes: 0 done or nothing to do (status: every pin is current); 10 status found a pin behind;
-          #   3 refused (see the message); 5 an input the caller uses changed; 4 the pin-only check failed; 64 bad usage; 1 anything else (no release, gh error).
+          #   3 refused (see the message); 5 an input the caller uses changed; 4 the pin-only check failed; 64 bad usage; 1 anything else (no release, gh error);
+          #   11 apply or pr rewrote the pins but literal copies of the old SHA remain outside the workflows (listed; rerun with --also-update-literals).
           # Environment: GH_BIN (the gh command, default gh; tests point it at a fake), REPIN_NOW (an ISO time standing
           #   in for now, tests only). GNU date and sed are required.
           set -euo pipefail
@@ -669,9 +677,117 @@ jobs:
             fi
           }
 
+          # --- other copies of the old pin ---------------------------------------------------------------------------------
+          # A pin can live outside the workflows too: a test that asserts it, a script constant, a template. A re-pin that
+          # leaves them behind fails the caller's own checks. These helpers find and (only on request) rewrite the exact copies.
+
+          # history_file PATH: success for a release-history file, whose old SHAs are a record and never rewritten.
+          history_file() {
+            local base=${1##*/}
+            base=${base^^}
+            case $base in CHANGELOG* | HISTORY* | NEWS* | RELEASES* | RELEASE_NOTES* | RELEASE-NOTES*) return 0 ;; esac
+            return 1
+          }
+
+          # literal_scan DIR NEWSHA OUT: for each pinned SHA other than NEWSHA, the tracked text files of DIR (a git checkout;
+          # any other directory is skipped) that hold it as a whole word, outside the canonical workflow pin lines, as
+          # `sha<TAB>tag<TAB>path<TAB>line` in OUT. Binary files (git grep -I), symlinks, untracked files and history files are
+          # left out; history files are noted on stdout.
+          #
+          # A file name is data. Only names made of [A-Za-z0-9._/-] (what check_names allows for workflow paths) are listed,
+          # rewritten or echoed anywhere; any other name is skipped and only counted in UNSAFE (a count, never the name).
+          UNSAFE=0
+          declare -A UNSAFE_SEEN
+          literal_scan() {
+            local dir=$1 newsha=$2 out=$3 file line sha tag f n
+            declare -A old pinned
+            : >"$out"
+            UNSAFE=0
+            UNSAFE_SEEN=()
+            git -C "$dir" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
+            while IFS=$'\t' read -r file line sha tag _; do
+              pinned["${file#"$dir"/}:$line"]=1
+              [ "$sha" = "$newsha" ] || old[$sha]=$tag
+            done < <(pins "$dir")
+            for sha in "${!old[@]}"; do
+              tag=${old[$sha]}
+              while IFS= read -r -d '' f; do
+                if ! [[ $f =~ ^[A-Za-z0-9._/-]+$ ]]; then
+                  UNSAFE_SEEN[$f]=1
+                  UNSAFE=${#UNSAFE_SEEN[@]}
+                  continue
+                fi
+                [ -L "$dir/$f" ] && continue
+                while IFS=: read -r n _; do
+                  [ -z "${pinned["$f:$n"]:-}" ] || continue
+                  if history_file "$f"; then
+                    echo "left alone (release history): $f:$n"
+                    continue
+                  fi
+                  printf '%s\t%s\t%s\t%s\n' "$sha" "$tag" "$f" "$n" >>"$out"
+                done < <(grep -n -I -w -F -e "$sha" -- "$dir/$f" || true)
+              done < <(git -C "$dir" grep -z -l -I -w -F -e "$sha" || true)
+            done
+            sort -t$'\t' -k3,3 -k4,4n -o "$out" "$out"
+          }
+
+          # literal_lines HITS: the hits as `  path:line (sha12, tag)`.
+          literal_lines() {
+            awk -F'\t' '{ printf "  %s:%s (%s, %s)\n", $3, $4, substr($1, 1, 12), $2 }' "$1"
+          }
+
+          # literal_unsafe_note: how many files with unsafe names were skipped, as a count only; nothing when none.
+          literal_unsafe_note() {
+            [ "$UNSAFE" -gt 0 ] || return 0
+            echo "$UNSAFE file(s) with unsafe names skipped (not listed, not rewritten; fix them by hand)"
+          }
+
+          # literal_report HITS: the hits, then the skipped count; prints nothing when there is neither.
+          literal_report() {
+            if [ -s "$1" ]; then
+              echo "copies of the old pin outside the workflow refs ($(wc -l <"$1")):"
+              literal_lines "$1"
+            fi
+            literal_unsafe_note
+          }
+
+          # literal_rewrite DIR NEWSHA NEWTAG HITS DRY LIST: rewrite (DRY=1: only print the diff of) the exact copies named in
+          # HITS; the changed paths (relative to DIR) go to the file LIST. A copy is the whole-word old SHA; the `# vX.Y.Z`
+          # comment is changed only where it directly follows that SHA.
+          literal_rewrite() {
+            local dir=$1 newsha=$2 newtag=$3 hits=$4 dry=$5 list=$6 tmp f sha tag etag n=0 before after verb
+            local -a exprs
+            : >"$list"
+            mktmp tmp -d
+            verb=rewrote
+            [ "$dry" = 1 ] && verb="would rewrite"
+            while IFS= read -r f; do
+              exprs=()
+              while IFS=$'\t' read -r sha tag; do
+                etag=${tag//./\\.}
+                exprs+=(-e "s/\\b$sha\\b([\"']?[[:space:]]+#[[:space:]]*)$etag(\\.([^0-9]|\$)|[^0-9A-Za-z.]|\$)/$newsha\\1$newtag\\2/g" -e "s/\\b$sha\\b/$newsha/g")
+              done < <(F="$f" awk -F'\t' '$3 == ENVIRON["F"] { print $1 "\t" $2 }' "$hits" | sort -u)
+              [ "${#exprs[@]}" -gt 0 ] || continue
+              n=$((n + 1))
+              sed -E "${exprs[@]}" -- "$dir/$f" >"$tmp/$n.new"
+              cmp -s "$dir/$f" "$tmp/$n.new" && continue
+              before=$(wc -l <"$dir/$f")
+              after=$(wc -l <"$tmp/$n.new")
+              [ "$before" = "$after" ] || die 4 "the rewrite of $f changed its line count; nothing more was written"
+              if [ "$dry" = 1 ]; then
+                diff -u "$dir/$f" "$tmp/$n.new" || true
+              else
+                cat "$tmp/$n.new" >"$dir/$f"
+              fi
+              F="$f" awk -F'\t' -v v="$verb" -v n="$newtag" \
+                '$3 == ENVIRON["F"] { printf "%s %s:%s (%s -> %s)\n", v, $3, $4, substr($1, 1, 12), n }' "$hits" | sort -u
+              printf '%s\n' "$f" >>"$list"
+            done < <(cut -f3 "$hits" | sort -u)
+          }
+
           cmd_status() {
             [ $# -ge 1 ] || usage
-            local dir latest behind=0 refused=0 list tag n sha note
+            local dir latest behind=0 refused=0 list tag n sha note lits
             latest=$(latest_tag)
             tag_info "$latest"
             for dir in "$@"; do
@@ -687,6 +803,8 @@ jobs:
                 echo "$dir: no GYST pins"
                 continue
               fi
+              mktmp lits
+              literal_scan "$dir" "${TAG_SHA[$latest]}" "$lits"
               echo "$dir: latest $latest (${TAG_DATE[$latest]%%T*}, $(days_old "${TAG_DATE[$latest]}") days old)"
               while IFS= read -r tag; do
                 n=$(printf '%s\n' "$list" | awk -F'\t' -v t="$tag" '$4 == t' | wc -l)
@@ -706,6 +824,7 @@ jobs:
                   echo " BEHIND$note"
                 fi
               done < <(printf '%s\n' "$list" | awk -F'\t' '{ print $4 }' | sort -uV)
+              literal_report "$lits"
             done
             [ "$refused" = 0 ] || return 3
             [ "$behind" = 0 ] || return 10
@@ -748,7 +867,7 @@ jobs:
           }
 
           cmd_apply() {
-            local to="" dry=0 allow=0 dir="" changed list
+            local to="" dry=0 allow=0 lit=0 dir="" changed list lits lchanged lrc=0
             while [ $# -gt 0 ]; do
               case $1 in
                 --to)
@@ -764,6 +883,10 @@ jobs:
                   allow=1
                   shift
                   ;;
+                --also-update-literals)
+                  lit=1
+                  shift
+                  ;;
                 -*) usage ;;
                 *)
                   [ -z "$dir" ] || usage
@@ -776,7 +899,11 @@ jobs:
             [ -d "$dir/.github" ] || die 64 "not a repository with a .github directory: $dir"
             check_names "$dir"
             [ -n "$to" ] || to=$(latest_tag)
+            tag_info "$to"
             mktmp list
+            mktmp lits
+            mktmp lchanged
+            literal_scan "$dir" "${TAG_SHA[$to]}" "$lits"
             rewrite "$dir" "$to" "$dry" "$list" "$allow"
             changed=$(cat "$list")
             if [ -z "$changed" ]; then
@@ -787,11 +914,23 @@ jobs:
               echo "re-pinned to $to:"
               printf '%s\n' "$changed" | sed 's/^/  /'
             fi
+            if [ -s "$lits" ] || [ "$UNSAFE" -gt 0 ]; then
+              if [ "$lit" = 1 ]; then
+                [ ! -s "$lits" ] || literal_rewrite "$dir" "${TAG_SHA[$to]}" "$to" "$lits" "$dry" "$lchanged"
+                literal_unsafe_note
+              else
+                literal_report "$lits"
+                echo "these copies were not changed; rerun with --also-update-literals to rewrite them"
+              fi
+              # exit 11: copies of the old SHA remain (all of them without the flag; the unsafe-named ones with it)
+              if [ "$lit" != 1 ] || [ "$UNSAFE" -gt 0 ]; then lrc=11; fi
+            fi
+            return "$lrc"
           }
 
           cmd_pr() {
-            local to="" base="" watch=0 allow=0 dir="" start branch open changed list notes body f count url
-            local -a files=()
+            local to="" base="" watch=0 allow=0 lit=0 dir="" start branch open changed list notes body f count url lits lchanged lrc=0
+            local -a files=() lfiles=()
             while [ $# -gt 0 ]; do
               case $1 in
                 --to)
@@ -810,6 +949,10 @@ jobs:
                   ;;
                 --allow-input-changes)
                   allow=1
+                  shift
+                  ;;
+                --also-update-literals)
+                  lit=1
                   shift
                   ;;
                 -*) usage ;;
@@ -836,6 +979,9 @@ jobs:
             fi
             mktmp list
             mktmp notes
+            mktmp lits
+            mktmp lchanged
+            literal_scan "$dir" "${TAG_SHA[$to]}" "$lits"
             rewrite "$dir" "$to" 0 "$list" "$allow" "$notes"
             changed=$(cat "$list")
             if [ -z "$changed" ]; then
@@ -844,6 +990,14 @@ jobs:
             fi
             while IFS= read -r f; do files+=("${f#"$dir"/}"); done <<<"$changed"
             count=$(git -C "$dir" diff --numstat -- "${files[@]}" | awk '{ n += $1 } END { print n + 0 }')
+            if [ "$lit" = 1 ] && [ -s "$lits" ]; then
+              literal_rewrite "$dir" "${TAG_SHA[$to]}" "$to" "$lits" 0 "$lchanged"
+              while IFS= read -r f; do lfiles+=("$f"); done <"$lchanged"
+            fi
+            if [ -s "$lits" ] || [ "$UNSAFE" -gt 0 ]; then
+              literal_unsafe_note
+              if [ "$lit" != 1 ] || [ "$UNSAFE" -gt 0 ]; then lrc=11; fi
+            fi
             mktmp body
             {
               echo "Pin-only re-pin of the reusable workflows from \`$SRC\` to \`$to\`."
@@ -852,6 +1006,21 @@ jobs:
               echo
               printf -- '- `%s`\n' "${files[@]}"
               echo
+              if [ "${#lfiles[@]}" -gt 0 ]; then
+                echo "With \`--also-update-literals\` it also rewrote exact copies of the old pin SHA (and a \`# vX.Y.Z\` comment directly after it) outside the workflows:"
+                echo
+                printf -- "- \`%s\`\n" "${lfiles[@]}"
+                echo
+              elif [ -s "$lits" ]; then
+                echo "Copies of the old pin SHA remain outside the workflows and were NOT changed (rerun with \`--also-update-literals\`); this pull request's checks may fail on them:"
+                echo
+                literal_lines "$lits" | sed 's/^  /- /'
+                echo
+              fi
+              if [ "$UNSAFE" -gt 0 ]; then
+                echo "- $(literal_unsafe_note)"
+                echo
+              fi
               echo "- Release: https://github.com/$SRC/releases/tag/$to"
               echo "- Changelog: https://github.com/$SRC/blob/$to/CHANGELOG.md"
               echo
@@ -864,8 +1033,8 @@ jobs:
               echo "Opened by \`scripts/repin.sh\`. It does not merge; read the changelog entries since the old pin, then merge once CI is green."
             } >"$body"
             git -C "$dir" switch -q -c "$branch"
-            git -C "$dir" add -- "${files[@]}"
-            git -C "$dir" commit -q -m "Re-pin git-your-ship-together to $to" -m "Pin-only: the commit SHA and the version comment of each reference, nothing else."
+            git -C "$dir" add -- "${files[@]}" "${lfiles[@]}"
+            git -C "$dir" commit -q -m "Re-pin git-your-ship-together to $to" -m "Pin-only: the commit SHA and the version comment of each reference, nothing else.${lfiles[*]:+ Plus exact copies of the old SHA in: ${lfiles[*]}.}"
             git -C "$dir" push -q origin "$branch"
             url=$(cd "$dir" && "$gh_bin" pr create --base "$base" --head "$branch" --title "Re-pin git-your-ship-together to $to" --body-file "$body")
             echo "opened $url"
@@ -874,6 +1043,7 @@ jobs:
               bash "$here/wait-ci.sh" --repo "$(cd "$dir" && "$gh_bin" repo view --json nameWithOwner --jq .nameWithOwner)" \
                 --pr "${url##*/}" --sha "$(git -C "$dir" rev-parse "$branch")"
             fi
+            return "$lrc"
           }
 
           [ $# -ge 1 ] || usage

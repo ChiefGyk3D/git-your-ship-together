@@ -10,5 +10,7 @@ atheris==3.1.0
 # Validates the CycloneDX SBOM python-package-release.yml writes (tests/test_sbom.py); the extra is the JSON-schema checker.
 cyclonedx-python-lib[json-validation]==11.12.0
 pytest==9.1.1
+# Runs the suite in parallel on the CI runner (ci.yml "Run the tests": pytest -n auto); the tests share no port or path.
+pytest-xdist==3.8.0
 PyYAML==6.0.3
 ruff==0.17.3

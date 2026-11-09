@@ -90,9 +90,11 @@ publish).
 |---|---|
 | `ci.yml` | actionlint, zizmor, the pytest contract, then every reusable workflow run against `fixture/` at the PR's ref |
 | `security-self.yml` | `security.yml` run on this repository |
+| `fixture-image.yml` | Publishes `ghcr.io/chiefgyk3d/gyst-fixture` (from `fixture/gyst-fixture/`) through `container-release.yml` on a manual run or a push to `main`; `fixture verify` and `fixture rescan` check it, pinned by digest |
 | `dependabot-auto-merge-self.yml` | `dependabot-auto-merge.yml` run on this repository's own bumps |
 | `audit.yml` | The weekly [baseline audit](Baseline-and-the-weekly-audit.md) and risk-register issues |
 | `wiki.yml` | Publishes this wiki from `main`; see [Maintaining this wiki](Maintaining-this-wiki.md) |
+| `main-verify.yml` | After a push to `main`, every six hours and by hand: start `ci.yml` by `workflow_dispatch` when the head has no required check, fail when one is red or missing ([Verify main](Verify-main.md)) |
 
 ### Everything else
 
@@ -121,6 +123,7 @@ publish).
 | `scripts/parallel_ci_plan.py` | The input validation and path rules `parallel-ci.yml` inlines byte for byte; also runnable locally |
 | `scripts/parallel_ci_gate.py` | The gate rule `parallel-ci.yml` and `ci-gate.yml` inline byte for byte |
 | `scripts/classify_changes.py`, `scripts/ci_gate.py` | The logic behind the `classify-changes` and `ci-gate` actions ([Docs-only fast path](Docs-only-fast-path.md)) |
+| `scripts/verify_main.py` | The logic of `main-verify.yml` (assess, dispatch, confirm); stdlib only, run by the workflow from the checkout ([Verify main](Verify-main.md)) |
 | `scripts/check_token_drift.py` | The pin-and-source drift check `token-drift.yml` inlines byte for byte; also runnable locally |
 | `scripts/check_vendored_drift.py` | The drift check `vendored-drift.yml` inlines byte for byte; also runnable locally |
 | `scripts/check_pin_comments.py` | The pin-comment check `pin-comments.yml` inlines byte for byte; also runnable locally |
