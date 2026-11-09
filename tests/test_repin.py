@@ -40,8 +40,13 @@ if a[:1] == ["api"]:
         print(sc["latest"])
         sys.exit(0)
     if "/contents/" in path:
-        fpath = path.split("/contents/", 1)[1]
-        ref = a[a.index("-f") + 1].split("=", 1)[1]
+        fpath, _, query = path.split("/contents/", 1)[1].partition("?")
+        # Real gh turns -f/-F into a POST unless -X GET is given; the contents endpoint is GET only.
+        method = a[a.index("-X") + 1] if "-X" in a else ("POST" if ("-f" in a or "-F" in a) else "GET")
+        if method != "GET":
+            sys.stderr.write("gh: Not Found (HTTP 404)\n")
+            sys.exit(1)
+        ref = dict(kv.split("=", 1) for kv in query.split("&") if "=" in kv).get("ref", "")
         docs = sc.get("contents", {})
         key = fpath + "@" + ref
         if key in docs:
@@ -175,6 +180,19 @@ def test_status_prints_pinned_against_latest_with_ages_and_exits_10_when_behind(
     assert "38 days old" in p.stdout  # 2026-10-01 to 2026-11-08
     assert "3 days old" in p.stdout  # the latest, released 2026-11-05
     assert "BEHIND" in p.stdout
+
+
+def test_apply_reads_workflow_inputs_with_a_get_request(env):
+    """gh turns -f into a POST, which the contents endpoint rejects, so every caller exited 5 (issue #374)."""
+    root = make_caller(env, {"ci.yml": wf()})
+    p = run(env, "apply", root)
+    assert p.returncode == 0, p.stdout + p.stderr
+    assert "cannot read" not in p.stderr
+    reads = [c for c in calls(env) if len(c) > 1 and "/contents/" in c[1]]
+    assert reads, "no contents reads were made"
+    for c in reads:
+        assert "-f" not in c and "-F" not in c, c
+        assert "ref=" in c[1], c
 
 
 def test_status_exits_0_when_every_pin_is_the_latest(env):

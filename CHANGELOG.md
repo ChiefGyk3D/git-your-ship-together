@@ -5,6 +5,13 @@ name what a caller sees after that.
 
 ## Unreleased
 
+### Fix: `repin.sh` could not read workflow inputs (issue #374)
+
+- **`scripts/repin.sh`.** `apply`, `status` and `pr` read each called workflow's inputs through the contents API, and
+  passed the ref with `gh api -f`, which makes gh send a POST; GitHub rejected it, so every caller exited 5 with
+  "cannot read <workflow> at the old pin". The ref now rides in the query string (a GET). A genuine input drop still
+  exits 5.
+
 ### Hardening: credential scope of `repin.yml` (issue #370)
 
 - **`repin.yml`.** The Doppler fetch no longer injects secrets into the job environment (`inject-env-vars: false`); the
