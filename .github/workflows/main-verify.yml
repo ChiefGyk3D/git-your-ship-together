@@ -1,0 +1,112 @@
+# Verifies the head of the default branch after the fact. A push made with the job token (the Dependabot auto-merge
+# is one) starts no workflow runs, so a commit can land on main with no CI at all and main sits unverified until the
+# nightly run. This workflow runs on every push to main, every six hours and by hand, reads the head commit and
+# the required checks on it, and:
+#   - head green: says so in one line and stops (quiet and idempotent);
+#   - a required check red: fails, and the annotation lists the red contexts and the counts;
+#   - none of the required checks reported (once the commit is 10 minutes old): starts the CI workflow on the
+#     default branch by workflow_dispatch, which is the one event the job token may start (GitHub: workflow_dispatch
+#     and repository_dispatch always create workflow runs, https://docs.github.com/en/actions/concepts/security/github_token,
+#     read 2026-11-09), then waits, bounded, for the required checks to complete;
+#   - still nothing completed after the bounded wait, or any check not green: fails.
+# The logic is scripts/verify_main.py (stdlib only; tests/test_verify_main.py). This is a self-caller only: the
+# reusable form would need the script inlined and an input per repository (the CI workflow's file name), so it is
+# not shipped; another repository can copy this file and the script.
+#
+# Needs: ci.yml keeps `workflow_dispatch` as a trigger (tests/test_verify_main.py pins that). The required checks are
+# read from the branch protection when the token can (it usually cannot: the endpoint wants repository admin), else
+# FALLBACK_CONTEXTS below, which must match the protection (scripts/audit_baseline.py checks it weekly).
+# One caveat: the push that this workflow triggers on is itself not created when the push is made with the job token,
+# so a bot-merged commit is caught by the six-hour schedule, at most six hours late; a push by a person or an app is
+# caught at once.
+name: Verify main
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+
+permissions: {}
+
+# One verification at a time and never cancelled halfway: a second one waits for the first.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+env:
+  CI_WORKFLOW: "ci.yml"
+  FALLBACK_CONTEXTS: "CI green"
+
+jobs:
+  assess:
+    name: Read the head of main
+    # Only the default branch is verified; a manual run from another branch does nothing.
+    if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read  # check out scripts/verify_main.py, read the head commit and the branch protection
+      checks: read  # the check runs on the head commit
+      actions: read  # whether a CI run for the head is already queued
+    outputs:
+      verdict: ${{ steps.assess.outputs.verdict }}
+      sha: ${{ steps.assess.outputs.sha }}
+    steps:
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: assess
+        timeout-minutes: 13
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 -I scripts/verify_main.py assess --workflow "$CI_WORKFLOW" --fallback-contexts "$FALLBACK_CONTEXTS"
+
+  dispatch:
+    name: Start CI on main
+    needs: assess
+    if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && needs.assess.outputs.verdict == 'dispatch' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read  # check out scripts/verify_main.py and read the head commit
+      actions: write  # the one write: workflow_dispatch of the CI workflow
+    steps:
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - timeout-minutes: 3
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          ASSESSED_SHA: ${{ needs.assess.outputs.sha }}
+        run: python3 -I scripts/verify_main.py dispatch --workflow "$CI_WORKFLOW" --sha "$ASSESSED_SHA"
+
+  confirm:
+    name: Required checks on main are green
+    needs: [assess, dispatch]
+    # The dispatch job is skipped when nothing needed dispatching; a failed assess or dispatch fails the workflow
+    # on its own, so this job runs only after a clean assess and a dispatch that succeeded or was not needed.
+    if: ${{ always() && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && needs.assess.result == 'success' && needs.assess.outputs.verdict != 'green' && (needs.dispatch.result == 'success' || needs.dispatch.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    permissions:
+      contents: read  # check out scripts/verify_main.py, read the head commit and the branch protection
+      checks: read  # the check runs on the head commit
+    steps:
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - timeout-minutes: 30
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 -I scripts/verify_main.py confirm --workflow "$CI_WORKFLOW" --fallback-contexts "$FALLBACK_CONTEXTS"
