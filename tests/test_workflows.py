@@ -322,6 +322,9 @@ ALLOWED_WRITES = {
     # This repository's own wiki: the caller of the above, granting what the called
     # job declares. The generate job it runs holds contents: read.
     ("wiki.yml", "wiki", "contents"),
+    # Verify main: the dispatch job alone holds the write, `actions: write` for one workflow_dispatch of the CI workflow
+    # on the default branch (the one event the job token may start); the jobs that read the checks hold read only.
+    ("main-verify.yml", "dispatch", "actions"),
     # And both on the fixture, whose callers pass deploy/publish: false.
     ("ci.yml", "fixture-dast", "security-events"),  # dast.yml's SARIF upload, which does run on the fixture
     # agent-scan.yml's upload jobs, which upload-sarif: false skips on the fixture; a caller still grants the scope
