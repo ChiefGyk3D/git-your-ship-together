@@ -634,6 +634,12 @@ def step_named(prefix):
     return found[0]
 
 
+FETCH_PREFIX = "Fetch CI secrets from Doppler"
+KEY_EXPR = (
+    "${{ steps.doppler-oidc.outputs.REPIN_APP_PRIVATE_KEY || steps.doppler-token.outputs.REPIN_APP_PRIVATE_KEY }}"
+)
+
+
 def test_the_workflow_inlines_the_script_byte_for_byte():
     run = step_named("Write the re-pin script")["run"]
     head = "cat > \"$RUNNER_TEMP/repin.sh\" <<'REPIN_SH'\n"
@@ -655,7 +661,7 @@ def test_the_job_token_stays_read_only_and_every_write_is_the_apps_with_three_na
         "permission-workflows": "write",
     }
     assert app["with"]["repositories"] == "${{ github.event.repository.name }}", "limited to the calling repository"
-    assert app["with"]["private-key"] == "${{ env.REPIN_APP_PRIVATE_KEY }}", "the key comes from the Doppler fetch"
+    assert app["with"]["private-key"] == KEY_EXPR, "the key comes from the Doppler fetch step outputs"
 
 
 def test_the_app_key_is_never_a_github_secret():
@@ -667,7 +673,6 @@ def test_the_app_key_is_never_a_github_secret():
     used = set(re.findall(r"secrets\.([A-Za-z0-9_]+)", text))
     assert used == {"DOPPLER_TOKEN"}, used
     assert "secrets.APP_PRIVATE_KEY" not in text and "\n      APP_PRIVATE_KEY:" not in text
-    assert step_named("Fetch CI secrets from Doppler (OIDC)")["with"]["inject-env-vars"] is True
     # The key is never on a command line or echoed: no script body names it, and the token step takes it as an input.
     for step in workflow_steps():
         assert "REPIN_APP_PRIVATE_KEY" not in str(step.get("run", "")), step.get("name")
@@ -694,3 +699,72 @@ def test_the_workflow_never_merges_and_hands_git_no_credential_in_a_url_or_heade
     assert "pr merge" not in script and "--auto" not in script
     run = step_named("Open the pin-only")["run"]
     assert "GIT_ASKPASS" in run and "https://" not in run.replace("$SERVER_URL", "")
+
+
+# --- credential scope (issue #370): the App key reaches the token step and nothing after it ---------------------
+
+
+def test_the_doppler_fetch_never_injects_the_secret_into_the_environment():
+    fetches = [s for s in workflow_steps() if str(s.get("name", "")).startswith(FETCH_PREFIX)]
+    assert len(fetches) == 2, "both the OIDC and the Service Token fetch are checked"
+    for step in fetches:
+        assert step["with"].get("inject-env-vars") is False, step["name"]
+        assert step.get("id") in {"doppler-oidc", "doppler-token"}, step["name"]
+
+
+LEAK_MARKERS = (
+    "REPIN_APP_PRIVATE_KEY",
+    "steps.doppler-",
+    "doppler-oidc",
+    "doppler-token",
+    "toJSON(steps",
+    "steps[",
+    "secrets",
+)
+
+
+def key_leaks_after(steps, mint):
+    """Names of steps after the mint step that could read the key: by name, by whole-context dump or by bracket form."""
+    return [
+        str(step.get("name")) for step in steps[mint + 1 :] if any(m.lower() in str(step).lower() for m in LEAK_MARKERS)
+    ]
+
+
+@pytest.mark.parametrize(
+    "bypass",
+    [
+        {"env": {"DUMP": "${{ toJSON(steps) }}"}},
+        {"env": {"DUMP": "${{ tojson(steps) }}"}},
+        {"env": {"K": "${{ steps['doppler-oidc'].outputs.REPIN_APP_PRIVATE_KEY }}"}},
+        {"env": {"K": "${{ steps['doppler-token'].outputs }}"}},
+        {"env": {"S": "${{ toJSON(secrets) }}"}},
+        {"env": {"S": "${{ secrets }}"}},
+        {"env": {"K": "${{ env.REPIN_APP_PRIVATE_KEY }}"}},
+    ],
+)
+def test_the_post_mint_guard_bites_on_each_bypass(bypass):
+    steps = workflow_steps()
+    mint = next(i for i, s in enumerate(steps) if str(s.get("name", "")).startswith("Mint a one-hour"))
+    assert key_leaks_after(steps, mint) == []
+    mutated = [*steps, {"name": "Injected", "run": "true", **bypass}]
+    assert key_leaks_after(mutated, mint) == ["Injected"]
+
+
+def test_the_key_is_not_referenced_by_any_step_after_the_token_step_nor_by_a_job_env():
+    doc = yaml.safe_load(WORKFLOW.read_text())
+    assert "REPIN_APP_PRIVATE_KEY" not in str(doc["jobs"]["repin"].get("env", {})) + str(doc.get("env", {}))
+    steps = workflow_steps()
+    mint = next(i for i, s in enumerate(steps) if str(s.get("name", "")).startswith("Mint a one-hour"))
+    assert mint > 0
+    assert not key_leaks_after(steps, mint)
+    for step in steps[:mint]:
+        name = str(step.get("name", ""))
+        if "REPIN_APP_PRIVATE_KEY" in str(step) and not name.startswith(FETCH_PREFIX):
+            assert name.startswith("Decide whether"), name
+            assert str(step["env"]["KEY_SET"]).endswith("!= '' }}"), "a boolean, not the value"
+
+
+def test_the_repin_job_hardens_the_runner_with_disable_sudo():
+    hardening = [s for s in workflow_steps() if str(s.get("uses", "")).startswith("step-security/harden-runner@")]
+    assert len(hardening) == 1
+    assert hardening[0]["with"]["disable-sudo"] is True
