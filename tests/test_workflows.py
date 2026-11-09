@@ -1255,3 +1255,24 @@ def test_the_distro_default_allows_every_host_a_docker_pull_reaches(name):
     ].split()
     assert DOCKER_PULL_HOSTS <= set(endpoints), f"{name}: the distro image pull is blocked under block"
     assert not any("*" in e for e in endpoints), f"{name}: allow-list has a wildcard"
+
+
+# The suite is the longest serial job (issue #306): ci.yml runs it with pytest-xdist, which the lock must carry.
+def _suite_command(doc: dict) -> str:
+    steps = steps_of(jobs(doc)["test"])
+    return next(s["run"] for s in steps if s.get("name") == "Run the tests")
+
+
+def _lock_names(text: str) -> set[str]:
+    return {m.group(1).lower() for m in re.finditer(r"^([A-Za-z0-9_.-]+)(?:\[[^\]]*\])?==", text, re.M)}
+
+
+def test_ci_runs_the_suite_in_parallel_with_a_locked_xdist():
+    assert re.search(r"\bpytest\b.* -n auto\b", _suite_command(load(WORKFLOWS / "ci.yml")))
+    assert "pytest-xdist" in _lock_names((REPO / "requirements-dev.txt").read_text())
+    assert "pytest-xdist" in _lock_names((REPO / "requirements-dev.in").read_text())
+
+
+def test_the_parallel_suite_guard_bites():
+    assert not re.search(r"\bpytest\b.* -n auto\b", "pytest -q")
+    assert "pytest-xdist" not in _lock_names("pytest==9.1.1 \\\n    --hash=sha256:aa\n")

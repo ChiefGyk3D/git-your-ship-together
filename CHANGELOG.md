@@ -5,6 +5,25 @@ name what a caller sees after that.
 
 ## Unreleased
 
+### New: `wait-ci.sh --from-protection` and a fail-fast on a gate name that never reports (issue #378)
+
+Five merge captains hit a 10-minute hang or gated on the wrong thing: the default gate is a bare `CI green`, `--require-check` only adds to it, and a nested name (`ci / CI green`, `gate / CI green`) needed `--context`, which replaces the default. Nothing existing changes unless a caller uses the new flag; the fail-fast changes only how a wait that could never end is reported.
+
+- **`--from-protection`.** The gate is read from the default branch: its classic required status checks, then its active rulesets (the union, as GitHub enforces both), with app ids honored. It replaces the default gate, is mutually exclusive with `--context`, and `--require-check` still adds. No readable required check is exit 64 naming the branch.
+- **Fail fast.** A requested name that has not reported while every run on the pinned head is complete and the list read identical on 3 polls over at least 60 s now ends with exit 2 (`result` `missing`) and names the missing context and the check names that did report, instead of waiting for the hung timer. A run still open, or a late workflow that starts within that window, is waited for as before. Every other exit code, the head pin, the mergeability read and the settle rule are unchanged.
+- **`--help`.** The script prints its usage and options.
+
+### Added: `repin.sh` finds the other copies of the old pin (issue #380)
+
+Two callers failed their re-pin pull requests because a file outside the workflows held the old SHA: a test asserting `bash-ci.yml@<old> # v1.31.0`, and a script constant that a test compared with the workflow pin.
+
+- **Report.** After the pins are rewritten, and in `status` and `apply --dry-run`, `scripts/repin.sh` searches the tracked files of the git checkout for each old full 40-hex SHA as a whole word and lists every hit outside the rewritten workflow refs as `path:line`. Binary files, symlinks, untracked files, a longer hex string that merely contains the SHA, and release-history files (`CHANGELOG*`, `HISTORY*`, `NEWS*`, `RELEASES*`, `RELEASE_NOTES*`) are never hits.
+- **New exit code 11** (`apply` and `pr`): the pins were rewritten but copies remain, listed. `pr` still opens the workflow-only pull request and names the copies in its body. Every existing code keeps its meaning; `status` keeps 0, 10 and 3.
+- **`--also-update-literals`** (`apply`, `pr`): rewrites those exact copies, and a `# vX.Y.Z` comment only where it directly follows the SHA (a closing quote may sit between), prints each rewrite, and with `pr` commits those files too. `--dry-run` prints the diff. A caller that already re-pinned has no old SHA left to search for, so pass the flag on the run that re-pins.
+- **The scheduled workflow** inlines the new script and does not pass the flag: a caller with copies gets the workflow-only pull request and a failed step (exit 11) that names them.
+- **File names are data.** Only names made of `A-Za-z0-9._/-` are listed, rewritten or put in a pull request body; any other name (a backtick, a backslash, a newline, a space, `$(...)`, a `;`) is skipped and only counted ("N file(s) with unsafe names skipped"), and that count alone makes the run exit 11. The file name reaches awk through `ENVIRON`, never `-v`, and sed gets only `-e` scripts and `--` before the file.
+- **Tests.** `tests/test_repin.py` builds a git fixture with a workflow ref, a test asserting the old pin, a script constant, a CHANGELOG line (untouched), a history file, a binary file, a symlink, an untracked file and a longer hex string.
+
 ### Added: a GYST-owned fixture image for `fixture verify` and `fixture rescan` (issue #381, refs)
 
 `fixture verify` and `fixture rescan` checked `ghcr.io/chiefgyk3d/star-daemon:latest`, a third-party moving tag, so a rebuild, rename or privacy change there turned this repository red (#285, #315). No caller input changes; this is this repository's own pipeline.
@@ -29,6 +48,12 @@ On 2026-11-09 commit 52592bc, a Dependabot bump merged by the auto-merge token, 
 - **`main-verify.yml`.** Runs on a push to `main`, every six hours and by hand. It reads the default branch head and the required checks on it (from the branch protection when the token can read it, else `FALLBACK_CONTEXTS`, `CI green`). Green: one line, nothing else. A required check red: the job fails and the annotation lists the red contexts with counts. None reported once the commit is 10 minutes old (and no `ci.yml` run for it is queued): `ci.yml` is dispatched on `main` by `workflow_dispatch`, which a job token may start, and the required checks are awaited for at most 25 minutes. Still nothing completed, or anything not green: the job fails. Three jobs, so `actions: write` is on the dispatch job alone; no secret; default branch only; every wait and request is bounded.
 - **`scripts/verify_main.py`** (stdlib only) holds the logic; `tests/test_verify_main.py` runs it against a stubbed REST API and a fake clock.
 - **Limits.** The push trigger is itself not created for a push made with the job token, so a bot-merged commit is caught by the six-hour schedule, up to six hours late. `ci.yml` must keep `workflow_dispatch` (it has it; a test pins that). Not shipped as a reusable workflow: it would need the script inlined and an input for the CI workflow's file name; another repository can copy the file and the script.
+
+### Changed: the repository's own test job runs pytest in parallel (issue #306)
+
+- **`ci.yml` `Test the workflows`.** `Run the tests` is now `pytest -q -n auto` (pytest-xdist, one worker per CPU). The step took 622 s of a 641 s job on the latest successful main run, and the last 15 successful runs of the job took 563 to 958 s. No test, assertion or check changed, the job name and `CI green` wiring are the same, and a caller sees nothing (this file is the repository's own CI, not a reusable workflow).
+- **`requirements-dev.in` / `.txt`.** `pytest-xdist==3.8.0` (and its `execnet`) added; the lock was regenerated with `pip-compile --generate-hashes --strip-extras`, which also drops the `[extras]` brackets pip-compile now strips from two existing lines.
+- **Guard.** `tests/test_workflows.py` fails if the step loses `-n auto` or the lock loses `pytest-xdist`.
 
 ### Fixed: tool installs survive a GitHub download outage (issue #372, refs)
 
