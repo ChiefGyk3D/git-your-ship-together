@@ -14,6 +14,7 @@ hide the one check that proves a crash fails the job.
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import re
 import signal
@@ -98,6 +99,34 @@ def test_the_workflow_pin_matches_the_one_this_repository_tests_with():
     assert f"atheris=={version} " in lock, "requirements-dev.txt does not lock the workflow's Atheris version"
     missing = {h for h in hashes if h not in lock}
     assert not missing, f"hashes in python-fuzz.yml but not in requirements-dev.txt: {sorted(missing)}"
+
+
+def atheris_python_ok(version_file_text, fuzz_default, supported):
+    """True when Dependabot would resolve the Atheris pin: a listed minor, equal to the fuzz default."""
+    minor = version_file_text.strip()
+    return re.fullmatch(r"\d+\.\d+", minor) is not None and minor in supported and minor == fuzz_default
+
+
+def test_dependabot_resolves_requirements_dev_under_the_python_atheris_has_wheels_for():
+    """Dependabot picks its newest preinstalled CPython unless `.python-version` says otherwise.
+
+    Atheris 3.1.0 has no sdist and no wheel for a CPython newer than 3.14, so under the newest one
+    Dependabot's resolver finds only 3.0.0 and the whole pip update fails (issue #366).
+    """
+    path = REPO / ".python-version"
+    assert path.is_file(), ".python-version is missing; Dependabot would resolve under its newest CPython"
+    default = load(WORKFLOW).get(True, load(WORKFLOW).get("on"))["workflow_call"]["inputs"]["python-version"]["default"]
+    supported = [e["version"] for e in json.loads((REPO / ".github" / "python-support.json").read_text())["versions"]]
+    assert atheris_python_ok(path.read_text(), str(default), supported), (
+        f".python-version must be one listed minor equal to python-fuzz.yml's default ({default})"
+    )
+
+
+def test_the_python_version_guard_bites():
+    assert atheris_python_ok("3.14\n", "3.14", ["3.13", "3.14"])
+    assert not atheris_python_ok("3.15\n", "3.14", ["3.14", "3.15"]), "newer than the fuzz default"
+    assert not atheris_python_ok("3.9\n", "3.14", ["3.14"]), "unlisted"
+    assert not atheris_python_ok("3.14.2\n", "3.14", ["3.14"]), "must be major.minor"
 
 
 def test_findings_are_uploaded_for_thirty_days_even_when_the_step_failed():
