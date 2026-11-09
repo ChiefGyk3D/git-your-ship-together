@@ -1165,9 +1165,7 @@ def test_the_readme_and_the_changelog_carry_the_migration_note():
     # The entry sits in Unreleased until the next release cut moves it under a version heading, so find it by its own
     # heading wherever it lives now instead of pinning the test to one section.
     changelog = (REPO / "CHANGELOG.md").read_text()
-    entries = [
-        e for e in changelog.split("\n### ")[1:] if "issue #336" in e.split("\n", 1)[0]
-    ]
+    entries = [e for e in changelog.split("\n### ")[1:] if "issue #336" in e.split("\n", 1)[0]]
     assert len(entries) == 1, "exactly one changelog entry carries the issue #336 migration note"
     entry = entries[0]
     assert "commit-bound" in entry
