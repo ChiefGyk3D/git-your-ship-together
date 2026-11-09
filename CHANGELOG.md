@@ -13,6 +13,12 @@ A caller sees this after it re-pins; no input changes, no egress host is added a
 - **The site-packages hint.** When every secret hit is under a `site-packages` path it adds one line: set `skip-secret-scan-in-site-packages: true` on the call to skip secret rules there (CVE scanning stays on). The input stays opt-in and off by default.
 - **Where it lives.** `scripts/trivy_sarif_summary.py` (stdlib only); its marked block is inlined byte for byte, held identical by `tests/test_trivy_sarif_summary.py`. `verify-published.yml` and `base-image-digest.yml` scan with their own Trivy binary and JSON output, not this scan, and are unchanged.
 
+### Changed: the repository's own test job runs pytest in parallel (issue #306)
+
+- **`ci.yml` `Test the workflows`.** `Run the tests` is now `pytest -q -n auto` (pytest-xdist, one worker per CPU). The step took 622 s of a 641 s job on the latest successful main run, and the last 15 successful runs of the job took 563 to 958 s. No test, assertion or check changed, the job name and `CI green` wiring are the same, and a caller sees nothing (this file is the repository's own CI, not a reusable workflow).
+- **`requirements-dev.in` / `.txt`.** `pytest-xdist==3.8.0` (and its `execnet`) added; the lock was regenerated with `pip-compile --generate-hashes --strip-extras`, which also drops the `[extras]` brackets pip-compile now strips from two existing lines.
+- **Guard.** `tests/test_workflows.py` fails if the step loses `-n auto` or the lock loses `pytest-xdist`.
+
 ### Fixed: tool installs survive a GitHub download outage (issue #372, refs)
 
 On 2026-11-09 a GitHub incident timed out anonymous traffic (HTTP 504, curl exit 22) and every plain `curl -sSfL` tool install failed on its first try. A caller sees this after it re-pins; no input changes and no egress host is added.

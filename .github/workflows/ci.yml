@@ -150,8 +150,11 @@ jobs:
       - name: Require jq
         run: command -v jq >/dev/null || sudo apt-get install -y --no-install-recommends jq
 
+      # pytest-xdist (requirements-dev.txt): one worker per CPU. The tests share no port, fixed path or working
+      # directory (each scenario builds its own tmp_path and binds port 0), so the suite asserts the same things in
+      # a fraction of the wall time. -n is in the command, not in pyproject.toml, so a local `pytest` stays serial.
       - name: Run the tests
-        run: pytest -q
+        run: pytest -q -n auto
 
   # The fixture project (fixture/README.md) through python-ci.yml at this ref.
   # The grant is what a caller gives: python-ci narrows it to contents: read
