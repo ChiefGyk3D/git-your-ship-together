@@ -5,6 +5,14 @@ name what a caller sees after that.
 
 ## Unreleased
 
+### Fixed: tool installs survive a GitHub download outage (issue #372, refs)
+
+On 2026-11-09 a GitHub incident timed out anonymous traffic (HTTP 504, curl exit 22) and every plain `curl -sSfL` tool install failed on its first try. A caller sees this after it re-pins; no input changes and no egress host is added.
+
+- **`fetch_release`.** One helper (`scripts/fetch-release.sh`) now makes all 14 release downloads: gitleaks (`security.yml`), syft (`python-package-release.yml`), Trivy (`base-image-digest.yml`, `verify-published.yml`), hadolint (`container-release.yml`), shellcheck and shfmt (`bash-ci.yml`), OpenTofu (4 jobs), tflint and OPA (`tofu-ci.yml`) and arduino-cli (`arduino-ci.yml`). It sends the job token (passed to the step as `FETCH_RELEASE_TOKEN`), when the step has one, on `https://github.com/` URLs only (through a curl config on stdin: in no argument list, and `set -x` is switched off around it). Only the two jobs already kept in `block` hand it over (`python-package-release.yml` `build`, `tofu-ci.yml` `plan`); a job that follows `egress-policy-secretless` holds no token by design (EX-0001) and downloads anonymously with the same retries. It tries at most 5 times with exponential backoff and jitter (2, 4, 8, 16 s, up to half again), caps each try at 45 s and the whole call at 170 s. The pinned SHA-256 is mandatory and fatal: a missing, malformed or mismatched hash fails at once, is never retried and leaves no file. The existing cache check and the `sha256sum -c` after the download stay.
+- **Inlined, held identical.** A reusable workflow cannot call a file of its own commit, so the marked block is copied into each step; `tests/test_fetch_release.py` holds every copy byte-identical to the script, runs the function against a fake curl (retry bounds, mandatory checksum, token never in argv or logs, even under `set -x`), and fails if any step curls a release URL outside the helper.
+- **Not changed.** The `sigstore/cosign-installer` (3 steps), `aquasecurity/trivy-action` (3 steps) and `anchore/sbom-action` (1 step) steps download inside third-party actions and still do so; see issue #372.
+
 ### New: opt-in `token-drift.yml` (issue #342)
 
 A new reusable workflow. Nothing existing changes: a caller sees it only by adding a job that calls it, after it re-pins.

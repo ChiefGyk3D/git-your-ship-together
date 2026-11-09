@@ -758,8 +758,72 @@ jobs:
           TRIVY_SHA256: ${{ inputs.trivy-sha256 }}
         run: |
           set -euo pipefail
+          # BEGIN fetch_release
+          fetch_release() {
+            local xt=0 rc
+            case $- in *x*) xt=1 ;; esac
+            set +x
+            if _fetch_release "$@"; then rc=0; else rc=$?; fi
+            if [ "$xt" = 1 ]; then set -x; fi
+            return "$rc"
+          }
+          _fetch_release() {
+            local url=${1:-} out=${2:-} want=${3:-} token=${FETCH_RELEASE_TOKEN:-}
+            local tries=5 budget=${FETCH_RELEASE_BUDGET:-170} delay=${FETCH_RELEASE_BASE_DELAY:-2}
+            local start=$SECONDS n=0 left cap pause step tmp code rc have
+            case $url in https://?*) ;; *) echo "::error title=fetch_release::the URL must start with https://"; return 2 ;; esac
+            if [ -z "$out" ]; then echo "::error title=fetch_release::no output file given"; return 2; fi
+            case $want in *[!0-9a-fA-F]*) want="" ;; esac
+            if [ "${#want}" -ne 64 ]; then
+              echo "::error title=fetch_release::a SHA-256 of exactly 64 hex digits is required for $url"
+              return 2
+            fi
+            case $budget in '' | *[!0-9]*) budget=170 ;; esac
+            case $delay in '' | *[!0-9]*) delay=2 ;; esac
+            if [ "$budget" -gt 170 ]; then budget=170; fi
+            case $url in https://github.com/*) ;; *) token="" ;; esac
+            case $token in *[!A-Za-z0-9_.-]*) token="" ;; esac
+            tmp=$(mktemp "${out}.XXXXXX") || return 1
+            step=$delay
+            while [ "$n" -lt "$tries" ]; do
+              n=$((n + 1))
+              left=$((budget - (SECONDS - start)))
+              if [ "$left" -lt 1 ]; then break; fi
+              cap=$((left < 45 ? left : 45))
+              if [ -n "$token" ]; then have="header = \"Authorization: Bearer ${token}\""; else have="# anonymous"; fi
+              if code=$(printf '%s\n' "$have" | curl -sSfL --proto '=https' --proto-redir '=https' --tlsv1.2 \
+                --connect-timeout 10 --max-time "$cap" -K - -w '%{http_code}' -o "$tmp" "$url"); then
+                rc=0
+              else
+                rc=$?
+              fi
+              if [ "$rc" -eq 0 ]; then
+                have=$(sha256sum "$tmp" | cut -d' ' -f1)
+                if [ "$have" != "$(printf '%s' "$want" | tr 'A-F' 'a-f')" ]; then
+                  rm -f "$tmp"
+                  echo "::error title=fetch_release::SHA-256 mismatch for $url: expected $want, got $have"
+                  return 1
+                fi
+                mv -f "$tmp" "$out"
+                return 0
+              fi
+              echo "fetch_release: attempt $n of $tries failed for $url (curl exit $rc, HTTP ${code:-none})" >&2
+              case $code in 401 | 403) token="" ;; esac
+              if [ "$n" -ge "$tries" ]; then break; fi
+              pause=$((step + RANDOM % (step / 2 + 1)))
+              left=$((budget - (SECONDS - start)))
+              if [ "$pause" -ge "$left" ]; then break; fi
+              echo "fetch_release: waiting ${pause}s before the next try" >&2
+              sleep "$pause"
+              step=$((step * 2))
+            done
+            rm -f "$tmp"
+            echo "::error title=fetch_release::could not download $url after $n tries (last curl exit ${rc:-none}); nothing was written to the output file"
+            return 1
+          }
+          # END fetch_release
           archive="$RUNNER_TEMP/trivy.tar.gz"
-          curl -sSfL -o "$archive" "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          fetch_release "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" "$archive" "${TRIVY_SHA256}"
           echo "${TRIVY_SHA256}  ${archive}" | sha256sum -c -
           mkdir "$RUNNER_TEMP/trivy-bin"
           tar -xzf "$archive" -C "$RUNNER_TEMP/trivy-bin" trivy

@@ -164,7 +164,8 @@ def test_every_download_restores_a_cache_first_and_hashes_what_is_on_disk(name, 
         assert part in key, f"{name}: the {tool} cache key {key!r} lacks {part}"
     assert caches[0]["with"]["path"] == env["CACHE_DIR"], f"{name}: {tool} caches a different path than it reads"
     body = step["run"]
-    curl_line = next(line for line in body.splitlines() if "curl" in line)
+    # the download is the fetch_release call (scripts/fetch-release.sh, inlined above it), not the curl inside it
+    curl_line = next(line for line in body.splitlines() if line.lstrip().startswith("fetch_release "))
     # The last hash check is outside the `if [ ! -f ]` that guards the download,
     # so it runs on the cached archive and the fresh one alike.
     check_lines = [line for line in body.splitlines() if re.search(r"sha256sum -c -$", line)]
