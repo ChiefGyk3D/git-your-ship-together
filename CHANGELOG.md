@@ -12,6 +12,7 @@ pinned to: the comment must exist, the tag must exist, and it must resolve to th
 `ref-version-mismatch` checked this, and only for callers that run zizmor. A lookup that cannot be completed is `UNVERIFIED` and
 fails the job (input `unverified: warn` prints it and passes); lookups are bounded (10 s each, 200 and 120 s in all). Read-only;
 a caller that sets nothing sees no change. This repository's own CI now runs it. Script: `scripts/check_pin_comments.py`.
+
 ### Breaking: `security.yml` no longer supports Python 3.10 (issues #347, #314)
 
 The pip-audit and Semgrep hash locks now cover CPython 3.11 through 3.14 (they covered 3.10 through 3.14). 3.10 reached end of life on 2026-10-01
