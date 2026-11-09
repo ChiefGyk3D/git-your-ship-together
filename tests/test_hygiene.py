@@ -94,6 +94,8 @@ def test_a_job_that_keeps_sudo_runs_a_caller_install_command(name, job_name):
 FIXED_GROUPS = {
     ("docs-pages.yml", "deploy"): "pages",
     ("wiki-publish.yml", "publish"): "wiki",
+    # Keyed on the GHCR image only (the plan's serialize output), never on the ref, github.workflow or the commit.
+    ("container-release.yml", "merge"): "container-release-${{ needs.plan.outputs.serialize }}",
 }
 
 
