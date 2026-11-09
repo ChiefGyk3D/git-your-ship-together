@@ -166,6 +166,7 @@ jobs:
     name: Verify ${{ inputs.image }}
     if: inputs.image != ''
     runs-on: ubuntu-24.04
+    # normal: ~1 min (p50 0.9, p95 1.2; last ~30 green runs)
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read
@@ -416,6 +417,7 @@ jobs:
     name: Verify release ${{ inputs.release-tag }}
     if: inputs.release-tag != ''
     runs-on: ubuntu-24.04
+    # normal: no fixture history
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read  # list and download the release's assets
@@ -633,6 +635,7 @@ jobs:
       always() && inputs.rescan &&
       !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
     runs-on: ubuntu-24.04
+    # normal: ~1 min (p50 0.5, p95 0.7; last ~30 green runs)
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read  # download the release's SBOM
@@ -964,6 +967,7 @@ jobs:
     if: always()
     needs: [verify, verify-release, rescan]
     runs-on: ubuntu-24.04
+    # normal: ~1 min (p50 0.3, p95 0.4; last ~30 green runs)
     timeout-minutes: 5
     permissions: {}
     steps:

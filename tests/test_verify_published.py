@@ -108,9 +108,11 @@ def test_fixture_verifies_a_real_image_and_gates_ci_green():
     ci = yaml.safe_load(CI.read_text())["jobs"]
     job = ci["fixture-verify"]
     assert job["uses"] == "./.github/workflows/verify-published.yml"
-    assert job["with"]["image"].startswith("ghcr.io/chiefgyk3d/")
-    assert job["with"]["test-command"].strip()
-    assert "|| true" not in job["with"]["test-command"]
+    assert job["with"]["image"] == "${{ needs.fixture-pin.outputs.image }}"
+    assert job["with"]["test-command"] == "${{ needs.fixture-pin.outputs.test-command }}"
+    pin = next(x for x in ci["fixture-pin"]["steps"] if x.get("id") == "pin")["run"]
+    assert pin.count("echo ") and pin.count("image=ghcr.io/chiefgyk3d/") == 2, "both pins name a real ghcr.io image"
+    assert pin.count("test-command=docker run") == 2 and "|| true" not in pin
     assert "fixture-verify" in ci["ci-green"]["needs"]
 
 
@@ -567,7 +569,7 @@ def test_the_fixture_rescans_a_real_image_and_gates_ci_green():
     job = ci["fixture-rescan"]
     assert job["uses"] == "./.github/workflows/verify-published.yml"
     assert job["with"]["rescan"] is True
-    assert job["with"]["image"].startswith("ghcr.io/chiefgyk3d/")
+    assert job["with"]["image"] == "${{ needs.fixture-pin.outputs.image }}"
     assert job["permissions"] == {"contents": "read", "packages": "read"}
     assert "fixture-rescan" in ci["ci-green"]["needs"]
     live = ci["rescan-live"]
@@ -765,7 +767,9 @@ def test_a_malformed_calling_repository_is_refused_too():
 
 
 def test_the_fixture_that_verifies_another_repositorys_image_names_its_source():
-    """star-daemon's image is built by star-daemon, not by this repository, so the default would refuse it."""
+    """The pin job names the repository that built the image (star-daemon's own while the DIGEST file says
+    `unpublished`, this repository's once it holds a digest), and both fixture jobs pass it on; the default,
+    the calling repository, would refuse star-daemon's image. tests/test_fixture_image.py runs the pin step."""
     ci = yaml.safe_load(CI.read_text())["jobs"]
     for name in ("fixture-verify", "fixture-rescan"):
-        assert ci[name]["with"]["source-repository"] == "ChiefGyk3D/Star-Daemon"
+        assert ci[name]["with"]["source-repository"] == "${{ needs.fixture-pin.outputs.source-repository }}"

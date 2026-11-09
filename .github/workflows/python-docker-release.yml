@@ -261,4 +261,5 @@ jobs:
       doppler-trusted-refs-only: ${{ inputs.doppler-trusted-refs-only }}
       allowed-publish-events: ${{ inputs.allowed-publish-events }}
       require-tag-ref: ${{ inputs.require-tag-ref }}
+      # normal: no fixture history
       timeout-minutes: ${{ inputs.timeout-minutes }}

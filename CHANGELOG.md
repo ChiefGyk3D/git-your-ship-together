@@ -5,6 +5,17 @@ name what a caller sees after that.
 
 ## Unreleased
 
+### Changed: `project-sync.yml` calls safo v0.2.0 (issue #398)
+
+The Action behind `project-sync.yml` moves from `v0.1.2` to `v0.2.0` (commit `180002332e359b883c33aa4d512b5ba29b2c7657`, the signed annotated tag). Its release hardens which events may use a credential. Callers re-pin and change nothing else: this workflow passes neither `board-file` nor `status-body-file`, so the new rule that those files must be committed and checked out does not apply, and no checkout step or permission was added (`contents: read` and `id-token: write` stay).
+
+What you see after you re-pin:
+
+- **Same-repository events work as before**: `issues`, `pull_request_target` (default branch, pull request from this repository), `schedule` and `workflow_dispatch`. The run now prints one notice naming the event, the ref and the trusted revision it used.
+- **A pull request from a fork is refused under `pull_request_target`.** safo now gives a credential to a fork's pull request only when the Action input `allow-fork-pull-request-target` is `"true"`; this workflow does not pass it, so the sync job fails with a message naming the event, and that card is not added until the next scheduled reconcile. A repository that is itself a fork gets no credential either (`allow-fork-repository`). Neither switch is exposed here on purpose; ask in an issue if a caller needs one.
+- **Any event not on safo's allow-list** (for example `pull_request` from a fork) is refused for the same reason.
+- **Test.** `tests/test_project_sync_wrapper.py` pins the new commit and asserts, for every workflow, that a checkout precedes a safo step that passes `board-file` or `status-body-file`, with a negative case.
+
 ### Added: opt-in pull request title lint (issue #393, refs #358)
 
 - **`pr-title-lint.yml`.** A reusable, read-only pull request title gate with a configurable Python regular expression,
@@ -36,6 +47,15 @@ Two callers failed their re-pin pull requests because a file outside the workflo
 - **File names are data.** Only names made of `A-Za-z0-9._/-` are listed, rewritten or put in a pull request body; any other name (a backtick, a backslash, a newline, a space, `$(...)`, a `;`) is skipped and only counted ("N file(s) with unsafe names skipped"), and that count alone makes the run exit 11. The file name reaches awk through `ENVIRON`, never `-v`, and sed gets only `-e` scripts and `--` before the file.
 - **Tests.** `tests/test_repin.py` builds a git fixture with a workflow ref, a test asserting the old pin, a script constant, a CHANGELOG line (untouched), a history file, a binary file, a symlink, an untracked file and a longer hex string.
 
+### Added: a GYST-owned fixture image for `fixture verify` and `fixture rescan` (issue #381, refs)
+
+`fixture verify` and `fixture rescan` checked `ghcr.io/chiefgyk3d/star-daemon:latest`, a third-party moving tag, so a rebuild, rename or privacy change there turned this repository red (#285, #315). No caller input changes; this is this repository's own pipeline.
+
+- **`fixture/gyst-fixture/`.** A five-line Dockerfile on `alpine:3.23` pinned by digest, one copied file (`VERSION`), non-root, no build-time network, no secret.
+- **`.github/workflows/fixture-image.yml`.** On a manual run or a push to `main` that changes the image source, calls this repository's own `container-release.yml` (hadolint, Trivy, keyless cosign signature, SPDX SBOM attestation, SLSA provenance) to publish `ghcr.io/chiefgyk3d/gyst-fixture`, tagged `1.0.0`, `latest` and the commit, and its merge job's summary shows the digest. It sets `allowed-publish-events: push,workflow_dispatch` and `require-tag-ref: false` for this one image, guarded by `if: github.ref == 'refs/heads/main'`; the defaults of `container-release.yml` (push events, `vX.Y.Z` tag refs) are unchanged for every caller.
+- **One pin file.** `fixture/gyst-fixture/DIGEST` holds `unpublished` or one `sha256:<64 hex>`. A new `fixture pin` job in `ci.yml` reads it and hands the two fixture jobs their image, source repository, signer identity regexp and test command; any other content fails the job. While it says `unpublished` (this change) both jobs keep checking star-daemon, so `main` does not depend on an image that does not exist yet. The follow-up change writes the digest, which switches them to `gyst-fixture@sha256:...`. `tests/test_fixture_image.py` pins the format, that the digest is written nowhere else, and the signer regexp.
+- **After the first publish (owner, once).** The package GHCR creates is private ("When you first publish a package, the default visibility is private"), and `fixture verify` and `fixture rescan` pull anonymously, so it must be made public. VERIFIED against GitHub Docs on 2026-11-09 ("Working with the Container registry" and "Configuring a package's access control and visibility"): on the package's page, Package settings, "Danger Zone", "Change visibility", Public (the docs warn a public package cannot be made private again). VERIFIED against the REST reference for Packages (docs.github.com/en/rest/packages/packages, 2026-11-09): it lists, gets, deletes and restores packages and package versions and has no operation that sets visibility, so there is no API command to give. The lead confirms the result with `docker logout ghcr.io; docker pull ghcr.io/chiefgyk3d/gyst-fixture@sha256:<digest>` (INFERRED to work anonymously once public; not run, the image does not exist yet).
+
 ### Added: a failed Trivy image scan names what tripped it (issue #383)
 
 A caller sees this after it re-pins; no input changes, no egress host is added and the scan's exit behavior is unchanged.
@@ -57,6 +77,14 @@ On 2026-11-09 commit 52592bc, a Dependabot bump merged by the auto-merge token, 
 - **`ci.yml` `Test the workflows`.** `Run the tests` is now `pytest -q -n auto` (pytest-xdist, one worker per CPU). The step took 622 s of a 641 s job on the latest successful main run, and the last 15 successful runs of the job took 563 to 958 s. No test, assertion or check changed, the job name and `CI green` wiring are the same, and a caller sees nothing (this file is the repository's own CI, not a reusable workflow).
 - **`requirements-dev.in` / `.txt`.** `pytest-xdist==3.8.0` (and its `execnet`) added; the lock was regenerated with `pip-compile --generate-hashes --strip-extras`, which also drops the `[extras]` brackets pip-compile now strips from two existing lines.
 - **Guard.** `tests/test_workflows.py` fails if the step loses `-n auto` or the lock loses `pytest-xdist`.
+
+### Changed: every job has a measured time cap (issue #247)
+
+On 2026-10-30 fixture jobs finished in seconds and then sat idle for 20 to 35 minutes until a cap; each cost a re-run. A caller sees nothing until it re-pins, and nothing changes in a reusable workflow's inputs or defaults.
+
+- **Fixture calls and self jobs.** `ci.yml`, `security-self.yml`, `wiki.yml` and `dependabot-auto-merge-self.yml` now pass each reusable workflow's `timeout-minutes` input (5, or 10 for the Python CI fixture and the security scan, from the last 30 green runs: p95 under 3 minutes everywhere). `actionlint`, `zizmor`, `fixture sbom`, the two action fixtures and `rescan fails when it should` drop to 5; `dast fails when it should` drops from 60 to 30. `Test the workflows` stays at 20. Every cap has a `# normal: ~N min` comment above it.
+- **Not changed.** The reusable workflows' defaults (a caller's job can be much slower than the fixture) and the container builds' 60.
+- **Test and page.** `tests/test_job_timeouts.py` fails a job with no cap, a cap above 90 minutes without a written reason, an `inputs.` expression that names no number input, and a caller that leaves a called workflow's default in place. [Job timeouts](docs/wiki/Job-timeouts.md) holds the measurements, what the logs of runs 41035462015 and 41065673856 show (the hang is after the last step, not in the harden-runner post step or the artifact upload) and the effect of the docs-only gating.
 
 ### Fixed: tool installs survive a GitHub download outage (issue #372, refs)
 

@@ -52,6 +52,7 @@ refuses to do.
 | Find a file, or where a kind of change lives | [Repository map](Repository-map.md) |
 | Control what a job may reach on the network | [Egress control](Egress-control.md) |
 | Fix a red run, symptom by symptom | [Troubleshooting](Troubleshooting.md) |
+| Know what each job normally takes and what caps it | [Job timeouts](Job-timeouts.md) |
 | Read the mistakes as lessons | [Lessons learned](Lessons-learned.md) |
 | Understand how the rules are tested | [Testing and the contract](Testing-and-the-contract.md) |
 | Change something, or cut a release | [Contributing and developing](Contributing-and-developing.md) |
