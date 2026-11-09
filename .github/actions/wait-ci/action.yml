@@ -3,7 +3,7 @@
 # A thin wrapper: every rule lives in scripts/wait-ci.sh (a copy would drift), which this step
 # calls by path from the action's own checkout. The inputs reach it through env and quoted
 # arguments only, never through the script text. The exit codes are the script's: 0 green (and
-# merged if asked), 1 red, 2 timeout, 3 hung, 4 head moved, 5 queued, 6 another check red, 64 bad input. Outputs are written even
+# merged if asked), 1 red, 2 timeout, 3 hung, 4 head moved, 5 queued, 6 another check red, 7 merge conflict, 64 bad input. Outputs are written even
 # when the step fails, so a later `if: always()` step can read them.
 #
 # Not for a job that the gate itself waits on: the step would wait for the check run of the very job
@@ -91,7 +91,7 @@ inputs:
     default: ${{ github.token }}
 outputs:
   result:
-    description: green, red, other-red (the gate held but another check run is red), timeout, hung, head-moved, merge-blocked, queued (a positively observed unmerged pull request), error (including a pull request that could not be read after the merge call) or usage.
+    description: green, red, other-red (the gate held but another check run is red), conflict (the pull request cannot be merged cleanly into its base), timeout, hung, head-moved, merge-blocked, queued (a positively observed unmerged pull request), error (including a pull request that could not be read after the merge call) or usage.
     value: ${{ steps.wait.outputs.result }}
   sha:
     description: The commit that was verified green; set also when the result is merge-blocked or queued, empty otherwise.

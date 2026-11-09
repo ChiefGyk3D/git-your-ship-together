@@ -61,6 +61,7 @@ MERGE_UNGATED = {
     "Fetch CI secrets from Doppler (Service Token)",
     "Resolve image names",
     "Image metadata",
+    "Validate the signer identity",  # a pure check of an input; it has no push, signing or token ability
 }
 MERGE_UNGATED_USES = ("step-security/harden-runner@", "docker/setup-buildx-action@")
 
@@ -698,13 +699,14 @@ def test_the_platform_check_is_the_same_function_in_both_jobs():
     assert a == b
 
 
-def test_the_index_is_staged_under_a_run_scoped_tag_and_promoted_by_digest():
+def test_the_index_is_staged_under_a_run_scoped_tag_and_no_release_tag_is_written_there():
     s = step("merge", "Create the multi-arch index")
     assert "SHA" in s["env"] and "RUN_ID" in s["env"] and "RUN_ATTEMPT" in s["env"]
     assert s["env"]["RUN_ID"] == "${{ github.run_id }}" and s["env"]["RUN_ATTEMPT"] == "${{ github.run_attempt }}"
     run = s["run"]
     assert "stage-${SHA}-${RUN_ID}-${RUN_ATTEMPT}" in run
-    assert '"${GHCR}@${digest}"' in run, "final tags are created from the validated digest"
+    assert "TAGS" not in s["env"], "the release tags are written only by 'Publish the release tags' (issue #286)"
+    assert "--tag" in run and run.count("imagetools create") == 1, "one create per registry, to the staging tag only"
     for n in range(8):
         assert s["env"][f"D{n}"] == f"${{{{ needs.build.outputs.d{n} }}}}"
 
@@ -965,7 +967,6 @@ def index_env(hub: bool = False, **over):
     base = {
         "GHCR": GHCR,
         "HUB": HUB if hub else "",
-        "TAGS": f"{TAG1}\n{TAGL}" + (f"\n{HTAG1}\n{HTAGL}" if hub else ""),
         "MATRIX": MATRIX,
         "SHA": "deadbeef",
         "RUN_ID": "7",
@@ -998,21 +999,15 @@ def test_the_index_is_created_from_digests_and_creation_causes_the_verified_stat
     digest = out["digest"]
     assert re.fullmatch(r"sha256:[0-9a-f]{64}", digest)
     stage_create = f"buildx imagetools create --tag {STAGE} {GHCR}@{DIGEST_A} {GHCR}@{DIGEST_B}"
-    assert create_calls(tmp_path) == [
-        stage_create,
-        f"buildx imagetools create --tag {TAG1} {GHCR}@{digest}",
-        f"buildx imagetools create --tag {TAGL} {GHCR}@{digest}",
-    ]
-    assert state["tags"] == {STAGE: digest, TAG1: digest, TAGL: digest}
+    assert create_calls(tmp_path) == [stage_create], "only the staging tag is written; the release tags move later"
+    assert state["tags"] == {STAGE: digest}
     assert [c["digest"] for c in state["hosts"]["ghcr.io"][digest]["manifests"]] == [DIGEST_A, DIGEST_B]
     assert state["hosts"]["docker.io"] == {}, "Docker Hub off: nothing touches it"
     assert not [c for c in (tmp_path / "docker.log").read_text().splitlines() if "docker.io" in c]
-    # the staged tag is read only after it was created, and the final tags are read after their creates
+    # the staged tag is read only after it was created
     order = (tmp_path / "docker.log").read_text().splitlines()
     first_inspect = next(i for i, c in enumerate(order) if "inspect" in c and STAGE in c)
     assert order.index(stage_create) < first_inspect
-    last_create = max(i for i, c in enumerate(order) if "imagetools create" in c)
-    assert any("inspect" in c and TAG1 in c for c in order[last_create:])
 
 
 def test_with_docker_hub_each_registry_gets_its_own_verified_index(tmp_path):
@@ -1022,15 +1017,11 @@ def test_with_docker_hub_each_registry_gets_its_own_verified_index(tmp_path):
     digest = out["digest"]
     assert create_calls(tmp_path) == [
         f"buildx imagetools create --tag {STAGE} {GHCR}@{DIGEST_A} {GHCR}@{DIGEST_B}",
-        f"buildx imagetools create --tag {TAG1} {GHCR}@{digest}",
-        f"buildx imagetools create --tag {TAGL} {GHCR}@{digest}",
         f"buildx imagetools create --tag {HSTAGE} {GHCR}@{DIGEST_A} {GHCR}@{DIGEST_B}",
-        f"buildx imagetools create --tag {HTAG1} {HUB}@{digest}",
-        f"buildx imagetools create --tag {HTAGL} {HUB}@{digest}",
     ]
     hub = state["hosts"]["docker.io"]
     assert digest in hub and DIGEST_A in hub and DIGEST_B in hub, "the Docker Hub repository holds its own copies"
-    assert state["tags"][HTAG1] == state["tags"][HTAGL] == state["tags"][HSTAGE] == digest
+    assert state["tags"] == {STAGE: digest, HSTAGE: digest}
 
 
 def test_a_registry_that_requires_sources_to_exist_locally_fails_closed_for_docker_hub_only(tmp_path):
@@ -1083,16 +1074,12 @@ HOSTILE = {
     "drops a platform": {"drops_last": True},
     "adds a manifest": {"adds_extra": DIGEST_IDX},
     "stage tag replaced": {"hooks": [{"after_create": 1, "tag": STAGE, "digest": DIGEST_A}]},
-    "final tag replaced": {"hooks": [{"after_create": 2, "tag": TAG1, "digest": DIGEST_B}]},
-    "last tag replaced": {"hooks": [{"after_create": 3, "tag": TAGL, "digest": DIGEST_B}]},
     "hub digest differs": {"reverse_host": "docker.io"},  # same children, other order: a different index digest
 }
 HOSTILE_HUB = {
     "hub drops a platform": {"drops_last": True, "flaw_host": "docker.io"},
     "hub adds a manifest": {"adds_extra": DIGEST_IDX, "flaw_host": "docker.io"},
-    "hub stage tag replaced": {"hooks": [{"after_create": 4, "tag": HSTAGE, "digest": DIGEST_A}]},
-    "hub final tag replaced": {"hooks": [{"after_create": 5, "tag": HTAG1, "digest": DIGEST_B}]},
-    "hub last tag replaced": {"hooks": [{"after_create": 6, "tag": HTAGL, "digest": DIGEST_B}]},
+    "hub stage tag replaced": {"hooks": [{"after_create": 2, "tag": HSTAGE, "digest": DIGEST_A}]},
 }
 
 
@@ -1112,25 +1099,14 @@ def mutated_index_scripts() -> dict[str, tuple[str, str | None, bool]]:
     """name -> (weakened script, the hostile case only that guard stops or None, Docker Hub enabled)."""
     s = INDEX_SCRIPT
     stage_create = 'docker buildx imagetools create --tag "$staging" "${sources[@]}"'
-    promote = 'docker buildx imagetools create --tag "$tag" "${repo}@${digest}"'
-    verify = '[ "$(docker buildx imagetools inspect "$tag" --format \'{{.Manifest.Digest}}\')" = "$first_digest" ]'
     registries = 'registries+=("$HUB")'
     same = '[ "$digest" = "$first_digest" ]'
-    for needle in (stage_create, promote, verify, registries, same):
+    for needle in (stage_create, registries, same):
         assert needle in s, needle
-    swapped = 'docker buildx imagetools create --tag "$tag" "${sources[0]}"'
     out = {
         "no staging create": (s.replace(stage_create, "true"), None, False),
-        "no promotion": (s.replace(promote, "true"), None, False),
-        "promote from the first source": (s.replace(promote, swapped), None, False),
-        "no hub registry": (s.replace(registries, "true"), None, True),
-        "no final tag check": (s.replace(verify, "true"), "final tag replaced", False),
         "no content binding": (s.replace('[ "$got" = "$want_set" ]', "true"), "adds a manifest", False),
-        "no cross-registry equality (nor final check)": (
-            s.replace(same, "true").replace(verify, "true"),
-            "hub digest differs",
-            True,
-        ),
+        "no cross-registry equality": (s.replace(same, "true"), "hub digest differs", True),
     }
     for name, (mutated, _, _) in out.items():
         assert mutated != s, name
@@ -1155,47 +1131,6 @@ def test_removing_or_redirecting_a_step_of_the_index_script_is_caught(tmp_path, 
         assert run_index(refused, make_db(**HOSTILE[hostile]), hub=hub)[0] != 0
         code, out, _ = run_index(weak, make_db(**HOSTILE[hostile]), script=mutated, hub=hub)
         assert code == 0 and "digest" in out
-
-
-# --- the re-check of the final tags ------------------------------------------
-
-RECHECKS = ("Re-check the final tags before signing", "Re-check the final tags after attestation")
-
-
-def recheck_env(**over):
-    return {"TAGS": f"{TAG1}\n{TAGL}\n{HTAG1}", "DIGEST": DIGEST_IDX, **over}
-
-
-@pytest.mark.parametrize("name", RECHECKS)
-def test_the_recheck_passes_only_when_every_final_tag_resolves_to_the_digest(tmp_path, name):
-    script = step("merge", name)["run"]
-    base = {TAG1: DIGEST_IDX, TAGL: DIGEST_IDX, HTAG1: DIGEST_IDX}
-    cases = [
-        (base, True),
-        ({**base, TAGL: DIGEST_A}, False),  # the second tag moved
-        ({**base, TAG1: DIGEST_A}, False),  # the first tag moved
-        ({**base, HTAG1: DIGEST_A}, False),  # the Docker Hub tag moved
-        ({TAG1: DIGEST_IDX, TAGL: DIGEST_IDX}, False),  # a tag is gone
-    ]
-    for n, (tags, ok) in enumerate(cases):
-        sub = tmp_path / str(n)
-        sub.mkdir()
-        db = make_db(tags=tags)
-        db["hosts"]["docker.io"] = {DIGEST_IDX: MULTI, DIGEST_A: SINGLE_A}
-        db["hosts"]["ghcr.io"][DIGEST_IDX] = MULTI
-        code, _, out = run_script(script, sub, recheck_env(), stub(db, sub))
-        assert (code == 0) == ok, out
-        assert ok or "::error" in out
-
-
-def test_the_recheck_steps_are_the_same_script_before_signing_and_after_attestation():
-    names = [s.get("name") for s in steps_of(jobs(load(RELEASE))["merge"])]
-    a, b = (step("merge", n) for n in RECHECKS)
-    assert a["run"] == b["run"] and a["env"] == b["env"]
-    assert a["env"]["DIGEST"] == "${{ steps.index.outputs.digest }}"
-    assert names.index(RECHECKS[0]) < names.index("Install cosign") < names.index("Sign the image (keyless)")
-    assert names.index(RECHECKS[1]) > names.index("Record build provenance")
-    assert names.index(RECHECKS[1]) < names.index("Summary")
 
 
 def test_the_documentation_states_what_the_final_tag_check_does_not_guarantee():
@@ -1293,7 +1228,7 @@ def test_the_signing_steps_use_only_the_validated_index_digest():
         step("merge", "Record build provenance", doc)["with"]["subject-digest"] == "${{ steps.index.outputs.digest }}"
     )
     for s in steps_of(jobs(doc)["merge"]):
-        allowed = ("Create the multi-arch index", *RECHECKS)
+        allowed = ("Create the multi-arch index", "Publish the release tags")
         assert "imagetools inspect" not in (s.get("run") or "") or s.get("name") in allowed
 
 

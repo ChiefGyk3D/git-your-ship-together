@@ -633,7 +633,9 @@ def test_the_workflow_inlines_the_script_byte_for_byte():
 def test_the_job_token_stays_read_only_and_every_write_is_the_apps_with_three_named_permissions():
     doc = yaml.safe_load(WORKFLOW.read_text())
     assert doc["permissions"] == {"contents": "read"}
-    assert doc["jobs"]["repin"]["permissions"] == {"contents": "read", "id-token": "write"}, "id-token is for the Doppler fetch"
+    assert doc["jobs"]["repin"]["permissions"] == {"contents": "read", "id-token": "write"}, (
+        "id-token is for the Doppler fetch"
+    )
     app = step_named("Mint a one-hour installation token")
     granted = {k: v for k, v in app["with"].items() if k.startswith("permission-")}
     assert granted == {

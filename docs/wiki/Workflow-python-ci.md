@@ -50,6 +50,13 @@ listed version is past its end date, so the default shrinks on schedule, and it 
 equal to the file. The tool locks behind `security.yml` and `agent-scan.yml` stop at 3.14: some locked packages publish
 no 3.15 wheel yet.
 
+**A smaller matrix on pull requests.** Set `pr-python-versions: '["3.11", "3.15"]'` (the oldest and newest) and a pull request
+runs only those `Test` legs, while push, schedule and dispatch keep running the full `python-versions`. Add `on: schedule` to the
+caller for a weekly full run. The default is empty, which changes nothing. Each entry must be in `python-versions`, and with
+`coverage-threshold` set `coverage-python-version` must be an entry too; the job fails with an error otherwise. `CI green` still
+needs `test`, so a failed leg still blocks the merge. Require `ci / CI green`, not individual `Test (Python ...)` checks, since the
+legs a pull request creates differ from the ones main creates.
+
 Point branch protection at `ci / CI green`. A repository with more than one language calls one CI workflow per language
 from one job each and requires each gate (`ci / CI green` and `shell / CI green`, say).
 

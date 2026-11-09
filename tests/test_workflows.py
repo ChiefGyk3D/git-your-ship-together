@@ -52,6 +52,7 @@ REUSABLE = [
         "lory-audit.yml",
         "agent-scan.yml",
         "vendored-drift.yml",
+        "pin-comments.yml",
         "base-image-digest.yml",
         "parallel-ci.yml",
         "ci-gate.yml",
@@ -82,6 +83,7 @@ DOPPLER = [
         "lory-audit.yml",
         "agent-scan.yml",
         "vendored-drift.yml",
+        "pin-comments.yml",
         "base-image-digest.yml",
         "parallel-ci.yml",
         "ci-gate.yml",
@@ -142,7 +144,7 @@ def all_steps(path: Path):
 
 
 def test_there_is_something_to_check():
-    assert len(REUSABLE) == 24, "expected the twenty-four callable workflows"
+    assert len(REUSABLE) == 25, "expected the twenty-five callable workflows"
     assert len(DOPPLER) == 6, "expected six of them to fetch CI secrets"
     assert [p.name for p in LANGUAGE_CI] == [
         "arduino-ci.yml",

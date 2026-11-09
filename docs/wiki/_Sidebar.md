@@ -61,6 +61,7 @@
 - [agent-scan](Workflow-agent-scan.md)
 - [vendored-drift](Workflow-vendored-drift.md)
 - [repin](Workflow-repin.md)
+- [pin-comments](Workflow-pin-comments.md)
 
 **Tools**
 
