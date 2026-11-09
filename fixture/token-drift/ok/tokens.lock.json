@@ -1,0 +1,9 @@
+{
+  "vendored": "fixture/token-drift/ok/tokens.json",
+  "sha256": "ad7a3bd48869f0b03efc4f61ae7df10e36ea9e5ae4834d51fc551ecccf340697",
+  "source": {
+    "repo": "example/brand-tokens",
+    "path": "brand/tokens.json",
+    "commit": "0123456789abcdef0123456789abcdef01234567"
+  }
+}

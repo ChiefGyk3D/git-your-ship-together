@@ -27,6 +27,7 @@ the workflow's YAML so it cannot drift; the README is the authority.
 | A scheduled or on-demand deep-dive audit by Lory (not a per-PR gate) | `lory-audit.yml` | [lory-audit](Workflow-lory-audit.md) |
 | A long single CI job that should run its build once and its checks side by side | `parallel-ci.yml` | [parallel-ci](Workflow-parallel-ci.md) |
 | One `CI green` over several workflows side by side | `ci-gate.yml` | [ci-gate](Workflow-ci-gate.md) |
+| A vendored file whose upstream moves, checked against the source too (opt-in) | `token-drift.yml` | [token-drift](Workflow-token-drift.md) |
 | A file vendored from another repository that must not drift (opt-in) | `vendored-drift.yml` | [vendored-drift](Workflow-vendored-drift.md) |
 | A `# vX.Y.Z` pin comment that must match the pinned SHA (opt-in) | `pin-comments.yml` | [pin-comments](Workflow-pin-comments.md) |
 | A Dockerfile whose base image is pinned by digest and should be rechecked on a schedule (opt-in) | `base-image-digest.yml` | [base-image-digest](Workflow-base-image-digest.md) |
@@ -50,6 +51,7 @@ from its own caller job, and requires every gate. See
 | `python-fuzz.yml` | No | No | Yes | No |
 | `container-release.yml` | Yes, after a push only | Docker Hub credentials, if used | Builds and scans only | GHCR (and Docker Hub) |
 | `verify-published.yml` | No (`packages: read`; the rescan adds nothing) | No | n/a (scheduled) | No |
+| `token-drift.yml` | No | No | Yes | No |
 | `vendored-drift.yml` | No | No | Yes | No |
 | `repin.yml` | Only for that fetch (`id-token: write`; the job token is `contents: read`; a GitHub App token does the writes) | The App private key, fetched from the secret store over OIDC (`doppler-project`, `doppler-config`, `doppler-identity-id`) | Reports only | No, opens a pull request and never merges |
 | `pin-comments.yml` | No (`contents: read` only) | No | Yes | No |

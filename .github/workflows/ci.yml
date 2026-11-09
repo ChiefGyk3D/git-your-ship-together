@@ -493,6 +493,89 @@ jobs:
     permissions:
       contents: read
 
+  # token-drift.yml at this ref, in block mode with the workflow's own default list (api.github.com and github.com
+  # only, so the live fetch needs nothing else, or this job goes red). `fixture-token-drift` checks a pin with the input
+  # cross-checks and no network; `-live` also fetches this repository's LICENSE through the API at the default
+  # branch's commit and requires the lock to equal it. The two planted fixtures run advisory, so their jobs are
+  # green by design, and `token-drift-control` then fails unless both reported drifted=true: a green drift check
+  # over fixtures that cannot go red proves nothing. tests/test_token_drift.py runs the script against hostile
+  # locks, refs and responses.
+  fixture-token-drift:
+    name: fixture token drift
+    needs: changes
+    if: needs.changes.outputs.docs-only != 'true'
+    uses: ./.github/workflows/token-drift.yml # zizmor: ignore[self-repository]
+    permissions:
+      contents: read
+    with:
+      lock-file: fixture/token-drift/ok/tokens.lock.json
+      vendored-path: fixture/token-drift/ok/tokens.json
+      source-repo: example/brand-tokens
+      source-path: brand/tokens.json
+
+  fixture-token-drift-live:
+    name: fixture token drift (live)
+    needs: changes
+    if: needs.changes.outputs.docs-only != 'true'
+    uses: ./.github/workflows/token-drift.yml # zizmor: ignore[self-repository]
+    permissions:
+      contents: read
+    with:
+      lock-file: fixture/token-drift/live/tokens.lock.json
+      check-live: true
+
+  fixture-token-drift-planted-pin:
+    name: fixture token drift (planted pin)
+    needs: changes
+    if: needs.changes.outputs.docs-only != 'true'
+    uses: ./.github/workflows/token-drift.yml # zizmor: ignore[self-repository]
+    permissions:
+      contents: read
+    with:
+      lock-file: fixture/token-drift/planted-pin/tokens.lock.json
+      advisory: true
+
+  fixture-token-drift-planted-live:
+    name: fixture token drift (planted live)
+    needs: changes
+    if: needs.changes.outputs.docs-only != 'true'
+    uses: ./.github/workflows/token-drift.yml # zizmor: ignore[self-repository]
+    permissions:
+      contents: read
+    with:
+      lock-file: fixture/token-drift/planted-live/tokens.lock.json
+      check-live: true
+      advisory: true
+
+  token-drift-control:
+    name: token drift control
+    if: needs.changes.outputs.docs-only != 'true'
+    needs: [changes, fixture-token-drift-planted-pin, fixture-token-drift-planted-live]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
+      - name: The check fired on the planted fixtures
+        env:
+          PIN: ${{ needs.fixture-token-drift-planted-pin.outputs.drifted }}
+          LIVE: ${{ needs.fixture-token-drift-planted-live.outputs.drifted }}
+        run: |
+          set -euo pipefail
+          echo "planted pin drifted=${PIN:-unset}; planted live drifted=${LIVE:-unset}"
+          bad=0
+          if [ "$PIN" != true ]; then
+            echo "::error title=token drift control::the planted pin fixture must report drifted=true"
+            bad=1
+          fi
+          if [ "$LIVE" != true ]; then
+            echo "::error title=token drift control::the planted live fixture must report drifted=true"
+            bad=1
+          fi
+          exit "$bad"
+
   # base-image-digest.yml at this ref over the fixture's Dockerfile, in block mode with the workflow's own
   # default list, so the registry and database hosts are measured here. exit-code "0" because a new advisory on
   # a Tuesday must not turn main red; that a fixable finding DOES fail the job is proved by
@@ -852,7 +935,7 @@ jobs:
   ci-green:
     name: CI green
     if: always()
-    needs: [changes, actionlint, zizmor, test, fixture-ci, fixture-bash, fixture-fuzz, fixture-tofu, fixture-arduino, fixture-package, fixture-sbom, fixture-artifact, fixture-pages, fixture-wiki, fixture-release, fixture-verify, fixture-rescan, fixture-drift, fixture-pin-comments, fixture-base-image, fixture-repin, fixture-parallel, fixture-gate, fixture-ci-gate-action, fixture-classify-action, rescan-live, fixture-project-sync, fixture-dast, dast-live, fixture-threat-model, fixture-agent-scan, fixture-agent-scan-planted, agent-scan-control]
+    needs: [changes, actionlint, zizmor, test, fixture-ci, fixture-bash, fixture-fuzz, fixture-tofu, fixture-arduino, fixture-package, fixture-sbom, fixture-artifact, fixture-pages, fixture-wiki, fixture-release, fixture-verify, fixture-rescan, fixture-drift, fixture-token-drift, fixture-token-drift-live, fixture-token-drift-planted-pin, fixture-token-drift-planted-live, token-drift-control, fixture-pin-comments, fixture-base-image, fixture-repin, fixture-parallel, fixture-gate, fixture-ci-gate-action, fixture-classify-action, rescan-live, fixture-project-sync, fixture-dast, dast-live, fixture-threat-model, fixture-agent-scan, fixture-agent-scan-planted, agent-scan-control]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -881,8 +964,8 @@ jobs:
         uses: ./.github/actions/ci-gate # zizmor: ignore[self-repository]
         with:
           needs: ${{ toJSON(needs) }}
-          required-jobs: changes actionlint zizmor test fixture-ci fixture-bash fixture-fuzz fixture-package fixture-artifact fixture-tofu fixture-arduino fixture-pages fixture-wiki fixture-project-sync fixture-release fixture-verify fixture-rescan fixture-drift fixture-pin-comments fixture-repin fixture-base-image fixture-parallel fixture-gate fixture-ci-gate-action fixture-classify-action rescan-live fixture-dast dast-live fixture-sbom fixture-threat-model fixture-agent-scan fixture-agent-scan-planted agent-scan-control
-          skippable-jobs: fixture-ci fixture-bash fixture-fuzz fixture-package fixture-artifact fixture-tofu fixture-arduino fixture-pages fixture-wiki fixture-project-sync fixture-release fixture-verify fixture-rescan fixture-drift fixture-pin-comments fixture-repin fixture-base-image fixture-parallel fixture-gate fixture-ci-gate-action fixture-classify-action fixture-dast fixture-sbom fixture-threat-model fixture-agent-scan fixture-agent-scan-planted agent-scan-control rescan-live dast-live
+          required-jobs: changes actionlint zizmor test fixture-ci fixture-bash fixture-fuzz fixture-package fixture-artifact fixture-tofu fixture-arduino fixture-pages fixture-wiki fixture-project-sync fixture-release fixture-verify fixture-rescan fixture-drift fixture-token-drift fixture-token-drift-live fixture-token-drift-planted-pin fixture-token-drift-planted-live token-drift-control fixture-pin-comments fixture-repin fixture-base-image fixture-parallel fixture-gate fixture-ci-gate-action fixture-classify-action rescan-live fixture-dast dast-live fixture-sbom fixture-threat-model fixture-agent-scan fixture-agent-scan-planted agent-scan-control
+          skippable-jobs: fixture-ci fixture-bash fixture-fuzz fixture-package fixture-artifact fixture-tofu fixture-arduino fixture-pages fixture-wiki fixture-project-sync fixture-release fixture-verify fixture-rescan fixture-drift fixture-token-drift fixture-token-drift-live fixture-token-drift-planted-pin fixture-token-drift-planted-live token-drift-control fixture-pin-comments fixture-repin fixture-base-image fixture-parallel fixture-gate fixture-ci-gate-action fixture-classify-action fixture-dast fixture-sbom fixture-threat-model fixture-agent-scan fixture-agent-scan-planted agent-scan-control rescan-live dast-live
           classifier-job: changes
           fork-skippable-jobs: fixture-package fixture-artifact fixture-pages fixture-wiki fixture-release fixture-dast fixture-sbom fixture-threat-model fixture-agent-scan fixture-agent-scan-planted agent-scan-control
           fork-pull-request: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
