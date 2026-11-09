@@ -1162,5 +1162,12 @@ def test_a_toml_allowlist_by_path_and_rule_works_in_the_tree_scan_and_hides_only
 def test_the_readme_and_the_changelog_carry_the_migration_note():
     readme = README.read_text()
     assert "commit-bound" in readme and "all-refs" in readme
-    unreleased = (REPO / "CHANGELOG.md").read_text().split("\n## v", 1)[0]
-    assert "commit-bound" in unreleased and "issue #336" in unreleased
+    # The entry sits in Unreleased until the next release cut moves it under a version heading, so find it by its own
+    # heading wherever it lives now instead of pinning the test to one section.
+    changelog = (REPO / "CHANGELOG.md").read_text()
+    entries = [e for e in changelog.split("\n### ")[1:] if "issue #336" in e.split("\n", 1)[0]]
+    assert len(entries) == 1, "exactly one changelog entry carries the issue #336 migration note"
+    entry = entries[0]
+    assert "commit-bound" in entry
+    owner = changelog.split("\n### " + entry.split("\n", 1)[0], 1)[0].rsplit("\n## ", 1)[1].split("\n", 1)[0]
+    assert owner == "Unreleased" or owner.startswith("v"), f"the entry sits under a release heading, got {owner!r}"

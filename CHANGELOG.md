@@ -5,6 +5,8 @@ name what a caller sees after that.
 
 ## Unreleased
 
+## v1.34.0 (2026-11-09)
+
 ### Changed: harden the CI green gate and the docs-only classification (issues #307, #325)
 
 Only this repository's own CI changes. The aggregate `CI green` job now reads its gate code from the base commit on a pull request
