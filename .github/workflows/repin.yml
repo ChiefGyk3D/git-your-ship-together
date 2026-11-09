@@ -755,7 +755,7 @@ jobs:
           # HITS; the changed paths (relative to DIR) go to the file LIST. A copy is the whole-word old SHA; the `# vX.Y.Z`
           # comment is changed only where it directly follows that SHA.
           literal_rewrite() {
-            local dir=$1 newsha=$2 newtag=$3 hits=$4 dry=$5 list=$6 tmp f sha tag etag n=0 before after verb
+            local dir=$1 newsha=$2 newtag=$3 hits=$4 dry=$5 list=$6 tmp f sha tag n=0 before after verb
             local -a exprs
             : >"$list"
             mktmp tmp -d
@@ -764,8 +764,7 @@ jobs:
             while IFS= read -r f; do
               exprs=()
               while IFS=$'\t' read -r sha tag; do
-                etag=${tag//./\\.}
-                exprs+=(-e "s/\\b$sha\\b([\"']?[[:space:]]+#[[:space:]]*)$etag(\\.([^0-9]|\$)|[^0-9A-Za-z.]|\$)/$newsha\\1$newtag\\2/g" -e "s/\\b$sha\\b/$newsha/g")
+                exprs+=(-e "s/\\b$sha\\b([\"']?[[:space:]]+#[[:space:]]*)v[0-9]+\\.[0-9]+\\.[0-9]+([^0-9A-Za-z.]|\$)/$newsha\\1$newtag\\2/g" -e "s/\\b$sha\\b/$newsha/g")
               done < <(F="$f" awk -F'\t' '$3 == ENVIRON["F"] { print $1 "\t" $2 }' "$hits" | sort -u)
               [ "${#exprs[@]}" -gt 0 ] || continue
               n=$((n + 1))

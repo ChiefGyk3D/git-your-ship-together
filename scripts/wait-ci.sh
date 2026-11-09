@@ -369,8 +369,8 @@ errfile="$(mktemp)"
 
 # The jq programs that turn the base branch's rules (rulesets) and classic branch protection into "C <context
 # base64> <app id|any>" lines (and "Q" for a merge queue). Used by --from-protection and by the merge-time check.
-RULES_JQ='.[] | select(.type == "merge_queue" or .type == "required_status_checks") | if .type == "merge_queue" then "Q" else ((.parameters.required_status_checks // [])[] | "C " + ((.context // "") | tostring | @base64) + " " + (if .integration_id == null or .integration_id == -1 then "any" else (.integration_id | tostring) end)) end'
-CLASSIC_JQ='(if ((.checks // []) | length) > 0 then .checks else (.contexts // [] | map({context: ., app_id: null})) end)[] | "C " + ((.context // "" | tostring) | @base64) + " " + (if .app_id == null or .app_id == -1 then "any" else (.app_id | tostring) end)'
+RULES_JQ='.[] | select(.type == "merge_queue" or .type == "required_status_checks") | if .type == "merge_queue" then "Q" else ((.parameters.required_status_checks // [])[] | ((.context // "") | tostring) as $context | (if ($context | explode | any(. < 32 or . == 127 or . == 133 or . == 1564 or . == 8206 or . == 8207 or . == 8232 or . == 8233 or (. >= 8234 and . <= 8238) or (. >= 8294 and . <= 8297))) then "X " else "C " end) + ($context | @base64) + " " + (if .integration_id == null or .integration_id == -1 then "any" else (.integration_id | tostring) end)) end'
+CLASSIC_JQ='(if ((.checks // []) | length) > 0 then .checks else (.contexts // [] | map({context: ., app_id: null})) end)[] | ((.context // "") | tostring) as $context | (if ($context | explode | any(. < 32 or . == 127 or . == 133 or . == 1564 or . == 8206 or . == 8207 or . == 8232 or . == 8233 or (. >= 8234 and . <= 8238) or (. >= 8294 and . <= 8297))) then "X " else "C " end) + ($context | @base64) + " " + (if .app_id == null or .app_id == -1 then "any" else (.app_id | tostring) end)'
 
 # gh with stdout and stderr kept apart. A failure is reported as one redacted line; a token never
 # reaches the log.
@@ -382,6 +382,20 @@ gh_try() {
   fi
   first="$(grep -m1 . "$errfile" || true)"
   say "gh call failed: $(redact "$first")" >&2
+  return 1
+}
+
+protection_read() {
+  local path="$1" jq_program="$2" output_name="$3" out first
+  if out="$("$gh_bin" api "$path" --jq "$jq_program" 2>"$errfile")"; then
+    printf -v "$output_name" '%s' "$out"
+    return 0
+  fi
+  first="$(grep -m1 . "$errfile" || true)"
+  if [[ "$first" == *"HTTP 404"* ]]; then
+    printf -v "$output_name" '%s' ""
+    return 4
+  fi
   return 1
 }
 
@@ -555,15 +569,35 @@ read_world() {
 if [[ $from_protection -eq 1 ]]; then
   dbranch="$(gh_try api "repos/${repo}" --jq '.default_branch // "" | tostring')" || dbranch=""
   [[ "$dbranch" =~ ^[A-Za-z0-9._/-]{1,200}$ ]] || die_usage "--from-protection: cannot read the default branch of ${repo}"
-  prot_rules="$("$gh_bin" api "repos/${repo}/rules/branches/${dbranch}" --jq "$RULES_JQ" 2>/dev/null)" || prot_rules=""
-  prot_classic="$("$gh_bin" api "repos/${repo}/branches/${dbranch}/protection/required_status_checks" --jq "$CLASSIC_JQ" 2>/dev/null)" || prot_classic=""
+  dbranch_path="${dbranch//\//%2F}"
+  prot_rules=""
+  prot_classic=""
+  rules_rc=0
+  classic_rc=0
+  protection_read "repos/${repo}/rules/branches/${dbranch_path}" "$RULES_JQ" prot_rules || rules_rc=$?
+  protection_read "repos/${repo}/branches/${dbranch_path}/protection/required_status_checks" "$CLASSIC_JQ" prot_classic || classic_rc=$?
+  if [[ $rules_rc -ne 0 && $rules_rc -ne 4 ]]; then
+    die_usage "--from-protection: the ruleset read failed for ${repo} branch ${dbranch}"
+  fi
+  if [[ $classic_rc -ne 0 && $classic_rc -ne 4 ]]; then
+    die_usage "--from-protection: the classic branch protection read failed for ${repo} branch ${dbranch}"
+  fi
   declare -A prot_seen=()
   while IFS= read -r line; do
+    if [[ "$line" == "X "* ]]; then
+      die_usage "--from-protection: a required check name of ${dbranch} holds a control character"
+    fi
     [[ "$line" == "C "* ]] || continue
     line="${line#C }"
     [[ -z "${prot_seen["$line"]:-}" ]] || continue
     prot_seen["$line"]=1
-    pname="$(printf '%s' "${line%% *}" | base64 -d 2>/dev/null)" || continue
+    pname="$({
+      printf '%s' "${line%% *}" | base64 -d
+      rc=$?
+      printf 'x'
+      exit "$rc"
+    } 2>/dev/null)" || continue
+    pname="${pname%x}"
     papp="${line#* }"
     [[ -n "$pname" ]] || continue
     [[ "$papp" == any || "$papp" =~ ^[1-9][0-9]{0,8}$ ]] || continue

@@ -5,6 +5,10 @@ name what a caller sees after that.
 
 ## Unreleased
 
+### Fixed: `wait-ci` was hardened (issue #404)
+
+`wait-ci` was hardened.
+
 ### Changed: `project-sync.yml` calls safo v0.2.0 (issue #398)
 
 The Action behind `project-sync.yml` moves from `v0.1.2` to `v0.2.0` (commit `180002332e359b883c33aa4d512b5ba29b2c7657`, the signed annotated tag). Its release hardens which events may use a credential. Callers re-pin and change nothing else: this workflow passes neither `board-file` nor `status-body-file`, so the new rule that those files must be committed and checked out does not apply, and no checkout step or permission was added (`contents: read` and `id-token: write` stay).
@@ -92,7 +96,7 @@ On 2026-11-09 a GitHub incident timed out anonymous traffic (HTTP 504, curl exit
 
 ### Fix: `repin.sh` could not read workflow inputs (issue #374)
 
-- **`scripts/repin.sh`.** `apply`, `status` and `pr` read each called workflow's inputs through the contents API, and
+- **`scripts/repin.sh`.** `apply` and `pr` read each called workflow's inputs through the contents API, and
   passed the ref with `gh api -f`, which makes gh send a POST; GitHub rejected it, so every caller exited 5 with
   "cannot read <workflow> at the old pin". The ref now rides in the query string (a GET). A genuine input drop still
   exits 5.
