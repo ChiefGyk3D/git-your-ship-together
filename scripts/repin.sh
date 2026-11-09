@@ -305,10 +305,17 @@ history_file() {
 # any other directory is skipped) that hold it as a whole word, outside the canonical workflow pin lines, as
 # `sha<TAB>tag<TAB>path<TAB>line` in OUT. Binary files (git grep -I), symlinks, untracked files and history files are
 # left out; history files are noted on stdout.
+#
+# A file name is data. Only names made of [A-Za-z0-9._/-] (what check_names allows for workflow paths) are listed,
+# rewritten or echoed anywhere; any other name is skipped and only counted in UNSAFE (a count, never the name).
+UNSAFE=0
+declare -A UNSAFE_SEEN
 literal_scan() {
   local dir=$1 newsha=$2 out=$3 file line sha tag f n
   declare -A old pinned
   : >"$out"
+  UNSAFE=0
+  UNSAFE_SEEN=()
   git -C "$dir" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
   while IFS=$'\t' read -r file line sha tag _; do
     pinned["${file#"$dir"/}:$line"]=1
@@ -317,8 +324,9 @@ literal_scan() {
   for sha in "${!old[@]}"; do
     tag=${old[$sha]}
     while IFS= read -r -d '' f; do
-      if [[ $f =~ [[:cntrl:]] ]]; then
-        echo "repin: skipping a file name with control characters: $(printf '%q' "$f")" >&2
+      if ! [[ $f =~ ^[A-Za-z0-9._/-]+$ ]]; then
+        UNSAFE_SEEN[$f]=1
+        UNSAFE=${#UNSAFE_SEEN[@]}
         continue
       fi
       [ -L "$dir/$f" ] && continue
@@ -335,11 +343,24 @@ literal_scan() {
   sort -t$'\t' -k3,3 -k4,4n -o "$out" "$out"
 }
 
-# literal_report HITS: the hits as `  path:line (sha12, tag)`; prints nothing when there are none.
-literal_report() {
-  [ -s "$1" ] || return 0
-  echo "copies of the old pin outside the workflow refs ($(wc -l <"$1")):"
+# literal_lines HITS: the hits as `  path:line (sha12, tag)`.
+literal_lines() {
   awk -F'\t' '{ printf "  %s:%s (%s, %s)\n", $3, $4, substr($1, 1, 12), $2 }' "$1"
+}
+
+# literal_unsafe_note: how many files with unsafe names were skipped, as a count only; nothing when none.
+literal_unsafe_note() {
+  [ "$UNSAFE" -gt 0 ] || return 0
+  echo "$UNSAFE file(s) with unsafe names skipped (not listed, not rewritten; fix them by hand)"
+}
+
+# literal_report HITS: the hits, then the skipped count; prints nothing when there is neither.
+literal_report() {
+  if [ -s "$1" ]; then
+    echo "copies of the old pin outside the workflow refs ($(wc -l <"$1")):"
+    literal_lines "$1"
+  fi
+  literal_unsafe_note
 }
 
 # literal_rewrite DIR NEWSHA NEWTAG HITS DRY LIST: rewrite (DRY=1: only print the diff of) the exact copies named in
@@ -357,9 +378,10 @@ literal_rewrite() {
     while IFS=$'\t' read -r sha tag; do
       etag=${tag//./\\.}
       exprs+=(-e "s/\\b$sha\\b([\"']?[[:space:]]+#[[:space:]]*)$etag(\\.([^0-9]|\$)|[^0-9A-Za-z.]|\$)/$newsha\\1$newtag\\2/g" -e "s/\\b$sha\\b/$newsha/g")
-    done < <(awk -F'\t' -v f="$f" '$3 == f { print $1 "\t" $2 }' "$hits" | sort -u)
+    done < <(F="$f" awk -F'\t' '$3 == ENVIRON["F"] { print $1 "\t" $2 }' "$hits" | sort -u)
+    [ "${#exprs[@]}" -gt 0 ] || continue
     n=$((n + 1))
-    sed -E "${exprs[@]}" "$dir/$f" >"$tmp/$n.new"
+    sed -E "${exprs[@]}" -- "$dir/$f" >"$tmp/$n.new"
     cmp -s "$dir/$f" "$tmp/$n.new" && continue
     before=$(wc -l <"$dir/$f")
     after=$(wc -l <"$tmp/$n.new")
@@ -369,8 +391,8 @@ literal_rewrite() {
     else
       cat "$tmp/$n.new" >"$dir/$f"
     fi
-    awk -F'\t' -v f="$f" -v v="$verb" -v n="$newtag" \
-      '$3 == f { printf "%s %s:%s (%s -> %s)\n", v, $3, $4, substr($1, 1, 12), n }' "$hits" | sort -u
+    F="$f" awk -F'\t' -v v="$verb" -v n="$newtag" \
+      '$3 == ENVIRON["F"] { printf "%s %s:%s (%s -> %s)\n", v, $3, $4, substr($1, 1, 12), n }' "$hits" | sort -u
     printf '%s\n' "$f" >>"$list"
   done < <(cut -f3 "$hits" | sort -u)
 }
@@ -504,14 +526,16 @@ cmd_apply() {
     echo "re-pinned to $to:"
     printf '%s\n' "$changed" | sed 's/^/  /'
   fi
-  if [ -s "$lits" ]; then
+  if [ -s "$lits" ] || [ "$UNSAFE" -gt 0 ]; then
     if [ "$lit" = 1 ]; then
-      literal_rewrite "$dir" "${TAG_SHA[$to]}" "$to" "$lits" "$dry" "$lchanged"
+      [ ! -s "$lits" ] || literal_rewrite "$dir" "${TAG_SHA[$to]}" "$to" "$lits" "$dry" "$lchanged"
+      literal_unsafe_note
     else
       literal_report "$lits"
       echo "these copies were not changed; rerun with --also-update-literals to rewrite them"
-      lrc=11
     fi
+    # exit 11: copies of the old SHA remain (all of them without the flag; the unsafe-named ones with it)
+    if [ "$lit" != 1 ] || [ "$UNSAFE" -gt 0 ]; then lrc=11; fi
   fi
   return "$lrc"
 }
@@ -578,14 +602,13 @@ cmd_pr() {
   fi
   while IFS= read -r f; do files+=("${f#"$dir"/}"); done <<<"$changed"
   count=$(git -C "$dir" diff --numstat -- "${files[@]}" | awk '{ n += $1 } END { print n + 0 }')
-  if [ -s "$lits" ]; then
-    if [ "$lit" = 1 ]; then
-      literal_rewrite "$dir" "${TAG_SHA[$to]}" "$to" "$lits" 0 "$lchanged"
-      while IFS= read -r f; do lfiles+=("$f"); done <"$lchanged"
-    else
-      literal_report "$lits"
-      lrc=11
-    fi
+  if [ "$lit" = 1 ] && [ -s "$lits" ]; then
+    literal_rewrite "$dir" "${TAG_SHA[$to]}" "$to" "$lits" 0 "$lchanged"
+    while IFS= read -r f; do lfiles+=("$f"); done <"$lchanged"
+  fi
+  if [ -s "$lits" ] || [ "$UNSAFE" -gt 0 ]; then
+    literal_unsafe_note
+    if [ "$lit" != 1 ] || [ "$UNSAFE" -gt 0 ]; then lrc=11; fi
   fi
   mktmp body
   {
@@ -603,7 +626,11 @@ cmd_pr() {
     elif [ -s "$lits" ]; then
       echo "Copies of the old pin SHA remain outside the workflows and were NOT changed (rerun with \`--also-update-literals\`); this pull request's checks may fail on them:"
       echo
-      literal_report "$lits" | tail -n +2 | sed 's/^  /- /'
+      literal_lines "$lits" | sed 's/^  /- /'
+      echo
+    fi
+    if [ "$UNSAFE" -gt 0 ]; then
+      echo "- $(literal_unsafe_note)"
       echo
     fi
     echo "- Release: https://github.com/$SRC/releases/tag/$to"

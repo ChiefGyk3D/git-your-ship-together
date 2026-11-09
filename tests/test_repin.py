@@ -623,6 +623,97 @@ def test_pr_mode_without_the_flag_opens_the_workflow_only_pr_names_the_copies_an
     assert git(root, "rev-parse", "--abbrev-ref", "HEAD").strip() == "main"
 
 
+HOSTILE_NAMES = [
+    "back`tick`.txt",
+    "back\\slash.txt",
+    "new\nline.txt",
+    "$(touch PWNED).txt",
+    "s;x;y;.txt",
+    "sp ace.txt",
+    "sq'uote.txt",
+]
+
+
+@pytest.fixture
+def hostile(env, lit):
+    """The `lit` repository plus tracked files whose names are hostile, a leading-dash name and a normal name."""
+    for name in HOSTILE_NAMES:
+        (lit / name).write_text(f'X = "{OLD}"\n')
+    (lit / "-dash.txt").write_text(f'X = "{OLD}" # v1.28.0\n')
+    (lit / "ok.txt").write_text(f'X = "{OLD}" # v1.28.0\n')
+    git(lit, "add", ".")
+    git(lit, "commit", "-q", "-m", "hostile")
+    return lit
+
+
+def assert_nothing_hostile_echoed(text):
+    for frag in ("tick", "slash", "PWNED", "line.txt", "s;x;y", "sp ace", "sq'uote", "touch"):
+        assert frag not in text, frag
+
+
+def test_hostile_file_names_are_never_rewritten_or_echoed_and_normal_names_still_work(env, hostile):
+    before = snapshot(hostile)
+    p = run(env, "apply", "--also-update-literals", hostile)
+    assert p.returncode == 11, p.stdout + p.stderr  # copies remain: the unsafe ones
+    after = snapshot(hostile)
+    for name in HOSTILE_NAMES:
+        assert after[name] == before[name], repr(name)
+    assert not (hostile / "PWNED").exists()
+    assert after["ok.txt"].decode() == f'X = "{NEW}" # v1.30.0\n'
+    assert after["-dash.txt"].decode() == f'X = "{NEW}" # v1.30.0\n'  # a leading dash is a file, never an option
+    assert f"{len(HOSTILE_NAMES)} file(s) with unsafe names skipped" in p.stdout
+    assert "rewrote ok.txt:1" in p.stdout and "rewrote -dash.txt:1" in p.stdout
+    assert_nothing_hostile_echoed(p.stdout + p.stderr)
+
+
+def test_hostile_file_names_without_the_flag_are_counted_not_listed(env, hostile):
+    p = run(env, "apply", hostile)
+    assert p.returncode == 11
+    assert f"{len(HOSTILE_NAMES)} file(s) with unsafe names skipped" in p.stdout
+    assert any(h.startswith("ok.txt:1 ") for h in hit_lines(p.stdout))
+    assert_nothing_hostile_echoed(p.stdout + p.stderr)
+
+
+def test_hostile_file_names_alone_still_exit_11_with_nothing_to_list(env):
+    root = make_caller(env, {"ci.yml": wf()}, "only-hostile")
+    (root / "a`b.txt").write_text(f"{OLD}\n")
+    init_repo(env, root)
+    p = run(env, "apply", "--also-update-literals", root)
+    assert p.returncode == 11, p.stdout + p.stderr
+    assert (root / "a`b.txt").read_text() == f"{OLD}\n"
+    assert "1 file(s) with unsafe names skipped" in p.stdout
+    assert "a`b" not in p.stdout + p.stderr
+
+
+def test_status_counts_hostile_names_without_echoing_them(env, hostile):
+    p = run(env, "status", hostile)
+    assert p.returncode == 10
+    assert f"{len(HOSTILE_NAMES)} file(s) with unsafe names skipped" in p.stdout
+    assert_nothing_hostile_echoed(p.stdout + p.stderr)
+
+
+@pytest.mark.parametrize("flag", [(), ("--also-update-literals",)])
+def test_the_pull_request_body_never_carries_a_hostile_file_name(env, clone, flag):
+    root, _ = clone
+    (root / "tests").mkdir()
+    (root / "tests" / "t.py").write_text(f'PIN = "{OLD}"\n')
+    for name in HOSTILE_NAMES:
+        (root / name).write_text(f'X = "{OLD}"\n')
+    git(root, "add", ".")
+    git(root, "commit", "-q", "-m", "t")
+    git(root, "push", "-q", "origin", "main")
+    p = run(env, "pr", *flag, root)
+    assert p.returncode == 11, p.stdout + p.stderr
+    body = Path(str(env["calls"]) + ".body").read_text()
+    assert f"{len(HOSTILE_NAMES)} file(s) with unsafe names skipped" in body
+    assert "tests/t.py" in body
+    assert_nothing_hostile_echoed(body + p.stdout + p.stderr)
+    changed = git(root, "diff", "--name-only", "-z", "main", "repin/gyst-v1.30.0").split("\0")
+    assert [c for c in changed if c] == (
+        [".github/workflows/ci.yml", "tests/t.py"] if flag else [".github/workflows/ci.yml"]
+    )
+
+
 def test_the_exit_code_table_names_11_and_the_flag():
     text = SCRIPT.read_text()
     assert re.search(r"11 [^;\n]*literal", text)

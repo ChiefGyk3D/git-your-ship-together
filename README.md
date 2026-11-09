@@ -1299,6 +1299,8 @@ Inputs of `container-release.yml`:
 | `require-tag-ref` | `true` | Publish only from a `refs/tags/vMAJOR.MINOR.PATCH` ref, with optional SemVer 2.0.0 pre-release and build parts (no leading zeroes, no empty identifiers); `v1`, `v1.2` and `vnot-a-release` do not publish. With `allowed-publish-events: "*"` and `require-tag-ref: false` the earlier behavior (any non-pull-request ref) is restored |
 | `timeout-minutes` | `60` | Timeout of each platform's build job; a platform built under QEMU is slow |
 
+A failed Trivy scan is followed by a `Summarize a failed Trivy scan` step that prints the totals by severity and the rule id, file path and count of each hit from the scan's SARIF (never the matched text; it always exits 0). When every secret hit is under `site-packages` it also names `skip-secret-scan-in-site-packages: true`. The script is `scripts/trivy_sarif_summary.py`, inlined byte for byte and tested by `tests/test_trivy_sarif_summary.py`.
+
 Outputs: `digest` and `image` (`ghcr.io/...@sha256:...`) of the published
 index, empty when not pushed.
 

@@ -13,7 +13,16 @@ Two callers failed their re-pin pull requests because a file outside the workflo
 - **New exit code 11** (`apply` and `pr`): the pins were rewritten but copies remain, listed. `pr` still opens the workflow-only pull request and names the copies in its body. Every existing code keeps its meaning; `status` keeps 0, 10 and 3.
 - **`--also-update-literals`** (`apply`, `pr`): rewrites those exact copies, and a `# vX.Y.Z` comment only where it directly follows the SHA (a closing quote may sit between), prints each rewrite, and with `pr` commits those files too. `--dry-run` prints the diff. A caller that already re-pinned has no old SHA left to search for, so pass the flag on the run that re-pins.
 - **The scheduled workflow** inlines the new script and does not pass the flag: a caller with copies gets the workflow-only pull request and a failed step (exit 11) that names them.
+- **File names are data.** Only names made of `A-Za-z0-9._/-` are listed, rewritten or put in a pull request body; any other name (a backtick, a backslash, a newline, a space, `$(...)`, a `;`) is skipped and only counted ("N file(s) with unsafe names skipped"), and that count alone makes the run exit 11. The file name reaches awk through `ENVIRON`, never `-v`, and sed gets only `-e` scripts and `--` before the file.
 - **Tests.** `tests/test_repin.py` builds a git fixture with a workflow ref, a test asserting the old pin, a script constant, a CHANGELOG line (untouched), a history file, a binary file, a symlink, an untracked file and a longer hex string.
+
+### Added: a failed Trivy image scan names what tripped it (issue #383)
+
+A caller sees this after it re-pins; no input changes, no egress host is added and the scan's exit behavior is unchanged.
+
+- **`Summarize a failed Trivy scan`.** A new step in both build jobs of `container-release.yml` (`python-docker-release.yml` forwards through it) runs when the scan step fails (`inputs.trivy && failure()`, 2 minutes at most, no network). From the SARIF the scan already wrote it prints the totals by severity and one row per rule id and file path with its count, secret rules first, at most 50 rows. It never prints the matched text, a message or a snippet; ids and paths are JSON-escaped and cut to 200 characters. It always exits 0, so it never changes pass or fail.
+- **The site-packages hint.** When every secret hit is under a `site-packages` path it adds one line: set `skip-secret-scan-in-site-packages: true` on the call to skip secret rules there (CVE scanning stays on). The input stays opt-in and off by default.
+- **Where it lives.** `scripts/trivy_sarif_summary.py` (stdlib only); its marked block is inlined byte for byte, held identical by `tests/test_trivy_sarif_summary.py`. `verify-published.yml` and `base-image-digest.yml` scan with their own Trivy binary and JSON output, not this scan, and are unchanged.
 
 ### Fixed: tool installs survive a GitHub download outage (issue #372, refs)
 
