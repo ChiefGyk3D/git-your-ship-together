@@ -13,6 +13,17 @@ Five merge captains hit a 10-minute hang or gated on the wrong thing: the defaul
 - **Fail fast.** A requested name that has not reported while every run on the pinned head is complete and the list read identical on 3 polls over at least 60 s now ends with exit 2 (`result` `missing`) and names the missing context and the check names that did report, instead of waiting for the hung timer. A run still open, or a late workflow that starts within that window, is waited for as before. Every other exit code, the head pin, the mergeability read and the settle rule are unchanged.
 - **`--help`.** The script prints its usage and options.
 
+### Added: `repin.sh` finds the other copies of the old pin (issue #380)
+
+Two callers failed their re-pin pull requests because a file outside the workflows held the old SHA: a test asserting `bash-ci.yml@<old> # v1.31.0`, and a script constant that a test compared with the workflow pin.
+
+- **Report.** After the pins are rewritten, and in `status` and `apply --dry-run`, `scripts/repin.sh` searches the tracked files of the git checkout for each old full 40-hex SHA as a whole word and lists every hit outside the rewritten workflow refs as `path:line`. Binary files, symlinks, untracked files, a longer hex string that merely contains the SHA, and release-history files (`CHANGELOG*`, `HISTORY*`, `NEWS*`, `RELEASES*`, `RELEASE_NOTES*`) are never hits.
+- **New exit code 11** (`apply` and `pr`): the pins were rewritten but copies remain, listed. `pr` still opens the workflow-only pull request and names the copies in its body. Every existing code keeps its meaning; `status` keeps 0, 10 and 3.
+- **`--also-update-literals`** (`apply`, `pr`): rewrites those exact copies, and a `# vX.Y.Z` comment only where it directly follows the SHA (a closing quote may sit between), prints each rewrite, and with `pr` commits those files too. `--dry-run` prints the diff. A caller that already re-pinned has no old SHA left to search for, so pass the flag on the run that re-pins.
+- **The scheduled workflow** inlines the new script and does not pass the flag: a caller with copies gets the workflow-only pull request and a failed step (exit 11) that names them.
+- **File names are data.** Only names made of `A-Za-z0-9._/-` are listed, rewritten or put in a pull request body; any other name (a backtick, a backslash, a newline, a space, `$(...)`, a `;`) is skipped and only counted ("N file(s) with unsafe names skipped"), and that count alone makes the run exit 11. The file name reaches awk through `ENVIRON`, never `-v`, and sed gets only `-e` scripts and `--` before the file.
+- **Tests.** `tests/test_repin.py` builds a git fixture with a workflow ref, a test asserting the old pin, a script constant, a CHANGELOG line (untouched), a history file, a binary file, a symlink, an untracked file and a longer hex string.
+
 ### Added: a failed Trivy image scan names what tripped it (issue #383)
 
 A caller sees this after it re-pins; no input changes, no egress host is added and the scan's exit behavior is unchanged.

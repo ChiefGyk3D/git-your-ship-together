@@ -125,7 +125,7 @@ And what keeps the callers honest:
 | `baseline/risk-register.yaml` | Every advisory a pipeline is told to ignore, with the reason, the mitigation, an owner and an expiry. See [Risk register](#risk-register) |
 | `scripts/audit_baseline.py` | Reads each repository's settings and workflows from the API and reports PASS, FAIL or UNKNOWN per baseline item. Exit 0 only when every check passed |
 | `scripts/new-repo.sh` | Adopts a repository, or starts one: reads what it holds, writes the caller workflows and `dependabot.yml` from that, commits on a branch and opens the pull request, applies every BASELINE setting, appends to `baseline/repos.txt`. `--dry-run` writes the files somewhere else and prints the settings instead; that is what its test runs |
-| `scripts/repin.sh` | Moves a repository's pins of these workflows to a release, changing only the SHA and the `# vX.Y.Z` comment: `status` (pinned against latest, with ages), `apply`, and `pr` (branch, push, pull request; never merges). A Dependabot template with a GYST group is in `examples/dependabot-gyst.yml`. See [repin](docs/wiki/Script-repin.md) |
+| `scripts/repin.sh` | Moves a repository's pins of these workflows to a release, changing only the SHA and the `# vX.Y.Z` comment: `status` (pinned against latest, with ages), `apply`, and `pr` (branch, push, pull request; never merges). Lists other copies of the old SHA in tracked files (exit 11) and rewrites them with `--also-update-literals`. A Dependabot template with a GYST group is in `examples/dependabot-gyst.yml`. See [repin](docs/wiki/Script-repin.md) |
 | `scripts/wait-ci.sh` | The CI watcher behind `.github/actions/wait-ci`: pins the head SHA, waits for the required check and every other check on that commit, optionally squash-merges it. A second line only: the atomic guarantee is GitHub-enforced required checks or a merge queue (`--require-protection` fails when the base branch has none). Tested against a fake `gh` in `tests/test_wait_ci.py` |
 | `scripts/doppler-ci-set.sh` | Sets one secret in the shared Doppler `ci` config. The value is typed twice with echo off and never reaches a command line, shell history or the terminal |
 | `docs/wiki/` | The source of the [GitHub wiki](https://github.com/ChiefGyk3D/git-your-ship-together/wiki), a generated mirror: edit here, never on github.com. A change that alters what a person would read changes the page in the same pull request |
@@ -1417,7 +1417,8 @@ Inputs of `verify-published.yml`:
 `repin.yml` keeps a caller's pins current. On a schedule it runs `scripts/repin.sh` (inlined byte for byte) and, when any
 `uses: ChiefGyk3D/git-your-ship-together/...@<sha> # vX.Y.Z` pin is behind the latest release, opens ONE pull request that
 changes the SHA and the version comment of every pin and nothing else, with the release and changelog links in the body. It
-never merges. It stops without a pull request, and fails the job naming them, when the new release drops or retypes an input
+never merges. Other copies of the old SHA in tracked files (a test asserting the pin, a script constant) are listed in the body
+and make the step exit 11; `scripts/repin.sh --also-update-literals` rewrites them. It stops without a pull request, and fails the job naming them, when the new release drops or retypes an input
 the caller sets or adds a required input it does not set. Writing a branch that changes workflow files takes a GitHub App
 installation token (the job token cannot hold the `workflows` permission, and a pull request it opened would start no checks):
 Contents, Pull requests and Workflows set to write, limited to the calling repository, minted at the start of the job. Without

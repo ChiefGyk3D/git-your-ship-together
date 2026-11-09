@@ -70,6 +70,14 @@ keys you set. It stops, opens nothing and fails the job, naming them, when the n
 listed in the pull request body as a note, not a blocker. A definition it cannot read is a stop, not a pass. To adopt such a
 release, adjust the caller by hand.
 
+## Copies of the old pin outside the workflows
+
+The pull request changes workflow files only. If a test, a script constant or a template in the caller also holds the old SHA, the
+script lists it (`path:line`) in the pull request body, and the step exits 11 after opening the pull request, so the run is red
+and the file is named. Fix it by hand on the branch, or run `scripts/repin.sh apply --also-update-literals` (or `pr
+--also-update-literals`) yourself; the scheduled job does not pass that flag. `CHANGELOG*` and other release-history files are
+never listed. See [repin](Script-repin.md).
+
 ## How it is tested
 
 `tests/test_repin.py` holds the inlined copy identical to the script, the three permissions and their repository scope, that the App
