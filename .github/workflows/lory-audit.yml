@@ -85,6 +85,7 @@ jobs:
   audit:
     name: Lory audit
     runs-on: ubuntu-latest
+    # normal: no fixture history
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read

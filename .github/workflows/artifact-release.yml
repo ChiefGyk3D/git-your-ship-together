@@ -122,6 +122,7 @@ jobs:
   build:
     name: Build${{ inputs.verify-command != '' && ', verify' || '' }}
     runs-on: ubuntu-latest
+    # normal: ~1 min (p50 0.3, p95 0.5; last ~30 green runs)
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read  # every caller command runs here, beside nothing
@@ -346,6 +347,7 @@ jobs:
       contains(format(',{0},', inputs.allowed-publish-events), format(',{0},', github.event_name)) &&
       startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    # normal: no fixture history
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: write  # create the release, upload its assets

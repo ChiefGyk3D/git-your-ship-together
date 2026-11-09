@@ -158,6 +158,7 @@ jobs:
   fmt:
     name: fmt
     runs-on: ubuntu-latest
+    # normal: ~1 min (p50 0.3, p95 0.5; last ~30 green runs)
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read
@@ -400,6 +401,7 @@ jobs:
   validate:
     name: validate
     runs-on: ubuntu-latest
+    # normal: ~1 min (p50 0.3, p95 0.9; last ~30 green runs)
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read
@@ -649,6 +651,7 @@ jobs:
     name: test directories
     if: inputs.test
     runs-on: ubuntu-latest
+    # normal: ~1 min (p50 0.3, p95 0.4; last ~30 green runs)
     timeout-minutes: 5
     permissions: {}
     outputs:
@@ -812,6 +815,7 @@ jobs:
       matrix:
         leg: ${{ fromJSON(needs.test-dirs.outputs.legs) }}
     runs-on: ubuntu-latest
+    # normal: ~1 min (p50 0.4, p95 0.9; last ~30 green runs)
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read
@@ -1055,6 +1059,7 @@ jobs:
     name: tflint
     if: inputs.tflint
     runs-on: ubuntu-latest
+    # normal: ~1 min (p50 0.3, p95 0.5; last ~30 green runs)
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read
@@ -1289,6 +1294,7 @@ jobs:
     name: Configuration scan (Trivy)
     if: inputs.trivy
     runs-on: ubuntu-latest
+    # normal: ~1 min (p50 0.4, p95 0.5; last ~30 green runs)
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read
@@ -1425,6 +1431,7 @@ jobs:
     name: policy (OPA)
     if: inputs.policy-directories != ''
     runs-on: ubuntu-latest
+    # normal: ~1 min (p50 0.3, p95 0.5; last ~30 green runs)
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read
@@ -1666,6 +1673,7 @@ jobs:
     name: plan
     if: inputs.plan-command != '' && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
+    # normal: no fixture history
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read
@@ -2025,6 +2033,7 @@ jobs:
     name: Workflow lint (actionlint, zizmor)
     if: inputs.workflow-lint
     runs-on: ubuntu-latest
+    # normal: no fixture history
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read
@@ -2164,6 +2173,7 @@ jobs:
     if: always()
     needs: [fmt, validate, test-dirs, test, tflint, trivy, policy, plan, workflow-lint]
     runs-on: ubuntu-latest
+    # normal: ~1 min (p50 0.3, p95 0.4; last ~30 green runs)
     timeout-minutes: 5
     permissions: {}
     steps:
