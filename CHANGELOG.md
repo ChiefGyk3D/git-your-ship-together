@@ -5,6 +5,16 @@ name what a caller sees after that.
 
 ## Unreleased
 
+### Added: `repin.sh` finds the other copies of the old pin (issue #380)
+
+Two callers failed their re-pin pull requests because a file outside the workflows held the old SHA: a test asserting `bash-ci.yml@<old> # v1.31.0`, and a script constant that a test compared with the workflow pin.
+
+- **Report.** After the pins are rewritten, and in `status` and `apply --dry-run`, `scripts/repin.sh` searches the tracked files of the git checkout for each old full 40-hex SHA as a whole word and lists every hit outside the rewritten workflow refs as `path:line`. Binary files, symlinks, untracked files, a longer hex string that merely contains the SHA, and release-history files (`CHANGELOG*`, `HISTORY*`, `NEWS*`, `RELEASES*`, `RELEASE_NOTES*`) are never hits.
+- **New exit code 11** (`apply` and `pr`): the pins were rewritten but copies remain, listed. `pr` still opens the workflow-only pull request and names the copies in its body. Every existing code keeps its meaning; `status` keeps 0, 10 and 3.
+- **`--also-update-literals`** (`apply`, `pr`): rewrites those exact copies, and a `# vX.Y.Z` comment only where it directly follows the SHA (a closing quote may sit between), prints each rewrite, and with `pr` commits those files too. `--dry-run` prints the diff. A caller that already re-pinned has no old SHA left to search for, so pass the flag on the run that re-pins.
+- **The scheduled workflow** inlines the new script and does not pass the flag: a caller with copies gets the workflow-only pull request and a failed step (exit 11) that names them.
+- **Tests.** `tests/test_repin.py` builds a git fixture with a workflow ref, a test asserting the old pin, a script constant, a CHANGELOG line (untouched), a history file, a binary file, a symlink, an untracked file and a longer hex string.
+
 ### Fixed: tool installs survive a GitHub download outage (issue #372, refs)
 
 On 2026-11-09 a GitHub incident timed out anonymous traffic (HTTP 504, curl exit 22) and every plain `curl -sSfL` tool install failed on its first try. A caller sees this after it re-pins; no input changes and no egress host is added.

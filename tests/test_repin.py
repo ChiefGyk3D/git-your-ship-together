@@ -447,6 +447,188 @@ def test_pr_mode_does_nothing_when_the_caller_is_current(env, clone):
     assert not [c for c in calls(env) if c[:2] == ["pr", "create"]]
 
 
+# --- literal copies of the old pin outside the workflows (issue #380) ---------------------------------------
+
+
+def init_repo(env, root):
+    ge = {**os.environ, **env["env"]}
+    for args in (["init", "-q", "-b", "main"], ["add", "."], ["commit", "-q", "-m", "init"]):
+        subprocess.run(["git", "-C", str(root), *args], check=True, env=ge)
+
+
+@pytest.fixture
+def lit(env):
+    """A git repository: a workflow pin plus every kind of other place that can hold the old SHA."""
+    root = make_caller(env, {"ci.yml": wf()}, "lit")
+    (root / "tests").mkdir()
+    (root / "scripts").mkdir()
+    (root / "docs").mkdir()
+    (root / "tests" / "test_template.py").write_text(
+        f'assert "{SRC}/.github/workflows/bash-ci.yml@{OLD} # v1.28.0" in TEXT\n'
+        f"PARTIAL = '{OLD}e'\n"  # a longer hex string that merely contains the SHA: never a match
+        f"OTHER = '{OTHER}'\n"
+    )
+    (root / "scripts" / "apply-baseline.sh").write_text(f'#!/bin/sh\nGYST_SHA="{OLD}"\n')
+    (root / "CHANGELOG.md").write_text(f"- pinned {OLD} # v1.28.0 for a while\n")
+    (root / "docs" / "HISTORY.md").write_text(f"- {OLD} # v1.28.0\n")
+    (root / "blob.bin").write_bytes(b"\x00\x01" + OLD.encode() + b"\x00")
+    (root / "scripts" / "link").symlink_to("apply-baseline.sh")
+    init_repo(env, root)
+    return root
+
+
+def snapshot(root):
+    return {
+        str(p.relative_to(root)): p.read_bytes()
+        for p in sorted(root.rglob("*"))
+        if p.is_file() and ".git" not in p.relative_to(root).parts
+    }
+
+
+def hit_lines(out):
+    return [ln.strip() for ln in out.splitlines() if re.match(r"\s+\S+:\d+\b", ln)]
+
+
+def test_apply_without_the_flag_reports_every_other_copy_rewrites_only_the_pin_and_exits_11(env, lit):
+    before = snapshot(lit)
+    p = run(env, "apply", lit)
+    assert p.returncode == 11, p.stdout + p.stderr
+    after = snapshot(lit)
+    assert {k for k in after if after[k] != before[k]} == {".github/workflows/ci.yml"}
+    assert "--also-update-literals" in p.stdout
+    hits = hit_lines(p.stdout)
+    assert any(h.startswith("tests/test_template.py:1 ") for h in hits), hits
+    assert any(h.startswith("scripts/apply-baseline.sh:2 ") for h in hits), hits
+    # not a hit to fix: history files, binary files, a partial match, another SHA, the workflow pin itself
+    joined = "\n".join(hits)
+    for gone in ("CHANGELOG", "HISTORY", "blob.bin", "test_template.py:2", "test_template.py:3", "ci.yml"):
+        assert gone not in joined, gone
+
+
+def test_the_flag_rewrites_the_exact_literal_and_the_adjacent_version_and_prints_each_rewrite(env, lit):
+    before = snapshot(lit)
+    p = run(env, "apply", "--also-update-literals", lit)
+    assert p.returncode == 0, p.stdout + p.stderr
+    after = snapshot(lit)
+    t = after["tests/test_template.py"].decode()
+    assert f"bash-ci.yml@{NEW} # v1.30.0" in t
+    assert f"PARTIAL = '{OLD}e'" in t and f"OTHER = '{OTHER}'" in t  # partial match and other SHA untouched
+    assert f'GYST_SHA="{NEW}"' in after["scripts/apply-baseline.sh"].decode()
+    out = p.stdout
+    assert "rewrote tests/test_template.py:1" in out and "rewrote scripts/apply-baseline.sh:2" in out
+    for name in ("CHANGELOG.md", "docs/HISTORY.md", "blob.bin"):
+        assert after[name] == before[name], name
+    assert (lit / "scripts" / "link").is_symlink()
+    assert "rewrote" not in "".join(ln for ln in out.splitlines() if "CHANGELOG" in ln or "blob" in ln)
+
+
+def test_the_version_comment_is_changed_only_where_it_directly_follows_the_sha(env, lit):
+    (lit / "tests" / "other.py").write_text(f"# v1.28.0 is the old release\nX = '{OLD}'\nY = '{OLD}' # note v1.28.0\n")
+    git(lit, "add", ".")
+    git(lit, "commit", "-q", "-m", "more")
+    p = run(env, "apply", "--also-update-literals", lit)
+    assert p.returncode == 0, p.stderr
+    assert (lit / "tests" / "other.py").read_text() == (
+        f"# v1.28.0 is the old release\nX = '{NEW}'\nY = '{NEW}' # note v1.28.0\n"
+    )
+
+
+def test_apply_is_clean_on_a_repository_with_no_other_copies_with_and_without_the_flag(env):
+    root = make_caller(env, {"ci.yml": wf()}, "plain")
+    init_repo(env, root)
+    p = run(env, "apply", "--also-update-literals", root)
+    assert p.returncode == 0, p.stderr
+    assert "outside the workflow" not in p.stdout
+    root2 = make_caller(env, {"ci.yml": wf()}, "plain2")
+    init_repo(env, root2)
+    p = run(env, "apply", root2)
+    assert p.returncode == 0, p.stderr
+    assert "outside the workflow" not in p.stdout
+
+
+def test_dry_run_reports_the_copies_and_with_the_flag_shows_the_diff_and_writes_nothing(env, lit):
+    before = snapshot(lit)
+    p = run(env, "apply", "--dry-run", lit)
+    assert p.returncode == 11
+    assert any(h.startswith("tests/test_template.py:1 ") for h in hit_lines(p.stdout))
+    assert snapshot(lit) == before
+    p = run(env, "apply", "--dry-run", "--also-update-literals", lit)
+    assert p.returncode == 0, p.stderr
+    assert f'+GYST_SHA="{NEW}"' in p.stdout
+    assert snapshot(lit) == before
+
+
+def test_status_lists_the_other_copies_of_a_pin_that_is_behind_and_keeps_exit_10(env, lit):
+    before = snapshot(lit)
+    p = run(env, "status", lit)
+    assert p.returncode == 10
+    hits = hit_lines(p.stdout)
+    assert any(h.startswith("tests/test_template.py:1 ") for h in hits)
+    assert any(h.startswith("scripts/apply-baseline.sh:2 ") for h in hits)
+    assert snapshot(lit) == before
+
+
+def test_status_lists_no_copies_when_the_pin_is_current(env, lit):
+    (lit / ".github/workflows/ci.yml").write_text(wf(NEW, "v1.30.0"))
+    p = run(env, "status", lit)
+    assert p.returncode == 0
+    assert "outside the workflow" not in p.stdout
+
+
+def test_a_directory_that_is_not_a_git_checkout_skips_the_scan_and_keeps_its_old_exit_codes(env):
+    root = make_caller(env, {"ci.yml": wf()}, "nogit")
+    (root / "t.py").write_text(f"{OLD}\n")
+    assert run(env, "apply", root).returncode == 0
+    assert (root / "t.py").read_text() == f"{OLD}\n"
+
+
+def test_an_untracked_file_is_never_scanned_or_rewritten(env, lit):
+    (lit / "scratch.txt").write_text(f"{OLD}\n")
+    p = run(env, "apply", "--also-update-literals", lit)
+    assert p.returncode == 0
+    assert (lit / "scratch.txt").read_text() == f"{OLD}\n"
+
+
+def test_the_flag_is_refused_on_status(env, lit):
+    assert run(env, "status", "--also-update-literals", lit).returncode == 64
+
+
+def test_pr_mode_with_the_flag_commits_the_literal_files_too(env, clone):
+    root, _ = clone
+    (root / "tests").mkdir()
+    (root / "tests" / "t.py").write_text(f'PIN = "{OLD}"  # v1.28.0\n')
+    git(root, "add", ".")
+    git(root, "commit", "-q", "-m", "t")
+    git(root, "push", "-q", "origin", "main")
+    p = run(env, "pr", "--also-update-literals", root)
+    assert p.returncode == 0, p.stdout + p.stderr
+    changed = sorted(git(root, "diff", "--name-only", "main", "repin/gyst-v1.30.0").split())
+    assert changed == [".github/workflows/ci.yml", "tests/t.py"]
+    assert f'PIN = "{NEW}"  # v1.30.0' in git(root, "show", "repin/gyst-v1.30.0:tests/t.py")
+    assert "tests/t.py" in Path(str(env["calls"]) + ".body").read_text()
+
+
+def test_pr_mode_without_the_flag_opens_the_workflow_only_pr_names_the_copies_and_exits_11(env, clone):
+    root, _ = clone
+    (root / "tests").mkdir()
+    (root / "tests" / "t.py").write_text(f'PIN = "{OLD}"\n')
+    git(root, "add", ".")
+    git(root, "commit", "-q", "-m", "t")
+    git(root, "push", "-q", "origin", "main")
+    p = run(env, "pr", root)
+    assert p.returncode == 11, p.stdout + p.stderr
+    assert git(root, "diff", "--name-only", "main", "repin/gyst-v1.30.0").split() == [".github/workflows/ci.yml"]
+    body = Path(str(env["calls"]) + ".body").read_text()
+    assert "tests/t.py:1" in body and "--also-update-literals" in body
+    assert git(root, "rev-parse", "--abbrev-ref", "HEAD").strip() == "main"
+
+
+def test_the_exit_code_table_names_11_and_the_flag():
+    text = SCRIPT.read_text()
+    assert re.search(r"11 [^;\n]*literal", text)
+    assert "--also-update-literals" in text
+
+
 # --- the Dependabot template ------------------------------------------------
 
 
