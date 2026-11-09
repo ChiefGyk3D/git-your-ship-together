@@ -68,6 +68,7 @@ publish).
 | `parallel-ci.yml` | [CI](Workflow-parallel-ci.md) | One build, checks as parallel jobs sharing it, path rules that fail closed, `CI green` |
 | `ci-gate.yml` | [CI](Workflow-ci-gate.md) | `CI green` over the jobs a caller hands it |
 | `vendored-drift.yml` | [Automation](Which-workflow-do-I-need.md) | Fail when a vendored file or its generated output no longer matches its lock |
+| `pin-comments.yml` | [Automation](Which-workflow-do-I-need.md) | Fail when a `# vX.Y.Z` comment on a SHA-pinned `uses:` does not name the pinned commit |
 | `base-image-digest.yml` | [Release](Which-workflow-do-I-need.md) | Scheduled: fail when a pinned base-image digest has a fixable finding its tag's current digest fixes |
 | `python-package-release.yml` | [Release](Which-workflow-do-I-need.md) | Build, check, publish to the GitHub release (PyPI via a direct pypa publish step in the caller's own job) |
 | `artifact-release.yml` | [Release](Which-workflow-do-I-need.md) | Build any file, sign it, attach it to the release |
@@ -117,6 +118,7 @@ publish).
 | `scripts/parallel_ci_gate.py` | The gate rule `parallel-ci.yml` and `ci-gate.yml` inline byte for byte |
 | `scripts/classify_changes.py`, `scripts/ci_gate.py` | The logic behind the `classify-changes` and `ci-gate` actions ([Docs-only fast path](Docs-only-fast-path.md)) |
 | `scripts/check_vendored_drift.py` | The drift check `vendored-drift.yml` inlines byte for byte; also runnable locally |
+| `scripts/check_pin_comments.py` | The pin-comment check `pin-comments.yml` inlines byte for byte; also runnable locally |
 | `scripts/base_image_digest.py` | The pin reader and report comparison `base-image-digest.yml` inlines byte for byte |
 | `scripts/doppler-ci-set.sh` | Set one Doppler secret without the value touching a command line |
 | `.github/requirements/` | `pip-audit` and `semgrep`: the one-line `.in` and the hash lock `security.yml` carries inline |
