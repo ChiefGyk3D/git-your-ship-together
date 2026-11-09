@@ -712,15 +712,51 @@ def test_the_doppler_fetch_never_injects_the_secret_into_the_environment():
         assert step.get("id") in {"doppler-oidc", "doppler-token"}, step["name"]
 
 
+LEAK_MARKERS = (
+    "REPIN_APP_PRIVATE_KEY",
+    "steps.doppler-",
+    "doppler-oidc",
+    "doppler-token",
+    "toJSON(steps",
+    "steps[",
+    "secrets",
+)
+
+
+def key_leaks_after(steps, mint):
+    """Names of steps after the mint step that could read the key: by name, by whole-context dump or by bracket form."""
+    return [
+        str(step.get("name")) for step in steps[mint + 1 :] if any(m.lower() in str(step).lower() for m in LEAK_MARKERS)
+    ]
+
+
+@pytest.mark.parametrize(
+    "bypass",
+    [
+        {"env": {"DUMP": "${{ toJSON(steps) }}"}},
+        {"env": {"DUMP": "${{ tojson(steps) }}"}},
+        {"env": {"K": "${{ steps['doppler-oidc'].outputs.REPIN_APP_PRIVATE_KEY }}"}},
+        {"env": {"K": "${{ steps['doppler-token'].outputs }}"}},
+        {"env": {"S": "${{ toJSON(secrets) }}"}},
+        {"env": {"S": "${{ secrets }}"}},
+        {"env": {"K": "${{ env.REPIN_APP_PRIVATE_KEY }}"}},
+    ],
+)
+def test_the_post_mint_guard_bites_on_each_bypass(bypass):
+    steps = workflow_steps()
+    mint = next(i for i, s in enumerate(steps) if str(s.get("name", "")).startswith("Mint a one-hour"))
+    assert key_leaks_after(steps, mint) == []
+    mutated = [*steps, {"name": "Injected", "run": "true", **bypass}]
+    assert key_leaks_after(mutated, mint) == ["Injected"]
+
+
 def test_the_key_is_not_referenced_by_any_step_after_the_token_step_nor_by_a_job_env():
     doc = yaml.safe_load(WORKFLOW.read_text())
     assert "REPIN_APP_PRIVATE_KEY" not in str(doc["jobs"]["repin"].get("env", {})) + str(doc.get("env", {}))
     steps = workflow_steps()
     mint = next(i for i, s in enumerate(steps) if str(s.get("name", "")).startswith("Mint a one-hour"))
     assert mint > 0
-    for step in steps[mint + 1 :]:
-        assert "REPIN_APP_PRIVATE_KEY" not in str(step), step.get("name")
-        assert "steps.doppler-" not in str(step), step.get("name")
+    assert not key_leaks_after(steps, mint)
     for step in steps[:mint]:
         name = str(step.get("name", ""))
         if "REPIN_APP_PRIVATE_KEY" in str(step) and not name.startswith(FETCH_PREFIX):
