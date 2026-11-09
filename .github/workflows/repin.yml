@@ -615,13 +615,12 @@ jobs:
           # check_inputs DIR TAG ALLOW NOTES: exit 5 on a refused change unless ALLOW is 1; appends the findings to NOTES.
           check_inputs() {
             local dir=$1 tag=$2 allow=$3 notes=$4 newsha=${TAG_SHA[$2]} file line sha otag path
-            local oldf newf key problems=0 name used
+            local oldf newf problems=0 name used
             declare -A odef ndef
             mktmp oldf
             mktmp newf
             while IFS=$'\t' read -r file line sha otag path; do
               [ "$sha" != "$newsha" ] || continue
-              key="$path@$sha"
               if ! fetch_def "$path" "$sha" "$oldf" || ! fetch_def "$path" "$newsha" "$newf"; then
                 echo "repin: cannot read $path at the old pin ($otag) or at $tag, so its inputs cannot be compared ($file:$line)" >&2
                 problems=1
@@ -644,8 +643,8 @@ jobs:
               done < <(with_keys "$file" "$line")
               for name in "${!ndef[@]}"; do
                 case $used in *" $name "*) continue ;; esac
-                IFS='|' read -r nty ndf nrq <<<"${ndef[$name]}"
-                IFS='|' read -r oty odf orq <<<"${odef[$name]:-||}"
+                IFS='|' read -r _ ndf nrq <<<"${ndef[$name]}"
+                IFS='|' read -r _ odf orq <<<"${odef[$name]:-||}"
                 if [ "$nrq" = true ] && [ -z "$ndf" ] && { [ -z "${odef[$name]:-}" ] || [ "$orq" != true ]; }; then
                   echo "repin: $file:$line $path: $tag adds the required input $name, which the caller does not set" >&2
                   problems=1
