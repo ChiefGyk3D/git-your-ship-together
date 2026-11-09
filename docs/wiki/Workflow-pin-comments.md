@@ -9,7 +9,7 @@ changes.
 
 ## What fails the job
 
-1. A `uses: owner/repo@<40 hex>` line with no version comment (`# v1.2.3`, `# v4`).
+1. A `uses: owner/repo@<40 hex>` line with no version comment (`# vX.Y.Z`, `# v4`).
 2. A comment whose tag does not exist in `owner/repo`.
 3. A tag that resolves to a different commit than the pin. The message prints both.
 4. No workflow or action file at all: nothing checked is not a pass.
