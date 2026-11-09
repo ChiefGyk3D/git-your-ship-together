@@ -99,7 +99,7 @@ publish).
 | Path | What it is |
 |---|---|
 | `.github/actions/doppler-secrets/` | Composite action: fetch a Doppler config as masked env vars, or (`export: outputs`) as one masked JSON output, optionally narrowed by `names`. The source of the inlined copies of its decide step |
-| `.github/actions/egress-canary/` | Composite action: fail fast when an address of the GitHub hosts is unreachable under harden-runner `block` (EX-0001). The source of the inlined copies |
+| `.github/actions/egress-canary/` | Composite action: fail fast when an address of the GitHub hosts is unreachable under harden-runner `block`. The source of the inlined copies |
 | `.github/actions/wait-ci/` | Composite action: pin a commit, wait for its required check and every other check on it, optionally squash-merge exactly that commit ([wait-ci](Action-wait-ci.md)). Wraps `scripts/wait-ci.sh` |
 | `.github/actions/classify-changes/` | Composite action: `docs-only=true` only when every path a pull request changes is on the caller's docs-only list, read from the API ([Docs-only fast path](Docs-only-fast-path.md)). Wraps `scripts/classify_changes.py` |
 | `.github/actions/ci-gate/` | Composite action: the body of a caller's `CI green`; a skip counts only for a named job when the classifier said docs only ([Docs-only fast path](Docs-only-fast-path.md)). Wraps `scripts/ci_gate.py` |

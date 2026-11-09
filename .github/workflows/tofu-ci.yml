@@ -162,7 +162,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: Validate the egress policy inputs (EX-0001)
+      - name: Validate the egress policy inputs
         timeout-minutes: 1
         shell: bash
         working-directory: ${{ github.workspace }}
@@ -192,7 +192,7 @@ jobs:
           # The agent may only stop reporting to StepSecurity in block mode.
           disable-telemetry: ${{ ((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block') == 'block' }}
 
-      - name: Egress canary (EX-0001)
+      - name: Egress canary
         if: ${{ runner.os == 'Linux' && (((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block') == 'block') }}
         timeout-minutes: 2
         shell: bash
@@ -215,7 +215,7 @@ jobs:
           canary_show() { local n=$1; shift; echo "+ $*"; { timeout 10 "$@" 2>&1 || true; } | head -n "$n" || true; }
           canary_diag() {
             local name
-            echo "::group::egress canary diagnostics (EX-0001, for the GitHub Support ticket)"
+            echo "::group::egress canary diagnostics (for the GitHub Support ticket)"
             canary_show 5 uname -srmo
             canary_show 20 cat /etc/resolv.conf
             canary_show 20 bash -c "resolvectl status 2>/dev/null | grep -E '^ *(Current DNS Server|DNS Servers?|DNS Domain):'"
@@ -248,11 +248,11 @@ jobs:
               echo "egress canary: all $n addresses of $NAMES accept TCP $PORT"
               return 0
             fi
-            echo "::error title=egress canary::egress broken on this runner (known westus2 DNS issue, EX-0001): rerun the job"
+            echo "::error title=egress canary::egress broken on this runner (known westus2 DNS issue): rerun the job"
             echo "unreachable addresses (name address; '-' means the name did not resolve):"
             printf '%s\n' "$bad"
             canary_diag
-            echo "EX-0001 egress canary failed, unreachable: $(printf '%s' "$bad" | tr '\n' ';')" >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
+            echo "egress canary failed, unreachable: $(printf '%s' "$bad" | tr '\n' ';')" >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
             return 1
           }
           set -m
@@ -268,7 +268,7 @@ jobs:
             kill -KILL -- "-$main" >/dev/null 2>&1 || true
           fi
           if [ "$rc" -eq 143 ] || [ "$rc" -eq 137 ]; then
-            echo "::error title=egress canary::the canary hit its 90 s deadline (EX-0001): rerun the job"
+            echo "::error title=egress canary::the canary hit its 90 s deadline: rerun the job"
             rc=124
           fi
           exit "$rc"
@@ -404,7 +404,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: Validate the egress policy inputs (EX-0001)
+      - name: Validate the egress policy inputs
         timeout-minutes: 1
         shell: bash
         working-directory: ${{ github.workspace }}
@@ -434,7 +434,7 @@ jobs:
           # The agent may only stop reporting to StepSecurity in block mode.
           disable-telemetry: ${{ ((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block') == 'block' }}
 
-      - name: Egress canary (EX-0001)
+      - name: Egress canary
         if: ${{ runner.os == 'Linux' && (((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block') == 'block') }}
         timeout-minutes: 2
         shell: bash
@@ -457,7 +457,7 @@ jobs:
           canary_show() { local n=$1; shift; echo "+ $*"; { timeout 10 "$@" 2>&1 || true; } | head -n "$n" || true; }
           canary_diag() {
             local name
-            echo "::group::egress canary diagnostics (EX-0001, for the GitHub Support ticket)"
+            echo "::group::egress canary diagnostics (for the GitHub Support ticket)"
             canary_show 5 uname -srmo
             canary_show 20 cat /etc/resolv.conf
             canary_show 20 bash -c "resolvectl status 2>/dev/null | grep -E '^ *(Current DNS Server|DNS Servers?|DNS Domain):'"
@@ -490,11 +490,11 @@ jobs:
               echo "egress canary: all $n addresses of $NAMES accept TCP $PORT"
               return 0
             fi
-            echo "::error title=egress canary::egress broken on this runner (known westus2 DNS issue, EX-0001): rerun the job"
+            echo "::error title=egress canary::egress broken on this runner (known westus2 DNS issue): rerun the job"
             echo "unreachable addresses (name address; '-' means the name did not resolve):"
             printf '%s\n' "$bad"
             canary_diag
-            echo "EX-0001 egress canary failed, unreachable: $(printf '%s' "$bad" | tr '\n' ';')" >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
+            echo "egress canary failed, unreachable: $(printf '%s' "$bad" | tr '\n' ';')" >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
             return 1
           }
           set -m
@@ -510,7 +510,7 @@ jobs:
             kill -KILL -- "-$main" >/dev/null 2>&1 || true
           fi
           if [ "$rc" -eq 143 ] || [ "$rc" -eq 137 ]; then
-            echo "::error title=egress canary::the canary hit its 90 s deadline (EX-0001): rerun the job"
+            echo "::error title=egress canary::the canary hit its 90 s deadline: rerun the job"
             rc=124
           fi
           exit "$rc"
@@ -654,7 +654,7 @@ jobs:
     outputs:
       legs: ${{ steps.plan.outputs.legs }}
     steps:
-      - name: Validate the egress policy inputs (EX-0001)
+      - name: Validate the egress policy inputs
         timeout-minutes: 1
         shell: bash
         working-directory: ${{ github.workspace }}
@@ -684,7 +684,7 @@ jobs:
           # The agent may only stop reporting to StepSecurity in block mode.
           disable-telemetry: ${{ ((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block') == 'block' }}
 
-      - name: Egress canary (EX-0001)
+      - name: Egress canary
         if: ${{ runner.os == 'Linux' && (((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block') == 'block') }}
         timeout-minutes: 2
         shell: bash
@@ -707,7 +707,7 @@ jobs:
           canary_show() { local n=$1; shift; echo "+ $*"; { timeout 10 "$@" 2>&1 || true; } | head -n "$n" || true; }
           canary_diag() {
             local name
-            echo "::group::egress canary diagnostics (EX-0001, for the GitHub Support ticket)"
+            echo "::group::egress canary diagnostics (for the GitHub Support ticket)"
             canary_show 5 uname -srmo
             canary_show 20 cat /etc/resolv.conf
             canary_show 20 bash -c "resolvectl status 2>/dev/null | grep -E '^ *(Current DNS Server|DNS Servers?|DNS Domain):'"
@@ -740,11 +740,11 @@ jobs:
               echo "egress canary: all $n addresses of $NAMES accept TCP $PORT"
               return 0
             fi
-            echo "::error title=egress canary::egress broken on this runner (known westus2 DNS issue, EX-0001): rerun the job"
+            echo "::error title=egress canary::egress broken on this runner (known westus2 DNS issue): rerun the job"
             echo "unreachable addresses (name address; '-' means the name did not resolve):"
             printf '%s\n' "$bad"
             canary_diag
-            echo "EX-0001 egress canary failed, unreachable: $(printf '%s' "$bad" | tr '\n' ';')" >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
+            echo "egress canary failed, unreachable: $(printf '%s' "$bad" | tr '\n' ';')" >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
             return 1
           }
           set -m
@@ -760,7 +760,7 @@ jobs:
             kill -KILL -- "-$main" >/dev/null 2>&1 || true
           fi
           if [ "$rc" -eq 143 ] || [ "$rc" -eq 137 ]; then
-            echo "::error title=egress canary::the canary hit its 90 s deadline (EX-0001): rerun the job"
+            echo "::error title=egress canary::the canary hit its 90 s deadline: rerun the job"
             rc=124
           fi
           exit "$rc"
@@ -816,7 +816,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: Validate the egress policy inputs (EX-0001)
+      - name: Validate the egress policy inputs
         timeout-minutes: 1
         shell: bash
         working-directory: ${{ github.workspace }}
@@ -846,7 +846,7 @@ jobs:
           # The agent may only stop reporting to StepSecurity in block mode.
           disable-telemetry: ${{ ((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block') == 'block' }}
 
-      - name: Egress canary (EX-0001)
+      - name: Egress canary
         if: ${{ runner.os == 'Linux' && (((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block') == 'block') }}
         timeout-minutes: 2
         shell: bash
@@ -869,7 +869,7 @@ jobs:
           canary_show() { local n=$1; shift; echo "+ $*"; { timeout 10 "$@" 2>&1 || true; } | head -n "$n" || true; }
           canary_diag() {
             local name
-            echo "::group::egress canary diagnostics (EX-0001, for the GitHub Support ticket)"
+            echo "::group::egress canary diagnostics (for the GitHub Support ticket)"
             canary_show 5 uname -srmo
             canary_show 20 cat /etc/resolv.conf
             canary_show 20 bash -c "resolvectl status 2>/dev/null | grep -E '^ *(Current DNS Server|DNS Servers?|DNS Domain):'"
@@ -902,11 +902,11 @@ jobs:
               echo "egress canary: all $n addresses of $NAMES accept TCP $PORT"
               return 0
             fi
-            echo "::error title=egress canary::egress broken on this runner (known westus2 DNS issue, EX-0001): rerun the job"
+            echo "::error title=egress canary::egress broken on this runner (known westus2 DNS issue): rerun the job"
             echo "unreachable addresses (name address; '-' means the name did not resolve):"
             printf '%s\n' "$bad"
             canary_diag
-            echo "EX-0001 egress canary failed, unreachable: $(printf '%s' "$bad" | tr '\n' ';')" >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
+            echo "egress canary failed, unreachable: $(printf '%s' "$bad" | tr '\n' ';')" >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
             return 1
           }
           set -m
@@ -922,7 +922,7 @@ jobs:
             kill -KILL -- "-$main" >/dev/null 2>&1 || true
           fi
           if [ "$rc" -eq 143 ] || [ "$rc" -eq 137 ]; then
-            echo "::error title=egress canary::the canary hit its 90 s deadline (EX-0001): rerun the job"
+            echo "::error title=egress canary::the canary hit its 90 s deadline: rerun the job"
             rc=124
           fi
           exit "$rc"
@@ -1059,7 +1059,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: Validate the egress policy inputs (EX-0001)
+      - name: Validate the egress policy inputs
         timeout-minutes: 1
         shell: bash
         working-directory: ${{ github.workspace }}
@@ -1089,7 +1089,7 @@ jobs:
           # The agent may only stop reporting to StepSecurity in block mode.
           disable-telemetry: ${{ ((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block') == 'block' }}
 
-      - name: Egress canary (EX-0001)
+      - name: Egress canary
         if: ${{ runner.os == 'Linux' && (((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block') == 'block') }}
         timeout-minutes: 2
         shell: bash
@@ -1112,7 +1112,7 @@ jobs:
           canary_show() { local n=$1; shift; echo "+ $*"; { timeout 10 "$@" 2>&1 || true; } | head -n "$n" || true; }
           canary_diag() {
             local name
-            echo "::group::egress canary diagnostics (EX-0001, for the GitHub Support ticket)"
+            echo "::group::egress canary diagnostics (for the GitHub Support ticket)"
             canary_show 5 uname -srmo
             canary_show 20 cat /etc/resolv.conf
             canary_show 20 bash -c "resolvectl status 2>/dev/null | grep -E '^ *(Current DNS Server|DNS Servers?|DNS Domain):'"
@@ -1145,11 +1145,11 @@ jobs:
               echo "egress canary: all $n addresses of $NAMES accept TCP $PORT"
               return 0
             fi
-            echo "::error title=egress canary::egress broken on this runner (known westus2 DNS issue, EX-0001): rerun the job"
+            echo "::error title=egress canary::egress broken on this runner (known westus2 DNS issue): rerun the job"
             echo "unreachable addresses (name address; '-' means the name did not resolve):"
             printf '%s\n' "$bad"
             canary_diag
-            echo "EX-0001 egress canary failed, unreachable: $(printf '%s' "$bad" | tr '\n' ';')" >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
+            echo "egress canary failed, unreachable: $(printf '%s' "$bad" | tr '\n' ';')" >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
             return 1
           }
           set -m
@@ -1165,7 +1165,7 @@ jobs:
             kill -KILL -- "-$main" >/dev/null 2>&1 || true
           fi
           if [ "$rc" -eq 143 ] || [ "$rc" -eq 137 ]; then
-            echo "::error title=egress canary::the canary hit its 90 s deadline (EX-0001): rerun the job"
+            echo "::error title=egress canary::the canary hit its 90 s deadline: rerun the job"
             rc=124
           fi
           exit "$rc"
@@ -1293,7 +1293,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: Validate the egress policy inputs (EX-0001)
+      - name: Validate the egress policy inputs
         timeout-minutes: 1
         shell: bash
         working-directory: ${{ github.workspace }}
@@ -1323,7 +1323,7 @@ jobs:
           # The agent may only stop reporting to StepSecurity in block mode.
           disable-telemetry: ${{ ((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block') == 'block' }}
 
-      - name: Egress canary (EX-0001)
+      - name: Egress canary
         if: ${{ runner.os == 'Linux' && (((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block') == 'block') }}
         timeout-minutes: 2
         shell: bash
@@ -1346,7 +1346,7 @@ jobs:
           canary_show() { local n=$1; shift; echo "+ $*"; { timeout 10 "$@" 2>&1 || true; } | head -n "$n" || true; }
           canary_diag() {
             local name
-            echo "::group::egress canary diagnostics (EX-0001, for the GitHub Support ticket)"
+            echo "::group::egress canary diagnostics (for the GitHub Support ticket)"
             canary_show 5 uname -srmo
             canary_show 20 cat /etc/resolv.conf
             canary_show 20 bash -c "resolvectl status 2>/dev/null | grep -E '^ *(Current DNS Server|DNS Servers?|DNS Domain):'"
@@ -1379,11 +1379,11 @@ jobs:
               echo "egress canary: all $n addresses of $NAMES accept TCP $PORT"
               return 0
             fi
-            echo "::error title=egress canary::egress broken on this runner (known westus2 DNS issue, EX-0001): rerun the job"
+            echo "::error title=egress canary::egress broken on this runner (known westus2 DNS issue): rerun the job"
             echo "unreachable addresses (name address; '-' means the name did not resolve):"
             printf '%s\n' "$bad"
             canary_diag
-            echo "EX-0001 egress canary failed, unreachable: $(printf '%s' "$bad" | tr '\n' ';')" >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
+            echo "egress canary failed, unreachable: $(printf '%s' "$bad" | tr '\n' ';')" >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
             return 1
           }
           set -m
@@ -1399,7 +1399,7 @@ jobs:
             kill -KILL -- "-$main" >/dev/null 2>&1 || true
           fi
           if [ "$rc" -eq 143 ] || [ "$rc" -eq 137 ]; then
-            echo "::error title=egress canary::the canary hit its 90 s deadline (EX-0001): rerun the job"
+            echo "::error title=egress canary::the canary hit its 90 s deadline: rerun the job"
             rc=124
           fi
           exit "$rc"
@@ -1429,7 +1429,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: Validate the egress policy inputs (EX-0001)
+      - name: Validate the egress policy inputs
         timeout-minutes: 1
         shell: bash
         working-directory: ${{ github.workspace }}
@@ -1459,7 +1459,7 @@ jobs:
           # The agent may only stop reporting to StepSecurity in block mode.
           disable-telemetry: ${{ ((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block') == 'block' }}
 
-      - name: Egress canary (EX-0001)
+      - name: Egress canary
         if: ${{ runner.os == 'Linux' && (((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block') == 'block') }}
         timeout-minutes: 2
         shell: bash
@@ -1482,7 +1482,7 @@ jobs:
           canary_show() { local n=$1; shift; echo "+ $*"; { timeout 10 "$@" 2>&1 || true; } | head -n "$n" || true; }
           canary_diag() {
             local name
-            echo "::group::egress canary diagnostics (EX-0001, for the GitHub Support ticket)"
+            echo "::group::egress canary diagnostics (for the GitHub Support ticket)"
             canary_show 5 uname -srmo
             canary_show 20 cat /etc/resolv.conf
             canary_show 20 bash -c "resolvectl status 2>/dev/null | grep -E '^ *(Current DNS Server|DNS Servers?|DNS Domain):'"
@@ -1515,11 +1515,11 @@ jobs:
               echo "egress canary: all $n addresses of $NAMES accept TCP $PORT"
               return 0
             fi
-            echo "::error title=egress canary::egress broken on this runner (known westus2 DNS issue, EX-0001): rerun the job"
+            echo "::error title=egress canary::egress broken on this runner (known westus2 DNS issue): rerun the job"
             echo "unreachable addresses (name address; '-' means the name did not resolve):"
             printf '%s\n' "$bad"
             canary_diag
-            echo "EX-0001 egress canary failed, unreachable: $(printf '%s' "$bad" | tr '\n' ';')" >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
+            echo "egress canary failed, unreachable: $(printf '%s' "$bad" | tr '\n' ';')" >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
             return 1
           }
           set -m
@@ -1535,7 +1535,7 @@ jobs:
             kill -KILL -- "-$main" >/dev/null 2>&1 || true
           fi
           if [ "$rc" -eq 143 ] || [ "$rc" -eq 137 ]; then
-            echo "::error title=egress canary::the canary hit its 90 s deadline (EX-0001): rerun the job"
+            echo "::error title=egress canary::the canary hit its 90 s deadline: rerun the job"
             rc=124
           fi
           exit "$rc"
@@ -1671,7 +1671,7 @@ jobs:
       contents: read
       id-token: write  # Doppler OIDC
     steps:
-      - name: Validate the egress policy inputs (EX-0001)
+      - name: Validate the egress policy inputs
         timeout-minutes: 1
         shell: bash
         working-directory: ${{ github.workspace }}
@@ -1701,7 +1701,7 @@ jobs:
           # The agent may only stop reporting to StepSecurity in block mode.
           disable-telemetry: ${{ (inputs.egress-policy == 'audit' && 'audit' || 'block') == 'block' }}
 
-      - name: Egress canary (EX-0001)
+      - name: Egress canary
         if: ${{ runner.os == 'Linux' && ((inputs.egress-policy == 'audit' && 'audit' || 'block') == 'block') }}
         timeout-minutes: 2
         shell: bash
@@ -1724,7 +1724,7 @@ jobs:
           canary_show() { local n=$1; shift; echo "+ $*"; { timeout 10 "$@" 2>&1 || true; } | head -n "$n" || true; }
           canary_diag() {
             local name
-            echo "::group::egress canary diagnostics (EX-0001, for the GitHub Support ticket)"
+            echo "::group::egress canary diagnostics (for the GitHub Support ticket)"
             canary_show 5 uname -srmo
             canary_show 20 cat /etc/resolv.conf
             canary_show 20 bash -c "resolvectl status 2>/dev/null | grep -E '^ *(Current DNS Server|DNS Servers?|DNS Domain):'"
@@ -1757,11 +1757,11 @@ jobs:
               echo "egress canary: all $n addresses of $NAMES accept TCP $PORT"
               return 0
             fi
-            echo "::error title=egress canary::egress broken on this runner (known westus2 DNS issue, EX-0001): rerun the job"
+            echo "::error title=egress canary::egress broken on this runner (known westus2 DNS issue): rerun the job"
             echo "unreachable addresses (name address; '-' means the name did not resolve):"
             printf '%s\n' "$bad"
             canary_diag
-            echo "EX-0001 egress canary failed, unreachable: $(printf '%s' "$bad" | tr '\n' ';')" >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
+            echo "egress canary failed, unreachable: $(printf '%s' "$bad" | tr '\n' ';')" >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
             return 1
           }
           set -m
@@ -1777,7 +1777,7 @@ jobs:
             kill -KILL -- "-$main" >/dev/null 2>&1 || true
           fi
           if [ "$rc" -eq 143 ] || [ "$rc" -eq 137 ]; then
-            echo "::error title=egress canary::the canary hit its 90 s deadline (EX-0001): rerun the job"
+            echo "::error title=egress canary::the canary hit its 90 s deadline: rerun the job"
             rc=124
           fi
           exit "$rc"
@@ -2029,7 +2029,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: Validate the egress policy inputs (EX-0001)
+      - name: Validate the egress policy inputs
         timeout-minutes: 1
         shell: bash
         working-directory: ${{ github.workspace }}
@@ -2059,7 +2059,7 @@ jobs:
           # The agent may only stop reporting to StepSecurity in block mode.
           disable-telemetry: ${{ ((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block') == 'block' }}
 
-      - name: Egress canary (EX-0001)
+      - name: Egress canary
         if: ${{ runner.os == 'Linux' && (((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block') == 'block') }}
         timeout-minutes: 2
         shell: bash
@@ -2082,7 +2082,7 @@ jobs:
           canary_show() { local n=$1; shift; echo "+ $*"; { timeout 10 "$@" 2>&1 || true; } | head -n "$n" || true; }
           canary_diag() {
             local name
-            echo "::group::egress canary diagnostics (EX-0001, for the GitHub Support ticket)"
+            echo "::group::egress canary diagnostics (for the GitHub Support ticket)"
             canary_show 5 uname -srmo
             canary_show 20 cat /etc/resolv.conf
             canary_show 20 bash -c "resolvectl status 2>/dev/null | grep -E '^ *(Current DNS Server|DNS Servers?|DNS Domain):'"
@@ -2115,11 +2115,11 @@ jobs:
               echo "egress canary: all $n addresses of $NAMES accept TCP $PORT"
               return 0
             fi
-            echo "::error title=egress canary::egress broken on this runner (known westus2 DNS issue, EX-0001): rerun the job"
+            echo "::error title=egress canary::egress broken on this runner (known westus2 DNS issue): rerun the job"
             echo "unreachable addresses (name address; '-' means the name did not resolve):"
             printf '%s\n' "$bad"
             canary_diag
-            echo "EX-0001 egress canary failed, unreachable: $(printf '%s' "$bad" | tr '\n' ';')" >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
+            echo "egress canary failed, unreachable: $(printf '%s' "$bad" | tr '\n' ';')" >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
             return 1
           }
           set -m
@@ -2135,7 +2135,7 @@ jobs:
             kill -KILL -- "-$main" >/dev/null 2>&1 || true
           fi
           if [ "$rc" -eq 143 ] || [ "$rc" -eq 137 ]; then
-            echo "::error title=egress canary::the canary hit its 90 s deadline (EX-0001): rerun the job"
+            echo "::error title=egress canary::the canary hit its 90 s deadline: rerun the job"
             rc=124
           fi
           exit "$rc"
@@ -2167,7 +2167,7 @@ jobs:
     timeout-minutes: 5
     permissions: {}
     steps:
-      - name: Validate the egress policy inputs (EX-0001)
+      - name: Validate the egress policy inputs
         timeout-minutes: 1
         shell: bash
         working-directory: ${{ github.workspace }}
@@ -2197,7 +2197,7 @@ jobs:
           # The agent may only stop reporting to StepSecurity in block mode.
           disable-telemetry: ${{ ((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block') == 'block' }}
 
-      - name: Egress canary (EX-0001)
+      - name: Egress canary
         if: ${{ runner.os == 'Linux' && (((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block') == 'block') }}
         timeout-minutes: 2
         shell: bash
@@ -2220,7 +2220,7 @@ jobs:
           canary_show() { local n=$1; shift; echo "+ $*"; { timeout 10 "$@" 2>&1 || true; } | head -n "$n" || true; }
           canary_diag() {
             local name
-            echo "::group::egress canary diagnostics (EX-0001, for the GitHub Support ticket)"
+            echo "::group::egress canary diagnostics (for the GitHub Support ticket)"
             canary_show 5 uname -srmo
             canary_show 20 cat /etc/resolv.conf
             canary_show 20 bash -c "resolvectl status 2>/dev/null | grep -E '^ *(Current DNS Server|DNS Servers?|DNS Domain):'"
@@ -2253,11 +2253,11 @@ jobs:
               echo "egress canary: all $n addresses of $NAMES accept TCP $PORT"
               return 0
             fi
-            echo "::error title=egress canary::egress broken on this runner (known westus2 DNS issue, EX-0001): rerun the job"
+            echo "::error title=egress canary::egress broken on this runner (known westus2 DNS issue): rerun the job"
             echo "unreachable addresses (name address; '-' means the name did not resolve):"
             printf '%s\n' "$bad"
             canary_diag
-            echo "EX-0001 egress canary failed, unreachable: $(printf '%s' "$bad" | tr '\n' ';')" >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
+            echo "egress canary failed, unreachable: $(printf '%s' "$bad" | tr '\n' ';')" >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
             return 1
           }
           set -m
@@ -2273,7 +2273,7 @@ jobs:
             kill -KILL -- "-$main" >/dev/null 2>&1 || true
           fi
           if [ "$rc" -eq 143 ] || [ "$rc" -eq 137 ]; then
-            echo "::error title=egress canary::the canary hit its 90 s deadline (EX-0001): rerun the job"
+            echo "::error title=egress canary::the canary hit its 90 s deadline: rerun the job"
             rc=124
           fi
           exit "$rc"

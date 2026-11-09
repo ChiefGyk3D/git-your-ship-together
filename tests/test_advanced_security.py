@@ -79,10 +79,10 @@ def test_the_check_job_always_runs_and_does_no_checkout():
     job = JOBS[CHECK]
     assert "if" not in job and "needs" not in job
     assert job["permissions"] == {}, "the job performs no repository operation"
-    assert job["steps"][0]["name"] == "Validate the egress policy inputs (EX-0001)"
+    assert job["steps"][0]["name"] == "Validate the egress policy inputs"
     names = [s.get("name") for s in steps_of(job)]
     assert str(steps_of(job)[0].get("uses", "")).startswith("step-security/harden-runner@")
-    assert "Egress canary (EX-0001)" in names
+    assert "Egress canary" in names
     assert names[-1] == VALIDATE
     assert not any("checkout" in str(s.get("uses", "")) for s in steps_of(job))
 

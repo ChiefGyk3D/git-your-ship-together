@@ -125,11 +125,11 @@ def jobs(doc: dict) -> dict:
 
 
 def steps_of(job: dict) -> list[dict]:
-    """A job's steps. The leading egress policy check (EX-0001) runs before harden-runner and touches no network;
+    """A job's steps. The leading egress policy check runs before harden-runner and touches no network;
     the guard tests that say "harden-runner is first" look through it. tests/test_egress_canary.py pins that it is
     the first step, and that it is the only one that precedes harden-runner."""
     steps = [s for s in (job.get("steps") or []) if isinstance(s, dict)]
-    if steps and steps[0].get("name") == "Validate the egress policy inputs (EX-0001)":
+    if steps and steps[0].get("name") == "Validate the egress policy inputs":
         return steps[1:]
     return steps
 
@@ -738,7 +738,7 @@ def test_a_workflow_that_fetches_nothing_holds_no_token_at_all(name):
 
 
 DOWNLOAD = re.compile(r"\bcurl\b")
-CANARY_STEP = "Egress canary (EX-0001)"  # tests/test_egress_canary.py holds its text identical everywhere
+CANARY_STEP = "Egress canary"  # tests/test_egress_canary.py holds its text identical everywhere
 # The one curl that calls an API instead of downloading a tool. The exemption is a name AND a shape: the step must
 # still look like a bounded API call, and a step of that name that stops looking like one loses it.
 API_CALL_STEPS = {("lory-audit.yml", "Call the Lory pipeline scan API")}

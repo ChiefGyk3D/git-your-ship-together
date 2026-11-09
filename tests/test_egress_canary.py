@@ -1,4 +1,4 @@
-"""The egress canary (EX-0001): the script's logic, and where the workflows put it.
+"""The egress canary: the script's logic, and where the workflows put it.
 
 The script lives in `.github/actions/egress-canary/action.yml` and is inlined, byte for byte, as the
 third step of every job that can run harden-runner in `block` (a reusable workflow cannot name the
@@ -131,7 +131,7 @@ def test_one_dropped_address_fails_names_it_and_prints_the_diagnostics(tmp_path)
     stub = RESOLVE + 'canary_probe() { [ "$1" != 140.82.1.2 ]; }'
     code, out, summary = run_canary(tmp_path, stub)
     assert code == 1, out
-    assert "egress broken on this runner (known westus2 DNS issue, EX-0001): rerun the job" in out
+    assert "egress broken on this runner (known westus2 DNS issue): rerun the job" in out
     assert "github.com 140.82.1.2" in out
     assert "140.82.1.1\n" not in out.split("unreachable addresses")[1].split("::group::")[0]
     for expected in [
@@ -147,7 +147,7 @@ def test_one_dropped_address_fails_names_it_and_prints_the_diagnostics(tmp_path)
         assert expected in out, f"diagnostic missing: {expected}"
     assert "-Ivs" not in out and " -v " not in out, "no verbose curl: its output carries request headers"
     assert "uname -a" not in out and "ss -lunp" not in out, "no hostname and no process names in the diagnostics"
-    assert "EX-0001" in summary and "github.com 140.82.1.2" in summary
+    assert "egress canary failed" in summary and "EX-0001" not in summary and "github.com 140.82.1.2" in summary
     assert summary.count("\n") == 1, "the step summary is one line"
 
 
@@ -409,7 +409,7 @@ def test_the_policy_check_reports_every_bad_input_by_name():
     assert done.stdout.count("::error") == 2
 
 
-CHECK_NAME = "Validate the egress policy inputs (EX-0001)"
+CHECK_NAME = "Validate the egress policy inputs"
 
 
 def workflow_jobs():
@@ -585,7 +585,7 @@ def test_every_job_gets_the_policy_check_and_the_canary_right_after_harden_runne
         )
         assert check["working-directory"] == "${{ github.workspace }}" and check["shell"] == "bash"
     canary = steps[offset]
-    assert canary.get("name") == "Egress canary (EX-0001)", f"{path.name}:{name} has no canary after the checks"
+    assert canary.get("name") == "Egress canary", f"{path.name}:{name} has no canary after the checks"
     assert canary["timeout-minutes"] == 2
     assert canary["shell"] == "bash"
     # A job's defaults.run.working-directory may not exist before checkout (python-package-release `build`).
@@ -782,7 +782,7 @@ def what_a_job_holds(job: dict) -> list[str]:
     if grants.pop("security-events", "write") != "write":
         found.append("security-events")
     found += [f"{scope}: {level}" for scope, level in grants.items()]
-    steps = [s for s in job.get("steps") or [] if s.get("name") != "Egress canary (EX-0001)"]
+    steps = [s for s in job.get("steps") or [] if s.get("name") != "Egress canary"]
     scanned = {k: v for k, v in job.items() if k != "steps"}
     scanned["steps"] = steps
     texts = list(strings_in(scanned))
@@ -920,7 +920,7 @@ def test_the_guard_accepts_a_sarif_upload_and_a_read_only_job():
 def test_the_canary_overrides_every_job_default_working_directory_and_shell():
     seen_default = 0
     for path, name, job, steps in workflow_jobs():
-        canary = next((s for s in steps if s.get("name") == "Egress canary (EX-0001)"), None)
+        canary = next((s for s in steps if s.get("name") == "Egress canary"), None)
         if canary is None:
             continue
         run_defaults = (job.get("defaults") or {}).get("run") or {}
@@ -1070,7 +1070,7 @@ def test_the_expressions_depend_on_the_policy_check_for_exactness():
 
 # --- the canary is Linux-only (issue #196) -----------------------------------------------------------
 
-CANARY_NAME = "Egress canary (EX-0001)"
+CANARY_NAME = "Egress canary"
 
 
 def canary_steps():
