@@ -82,8 +82,14 @@ def test_expired_follows_the_injected_clock(today, expected):
 
 
 def test_a_lapsed_grace_entry_is_reported():
-    assert python_support.expired(date(2026, 11, 30)) == []
-    assert any("3.10" in p for p in python_support.expired(date(2026, 12, 1)))
+    data = copy.deepcopy(DATA)
+    data["grace"] = [{"version": "3.9", "until": "2026-11-30", "reason": "a lock still resolves from it"}]
+    assert python_support.expired(date(2026, 11, 30), data) == []
+    assert any("3.9" in p for p in python_support.expired(date(2026, 12, 1), data))
+
+
+def test_no_grace_entry_is_listed_today():
+    assert DATA.get("grace") == [], "3.10 is dropped; a new grace entry needs its own reason and deadline"
 
 
 def test_the_script_exits_nonzero_when_expired(capsys):

@@ -27,8 +27,8 @@ replaces such a pin when --relock resolves; tests/test_tool_locks.py checks the 
 
 The lock is pruned to what the jobs install on: ubuntu-latest is x86_64 Linux, a
 caller may run on `ubuntu-24.04-arm`, and the wheels kept are the manylinux
-x86_64 and aarch64 and pure-Python ones for CPython 3.10
-through 3.14 (security.yml's Python is an input, 3.10 the oldest it supports).
+x86_64 and aarch64 and pure-Python ones for CPython 3.11
+through 3.14 (security.yml's Python is an input, 3.11 the oldest it supports).
 The skill scanner needs CPython 3.11 to 3.14 and the MCP scanner 3.11.4 or newer (locked here from 3.12), so their
 locks cover 3.11 through 3.14; the header of each lock says which range it holds.
 pip-compile lists every file of every platform (Semgrep's lock alone is over a
@@ -55,8 +55,8 @@ WORKFLOWS = ROOT / ".github" / "workflows"
 # Per tool: the workflow that carries its lock, the step whose REQUIREMENTS env holds it, and the oldest CPython
 # minor it is locked for (the newest is NEWEST_MINOR for all).
 TOOLS = {
-    "pip-audit": ("security.yml", "Install pip-audit", 10),
-    "semgrep": ("security.yml", "Install Semgrep", 10),
+    "pip-audit": ("security.yml", "Install pip-audit", 11),
+    "semgrep": ("security.yml", "Install Semgrep", 11),
     "cisco-ai-skill-scanner": ("agent-scan.yml", "Install skill-scanner", 11),
     "cisco-ai-mcp-scanner": ("agent-scan.yml", "Install mcp-scanner", 12),
     # python-ci.yml `xdist`: pytest-xdist and execnet, both pure Python; pytest comes from the caller's own install.
@@ -73,7 +73,7 @@ HEADER = (
 )
 
 
-def wanted_wheel(filename: str, oldest: int = 10) -> bool:
+def wanted_wheel(filename: str, oldest: int = 11) -> bool:
     from packaging.utils import parse_wheel_filename
 
     pythons = {f"cp3{minor}" for minor in range(oldest, NEWEST_MINOR + 1)}

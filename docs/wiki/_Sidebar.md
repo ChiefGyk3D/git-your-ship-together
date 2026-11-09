@@ -60,8 +60,11 @@
 - [lory-audit](Workflow-lory-audit.md)
 - [agent-scan](Workflow-agent-scan.md)
 - [vendored-drift](Workflow-vendored-drift.md)
+- [repin](Workflow-repin.md)
+- [pin-comments](Workflow-pin-comments.md)
 
 **Tools**
 
 - [wait-ci](Action-wait-ci.md)
+- [repin](Script-repin.md)
 - [Docs-only fast path and parallel CI](Docs-only-fast-path.md)
