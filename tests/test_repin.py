@@ -339,8 +339,19 @@ def test_only_the_fake_gh_is_ever_called(env):
 # --- pr ---------------------------------------------------------------------
 
 
+IDENTITY = {
+    "GIT_AUTHOR_NAME": "Test",
+    "GIT_AUTHOR_EMAIL": "test@example.invalid",
+    "GIT_COMMITTER_NAME": "Test",
+    "GIT_COMMITTER_EMAIL": "test@example.invalid",
+}
+
+
 def git(cwd, *args):
-    return subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True, check=True).stdout
+    # a runner has no global git identity, so a commit made here brings its own
+    return subprocess.run(
+        ["git", "-C", str(cwd), *args], capture_output=True, text=True, check=True, env={**os.environ, **IDENTITY}
+    ).stdout
 
 
 @pytest.fixture
