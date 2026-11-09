@@ -127,6 +127,7 @@ publish).
 | `scripts/check_pin_comments.py` | The pin-comment check `pin-comments.yml` inlines byte for byte; also runnable locally |
 | `scripts/base_image_digest.py` | The pin reader and report comparison `base-image-digest.yml` inlines byte for byte |
 | `scripts/fetch-release.sh` | `fetch_release URL OUT SHA256`: the one release-asset download `bash-ci`, `tofu-ci`, `arduino-ci`, `security`, `container-release`, `python-package-release`, `base-image-digest` and `verify-published` inline byte for byte: at most 5 tries with backoff and jitter inside 170 s, the pinned SHA-256 mandatory and fatal, the job token sent to github.com only where a job already holds one |
+| `scripts/trivy_sarif_summary.py` | The failed-scan diagnostic `container-release.yml` inlines byte for byte: rule id, path and count per hit and the totals by severity from the scan's SARIF (never the matched text); also runnable locally |
 | `scripts/doppler-ci-set.sh` | Set one Doppler secret without the value touching a command line |
 | `.github/requirements/` | `pip-audit` and `semgrep`: the one-line `.in` and the hash lock `security.yml` carries inline |
 | `scripts/tool_locks.py` | Resolves those locks (`--relock`) and copies them into `security.yml`; `--check` fails on a difference |
