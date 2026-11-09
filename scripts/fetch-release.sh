@@ -35,8 +35,15 @@ _fetch_release() {
   local url=${1:-} out=${2:-} want=${3:-} token=${FETCH_RELEASE_TOKEN:-}
   local tries=5 budget=${FETCH_RELEASE_BUDGET:-170} delay=${FETCH_RELEASE_BASE_DELAY:-2}
   local start=$SECONDS n=0 left cap pause step tmp code rc have
-  case $url in https://?*) ;; *) echo "::error title=fetch_release::the URL must start with https://"; return 2 ;; esac
-  if [ -z "$out" ]; then echo "::error title=fetch_release::no output file given"; return 2; fi
+  case $url in https://?*) ;; *)
+    echo "::error title=fetch_release::the URL must start with https://"
+    return 2
+    ;;
+  esac
+  if [ -z "$out" ]; then
+    echo "::error title=fetch_release::no output file given"
+    return 2
+  fi
   case $want in *[!0-9a-fA-F]*) want="" ;; esac
   if [ "${#want}" -ne 64 ]; then
     echo "::error title=fetch_release::a SHA-256 of exactly 64 hex digits is required for $url"
