@@ -92,6 +92,7 @@ publish).
 | `security-self.yml` | `security.yml` run on this repository |
 | `dependabot-auto-merge-self.yml` | `dependabot-auto-merge.yml` run on this repository's own bumps |
 | `audit.yml` | The weekly [baseline audit](Baseline-and-the-weekly-audit.md) and risk-register issues |
+| `fleet-status.yml` | Weekly and on demand: `scripts/fleet_status.py` writes one table to the job summary and a JSON artifact (pins behind, open alert counts by severity, default-branch protection and required checks, newest push result). Counts only, `contents: read`, no secret; what the job token cannot read is `n/a` |
 | `wiki.yml` | Publishes this wiki from `main`; see [Maintaining this wiki](Maintaining-this-wiki.md) |
 
 ### Everything else
@@ -112,6 +113,7 @@ publish).
 | `baseline/selected-actions.json` | The Actions allow-list every repository sets |
 | `baseline/risk-register.yaml` | Every advisory a pipeline ignores, with reason and expiry |
 | `scripts/audit_baseline.py` | Reads repository settings from the API: PASS / FAIL / UNKNOWN |
+| `scripts/fleet_status.py` | The fleet report `fleet-status.yml` runs: REST only, standard library only, counts only; also runnable locally with your own token |
 | `.githooks/pre-commit` | The gitleaks hook on staged changes, same pin as `security.yml`; copied byte for byte by `new-repo.sh` |
 | `.githooks/pre-commit` | The gitleaks hook on staged changes, same pin as `security.yml`; copied byte for byte by `new-repo.sh` |
 | `scripts/new-repo.sh` | Adopt or start a repository: writes callers, opens the PR, applies settings |

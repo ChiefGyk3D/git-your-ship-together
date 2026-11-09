@@ -438,7 +438,7 @@ def test_the_policy_check_is_the_first_step_of_every_job_that_has_it():
 
 def test_every_job_that_can_block_has_the_policy_check_except_the_hardcoded_audit_workflow():
     for path, name, job, _steps in workflow_jobs():
-        if path.name in ("ci.yml", "audit.yml"):
+        if path.name in ("ci.yml", "audit.yml", "fleet-status.yml"):
             continue
         assert job["steps"][0].get("name") == CHECK_NAME, f"{path.name}:{name}"
 
@@ -642,7 +642,7 @@ def test_the_effective_policy_follows_the_right_inputs():
     semgrep need either to say so. The exact-string control is the policy check, see the test that pins it."""
     seen = 0
     for path, name, _job, steps in workflow_jobs():
-        if path.name in ("ci.yml", "audit.yml"):
+        if path.name in ("ci.yml", "audit.yml", "fleet-status.yml"):
             continue
         seen += 1
         used = set(re.findall(r"inputs\.([\w-]+)", steps[0]["with"]["egress-policy"])) - {"runner"}
@@ -823,7 +823,7 @@ def artifact_feeds_a_privileged_job(path: Path, name: str, kept=None) -> bool:
 @pytest.mark.parametrize("path,name,job,steps", list(workflow_jobs()), ids=lambda v: v if isinstance(v, str) else "")
 def test_a_job_follows_the_secretless_input_only_if_it_holds_nothing(path, name, job, steps):
     policy = steps[0]["with"]["egress-policy"]
-    if path.name in ("ci.yml", "audit.yml"):
+    if path.name in ("ci.yml", "audit.yml", "fleet-status.yml"):
         pytest.skip("hardcoded policies")
     follows_secretless = "egress-policy-secretless" in policy
     assert follows_secretless == ((path.name, name) not in KEPT_BLOCK), f"{path.name}:{name} is classified differently"
@@ -982,7 +982,7 @@ def uncached_problems(path_name: str, job: dict, policy: str) -> list[str]:
 @pytest.mark.parametrize("path,name,job,steps", list(workflow_jobs()), ids=lambda v: v if isinstance(v, str) else "")
 def test_no_cache_is_used_when_the_job_is_audit(path, name, job, steps):
     policy = steps[0]["with"]["egress-policy"]
-    if path.name in ("ci.yml", "audit.yml"):
+    if path.name in ("ci.yml", "audit.yml", "fleet-status.yml"):
         pytest.skip("hardcoded policy")
     assert uncached_problems(f"{path.name}:{name}", job, policy) == []
     used = sorted(set(re.findall(r"inputs\.([\w-]+)", policy)) - {"runner"})
@@ -1051,7 +1051,7 @@ def test_the_expressions_depend_on_the_policy_check_for_exactness():
     """
     jobs_with_expressions = 0
     for path in WORKFLOWS:
-        if path.name in ("ci.yml", "audit.yml"):
+        if path.name in ("ci.yml", "audit.yml", "fleet-status.yml"):
             continue  # hardcoded policies: no input reaches an expression
         for name, job in yaml.safe_load(path.read_text())["jobs"].items():
             steps = job.get("steps") or []
