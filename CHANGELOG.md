@@ -74,6 +74,14 @@ On 2026-10-30 fixture jobs finished in seconds and then sat idle for 20 to 35 mi
 - **Not changed.** The reusable workflows' defaults (a caller's job can be much slower than the fixture) and the container builds' 60.
 - **Test and page.** `tests/test_job_timeouts.py` fails a job with no cap, a cap above 90 minutes without a written reason, an `inputs.` expression that names no number input, and a caller that leaves a called workflow's default in place. [Job timeouts](docs/wiki/Job-timeouts.md) holds the measurements, what the logs of runs 41035462015 and 41065673856 show (the hang is after the last step, not in the harden-runner post step or the artifact upload) and the effect of the docs-only gating.
 
+### New: fleet status report, `fleet-status.yml` and `scripts/fleet_status.py` (issue #382)
+
+This repository's own workflow; nothing a caller pins changes.
+
+- **One page of counts.** Weekly (Monday 06:37 UTC) and on demand, for the non-archived, non-fork repositories of the owner (more owners with `--owner`, repeated): the GYST pins in each repository's `.github/workflows` against the latest release (current, behind, unknown, none), open Dependabot alert counts by severity, whether the default branch is protected (classic protection or a ruleset) with the exact required check names, and the newest default-branch push result. A markdown table goes to the job summary and a JSON file to an artifact kept 30 days.
+- **Counts only, REST only, standard library only.** No advisory text, package name or secret is read into the report. Every request has a timeout, a transient failure is retried twice, the rate-limit headers are respected, a request cap applies, a redirect is refused, and a rate limit stops the run with a message and no report instead of a partial table.
+- **No new credential.** The job holds `contents: read` and the default job token only. What that token cannot read (alerts, protection, other private repositories) is `n/a` in the table, never a guess; run the script by hand with a wider token to fill it in.
+
 ### Fixed: tool installs survive a GitHub download outage (issue #372, refs)
 
 On 2026-11-09 a GitHub incident timed out anonymous traffic (HTTP 504, curl exit 22) and every plain `curl -sSfL` tool install failed on its first try. A caller sees this after it re-pins; no input changes and no egress host is added.
