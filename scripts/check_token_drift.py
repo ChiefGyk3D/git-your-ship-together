@@ -25,8 +25,9 @@ Checks, in order. Malformed input is an error; a difference is drift. Both exit 
      the pin (drift). The lock's own commit is printed beside it; the file, not the commit id, is compared,
      because upstream may move on without touching the file.
 
---advisory turns drift (not errors) into WARN lines and exit 0, and writes `drifted=true|false` to
-$GITHUB_OUTPUT. It exists for a fixture that must prove the check fires without leaving every run red.
+--advisory turns drift (not errors) into WARN lines and exit 0. Whenever the run reaches a verdict (no errors,
+and either no drift or --advisory) it writes `drifted=true|false` to $GITHUB_OUTPUT; a run that fails writes
+nothing. --advisory exists for a fixture that must prove the check fires without leaving every run red.
 
 The live fetch sends GITHUB_TOKEN (the job's read-only token) only to api.github.com, never follows a
 redirect, reads at most MAX_BYTES, and needs a public source repository (the job token cannot read another
@@ -277,7 +278,7 @@ def main(argv: list[str]) -> int:
     for problem in drift:
         print(f"{'WARN' if args.advisory else 'FAIL'} {problem}")
     out = os.environ.get("GITHUB_OUTPUT")
-    if args.advisory and out:
+    if out and not errors and (args.advisory or not drift):
         with open(out, "a", encoding="utf-8") as handle:
             handle.write(f"drifted={'true' if drift else 'false'}\n")
     if errors or (drift and not args.advisory):

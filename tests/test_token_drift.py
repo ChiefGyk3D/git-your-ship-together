@@ -270,6 +270,49 @@ def test_advisory_does_not_excuse_a_malformed_lock(tree):
     assert run(tree, "--advisory").returncode == 1
 
 
+def outputs(tree: Path, tmp_path: Path, *args: str):
+    out = tmp_path / "out"
+    done = run(tree, *args, env={**os.environ, "GITHUB_OUTPUT": str(out)})
+    return done, (out.read_text() if out.exists() else "")
+
+
+@pytest.mark.parametrize("mode", [[], ["--advisory"]])
+def test_a_clean_run_writes_drifted_false_in_every_mode(tree, tmp_path, mode):
+    done, written = outputs(tree, tmp_path, *mode)
+    assert done.returncode == 0 and written == "drifted=false\n"
+
+
+def test_non_advisory_drift_fails_and_writes_no_output(tree, tmp_path):
+    (tree / "vendor" / "tokens.json").write_bytes(b"changed")
+    done, written = outputs(tree, tmp_path)
+    assert done.returncode == 1 and written == ""
+
+
+@pytest.mark.parametrize("mode", [[], ["--advisory"]])
+def test_a_malformed_lock_fails_and_writes_no_output(tree, tmp_path, mode):
+    write_lock(tree, "{nope")
+    done, written = outputs(tree, tmp_path, *mode)
+    assert done.returncode == 1 and written == ""
+
+
+@pytest.mark.parametrize("mode", [[], ["--advisory"]])
+def test_a_fetch_error_fails_and_writes_no_output(tree, tmp_path, monkeypatch, capsys, mode):
+    out = tmp_path / "out"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(out))
+    with FakeApi(BODY) as api:
+        api.mode = "404"
+        code, _ = live(tree, api, monkeypatch, capsys, *mode)
+    assert code == 1 and not out.exists()
+
+
+def test_live_advisory_drift_writes_true_and_succeeds(tree, tmp_path, monkeypatch, capsys):
+    out = tmp_path / "out"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(out))
+    with FakeApi(BODY + b"new") as api:
+        code, _ = live(tree, api, monkeypatch, capsys, "--advisory")
+    assert code == 0 and out.read_text() == "drifted=true\n"
+
+
 # --- the live check, against a fake api.github.com ----------------------------------------------
 
 

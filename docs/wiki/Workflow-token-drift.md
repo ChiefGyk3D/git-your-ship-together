@@ -93,7 +93,7 @@ repository; `tests/test_token_drift.py` fails if the copy differs.
 
 `ci.yml` calls this workflow on `fixture/token-drift/`: a passing pin, a passing live check against this repository's
 `LICENSE`, and two planted ones (an edited vendored file; a lock that no longer equals the source) run with `advisory: true`.
-`advisory` turns drift, never a malformed input, into a warning and the `drifted` output; `token-drift-control` fails unless
+`advisory` turns drift, never a malformed input, into a warning. The `drifted` output is `false` on a clean run and `true` on advisory drift, and empty whenever the job fails; `token-drift-control` fails unless
 both planted jobs report `drifted=true`. Leave `advisory` off in a real caller.
 
 <!-- inputs -->

@@ -1507,7 +1507,7 @@ Inputs of `token-drift.yml`:
 | `vendored-path`, `source-repo`, `source-path` | empty | Optional values the lock must agree with |
 | `source-ref` | empty (default branch) | With `check-live`: branch, tag or commit, resolved to one commit; plain names only |
 | `check-live` | `false` | Also compare the pin with the source file |
-| `advisory` | `false` | Report drift as a warning and set the `drifted` output (for fixtures); malformed input still fails |
+| `advisory` | `false` | Report drift as a warning (for fixtures); malformed input still fails. Output `drifted` is `false` clean, `true` on advisory drift, empty when the job fails |
 | `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `block`, `api.github.com:443 github.com:443`, empty | harden-runner |
 | `timeout-minutes` | `10` | Job timeout |
 
