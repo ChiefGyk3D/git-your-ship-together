@@ -12,6 +12,24 @@ pinned to: the comment must exist, the tag must exist, and it must resolve to th
 `ref-version-mismatch` checked this, and only for callers that run zizmor. A lookup that cannot be completed is `UNVERIFIED` and
 fails the job (input `unverified: warn` prints it and passes); lookups are bounded (10 s each, 200 and 120 s in all). Read-only;
 a caller that sets nothing sees no change. This repository's own CI now runs it. Script: `scripts/check_pin_comments.py`.
+### Breaking: `security.yml` no longer supports Python 3.10 (issues #347, #314)
+
+The pip-audit and Semgrep hash locks now cover CPython 3.11 through 3.14 (they covered 3.10 through 3.14). 3.10 reached end of life on 2026-10-01
+and no fixed `filelock` exists for it. Locked bumps: `filelock` 4.2.7 to 4.2.9 (the 3.10-only pins are gone), `platformdirs` 4.14.3 to 4.14.5, `py-serializable` 2.1.0 to 2.2.0.
+**A caller whose `security` job passes `python-version: "3.10"` must change it** (the default `3.13` is unaffected); on 3.10 the install now fails, since the locked wheels no longer resolve.
+The 3.10 grace entry in `.github/python-support.json` is deleted. The weekly audit (`audit.yml`) now runs `scripts/python_support.py`, so a listed version past its security end
+or a lapsed grace entry turns it red.
+
+### New: `python-ci.yml` `pr-python-versions` (issue #309)
+
+Opt-in, default empty: a caller that sets nothing sees no change after it re-pins, and the `test` matrix is `python-versions` on every event.
+Set to a JSON array such as `'["3.11", "3.15"]'` (the oldest and the newest), the `test` matrix on `pull_request` events is that list; push, schedule and dispatch still run the full `python-versions`, so a caller wanting the full matrix weekly adds a `schedule` trigger.
+A new step in each `test` leg fails the job when the value is not a non-empty JSON array of distinct strings, names a version not in `python-versions`, or (with `coverage-threshold` set, on a pull request) leaves out `coverage-python-version`, since no leg would then check the threshold.
+`CI green` is unchanged: it still needs `test` and fails on a failed leg. A caller whose branch protection requires individual `Test (Python X, runner)` checks must require only the legs the pull request matrix keeps; requiring `CI green` avoids that.
+
+### Changed: `container-release.yml` refusal notice names only the inputs that apply (issue #329)
+
+When `push: true` is refused, the warning annotation and job summary now follow the failed predicate instead of always naming both inputs: a pull-request event says no input can enable publishing; an event outside the allow-list names `allowed-publish-events`; a ref that is not a release tag names `require-tag-ref: false`; both failing names both. Message text only: the publish decision, outputs and inputs are unchanged.
 
 ### Fixed: the `ci-gate` composite action could not be loaded by a runner (issue #331)
 
@@ -31,6 +49,29 @@ action manifest (and any expression in a description), and GYST's own `CI green`
 `ci-gate` and `classify-changes` actions on a real runner. The cases that must fail (a failed job, an unnamed skip, a missing
 input) stay in `tests/test_docs_only_fast_path.py`, against the script the action calls.
 
+### Changed: `security.yml` says which `.gitleaksignore` entries cannot match a pull request's tree scan (issue #336)
+
+No scan argument, ignore file, default or exit code changes: a caller that re-pins sees the same findings as before and one new
+step, `Report commit-bound .gitleaksignore entries`. Since v1.29.0 (`gitleaks-scope: pr-commits`) a pull request also gets a
+tree scan, and a tree scan can only match the path-and-rule form of an ignore entry (`file:rule:line`), never the commit-bound
+form gitleaks writes for a history finding (`commit:file:rule:line`). A caller whose `.gitleaksignore` holds commit-bound
+entries therefore sees reviewed findings fail the pull request again, and a rebase or squash orphans them in the history scan
+too. The new step runs on a pull request with `pr-commits` and, when the base commit's `.gitleaksignore` holds such entries,
+writes a warning and a step summary naming each by line number, file and rule id (at most 50; never a commit, never a matched
+value). It never fails the job and never rewrites an entry.
+Migration, pick one: drop the commit id from the entry (`file:rule:line`, also survives a rebase or squash); allowlist the path
+and rule in `.gitleaks.toml` with a reason (read from the base commit on a pull request); or set `gitleaks-scope: all-refs`.
+README has the details under "Migrating `.gitleaksignore` entries".
+
+### Changed: the documented security-only caller carries a `CI green` gate (issue #337)
+
+The README `Security` caller example now ends in a `gate` job that calls `ci-gate.yml` over `security` (`if: always()`,
+`permissions: {}`), so a repository whose only GYST caller is `security.yml` produces a check, `gate / CI green`, that branch
+protection can require. `scripts/audit_baseline.py` now also derives `<job> / CI green` from a job that calls `ci-gate.yml`, so
+a caller that already uses `ci-gate.yml` is expected to require that check too (before, only `*-ci.yml` calls counted). Nothing
+in `security.yml` changes; adding the job and requiring the check is the caller's step, and a protection write on a repository
+is a separate approval.
+
 ### New: `container-release.yml` `skip-secret-scan-in-site-packages` (issue #327)
 
 Opt-in, default `false`: a caller that sets nothing sees no change after it re-pins, and the Trivy step is byte for byte what it was.
@@ -41,6 +82,21 @@ dependency under those roots will **not** be detected (a supply-chain tradeoff).
 Fork pull requests: a caller that passes this input on `pull_request` events lets an untrusted pull request's image weaken only its own secret detection; publishing is already gated off for pull requests.
 Why: a package's docstring text can match a secret rule when nothing is a credential; the installed `anthropic` SDK trips
 `gcp-service-account` (11 CRITICAL findings on Boon-Tube-Daemon's image, no fixed version). Source: Trivy secret scanning docs, "Allow Rules".
+
+### Fixed: sign and attest before the release tags move (issue #286)
+
+Callers pick this up when they re-pin. **Security-sensitive release path.** Also hardens concurrency, ordering and input handling of tag promotion.
+
+- **`container-release.yml`: the release tags move last.** A Rekor 409 on `cosign sign` used to fail the job after the index was already published under `latest` and the other tags, leaving a published image with no SBOM or provenance. The merge job now stages the index in each registry under a tag of the run (`stage-<sha>-<run id>-<attempt>`) and writes no release tag there. It signs, attests the SBOM, records provenance and verifies the signature and the SBOM attestation of that digest in every registry. Only then does the new "Publish the release tags" step write `latest`, the branch, semver and `sha-` tags. If an earlier step fails, no release tag is written and the staged tags stay. This replaces the previous promotion inside the index step and the two "Re-check the final tags" steps.
+- **The tag step is bounded, not atomic.** A registry cannot write several tags in one step, so the step cannot promise that all tags move or none. Before writing anything it checks that the staged index reads back at its digest in each registry and records the digest every release tag holds now (a not-found reply means the tag is new; any other read failure stops the step with nothing moved). It writes one tag at a time, `sha-` tags first and `latest` last, each from its own registry, reads each back, and reads every tag again after the last write. Every registry call is retried up to 4 attempts in all, waiting 5, 10 and 20 seconds, only for HTTP 408, 425, 429, any 5xx or a timeout or reset; a write that returns an error is judged by reading the tag back.
+- **The restore is best effort and never overwrites another writer.** On a failure a tag is written back to its previous digest only while it still holds the digest this run wrote. A tag that holds any other digest is left alone, and the step fails with a "rollback failed" error naming the tag, the digest it holds, the digest this run promoted and the recorded previous digest. A restore needs the previous manifest to still exist, and the previous digest is whatever the tag held: this workflow does not verify it again. A tag that did not exist before cannot be deleted, so it may remain on the new digest; the step names it. If a restore is refused or fails, the step fails and names every tag and digest left behind. The step does not stop another writer with registry access.
+- **A Rekor 409 `equivalent entry already exists` counts as success only after `cosign verify` (`verify-attestation` for the SBOM) of that digest passes** with the signer identity, the OIDC issuer, the calling repository and the commit of the run. Any other error fails at once. Transient errors (HTTP 408, 425, 429 and every 5xx, timeouts, resets) are retried 4 times in all, waiting 5, 10 and 20 seconds.
+- **New input `signer-identity-regexp`**, strictly validated in the plan job, before any build leg pushes (literal characters and escaped dots only, ending in `@`) and again in `merge`. A caller needs no change; a fork of this repository sets its own. `python-docker-release.yml` forwards it.
+- **New input `allow-unsigned-publish`** (default `false`). A run that would publish with `sign`, `sbom` or `provenance` off now fails in the plan job unless this is `true`; a run that does not publish is unaffected. A caller that publishes unsigned on purpose sets it.
+- **Publishes to one destination are serialized, whatever the ref, and a release only moves the mutable tags when it is the newest.** The merge job's concurrency group is keyed on the GHCR image (Docker Hub on or off), never on the ref, and a running publish is never cancelled midway. GitHub keeps one pending run per group, so a pending run is replaced by a newer pending run for the same image; re-run the replaced one. On a branch ref the tag step reads the branch head first: a run whose commit is no longer the head writes only its `sha-` tags and warns; an unreadable head fails the job. On a `vMAJOR.MINOR.PATCH` tag ref it lists the repository's `v*` tags through the API (`contents: read`, already held) and compares SemVer 2.0.0 precedence (a stable release against stable releases only): if a newer release exists it writes only its version tag and the `sha-` tags and leaves `latest`, the major and minor tags alone, with a notice, so a backport such as `v1.9.1` after `v2.0.0` does not move `1.9` or `1`. A tag ref that is not a SemVer release has no order, so it writes only its own tag name and the `sha-` tags. If the tag list cannot be read, nothing moves.
+- **Harden concurrency/ordering of tag promotion and rollback.** Covers the publish queue, the newest-ref check and the restore step of the tag step.
+- **Not changed:** per-registry signing and the job's outputs (`digest`, `image`), the publish allow-list, and the digest hand-off between the build and merge jobs. The final verify does not re-check the GitHub provenance attestation. The default `signer-identity-regexp` names this repository's `container-release.yml`; it is unverified against a released image's certificate.
+- **Guard.** `tests/test_container_release_publish.py` runs the step scripts with stub `cosign` and a fake registry: tag order, release order across refs, retries, failure on the first and on a later tag, a tag landing on the wrong digest, a rollback that does not overwrite another writer, every 5xx status, and the Rekor conflict path.
 
 ## v1.33.0 (2026-11-08)
 

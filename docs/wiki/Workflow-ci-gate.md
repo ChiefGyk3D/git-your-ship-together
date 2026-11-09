@@ -11,6 +11,12 @@ A job counts only with the result `success`. `skipped` counts only for a job nam
 ids. `failure`, `cancelled`, an unknown result, a missing result, no jobs at all and a deliberate skip that names no needed
 job all fail. A skip nobody asked for, such as everything downstream of a failed build, is a failure.
 
+## A security-only repository
+
+`security.yml` produces no gate, so a repository whose only caller is the security one hands it to this workflow:
+`gate: { if: always(), needs: [security], uses: ...ci-gate.yml@<sha>, permissions: {}, with: { needs-json: ${{ toJSON(needs) }} } }`.
+The check is `gate / CI green`; require it in branch protection. The weekly audit derives that check from the `ci-gate.yml` call.
+
 ## A caller
 
 ```yaml
