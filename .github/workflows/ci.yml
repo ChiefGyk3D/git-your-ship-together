@@ -496,6 +496,18 @@ jobs:
     permissions:
       contents: read
 
+  # pr-title-lint.yml at this ref reads this run's pull request title without checking out the head. On push and
+  # workflow_dispatch it proves the documented no-op path. tests/test_pr_title_lint.py supplies the hostile titles,
+  # bad configuration and catastrophic expression that cannot be planted in a permanently green fixture job.
+  fixture-pr-title-lint:
+    name: fixture pull request title lint
+    needs: changes
+    if: needs.changes.outputs.docs-only != 'true'
+    uses: ./.github/workflows/pr-title-lint.yml # zizmor: ignore[self-repository]
+    permissions: {}
+    with:
+      egress-policy-secretless: block
+
   # token-drift.yml at this ref, in block mode with the workflow's own default list (api.github.com and github.com
   # only, so the live fetch needs nothing else, or this job goes red). `fixture-token-drift` checks a pin with the input
   # cross-checks and no network; `-live` also fetches this repository's LICENSE through the API at the default
@@ -938,7 +950,7 @@ jobs:
   ci-green:
     name: CI green
     if: always()
-    needs: [changes, actionlint, zizmor, test, fixture-ci, fixture-bash, fixture-fuzz, fixture-tofu, fixture-arduino, fixture-package, fixture-sbom, fixture-artifact, fixture-pages, fixture-wiki, fixture-release, fixture-verify, fixture-rescan, fixture-drift, fixture-token-drift, fixture-token-drift-live, fixture-token-drift-planted-pin, fixture-token-drift-planted-live, token-drift-control, fixture-pin-comments, fixture-base-image, fixture-repin, fixture-parallel, fixture-gate, fixture-ci-gate-action, fixture-classify-action, rescan-live, fixture-project-sync, fixture-dast, dast-live, fixture-threat-model, fixture-agent-scan, fixture-agent-scan-planted, agent-scan-control]
+    needs: [changes, actionlint, zizmor, test, fixture-ci, fixture-bash, fixture-fuzz, fixture-tofu, fixture-arduino, fixture-package, fixture-sbom, fixture-artifact, fixture-pages, fixture-wiki, fixture-release, fixture-verify, fixture-rescan, fixture-drift, fixture-pr-title-lint, fixture-token-drift, fixture-token-drift-live, fixture-token-drift-planted-pin, fixture-token-drift-planted-live, token-drift-control, fixture-pin-comments, fixture-base-image, fixture-repin, fixture-parallel, fixture-gate, fixture-ci-gate-action, fixture-classify-action, rescan-live, fixture-project-sync, fixture-dast, dast-live, fixture-threat-model, fixture-agent-scan, fixture-agent-scan-planted, agent-scan-control]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -967,8 +979,8 @@ jobs:
         uses: ./.github/actions/ci-gate # zizmor: ignore[self-repository]
         with:
           needs: ${{ toJSON(needs) }}
-          required-jobs: changes actionlint zizmor test fixture-ci fixture-bash fixture-fuzz fixture-package fixture-artifact fixture-tofu fixture-arduino fixture-pages fixture-wiki fixture-project-sync fixture-release fixture-verify fixture-rescan fixture-drift fixture-token-drift fixture-token-drift-live fixture-token-drift-planted-pin fixture-token-drift-planted-live token-drift-control fixture-pin-comments fixture-repin fixture-base-image fixture-parallel fixture-gate fixture-ci-gate-action fixture-classify-action rescan-live fixture-dast dast-live fixture-sbom fixture-threat-model fixture-agent-scan fixture-agent-scan-planted agent-scan-control
-          skippable-jobs: fixture-ci fixture-bash fixture-fuzz fixture-package fixture-artifact fixture-tofu fixture-arduino fixture-pages fixture-wiki fixture-project-sync fixture-release fixture-verify fixture-rescan fixture-drift fixture-token-drift fixture-token-drift-live fixture-token-drift-planted-pin fixture-token-drift-planted-live token-drift-control fixture-pin-comments fixture-repin fixture-base-image fixture-parallel fixture-gate fixture-ci-gate-action fixture-classify-action fixture-dast fixture-sbom fixture-threat-model fixture-agent-scan fixture-agent-scan-planted agent-scan-control rescan-live dast-live
+          required-jobs: changes actionlint zizmor test fixture-ci fixture-bash fixture-fuzz fixture-package fixture-artifact fixture-tofu fixture-arduino fixture-pages fixture-wiki fixture-project-sync fixture-release fixture-verify fixture-rescan fixture-drift fixture-pr-title-lint fixture-token-drift fixture-token-drift-live fixture-token-drift-planted-pin fixture-token-drift-planted-live token-drift-control fixture-pin-comments fixture-repin fixture-base-image fixture-parallel fixture-gate fixture-ci-gate-action fixture-classify-action rescan-live fixture-dast dast-live fixture-sbom fixture-threat-model fixture-agent-scan fixture-agent-scan-planted agent-scan-control
+          skippable-jobs: fixture-ci fixture-bash fixture-fuzz fixture-package fixture-artifact fixture-tofu fixture-arduino fixture-pages fixture-wiki fixture-project-sync fixture-release fixture-verify fixture-rescan fixture-drift fixture-pr-title-lint fixture-token-drift fixture-token-drift-live fixture-token-drift-planted-pin fixture-token-drift-planted-live token-drift-control fixture-pin-comments fixture-repin fixture-base-image fixture-parallel fixture-gate fixture-ci-gate-action fixture-classify-action fixture-dast fixture-sbom fixture-threat-model fixture-agent-scan fixture-agent-scan-planted agent-scan-control rescan-live dast-live
           classifier-job: changes
           fork-skippable-jobs: fixture-package fixture-artifact fixture-pages fixture-wiki fixture-release fixture-dast fixture-sbom fixture-threat-model fixture-agent-scan fixture-agent-scan-planted agent-scan-control
           fork-pull-request: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}

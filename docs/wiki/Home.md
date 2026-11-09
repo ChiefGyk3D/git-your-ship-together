@@ -48,6 +48,7 @@ refuses to do.
 | See what is next | [Roadmap](Roadmap.md) |
 | Learn from it, step by step, with exercises | [Learning path](Learning-path.md) |
 | Choose which workflow a repository needs | [Which workflow do I need?](Which-workflow-do-I-need.md) |
+| Enforce pull request title conventions | [pr-title-lint](Workflow-pr-title-lint.md) |
 | Find a file, or where a kind of change lives | [Repository map](Repository-map.md) |
 | Control what a job may reach on the network | [Egress control](Egress-control.md) |
 | Fix a red run, symptom by symptom | [Troubleshooting](Troubleshooting.md) |

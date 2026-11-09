@@ -76,6 +76,7 @@ Twenty-four reusable workflows and six composite actions:
 | `.github/workflows/repin.yml` | Opt-in scheduled re-pin: when a caller's pins of these workflows are behind the latest release, opens ONE pin-only pull request (SHA and `# vX.Y.Z` comment only), refuses and names it when the release changes an input the caller uses, never merges. Needs a GitHub App (Contents, Pull requests, Workflows: write) whose private key is fetched from Doppler; without one it reports only. See [Scheduled re-pin](#scheduled-re-pin) |
 | `.github/workflows/pin-comments.yml` | Opt-in check that the `# vX.Y.Z` comment on each SHA-pinned `uses:` line names the pinned commit (GitHub API lookup, bounded; an unverifiable lookup fails unless `unverified: warn`). Script: `scripts/check_pin_comments.py`. |
 | `.github/workflows/token-drift.yml` | Opt-in check that a vendored file (brand tokens) still equals its pin, and with `check-live` that the pin still equals the source repository's file at one resolved commit (public source, `api.github.com` only). Read-only, no secret |
+| `.github/workflows/pr-title-lint.yml` | Opt-in pull request title check: a configurable Python regular expression, length ceiling and prefix bypass list. Reads only the event payload, checks out no code and holds no token |
 | `.github/workflows/base-image-digest.yml` | Opt-in scheduled check of a Dockerfile's `FROM image:tag@sha256:...` pins: resolves today's digest of each tag and fails when the pinned digest has a fixable HIGH or CRITICAL finding (Trivy, container-release.yml's flags) that the current digest does not. Read-only, no secret, no issue write |
 | `.github/workflows/parallel-ci.yml` | One build, then caller-supplied checks as separate jobs that share it: a matrix over a `jobs` list, each leg downloading the one-day build artifact, with path rules that skip checks a change cannot affect (failing closed: a push, a schedule, an unmatched path or an unreadable diff runs everything), pip and tool-download caches keyed on pin files, and one `CI green` gate that counts only deliberate skips as passed. Holds no token |
 | `.github/workflows/ci-gate.yml` | The gate on its own: `CI green` over the jobs a caller hands it (`parallel-ci.yml`, `bash-ci.yml`, `security.yml`, a job of its own), red on anything that failed, was cancelled or was skipped without being named. Holds no token. A reusable workflow called as a job, not the composite action `.github/actions/ci-gate` below |
@@ -1461,6 +1462,41 @@ Inputs of `repin.yml`:
 
 The optional secret `DOPPLER_TOKEN` is a fallback for a caller without OIDC; leave it unset, the key is never a GitHub secret. The same tool by hand, and a Dependabot template with a GYST group, are in the
 [repin wiki page](docs/wiki/Script-repin.md).
+
+### Pull request title lint
+
+`pr-title-lint.yml` is an opt-in gate for the title that becomes a squash commit subject and changelog line. The title comes
+from the pull request event through an environment variable; the job checks out neither the base nor the head and holds no
+token. A call from any other event prints a notice and succeeds without checking a title.
+
+```yaml
+on:
+  pull_request:
+
+permissions: {}
+
+jobs:
+  title:
+    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/pr-title-lint.yml@<sha> # vX.Y.Z
+    permissions: {}
+    with:
+      allow-prefixes: "release:,chore(deps):"
+```
+
+Inputs of `pr-title-lint.yml`:
+
+| Input | Default | Meaning |
+|---|---|---|
+| `pattern` | imperative-style title, 8 to 120 characters, no trailing period | Python regular expression applied with `re.fullmatch`; `(Refs #12)` and `(Closes #12)` endings satisfy the default |
+| `max-length` | `120` | Unicode character ceiling, enforced before prefix and regular-expression matching |
+| `allow-prefixes` | empty | Comma-separated prefixes that bypass `pattern`, never `max-length` |
+| `egress-policy`, `egress-policy-secretless` | `block` | Standard validated harden-runner inputs; this job follows the secretless value |
+| `allowed-endpoints`, `extra-allowed-endpoints` | GitHub canary hosts, empty | Standard allow-list inputs; the title check itself makes no request |
+| `timeout-minutes` | `5` | Job timeout |
+
+The stdlib script checks length first and wraps `re.fullmatch` in a 0.25 second POSIX interval timer, because Python's `re`
+module has no timeout parameter. Invalid or catastrophically slow expressions fail with a clear annotation, not a traceback.
+See [the workflow page](docs/wiki/Workflow-pr-title-lint.md) for the default verbs and annotation behavior.
 
 ### Token drift check (the pin against its source)
 

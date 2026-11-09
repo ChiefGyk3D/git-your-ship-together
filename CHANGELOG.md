@@ -5,6 +5,18 @@ name what a caller sees after that.
 
 ## Unreleased
 
+### Added: opt-in pull request title lint (issue #393, refs #358)
+
+- **`pr-title-lint.yml`.** A reusable, read-only pull request title gate with a configurable Python regular expression,
+  `max-length` and comma-separated `allow-prefixes`. The default accepts imperative-style titles from 8 to 120 characters,
+  rejects a trailing period and accepts issue-reference endings. The event title reaches Python only through `PR_TITLE`, the
+  pull request head is never checked out, no secret is used, and a non-pull-request call is a notice-only no-op.
+- **Bounded matching.** `scripts/check_pr_title.py` checks the Unicode character count before matching and interrupts `re.fullmatch`
+  after 0.25 seconds with the stdlib POSIX interval timer. Invalid or timed-out expressions produce a clear annotation, never a
+  traceback. Annotations carry the title, broken rule, fix and character counts with workflow-command characters escaped.
+- **Contract.** `tests/test_pr_title_lint.py` covers valid and invalid defaults, all three behavior inputs, prefix bypasses,
+  overlong, shell-shaped, multiline and Unicode titles, invalid and catastrophic expressions, script identity and CI wiring.
+
 ### New: `wait-ci.sh --from-protection` and a fail-fast on a gate name that never reports (issue #378)
 
 Five merge captains hit a 10-minute hang or gated on the wrong thing: the default gate is a bare `CI green`, `--require-check` only adds to it, and a nested name (`ci / CI green`, `gate / CI green`) needed `--context`, which replaces the default. Nothing existing changes unless a caller uses the new flag; the fail-fast changes only how a wait that could never end is reported.
