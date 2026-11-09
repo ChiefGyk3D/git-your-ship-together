@@ -88,7 +88,7 @@ def test_only_the_upload_jobs_hold_the_one_write_and_they_run_nothing_of_the_rep
         assert spec["needs"] == scan
         uses = [str(s.get("uses", "")) for s in steps(job)]
         assert not any(u.startswith("actions/checkout@") for u in uses), "the upload job checks nothing out"
-        plain = [s for s in steps(job) if "(EX-0001)" not in s.get("name", "")]
+        plain = [s for s in steps(job) if s.get("name") not in ("Validate the egress policy inputs", "Egress canary")]
         assert not any("run" in s for s in plain), "only the egress policy check and canary are scripts"
         assert any(u.startswith("actions/download-artifact@") for u in uses)
         assert any(u.startswith("github/codeql-action/upload-sarif@") for u in uses)
@@ -108,10 +108,10 @@ def test_no_secret_no_opt_out_and_no_token_in_the_file():
     code = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
     for banned in ("continue-on-error", "secrets.", "DOPPLER", "GITHUB_TOKEN", "github.token"):
         assert banned not in code, f"agent-scan.yml contains {banned!r}"
-    # The egress canary (EX-0001) is a shared script with its own `|| true`s, held identical by test_egress_canary.py.
+    # The egress canary is a shared script with its own `|| true`s, held identical by test_egress_canary.py.
     for job in doc()["jobs"].values():
         for step in job["steps"]:
-            if "(EX-0001)" not in step.get("name", ""):
+            if step.get("name") not in ("Validate the egress policy inputs", "Egress canary"):
                 assert "|| true" not in yaml.safe_dump(step), step.get("name", step.get("uses"))
 
 

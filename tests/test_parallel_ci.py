@@ -620,7 +620,7 @@ def test_nothing_continues_on_error_or_ignores_a_failure(path):
     checked = 0
     for job in yaml.safe_load(text)["jobs"].values():
         for step in job.get("steps") or []:
-            if step.get("name") == "Egress canary (EX-0001)":
+            if step.get("name") == "Egress canary":
                 continue  # its diagnostics are best effort by design; tests/test_egress_canary.py pins the script
             body = step.get("run") or ""
             checked += 1

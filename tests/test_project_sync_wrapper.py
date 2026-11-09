@@ -141,8 +141,8 @@ def test_the_token_is_limited_to_the_named_repositories_else_the_calling_one_and
 
 
 def test_harden_runner_runs_first_and_the_default_list_lets_safo_install_pyyaml():
-    # The egress policy check (EX-0001) is the one step that runs before harden-runner; it touches no network.
-    assert steps()[0]["name"] == "Validate the egress policy inputs (EX-0001)"
+    # The egress policy check is the one step that runs before harden-runner; it touches no network.
+    assert steps()[0]["name"] == "Validate the egress policy inputs"
     first = steps()[1]
     assert first["uses"].startswith("step-security/harden-runner@")
     default = doc()[True]["workflow_call"]["inputs"]["allowed-endpoints"]["default"].split()

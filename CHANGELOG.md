@@ -12,6 +12,14 @@ name what a caller sees after that.
   "cannot read <workflow> at the old pin". The ref now rides in the query string (a GET). A genuine input drop still
   exits 5.
 
+### Changed: the egress steps lose the `(EX-0001)` suffix (issue #311)
+
+- **Step names.** `Egress canary (EX-0001)` is now `Egress canary` and `Validate the egress policy inputs (EX-0001)` is now
+  `Validate the egress policy inputs`, in every reusable workflow and in the `egress-canary` and `egress-policy-check`
+  composite actions. The canary's error and step-summary text no longer name EX-0001. Behavior, the script and the
+  `egress-policy-secretless` input are unchanged. A caller that matches the old step name, such as a merge watcher or a branch
+  rule that keys on it, must update to the new name. The closed exception record stays.
+
 ### Hardening: credential scope of `repin.yml` (issue #370)
 
 - **`repin.yml`.** The Doppler fetch no longer injects secrets into the job environment (`inject-env-vars: false`); the
