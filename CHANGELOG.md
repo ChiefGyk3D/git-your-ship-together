@@ -42,6 +42,29 @@ action manifest (and any expression in a description), and GYST's own `CI green`
 `ci-gate` and `classify-changes` actions on a real runner. The cases that must fail (a failed job, an unnamed skip, a missing
 input) stay in `tests/test_docs_only_fast_path.py`, against the script the action calls.
 
+### Changed: `security.yml` says which `.gitleaksignore` entries cannot match a pull request's tree scan (issue #336)
+
+No scan argument, ignore file, default or exit code changes: a caller that re-pins sees the same findings as before and one new
+step, `Report commit-bound .gitleaksignore entries`. Since v1.29.0 (`gitleaks-scope: pr-commits`) a pull request also gets a
+tree scan, and a tree scan can only match the path-and-rule form of an ignore entry (`file:rule:line`), never the commit-bound
+form gitleaks writes for a history finding (`commit:file:rule:line`). A caller whose `.gitleaksignore` holds commit-bound
+entries therefore sees reviewed findings fail the pull request again, and a rebase or squash orphans them in the history scan
+too. The new step runs on a pull request with `pr-commits` and, when the base commit's `.gitleaksignore` holds such entries,
+writes a warning and a step summary naming each by line number, file and rule id (at most 50; never a commit, never a matched
+value). It never fails the job and never rewrites an entry.
+Migration, pick one: drop the commit id from the entry (`file:rule:line`, also survives a rebase or squash); allowlist the path
+and rule in `.gitleaks.toml` with a reason (read from the base commit on a pull request); or set `gitleaks-scope: all-refs`.
+README has the details under "Migrating `.gitleaksignore` entries".
+
+### Changed: the documented security-only caller carries a `CI green` gate (issue #337)
+
+The README `Security` caller example now ends in a `gate` job that calls `ci-gate.yml` over `security` (`if: always()`,
+`permissions: {}`), so a repository whose only GYST caller is `security.yml` produces a check, `gate / CI green`, that branch
+protection can require. `scripts/audit_baseline.py` now also derives `<job> / CI green` from a job that calls `ci-gate.yml`, so
+a caller that already uses `ci-gate.yml` is expected to require that check too (before, only `*-ci.yml` calls counted). Nothing
+in `security.yml` changes; adding the job and requiring the check is the caller's step, and a protection write on a repository
+is a separate approval.
+
 ### New: `container-release.yml` `skip-secret-scan-in-site-packages` (issue #327)
 
 Opt-in, default `false`: a caller that sets nothing sees no change after it re-pins, and the Trivy step is byte for byte what it was.
