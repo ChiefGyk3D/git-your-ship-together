@@ -5,6 +5,14 @@ name what a caller sees after that.
 
 ## Unreleased
 
+### Breaking: `security.yml` no longer supports Python 3.10 (issues #347, #314)
+
+The pip-audit and Semgrep hash locks now cover CPython 3.11 through 3.14 (they covered 3.10 through 3.14). 3.10 reached end of life on 2026-10-01
+and no fixed `filelock` exists for it. Locked bumps: `filelock` 4.2.7 to 4.2.9 (the 3.10-only pins are gone), `platformdirs` 4.14.3 to 4.14.5, `py-serializable` 2.1.0 to 2.2.0.
+**A caller whose `security` job passes `python-version: "3.10"` must change it** (the default `3.13` is unaffected); on 3.10 the install now fails, since the locked wheels no longer resolve.
+The 3.10 grace entry in `.github/python-support.json` is deleted. The weekly audit (`audit.yml`) now runs `scripts/python_support.py`, so a listed version past its security end
+or a lapsed grace entry turns it red.
+
 ### New: `python-ci.yml` `pr-python-versions` (issue #309)
 
 Opt-in, default empty: a caller that sets nothing sees no change after it re-pins, and the `test` matrix is `python-versions` on every event.

@@ -2303,7 +2303,7 @@ Inputs of `security.yml`:
 | `snyk-on` | `schedule` | When Snyk runs: `schedule` is the weekly cron and `workflow_dispatch` only; `push` adds every push to the default branch and every tag. Snyk's free plan meters tests per month across the whole account, one Code and one Open Source test per run, and ten repositories on `push` spent a month's Code tests in a day. Never on a pull request |
 | `snyk-install-command` | empty | For a repository with no lock (`pip-audit-requirements: ""`) that declares its dependencies in `pyproject.toml`: the install Snyk Open Source scans a freeze of, such as `pip install .`. Empty with no lock leaves Snyk's discovery, which reads no PEP 621 `pyproject.toml` and ends in a "nothing to scan" warning |
 | `scorecard` | `false` | OpenSSF Scorecard, published; runs only on the default branch (push or schedule) |
-| `python-version` | `3.13` | Python for pip-audit, Semgrep and Snyk. The tool locks cover CPython 3.10 through 3.14 |
+| `python-version` | `3.13` | Python for pip-audit, Semgrep and Snyk. The tool locks cover CPython 3.11 through 3.14 |
 | `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `audit`, the measured list, empty | harden-runner, as in `python-ci.yml` |
 | `egress-policy-secretless` | `block` | harden-runner policy for the jobs that hold no stored secret, no OIDC token and no write-scoped token (`dependency-review` also holds its comment-scoped pull-requests write grant, a stated EX-0001 deviation), and whose output no privileged job consumes; exactly `audit` or `block`. Security exception EX-0001 is closed (2026-11-02), see [Known CI platform issue: westus2 (EX-0001)](#known-ci-platform-issue-westus2-ex-0001). `audit` opts out if the defect recurs |
 | `doppler-project`, `doppler-config`, `doppler-identity-id` | empty | See [Doppler setup](#doppler-setup) |
@@ -2359,7 +2359,7 @@ check out its own commit, so there is no file to read at run time. Scorecard's
 hash, and a workflow every caller pins by commit should not run unchecked
 code in all of them. The source of each is `.github/requirements/<tool>.in`
 (one exact version) and `<tool>.txt` (its lock: universal, so it covers every
-marker, pruned to the x86_64 and aarch64 Linux and CPython 3.10 to 3.14 wheels the jobs
+marker, pruned to the x86_64 and aarch64 Linux and CPython 3.11 to 3.14 wheels the jobs
 use). `python scripts/tool_locks.py` copies the files into `security.yml`,
 `--check` fails on a difference and `--relock` resolves again with `uv` (the
 script's docstring has the throwaway-venv commands). Dependabot watches the

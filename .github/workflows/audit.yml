@@ -170,6 +170,9 @@ jobs:
       - name: Install dependencies
         run: pip install --require-hashes -r requirements-dev.txt
 
+      - name: Supported Pythons (no expired version or grace entry)
+        run: python scripts/python_support.py
+
       # --- Doppler (same steps as .github/actions/doppler-secrets) ---------
       - name: Decide how to authenticate to Doppler
         id: doppler
