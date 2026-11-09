@@ -40,6 +40,12 @@ On 2026-11-09 commit 52592bc, a Dependabot bump merged by the auto-merge token, 
 - **`scripts/verify_main.py`** (stdlib only) holds the logic; `tests/test_verify_main.py` runs it against a stubbed REST API and a fake clock.
 - **Limits.** The push trigger is itself not created for a push made with the job token, so a bot-merged commit is caught by the six-hour schedule, up to six hours late. `ci.yml` must keep `workflow_dispatch` (it has it; a test pins that). Not shipped as a reusable workflow: it would need the script inlined and an input for the CI workflow's file name; another repository can copy the file and the script.
 
+### Changed: the repository's own test job runs pytest in parallel (issue #306)
+
+- **`ci.yml` `Test the workflows`.** `Run the tests` is now `pytest -q -n auto` (pytest-xdist, one worker per CPU). The step took 622 s of a 641 s job on the latest successful main run, and the last 15 successful runs of the job took 563 to 958 s. No test, assertion or check changed, the job name and `CI green` wiring are the same, and a caller sees nothing (this file is the repository's own CI, not a reusable workflow).
+- **`requirements-dev.in` / `.txt`.** `pytest-xdist==3.8.0` (and its `execnet`) added; the lock was regenerated with `pip-compile --generate-hashes --strip-extras`, which also drops the `[extras]` brackets pip-compile now strips from two existing lines.
+- **Guard.** `tests/test_workflows.py` fails if the step loses `-n auto` or the lock loses `pytest-xdist`.
+
 ### Fixed: tool installs survive a GitHub download outage (issue #372, refs)
 
 On 2026-11-09 a GitHub incident timed out anonymous traffic (HTTP 504, curl exit 22) and every plain `curl -sSfL` tool install failed on its first try. A caller sees this after it re-pins; no input changes and no egress host is added.
