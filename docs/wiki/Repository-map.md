@@ -90,6 +90,7 @@ publish).
 |---|---|
 | `ci.yml` | actionlint, zizmor, the pytest contract, then every reusable workflow run against `fixture/` at the PR's ref |
 | `security-self.yml` | `security.yml` run on this repository |
+| `fixture-image.yml` | Publishes `ghcr.io/chiefgyk3d/gyst-fixture` (from `fixture/gyst-fixture/`) through `container-release.yml` on a manual run or a push to `main`; `fixture verify` and `fixture rescan` check it, pinned by digest |
 | `dependabot-auto-merge-self.yml` | `dependabot-auto-merge.yml` run on this repository's own bumps |
 | `audit.yml` | The weekly [baseline audit](Baseline-and-the-weekly-audit.md) and risk-register issues |
 | `wiki.yml` | Publishes this wiki from `main`; see [Maintaining this wiki](Maintaining-this-wiki.md) |
