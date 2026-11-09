@@ -5,6 +5,14 @@ name what a caller sees after that.
 
 ## Unreleased
 
+### Added: a failed Trivy image scan names what tripped it (issue #383)
+
+A caller sees this after it re-pins; no input changes, no egress host is added and the scan's exit behavior is unchanged.
+
+- **`Summarize a failed Trivy scan`.** A new step in both build jobs of `container-release.yml` (`python-docker-release.yml` forwards through it) runs when the scan step fails (`inputs.trivy && failure()`, 2 minutes at most, no network). From the SARIF the scan already wrote it prints the totals by severity and one row per rule id and file path with its count, secret rules first, at most 50 rows. It never prints the matched text, a message or a snippet; ids and paths are JSON-escaped and cut to 200 characters. It always exits 0, so it never changes pass or fail.
+- **The site-packages hint.** When every secret hit is under a `site-packages` path it adds one line: set `skip-secret-scan-in-site-packages: true` on the call to skip secret rules there (CVE scanning stays on). The input stays opt-in and off by default.
+- **Where it lives.** `scripts/trivy_sarif_summary.py` (stdlib only); its marked block is inlined byte for byte, held identical by `tests/test_trivy_sarif_summary.py`. `verify-published.yml` and `base-image-digest.yml` scan with their own Trivy binary and JSON output, not this scan, and are unchanged.
+
 ### Fixed: tool installs survive a GitHub download outage (issue #372, refs)
 
 On 2026-11-09 a GitHub incident timed out anonymous traffic (HTTP 504, curl exit 22) and every plain `curl -sSfL` tool install failed on its first try. A caller sees this after it re-pins; no input changes and no egress host is added.
