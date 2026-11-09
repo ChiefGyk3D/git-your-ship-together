@@ -5,6 +5,12 @@ name what a caller sees after that.
 
 ## Unreleased
 
+### Hardening: credential scope of `repin.yml` (issue #370)
+
+- **`repin.yml`.** The Doppler fetch no longer injects secrets into the job environment (`inject-env-vars: false`); the
+  App key now reaches only the token step, through the fetch step's masked outputs. The job's harden-runner also sets
+  `disable-sudo: true`. No input, secret or permission changes.
+
 ### New: opt-in `token-drift.yml` (issue #342)
 
 A new reusable workflow. Nothing existing changes: a caller sees it only by adding a job that calls it, after it re-pins.
