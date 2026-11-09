@@ -1,0 +1,461 @@
+# Reusable Markdown lint: download the pinned standalone rumdl release, expand newline-separated globs without
+# shell evaluation, and turn at most 50 findings into file-and-line GitHub annotations. The default configuration
+# disables line length and inline HTML rules; pass `config` to use a repository-owned rumdl configuration instead.
+# No secret or write permission is used. This is opt-in: existing callers do not run it until they add a job.
+
+name: Markdown lint (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      globs:
+        description: Newline-separated repository-relative globs to lint. Empty, escaping, or entirely unmatched input fails rather than passing with nothing checked.
+        type: string
+        default: "**/*.md"
+      config:
+        description: Repository-relative rumdl configuration file. Empty uses GYST's built-in permissive default, which disables line length (MD013) and inline HTML (MD033).
+        type: string
+        default: ""
+      fail-on-findings:
+        description: Fail when rumdl reports findings. False keeps the job green but still emits warning annotations and the findings output, for advisory use and planted controls.
+        type: boolean
+        default: true
+      rumdl-version:
+        description: Pinned rumdl release version. The default is the release tested by this workflow and must move with `rumdl-url` and `rumdl-sha256`.
+        type: string
+        default: "0.3.2"
+      rumdl-url:
+        description: Exact HTTPS URL of the pinned rumdl release archive.
+        type: string
+        default: https://github.com/rvben/rumdl/releases/download/v0.3.2/rumdl-v0.3.2-x86_64-unknown-linux-gnu.tar.gz
+      rumdl-sha256:
+        description: Mandatory SHA-256 of the pinned rumdl release archive.
+        type: string
+        default: f527d1374765d826c1627ceab3d1f46e548268731a495b5b12a3af529b3d79e8
+      egress-policy:
+        description: harden-runner egress policy - `audit` logs outbound connections, `block` allows only `allowed-endpoints`.
+        type: string
+        default: block
+      egress-policy-secretless:
+        description: Policy for this secretless job. `audit` logs outbound connections; `block` allows only `allowed-endpoints`.
+        type: string
+        default: block
+      allowed-endpoints:
+        description: harden-runner allow-list for `block`, space-separated host:port entries. Defaults to checkout and the pinned GitHub release download.
+        type: string
+        default: "api.github.com:443 github.com:443 release-assets.githubusercontent.com:443"
+      extra-allowed-endpoints:
+        description: Appended to `allowed-endpoints` for caller-specific hosts. Wildcards are not supported.
+        type: string
+        default: ""
+      timeout-minutes:
+        description: Job timeout.
+        type: number
+        default: 10
+    outputs:
+      findings:
+        description: Number of rumdl findings, including findings past the 50-annotation display bound. Empty when input validation or rumdl itself failed.
+        value: ${{ jobs.lint.outputs.findings }}
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Markdown lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    outputs:
+      findings: ${{ steps.lint.outputs.findings }}
+    steps:
+      - name: Validate the egress policy inputs
+        timeout-minutes: 1
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        env:
+          POLICY_EGRESS_POLICY: ${{ inputs.egress-policy }}
+          POLICY_EGRESS_POLICY_SECRETLESS: ${{ inputs.egress-policy-secretless }}
+        run: |
+          set -u
+          bad=0
+          check() {
+            if [ "$2" = set ] && [ "$3" != audit ] && [ "$3" != block ]; then
+              echo "::error title=egress policy::the $1 input must be exactly 'audit' or 'block' (its value is ${#3} characters long)"
+              bad=1
+            fi
+          }
+          check egress-policy "${POLICY_EGRESS_POLICY+set}" "${POLICY_EGRESS_POLICY-}"
+          check egress-policy-secretless "${POLICY_EGRESS_POLICY_SECRETLESS+set}" "${POLICY_EGRESS_POLICY_SECRETLESS-}"
+          check distro-egress-policy "${POLICY_DISTRO_EGRESS_POLICY+set}" "${POLICY_DISTRO_EGRESS_POLICY-}"
+          check semgrep-egress-policy "${POLICY_SEMGREP_EGRESS_POLICY+set}" "${POLICY_SEMGREP_EGRESS_POLICY-}"
+          exit "$bad"
+
+
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: ${{ (inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block' }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
+          disable-sudo: true
+          disable-telemetry: ${{ ((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block') == 'block' }}
+
+      - name: Egress canary
+        if: ${{ runner.os == 'Linux' && (((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block') == 'block') }}
+        timeout-minutes: 2
+        shell: bash
+        # The workspace root exists before checkout; a job default working-directory may not.
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -u
+          NAMES="github.com api.github.com results-receiver.actions.githubusercontent.com"
+          PORT=443
+          canary_resolve() { timeout 5 getent ahostsv4 "$1" 2>/dev/null | awk '$2 == "STREAM" { print $1 }'; }
+          canary_probe() { timeout 3 bash -c "exec 3<>\"/dev/tcp/\$0/\$1\"" "$1" "$PORT" 2>/dev/null; }
+          canary_reach() {
+            local i
+            for i in 1 2 3 4; do
+              canary_probe "$1" && return 0
+              [ "$i" -lt 4 ] && sleep 1
+            done
+            return 1
+          }
+          canary_show() { local n=$1; shift; echo "+ $*"; { timeout 10 "$@" 2>&1 || true; } | head -n "$n" || true; }
+          canary_diag() {
+            local name
+            echo "::group::egress canary diagnostics (for the GitHub Support ticket)"
+            canary_show 5 uname -srmo
+            canary_show 20 cat /etc/resolv.conf
+            canary_show 20 bash -c "resolvectl status 2>/dev/null | grep -E '^ *(Current DNS Server|DNS Servers?|DNS Domain):'"
+            canary_show 20 bash -c "ss -lun | grep ':53 '"
+            for name in $NAMES pipelines.actions.githubusercontent.com; do
+              canary_show 20 getent ahostsv4 "$name"
+              canary_show 5 curl -sS -o /dev/null -w '%{http_code} %{remote_ip} %{time_connect}\n' --max-time 8 "https://$name"
+            done
+            echo "::endgroup::"
+          }
+          canary_main() {
+            local tmp name addr n=0 bad
+            tmp=$(mktemp -d) || return 1
+            for _ in 1 2 3; do
+              for name in $NAMES; do canary_resolve "$name" >>"$tmp/res.$name" & done
+              wait
+              sleep 1
+            done
+            for name in $NAMES; do
+              if [ -s "$tmp/res.$name" ]; then sort -u "$tmp/res.$name"; else echo "-"; fi | sed "s|^|$name |" >>"$tmp/pairs"
+            done
+            while read -r name addr; do
+              n=$((n + 1))
+              ( { [ "$addr" != "-" ] && canary_reach "$addr"; } || echo "$name $addr" >"$tmp/bad.$n" ) </dev/null &
+            done <"$tmp/pairs"
+            wait
+            bad=$(cat "$tmp"/bad.* 2>/dev/null | sort || true)
+            rm -rf "$tmp"
+            if [ -z "$bad" ]; then
+              echo "egress canary: all $n addresses of $NAMES accept TCP $PORT"
+              return 0
+            fi
+            echo "::error title=egress canary::egress broken on this runner (known westus2 DNS issue): rerun the job"
+            echo "unreachable addresses (name address; '-' means the name did not resolve):"
+            printf '%s\n' "$bad"
+            canary_diag
+            echo "egress canary failed, unreachable: $(printf '%s' "$bad" | tr '\n' ';')" >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
+            return 1
+          }
+          set -m
+          canary_main &
+          main=$!
+          (sleep 90; kill -TERM -- "-$main"; sleep 2; kill -KILL -- "-$main") >/dev/null 2>&1 &
+          dog=$!
+          wait "$main" && rc=0 || rc=$?
+          kill -TERM -- "-$dog" >/dev/null 2>&1 || true
+          if kill -0 -- "-$main" >/dev/null 2>&1; then
+            kill -TERM -- "-$main" >/dev/null 2>&1 || true
+            sleep 1
+            kill -KILL -- "-$main" >/dev/null 2>&1 || true
+          fi
+          if [ "$rc" -eq 143 ] || [ "$rc" -eq 137 ]; then
+            echo "::error title=egress canary::the canary hit its 90 s deadline: rerun the job"
+            rc=124
+          fi
+          exit "$rc"
+
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run rumdl
+        id: lint
+        env:
+          RUMDL_VERSION: ${{ inputs.rumdl-version }}
+          RUMDL_URL: ${{ inputs.rumdl-url }}
+          RUMDL_SHA256: ${{ inputs.rumdl-sha256 }}
+          MARKDOWN_GLOBS: ${{ inputs.globs }}
+          RUMDL_CONFIG: ${{ inputs.config }}
+          FAIL_ON_FINDINGS: ${{ inputs.fail-on-findings }}
+        run: |
+          set -euo pipefail
+          # BEGIN fetch_release
+          fetch_release() {
+            local xt=0 rc
+            case $- in *x*) xt=1 ;; esac
+            set +x
+            if _fetch_release "$@"; then rc=0; else rc=$?; fi
+            if [ "$xt" = 1 ]; then set -x; fi
+            return "$rc"
+          }
+          _fetch_release() {
+            local url=${1:-} out=${2:-} want=${3:-} token=${FETCH_RELEASE_TOKEN:-}
+            local tries=5 budget=${FETCH_RELEASE_BUDGET:-170} delay=${FETCH_RELEASE_BASE_DELAY:-2}
+            local start=$SECONDS n=0 left cap pause step tmp code rc have
+            case $url in https://?*) ;; *)
+              echo "::error title=fetch_release::the URL must start with https://"
+              return 2
+              ;;
+            esac
+            if [ -z "$out" ]; then
+              echo "::error title=fetch_release::no output file given"
+              return 2
+            fi
+            case $want in *[!0-9a-fA-F]*) want="" ;; esac
+            if [ "${#want}" -ne 64 ]; then
+              echo "::error title=fetch_release::a SHA-256 of exactly 64 hex digits is required for $url"
+              return 2
+            fi
+            case $budget in '' | *[!0-9]*) budget=170 ;; esac
+            case $delay in '' | *[!0-9]*) delay=2 ;; esac
+            if [ "$budget" -gt 170 ]; then budget=170; fi
+            case $url in https://github.com/*) ;; *) token="" ;; esac
+            case $token in *[!A-Za-z0-9_.-]*) token="" ;; esac
+            tmp=$(mktemp "${out}.XXXXXX") || return 1
+            step=$delay
+            while [ "$n" -lt "$tries" ]; do
+              n=$((n + 1))
+              left=$((budget - (SECONDS - start)))
+              if [ "$left" -lt 1 ]; then break; fi
+              cap=$((left < 45 ? left : 45))
+              if [ -n "$token" ]; then have="header = \"Authorization: Bearer ${token}\""; else have="# anonymous"; fi
+              if code=$(printf '%s\n' "$have" | curl -sSfL --proto '=https' --proto-redir '=https' --tlsv1.2 \
+                --connect-timeout 10 --max-time "$cap" -K - -w '%{http_code}' -o "$tmp" "$url"); then
+                rc=0
+              else
+                rc=$?
+              fi
+              if [ "$rc" -eq 0 ]; then
+                have=$(sha256sum "$tmp" | cut -d' ' -f1)
+                if [ "$have" != "$(printf '%s' "$want" | tr 'A-F' 'a-f')" ]; then
+                  rm -f "$tmp"
+                  echo "::error title=fetch_release::SHA-256 mismatch for $url: expected $want, got $have"
+                  return 1
+                fi
+                mv -f "$tmp" "$out"
+                return 0
+              fi
+              echo "fetch_release: attempt $n of $tries failed for $url (curl exit $rc, HTTP ${code:-none})" >&2
+              case $code in 401 | 403) token="" ;; esac
+              if [ "$n" -ge "$tries" ]; then break; fi
+              pause=$((step + RANDOM % (step / 2 + 1)))
+              left=$((budget - (SECONDS - start)))
+              if [ "$pause" -ge "$left" ]; then break; fi
+              echo "fetch_release: waiting ${pause}s before the next try" >&2
+              sleep "$pause"
+              step=$((step * 2))
+            done
+            rm -f "$tmp"
+            echo "::error title=fetch_release::could not download $url after $n tries (last curl exit ${rc:-none}); nothing was written to the output file"
+            return 1
+          }
+          # END fetch_release
+
+          tool_dir=$(mktemp -d "${RUNNER_TEMP}/rumdl.XXXXXX")
+          archive="$tool_dir/rumdl.tar.gz"
+          fetch_release "$RUMDL_URL" "$archive" "$RUMDL_SHA256"
+          echo "$RUMDL_SHA256  $archive" | sha256sum -c -
+          tar -xzf "$archive" -C "$tool_dir"
+          rumdl=$(find "$tool_dir" -type f -name rumdl -print -quit)
+          if [ -z "$rumdl" ]; then
+            echo "::error title=markdown lint::the verified rumdl archive contains no rumdl binary"
+            exit 1
+          fi
+          chmod 0755 "$rumdl"
+          default_config="$tool_dir/default-rumdl.toml"
+          cat >"$default_config" <<'TOML'
+          [global]
+          disable = ["MD013", "MD033"]
+          TOML
+          python3 -I - --root "$GITHUB_WORKSPACE" --rumdl "$rumdl" --globs "$MARKDOWN_GLOBS" \
+            --config "$RUMDL_CONFIG" --default-config "$default_config" --fail-on-findings "$FAIL_ON_FINDINGS" <<'PY'
+          #!/usr/bin/env python3
+          """Expand Markdown globs, run rumdl, and bound GitHub annotations."""
+          
+          from __future__ import annotations
+          
+          import argparse
+          import glob
+          import os
+          import re
+          import subprocess
+          import sys
+          from pathlib import Path, PurePosixPath
+          
+          MAX_ANNOTATIONS = 50
+          MAX_FILES = 10_000
+          MAX_PATTERNS = 100
+          RULE = re.compile(r"\b(MD\d{3})\b")
+          ANNOTATION = re.compile(r"^::(?:error|warning) (?P<properties>[^:]*)::(?P<message>.*)$")
+          
+          
+          class InputError(Exception):
+              """A caller input cannot safely name the requested files."""
+          
+          
+          def command_escape(value: str, *, property_value: bool = False) -> str:
+              value = value.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+              if property_value:
+                  value = value.replace(":", "%3A").replace(",", "%2C")
+              return value
+          
+          
+          def inside(root: Path, path: Path, label: str) -> Path:
+              try:
+                  resolved = path.resolve(strict=True)
+                  resolved.relative_to(root)
+              except (OSError, ValueError) as exc:
+                  raise InputError(f"{label} must be a regular file inside the repository") from exc
+              if not resolved.is_file():
+                  raise InputError(f"{label} must be a regular file inside the repository")
+              return resolved
+          
+          
+          def relative_input(root: Path, value: str, label: str) -> Path:
+              pure = PurePosixPath(value)
+              if not value or pure.is_absolute() or ".." in pure.parts or "\\" in value or "\x00" in value:
+                  raise InputError(f"{label} must be a repository-relative path without traversal")
+              return inside(root, root / pure, label)
+          
+          
+          def expand(root: Path, value: str) -> list[str]:
+              patterns = [line.strip() for line in value.splitlines() if line.strip()]
+              if not patterns:
+                  raise InputError("globs must contain at least one non-empty pattern")
+              if len(patterns) > MAX_PATTERNS:
+                  raise InputError(f"globs contains more than {MAX_PATTERNS} patterns")
+              found: set[str] = set()
+              for pattern in patterns:
+                  pure = PurePosixPath(pattern)
+                  if pure.is_absolute() or ".." in pure.parts or "\\" in pattern or "\x00" in pattern:
+                      raise InputError(f"glob {pattern!r} must stay inside the repository")
+                  try:
+                      matches = glob.glob(pattern, root_dir=root, recursive=True, include_hidden=True)
+                  except (OSError, re.error) as exc:
+                      raise InputError(f"glob {pattern!r} is invalid") from exc
+                  for name in matches:
+                      path = inside(root, root / name, f"glob match {name!r}")
+                      found.add(path.relative_to(root).as_posix())
+                      if len(found) > MAX_FILES:
+                          raise InputError(f"globs matched more than {MAX_FILES} files")
+              if not found:
+                  raise InputError("globs matched no regular files: nothing to lint is not a pass")
+              return sorted(found)
+          
+          
+          def properties(value: str) -> dict[str, str]:
+              result: dict[str, str] = {}
+              for item in value.split(","):
+                  key, separator, item_value = item.partition("=")
+                  if separator:
+                      result[key.strip()] = item_value.strip()
+              return result
+          
+          
+          def normalize(line: str, level: str) -> str | None:
+              match = ANNOTATION.fullmatch(line)
+              if not match:
+                  return None
+              props = properties(match["properties"])
+              rule = RULE.search(f"{props.get('title', '')} {match['message']}")
+              path = props.get("file", "")
+              line_number = props.get("line", "")
+              if not rule or not path or not line_number.isdigit() or int(line_number) < 1:
+                  return None
+              column = props.get("col", "")
+              message = RULE.sub("", match["message"], count=1).lstrip(" :-")
+              message = " ".join(message.split())[:300] or "Markdown lint finding"
+              metadata = [
+                  f"file={command_escape(path, property_value=True)}",
+                  f"line={line_number}",
+              ]
+              if column.isdigit() and int(column) > 0:
+                  metadata.append(f"col={column}")
+              metadata.append(f"title={rule.group(1)}")
+              return f"::{level} {','.join(metadata)}::{rule.group(1)}: {command_escape(message)}"
+          
+          
+          def write_findings(count: int) -> None:
+              output = os.environ.get("GITHUB_OUTPUT")
+              if output:
+                  with open(output, "a", encoding="utf-8") as handle:
+                      handle.write(f"findings={count}\n")
+          
+          
+          def main(argv: list[str]) -> int:
+              parser = argparse.ArgumentParser(description=__doc__)
+              parser.add_argument("--root", type=Path, required=True)
+              parser.add_argument("--rumdl", type=Path, required=True)
+              parser.add_argument("--globs", required=True)
+              parser.add_argument("--config", default="")
+              parser.add_argument("--default-config", type=Path, required=True)
+              parser.add_argument("--fail-on-findings", choices=("true", "false"), required=True)
+              args = parser.parse_args(argv)
+              try:
+                  root = args.root.resolve(strict=True)
+                  if not root.is_dir():
+                      raise InputError("root is not a directory")
+                  files = expand(root, args.globs)
+                  config = (
+                      relative_input(root, args.config, "config")
+                      if args.config
+                      else inside(args.default_config.parent.resolve(), args.default_config, "built-in config")
+                  )
+              except (InputError, OSError) as exc:
+                  print(f"::error title=markdown lint input::{command_escape(str(exc))}")
+                  return 2
+          
+              command = [
+                  str(args.rumdl),
+                  "check",
+                  "--config",
+                  str(config),
+                  "--output-format",
+                  "github",
+                  "--",
+                  *files,
+              ]
+              try:
+                  done = subprocess.run(command, cwd=root, capture_output=True, text=True, timeout=600, check=False)
+              except (OSError, subprocess.TimeoutExpired) as exc:
+                  print(f"::error title=markdown lint::rumdl failed to run ({type(exc).__name__})")
+                  return 2
+          
+              level = "error" if args.fail_on_findings == "true" else "warning"
+              annotations = [item for line in done.stdout.splitlines() if (item := normalize(line, level)) is not None]
+              if done.returncode not in (0, 1) or (done.returncode == 1 and not annotations):
+                  print(f"::error title=markdown lint::rumdl failed with exit {done.returncode} and no usable findings")
+                  return 2
+              for item in annotations[:MAX_ANNOTATIONS]:
+                  print(item)
+              if len(annotations) > MAX_ANNOTATIONS:
+                  print(f"::notice title=markdown lint::{len(annotations) - MAX_ANNOTATIONS} more finding(s) omitted")
+              write_findings(len(annotations))
+              if annotations:
+                  print(f"rumdl found {len(annotations)} Markdown issue(s)")
+                  return 1 if args.fail_on_findings == "true" else 0
+              print(f"rumdl checked {len(files)} file(s), no findings")
+              return 0
+          
+          
+          if __name__ == "__main__":
+              sys.exit(main(sys.argv[1:]))
+          PY

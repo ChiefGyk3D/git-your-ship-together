@@ -76,6 +76,7 @@ Twenty-four reusable workflows and six composite actions:
 | `.github/workflows/repin.yml` | Opt-in scheduled re-pin: when a caller's pins of these workflows are behind the latest release, opens ONE pin-only pull request (SHA and `# vX.Y.Z` comment only), refuses and names it when the release changes an input the caller uses, never merges. Needs a GitHub App (Contents, Pull requests, Workflows: write) whose private key is fetched from Doppler; without one it reports only. See [Scheduled re-pin](#scheduled-re-pin) |
 | `.github/workflows/pin-comments.yml` | Opt-in check that the `# vX.Y.Z` comment on each SHA-pinned `uses:` line names the pinned commit (GitHub API lookup, bounded; an unverifiable lookup fails unless `unverified: warn`). Script: `scripts/check_pin_comments.py`. |
 | `.github/workflows/token-drift.yml` | Opt-in check that a vendored file (brand tokens) still equals its pin, and with `check-live` that the pin still equals the source repository's file at one resolved commit (public source, `api.github.com` only). Read-only, no secret |
+| `.github/workflows/markdown-lint.yml` | Opt-in Markdown lint with the standalone rumdl v0.3.2 binary, pinned by release URL and SHA-256. Newline-separated globs, an optional repository config, a permissive built-in config, and at most 50 file-and-line annotations. Read-only, no secret |
 | `.github/workflows/base-image-digest.yml` | Opt-in scheduled check of a Dockerfile's `FROM image:tag@sha256:...` pins: resolves today's digest of each tag and fails when the pinned digest has a fixable HIGH or CRITICAL finding (Trivy, container-release.yml's flags) that the current digest does not. Read-only, no secret, no issue write |
 | `.github/workflows/parallel-ci.yml` | One build, then caller-supplied checks as separate jobs that share it: a matrix over a `jobs` list, each leg downloading the one-day build artifact, with path rules that skip checks a change cannot affect (failing closed: a push, a schedule, an unmatched path or an unreadable diff runs everything), pip and tool-download caches keyed on pin files, and one `CI green` gate that counts only deliberate skips as passed. Holds no token |
 | `.github/workflows/ci-gate.yml` | The gate on its own: `CI green` over the jobs a caller hands it (`parallel-ci.yml`, `bash-ci.yml`, `security.yml`, a job of its own), red on anything that failed, was cancelled or was skipped without being named. Holds no token. A reusable workflow called as a job, not the composite action `.github/actions/ci-gate` below |
@@ -96,6 +97,32 @@ Twenty-four reusable workflows and six composite actions:
 | `.github/actions/classify-changes` | Says whether a pull request changes only paths the caller calls docs only (for example `docs/**`, `tests/**`, `*.md`), from the changed-file list the API returns, never from the checkout. Output `docs-only=true` only when every path matches, none is under `.github/` or the caller's never-skip list, the head has not moved and the count matches the event's; anything unconfirmed is `false`, so the job runs. Wraps `scripts/classify_changes.py`. See [Docs-only fast path and parallel CI](docs/wiki/Docs-only-fast-path.md) |
 | `.github/actions/ci-gate` | The body of a caller's own `CI green` job: every needed job must be `success`, and the one exception is a named job `skipped` while the classify-changes job succeeded with `docs-only=true`. A pull request from a fork may also skip the jobs named in the optional `fork-skippable-jobs` (they need a token a fork does not get), only when the caller's `fork-pull-request` is `true`. A skip for any other reason, a failure, a cancellation or a job missing from `needs` fails. The caller passes `needs: ${{ toJSON(needs) }}` as an input (it has no default, and an empty or non-JSON value fails); v1.32.0's and v1.33.0's copies cannot be loaded by a runner, use v1.33.1 or later. A composite action called as a step, not the reusable workflow `ci-gate.yml` above. Wraps `scripts/ci_gate.py`. See [Docs-only fast path and parallel CI](docs/wiki/Docs-only-fast-path.md) |
 | `.github/actions/egress-policy-check` | Fails a job unless every egress policy input is exactly `audit` or `block`. The workflows inline a copy of it; this is the source |
+
+### Markdown lint
+
+`markdown-lint.yml` is an opt-in standalone rumdl check. A minimal caller is:
+
+```yaml
+permissions:
+  contents: read
+
+jobs:
+  markdown:
+    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/markdown-lint.yml@<sha> # vX.Y.Z
+    permissions:
+      contents: read
+    with:
+      globs: |
+        README.md
+        docs/**/*.md
+```
+
+`globs` is newline separated and defaults to `**/*.md`; `config` is empty by default and selects the built-in
+`.github/rumdl.toml`; `fail-on-findings` defaults true. The tool pin is three inputs that move together:
+`rumdl-version` (`0.3.2`), `rumdl-url` (the exact v0.3.2 x86_64 GNU/Linux archive), and `rumdl-sha256` (the release
+checksum). The usual `egress-policy`, `egress-policy-secretless`, `allowed-endpoints`, `extra-allowed-endpoints` and
+`timeout-minutes` inputs control the hardened job. Findings are bounded to 50 annotations; the `findings` output counts all
+of them. Leave the pin defaults and `fail-on-findings` unchanged in a normal caller.
 
 This repository's own pipeline, which runs the workflows against a real
 project before any caller pins them:

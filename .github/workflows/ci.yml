@@ -579,6 +579,57 @@ jobs:
           fi
           exit "$bad"
 
+  # markdown-lint.yml at this ref over one clean document and one planted MD001 heading-level jump. The planted
+  # call is advisory so the reusable job stays green, while markdown-lint-control fails unless rumdl reports at
+  # least one finding. tests/test_markdown_lint.py exercises glob, config, annotation and fail-mode handling with
+  # a fake rumdl executable; this fixture is the real release integration in CI.
+  fixture-markdown-lint:
+    name: fixture markdown lint
+    needs: changes
+    if: needs.changes.outputs.docs-only != 'true'
+    uses: ./.github/workflows/markdown-lint.yml # zizmor: ignore[self-repository]
+    permissions:
+      contents: read
+    with:
+      globs: fixture/markdown-lint/passing.md
+      egress-policy-secretless: block
+
+  fixture-markdown-lint-planted:
+    name: fixture markdown lint (planted)
+    needs: changes
+    if: needs.changes.outputs.docs-only != 'true'
+    uses: ./.github/workflows/markdown-lint.yml # zizmor: ignore[self-repository]
+    permissions:
+      contents: read
+    with:
+      globs: fixture/markdown-lint/planted.md
+      fail-on-findings: false
+      egress-policy-secretless: block
+
+  markdown-lint-control:
+    name: markdown lint control
+    needs: [changes, fixture-markdown-lint-planted]
+    if: needs.changes.outputs.docs-only != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
+      - name: The linter fired on the planted document
+        env:
+          FINDINGS: ${{ needs.fixture-markdown-lint-planted.outputs.findings }}
+        run: |
+          set -euo pipefail
+          echo "planted Markdown findings=${FINDINGS:-unset}"
+          case "$FINDINGS" in
+            '' | *[!0-9]* | 0)
+              echo "::error title=markdown lint control::the planted document must produce at least one finding"
+              exit 1
+              ;;
+          esac
+
   # base-image-digest.yml at this ref over the fixture's Dockerfile, in block mode with the workflow's own
   # default list, so the registry and database hosts are measured here. exit-code "0" because a new advisory on
   # a Tuesday must not turn main red; that a fixable finding DOES fail the job is proved by
@@ -938,7 +989,7 @@ jobs:
   ci-green:
     name: CI green
     if: always()
-    needs: [changes, actionlint, zizmor, test, fixture-ci, fixture-bash, fixture-fuzz, fixture-tofu, fixture-arduino, fixture-package, fixture-sbom, fixture-artifact, fixture-pages, fixture-wiki, fixture-release, fixture-verify, fixture-rescan, fixture-drift, fixture-token-drift, fixture-token-drift-live, fixture-token-drift-planted-pin, fixture-token-drift-planted-live, token-drift-control, fixture-pin-comments, fixture-base-image, fixture-repin, fixture-parallel, fixture-gate, fixture-ci-gate-action, fixture-classify-action, rescan-live, fixture-project-sync, fixture-dast, dast-live, fixture-threat-model, fixture-agent-scan, fixture-agent-scan-planted, agent-scan-control]
+    needs: [changes, actionlint, zizmor, test, fixture-ci, fixture-bash, fixture-fuzz, fixture-tofu, fixture-arduino, fixture-package, fixture-sbom, fixture-artifact, fixture-pages, fixture-wiki, fixture-release, fixture-verify, fixture-rescan, fixture-drift, fixture-token-drift, fixture-token-drift-live, fixture-token-drift-planted-pin, fixture-token-drift-planted-live, token-drift-control, fixture-markdown-lint, fixture-markdown-lint-planted, markdown-lint-control, fixture-pin-comments, fixture-base-image, fixture-repin, fixture-parallel, fixture-gate, fixture-ci-gate-action, fixture-classify-action, rescan-live, fixture-project-sync, fixture-dast, dast-live, fixture-threat-model, fixture-agent-scan, fixture-agent-scan-planted, agent-scan-control]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -967,8 +1018,8 @@ jobs:
         uses: ./.github/actions/ci-gate # zizmor: ignore[self-repository]
         with:
           needs: ${{ toJSON(needs) }}
-          required-jobs: changes actionlint zizmor test fixture-ci fixture-bash fixture-fuzz fixture-package fixture-artifact fixture-tofu fixture-arduino fixture-pages fixture-wiki fixture-project-sync fixture-release fixture-verify fixture-rescan fixture-drift fixture-token-drift fixture-token-drift-live fixture-token-drift-planted-pin fixture-token-drift-planted-live token-drift-control fixture-pin-comments fixture-repin fixture-base-image fixture-parallel fixture-gate fixture-ci-gate-action fixture-classify-action rescan-live fixture-dast dast-live fixture-sbom fixture-threat-model fixture-agent-scan fixture-agent-scan-planted agent-scan-control
-          skippable-jobs: fixture-ci fixture-bash fixture-fuzz fixture-package fixture-artifact fixture-tofu fixture-arduino fixture-pages fixture-wiki fixture-project-sync fixture-release fixture-verify fixture-rescan fixture-drift fixture-token-drift fixture-token-drift-live fixture-token-drift-planted-pin fixture-token-drift-planted-live token-drift-control fixture-pin-comments fixture-repin fixture-base-image fixture-parallel fixture-gate fixture-ci-gate-action fixture-classify-action fixture-dast fixture-sbom fixture-threat-model fixture-agent-scan fixture-agent-scan-planted agent-scan-control rescan-live dast-live
+          required-jobs: changes actionlint zizmor test fixture-ci fixture-bash fixture-fuzz fixture-package fixture-artifact fixture-tofu fixture-arduino fixture-pages fixture-wiki fixture-project-sync fixture-release fixture-verify fixture-rescan fixture-drift fixture-token-drift fixture-token-drift-live fixture-token-drift-planted-pin fixture-token-drift-planted-live token-drift-control fixture-markdown-lint fixture-markdown-lint-planted markdown-lint-control fixture-pin-comments fixture-repin fixture-base-image fixture-parallel fixture-gate fixture-ci-gate-action fixture-classify-action rescan-live fixture-dast dast-live fixture-sbom fixture-threat-model fixture-agent-scan fixture-agent-scan-planted agent-scan-control
+          skippable-jobs: fixture-ci fixture-bash fixture-fuzz fixture-package fixture-artifact fixture-tofu fixture-arduino fixture-pages fixture-wiki fixture-project-sync fixture-release fixture-verify fixture-rescan fixture-drift fixture-token-drift fixture-token-drift-live fixture-token-drift-planted-pin fixture-token-drift-planted-live token-drift-control fixture-markdown-lint fixture-markdown-lint-planted markdown-lint-control fixture-pin-comments fixture-repin fixture-base-image fixture-parallel fixture-gate fixture-ci-gate-action fixture-classify-action fixture-dast fixture-sbom fixture-threat-model fixture-agent-scan fixture-agent-scan-planted agent-scan-control rescan-live dast-live
           classifier-job: changes
           fork-skippable-jobs: fixture-package fixture-artifact fixture-pages fixture-wiki fixture-release fixture-dast fixture-sbom fixture-threat-model fixture-agent-scan fixture-agent-scan-planted agent-scan-control
           fork-pull-request: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}

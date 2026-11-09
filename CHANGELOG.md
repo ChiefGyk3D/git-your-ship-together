@@ -5,6 +5,12 @@ name what a caller sees after that.
 
 ## Unreleased
 
+### Added: opt-in Markdown lint with rumdl (issue #394)
+
+- **`markdown-lint.yml`.** Downloads rumdl v0.3.2 only through the shared release helper, verifies the supplied SHA-256, extracts it under the runner's temporary directory, and lints newline-separated repository-relative globs (`**/*.md` by default). `config` names a caller-owned file; empty uses `.github/rumdl.toml`, inlined byte for byte, with MD013 and MD033 disabled. `fail-on-findings` defaults true.
+- Findings become file, line and rule annotations, bounded to 50; the `findings` output includes omitted findings. Empty, escaping or unmatched globs and escaping or missing configs fail before rumdl runs. `scripts/run_markdown_lint.py` holds that offline-tested boundary and is inlined byte for byte.
+- `ci.yml` calls the workflow on a passing fixture and a planted MD001 heading jump in advisory mode; `markdown-lint-control` fails unless the planted call reports a finding. `tests/test_markdown_lint.py` uses a fake rumdl executable, so the release binary and its CLI/config compatibility are exercised only by the CI fixture, not by the offline tests.
+
 ### New: `wait-ci.sh --from-protection` and a fail-fast on a gate name that never reports (issue #378)
 
 Five merge captains hit a 10-minute hang or gated on the wrong thing: the default gate is a bare `CI green`, `--require-check` only adds to it, and a nested name (`ci / CI green`, `gate / CI green`) needed `--context`, which replaces the default. Nothing existing changes unless a caller uses the new flag; the fail-fast changes only how a wait that could never end is reported.

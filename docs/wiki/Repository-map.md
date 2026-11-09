@@ -68,6 +68,7 @@ publish).
 | `parallel-ci.yml` | [CI](Workflow-parallel-ci.md) | One build, checks as parallel jobs sharing it, path rules that fail closed, `CI green` |
 | `ci-gate.yml` | [CI](Workflow-ci-gate.md) | `CI green` over the jobs a caller hands it |
 | `token-drift.yml` | [Automation](Which-workflow-do-I-need.md) | Fail when a vendored file no longer matches its pin, or (opt-in) the pin no longer matches the source repository's file |
+| `markdown-lint.yml` | [Automation](Which-workflow-do-I-need.md) | Run the SHA-256-pinned rumdl release over caller-selected Markdown globs and emit bounded annotations |
 | `vendored-drift.yml` | [Automation](Which-workflow-do-I-need.md) | Fail when a vendored file or its generated output no longer matches its lock |
 | `repin.yml` | [Automation](Which-workflow-do-I-need.md) | Scheduled: open one pin-only pull request when a caller's GYST pins are behind the latest release ([repin](Workflow-repin.md)) |
 | `pin-comments.yml` | [Automation](Which-workflow-do-I-need.md) | Fail when a `# vX.Y.Z` comment on a SHA-pinned `uses:` does not name the pinned commit |
@@ -124,6 +125,7 @@ publish).
 | `scripts/classify_changes.py`, `scripts/ci_gate.py` | The logic behind the `classify-changes` and `ci-gate` actions ([Docs-only fast path](Docs-only-fast-path.md)) |
 | `scripts/verify_main.py` | The logic of `main-verify.yml` (assess, dispatch, confirm); stdlib only, run by the workflow from the checkout ([Verify main](Verify-main.md)) |
 | `scripts/check_token_drift.py` | The pin-and-source drift check `token-drift.yml` inlines byte for byte; also runnable locally |
+| `scripts/run_markdown_lint.py` | The offline glob, config, rumdl invocation and bounded-annotation boundary `markdown-lint.yml` inlines byte for byte |
 | `scripts/check_vendored_drift.py` | The drift check `vendored-drift.yml` inlines byte for byte; also runnable locally |
 | `scripts/check_pin_comments.py` | The pin-comment check `pin-comments.yml` inlines byte for byte; also runnable locally |
 | `scripts/base_image_digest.py` | The pin reader and report comparison `base-image-digest.yml` inlines byte for byte |
