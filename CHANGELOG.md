@@ -13,6 +13,14 @@ A caller sees this after it re-pins; no input changes, no egress host is added a
 - **The site-packages hint.** When every secret hit is under a `site-packages` path it adds one line: set `skip-secret-scan-in-site-packages: true` on the call to skip secret rules there (CVE scanning stays on). The input stays opt-in and off by default.
 - **Where it lives.** `scripts/trivy_sarif_summary.py` (stdlib only); its marked block is inlined byte for byte, held identical by `tests/test_trivy_sarif_summary.py`. `verify-published.yml` and `base-image-digest.yml` scan with their own Trivy binary and JSON output, not this scan, and are unchanged.
 
+### New: `main-verify.yml`, a post-merge check that main has green required checks (issue #379)
+
+On 2026-11-09 commit 52592bc, a Dependabot bump merged by the auto-merge token, landed on `main` with no workflow run at all: GitHub starts no run for a push made with the job token, so `main` can sit unverified. Nothing changes for a caller; this is this repository's own workflow.
+
+- **`main-verify.yml`.** Runs on a push to `main`, every six hours and by hand. It reads the default branch head and the required checks on it (from the branch protection when the token can read it, else `FALLBACK_CONTEXTS`, `CI green`). Green: one line, nothing else. A required check red: the job fails and the annotation lists the red contexts with counts. None reported once the commit is 10 minutes old (and no `ci.yml` run for it is queued): `ci.yml` is dispatched on `main` by `workflow_dispatch`, which a job token may start, and the required checks are awaited for at most 25 minutes. Still nothing completed, or anything not green: the job fails. Three jobs, so `actions: write` is on the dispatch job alone; no secret; default branch only; every wait and request is bounded.
+- **`scripts/verify_main.py`** (stdlib only) holds the logic; `tests/test_verify_main.py` runs it against a stubbed REST API and a fake clock.
+- **Limits.** The push trigger is itself not created for a push made with the job token, so a bot-merged commit is caught by the six-hour schedule, up to six hours late. `ci.yml` must keep `workflow_dispatch` (it has it; a test pins that). Not shipped as a reusable workflow: it would need the script inlined and an input for the CI workflow's file name; another repository can copy the file and the script.
+
 ### Fixed: tool installs survive a GitHub download outage (issue #372, refs)
 
 On 2026-11-09 a GitHub incident timed out anonymous traffic (HTTP 504, curl exit 22) and every plain `curl -sSfL` tool install failed on its first try. A caller sees this after it re-pins; no input changes and no egress host is added.
