@@ -65,6 +65,17 @@
 #     waiting out the timeout or failing at merge time. mergeable null means GitHub is still computing it: unknown,
 #     re-polled, never a conflict. State behind is a printed note, not a failure. None of this changes the green
 #     criteria or any other exit code; a conflicting pull request is never reported green and never merged.
+#   * A gate name that never reports fails fast (issue #378). When a requested context (default, --context,
+#     --from-protection or --require-check) has NOT been reported by the expected app, every check run on the pinned
+#     head is completed (none open), and the list read identical on 3 polls spanning at least 60 s, the wait ends with
+#     exit 2 and result "missing". The message names the missing context and lists the check names that DID report,
+#     so a wrong nested name ('ci / CI green' for 'CI green') is obvious, instead of waiting for the hung timer.
+#     A context still in progress, or any other run still open, keeps the wait going as before.
+#   * --from-protection (issue #378) takes the gate from the repository's default branch: the required status check
+#     contexts (and their app ids) of its branch protection plus its active rulesets, read over REST. It replaces the
+#     default gate, is mutually exclusive with --context, and --require-check still adds to it. A requirement bound
+#     to an app is satisfied only by a run from that app; one with no app, by the --app-id app (or any app with
+#     --any-app). No readable required checks at all is exit 64.
 #   * It prints the SHA it verified. It never prints a token (output from gh is redacted).
 #
 # Exit codes:
@@ -72,7 +83,8 @@
 #   1   red: a check failed or was cancelled, or a check run name holds a control character; also
 #       --merge could not merge ("merge blocked": a non-policy failure, or a policy block that
 #       outlasted the retries) and an unreadable or malformed head
-#   2   timeout: --timeout seconds passed without a verdict
+#   2   timeout: --timeout seconds passed without a verdict; also "missing" (result missing): a requested check name
+#       never reported while every run on the pinned head is done and the list is stable (issue #378)
 #   3   hung: no check changed state for --hung-after seconds
 #   4   head moved: the pull request head is no longer the pinned SHA
 #   5   queued: the merge was accepted and the pull request, read back, is positively not merged yet at the
@@ -92,10 +104,14 @@
 #   wait-ci.sh --repo OWNER/REPO (--pr N | --sha SHA) [options]
 #
 # Options (defaults in brackets):
+#   --help                  print this usage and the options, exit 0
 #   --repo OWNER/REPO       repository [$GITHUB_REPOSITORY]
 #   --pr N                  pull request to watch; its head is pinned and re-read, and --merge needs it
 #   --sha SHA               commit to verify; with --pr it must equal the head, else exit 4
 #   --context NAME          required check run name, exact match; repeatable ["CI green"]; '' for none
+#   --from-protection       take the gate from the default branch's required status checks (branch protection, then
+#                           rulesets; app ids honored) instead of "CI green"; exclusive with --context; exit 64 when
+#                           the branch has none. --require-check still adds to it
 #   --require-check NAME    a further required check run (exact name, expected app); repeatable [none]
 #   --allow-red NAME[@APP]  a non-gate check run that may be red, exact name; repeatable [none]. A recorded
 #                           exception, never a default; needs --allow-red-reason. @APP is the reporting app's
@@ -130,6 +146,8 @@ pr=""
 want_sha=""
 contexts=()
 contexts_given=0
+from_protection=0
+context_app=()
 required=()
 allowed=()
 allowed_names=()
@@ -232,6 +250,15 @@ while [[ $# -gt 0 ]]; do
       shift
       continue
       ;;
+    --from-protection)
+      from_protection=1
+      shift
+      continue
+      ;;
+    --help | -h)
+      sed -n '/^# Usage:/,/^set -euo/{/^set -euo/!p;}' "$0" | sed -e 's/^# \{0,1\}//'
+      exit 0
+      ;;
   esac
   need_value "$@"
   case "$1" in
@@ -264,11 +291,21 @@ while [[ $# -gt 0 ]]; do
   shift 2
 done
 
-if [[ $contexts_given -eq 0 ]]; then
+if [[ $from_protection -eq 1 && $contexts_given -eq 1 ]]; then
+  die_usage "--from-protection and --context are mutually exclusive: the gate is either read from the branch or named"
+fi
+if [[ $contexts_given -eq 0 && $from_protection -eq 0 ]]; then
   contexts=("CI green")
 fi
-# --require-check names are further required contexts: each must exist, from the expected app, and succeed.
-contexts+=("${required[@]}")
+# The first n_gate contexts are the gate itself; --require-check names (the rest) are further required contexts:
+# each must exist, from the expected app, and succeed. context_app holds the encoded app id a context is bound to,
+# "any" for any app, or "" for the --app-id app.
+n_gate=${#contexts[@]}
+for c in "${contexts[@]}"; do context_app+=(""); done
+for c in "${required[@]}"; do
+  contexts+=("$c")
+  context_app+=("")
+done
 
 [[ "$repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || die_usage "--repo must be OWNER/REPO (got '${repo}')"
 case "${repo%%/*}" in . | ..) die_usage "--repo owner must not be . or .." ;; esac
@@ -329,6 +366,11 @@ fi
 if has_ctrl "$allow_reason"; then die_usage "--allow-red-reason must be one line without control characters"; fi
 
 errfile="$(mktemp)"
+
+# The jq programs that turn the base branch's rules (rulesets) and classic branch protection into "C <context
+# base64> <app id|any>" lines (and "Q" for a merge queue). Used by --from-protection and by the merge-time check.
+RULES_JQ='.[] | select(.type == "merge_queue" or .type == "required_status_checks") | if .type == "merge_queue" then "Q" else ((.parameters.required_status_checks // [])[] | "C " + ((.context // "") | tostring | @base64) + " " + (if .integration_id == null or .integration_id == -1 then "any" else (.integration_id | tostring) end)) end'
+CLASSIC_JQ='(if ((.checks // []) | length) > 0 then .checks else (.contexts // [] | map({context: ., app_id: null})) end)[] | "C " + ((.context // "" | tostring) | @base64) + " " + (if .app_id == null or .app_id == -1 then "any" else (.app_id | tostring) end)'
 
 # gh with stdout and stderr kept apart. A failure is reported as one redacted line; a token never
 # reaches the log.
@@ -507,6 +549,41 @@ read_world() {
   fi
 }
 
+# --from-protection (issue #378): the gate is what the default branch requires. The default branch, then its classic
+# branch protection and its active rulesets (both are enforced, so the gate is their union); each requirement is a
+# context plus the app it is bound to. Nothing readable, or nothing required, is a usage error: no gate to wait on.
+if [[ $from_protection -eq 1 ]]; then
+  dbranch="$(gh_try api "repos/${repo}" --jq '.default_branch // "" | tostring')" || dbranch=""
+  [[ "$dbranch" =~ ^[A-Za-z0-9._/-]{1,200}$ ]] || die_usage "--from-protection: cannot read the default branch of ${repo}"
+  prot_rules="$("$gh_bin" api "repos/${repo}/rules/branches/${dbranch}" --jq "$RULES_JQ" 2>/dev/null)" || prot_rules=""
+  prot_classic="$("$gh_bin" api "repos/${repo}/branches/${dbranch}/protection/required_status_checks" --jq "$CLASSIC_JQ" 2>/dev/null)" || prot_classic=""
+  declare -A prot_seen=()
+  while IFS= read -r line; do
+    [[ "$line" == "C "* ]] || continue
+    line="${line#C }"
+    [[ -z "${prot_seen["$line"]:-}" ]] || continue
+    prot_seen["$line"]=1
+    pname="$(printf '%s' "${line%% *}" | base64 -d 2>/dev/null)" || continue
+    papp="${line#* }"
+    [[ -n "$pname" ]] || continue
+    [[ "$papp" == any || "$papp" =~ ^[1-9][0-9]{0,8}$ ]] || continue
+    if has_ctrl "$pname"; then die_usage "--from-protection: a required check name of ${dbranch} holds a control character"; fi
+    if [[ "$papp" != any ]]; then papp="$(enc "$papp")"; fi
+    # The protection's own contexts first, before any --require-check name.
+    contexts=("${contexts[@]:0:$n_gate}" "$pname" "${contexts[@]:$n_gate}")
+    context_app=("${context_app[@]:0:$n_gate}" "$papp" "${context_app[@]:$n_gate}")
+    n_gate=$((n_gate + 1))
+  done <<<"${prot_rules}"$'\n'"${prot_classic}"
+  if [[ $n_gate -eq 0 ]]; then
+    die_usage "--from-protection: ${repo} branch ${dbranch} has no readable required status checks (branch protection and rulesets both absent, empty or not readable); name the gate with --context"
+  fi
+  for g in "${allowed_names[@]}"; do
+    for c in "${contexts[@]}"; do
+      [[ "$g" != "$c" ]] || die_usage "--allow-red '${g}' is a required context; the gate cannot be allowed to fail"
+    done
+  done
+fi
+
 pin=""
 if [[ -n "$pr" ]]; then
   pin="$(pr_head)" || {
@@ -557,12 +634,17 @@ for i in "${!allowed_names[@]}"; do
   if [[ -n "${allowed_apps[$i]}" ]]; then allowed_app_enc+=("$(enc "${allowed_apps[$i]}")"); else allowed_app_enc+=(""); fi
 done
 
-is_context_enc() {
-  local e
-  for e in "${context_enc[@]}"; do
-    [[ "$1" == "$e" ]] && return 0
-  done
-  return 1
+# ctx_app_ok INDEX APP_ENC: the run's reporting app may satisfy context INDEX. A context bound to an app (from
+# --from-protection, stored base64) takes only that app; "any" takes every app; an unbound one takes the --app-id app. --any-app
+# accepts any app for every context.
+ctx_app_ok() {
+  local bound="${context_app[$1]}"
+  [[ $any_app -eq 1 || "$bound" == any ]] && return 0
+  if [[ -n "$bound" ]]; then
+    [[ "$2" == "$bound" ]]
+  else
+    [[ "$2" == "$B_APP" ]]
+  fi
 }
 
 # is_allowed_enc NAME_ENC SLUG_ENC: the name matches an --allow-red entry and, when that entry carries @APP, the
@@ -589,7 +671,8 @@ evaluate() {
   hostile=0
   local runs_seen=0 count_lines=0 count_missing=0 count_mismatch=0 dups=0 total_count=0
   local total=0 complete=0 bad=0 badname="" seen_ok seen_any
-  local other_bad=0 other_badname="" other_open=0 other_openname="" allowed_bad=0 is_ctx
+  local other_bad=0 other_badname="" other_open=0 other_openname="" allowed_bad=0 is_ctx name_hit
+  missing_final=0
   local -A ctx_seen=() ctx_ok=() ctx_open=() seen_id=()
   b_pin="$(enc "$pin")"
   while IFS=$'\x1f' read -r kind f1 f2 f3 f4 f5 f6 f7 f8; do
@@ -639,13 +722,13 @@ evaluate() {
     # is judged like any other check (red blocks with exit 6, open is waited for), unless --any-app.
     total=$((total + 1))
     is_ctx=0
-    if is_context_enc "$f8"; then
-      if [[ $any_app -eq 1 || "$f4" == "$B_APP" ]]; then
-        is_ctx=1
-      else
-        foreign=$((foreign + 1))
-      fi
-    fi
+    name_hit=0
+    for i in "${!contexts[@]}"; do
+      [[ "$f8" == "${context_enc[$i]}" ]] || continue
+      name_hit=1
+      if ctx_app_ok "$i" "$f4"; then is_ctx=1; fi
+    done
+    if [[ $name_hit -eq 1 && $is_ctx -eq 0 ]]; then foreign=$((foreign + 1)); fi
     if [[ "$f2" == "$B_COMPLETED" ]]; then
       complete=$((complete + 1))
       if [[ -n "$f3" && -n "${BAD_CONCLUSION[$f3]:-}" ]]; then
@@ -669,6 +752,7 @@ evaluate() {
     fi
     for i in "${!contexts[@]}"; do
       [[ $is_ctx -eq 1 && "$f8" == "${context_enc[$i]}" ]] || continue
+      ctx_app_ok "$i" "$f4" || continue
       ctx_seen[$i]=1
       if [[ "$f2" != "$B_COMPLETED" ]]; then
         ctx_open[$i]=1
@@ -720,15 +804,25 @@ evaluate() {
   fi
   seen_ok=1
   seen_any=""
+  local n_missing=0 n_unfinished=0
+  missing_names=""
   for i in "${!contexts[@]}"; do
     if [[ -z "${ctx_seen[$i]:-}" ]]; then
       seen_ok=0
+      n_missing=$((n_missing + 1))
+      missing_names="${missing_names}${missing_names:+, }'${contexts[$i]}'"
       seen_any="${seen_any}'${contexts[$i]}' not reported; "
     elif [[ -n "${ctx_open[$i]:-}" || "${ctx_ok[$i]:-}" != ok ]]; then
       seen_ok=0
+      n_unfinished=$((n_unfinished + 1))
       seen_any="${seen_any}'${contexts[$i]}' not finished; "
     fi
   done
+  # Issue #378: a name that has not reported while nothing else is still running. Only the caller, after the list
+  # has held still, may end the wait on it.
+  if [[ $n_missing -gt 0 && $n_unfinished -eq 0 && $other_open -eq 0 && $complete -eq $total ]]; then
+    missing_final=1
+  fi
   if [[ $seen_ok -eq 0 ]]; then
     detail="${seen_any}${complete}/${total} runs complete"
     return 0
@@ -746,8 +840,33 @@ evaluate() {
   if [[ $allowed_bad -gt 0 ]]; then detail+=" (${allowed_bad} allowed red)"; fi
 }
 
+# The distinct names of the check runs in a read, for a message (already known to hold no control character).
+MISSING_STABLE_POLLS=3
+MISSING_STABLE_SECS=60
+reported_names() {
+  local kind f1 f2 f3 f4 f5 f6 f7 f8 name out="" n=0 shown=0 seen=$'\n'
+  while IFS=$'\x1f' read -r kind f1 f2 f3 f4 f5 f6 f7 f8; do
+    [[ "$kind" == R && "$f8" =~ $B64_RE ]] || continue
+    name="$(dec_display "$f8")"
+    [[ "$seen" != *$'\n'"$name"$'\n'* ]] || continue
+    seen+="${name}"$'\n'
+    n=$((n + 1))
+    if [[ $shown -lt 30 ]]; then
+      out+="${out:+, }'${name}'"
+      shown=$((shown + 1))
+    fi
+  done <<<"$1"
+  [[ $n -le $shown ]] || out+=" (and $((n - shown)) more)"
+  printf '%s' "$out"
+}
+
 verdict=pending
 detail=""
+missing_final=0
+missing_names=""
+missing_fp=""
+missing_polls=0
+missing_since=0
 settle_fp=""
 settled_a=""
 settled_b=""
@@ -845,6 +964,28 @@ while :; do
   fi
   say "poll ${polls}: ${verdict}: ${detail}"
 
+  # Issue #378: a requested name that never reports while every run is done. Counted only on a clean read that is
+  # identical to the previous poll's (same head, same runs); it ends the wait once that has held for
+  # MISSING_STABLE_POLLS polls and MISSING_STABLE_SECS seconds, so a workflow that is merely slow to start is waited for.
+  if [[ "$verdict" == pending && $missing_final -eq 1 && $rc -eq 0 && $poll_failed -eq 0 ]]; then
+    fp_missing="${pin}|suites=${suites_a}/${suites_b}|$(fingerprint "$W_LINES")"
+    if [[ "$fp_missing" == "$missing_fp" ]]; then
+      missing_polls=$((missing_polls + 1))
+    else
+      missing_fp="$fp_missing"
+      missing_polls=1
+      missing_since="$t"
+    fi
+    if [[ $missing_polls -ge $MISSING_STABLE_POLLS && $((t - missing_since)) -ge $MISSING_STABLE_SECS ]]; then
+      say "missing: ${missing_names} never reported on ${pin} by the expected app, yet every check run on it is complete and the list held still for ${missing_polls} polls ($((t - missing_since)) s); it will not appear. Check names that DID report: $(reported_names "$W_LINES"). Match a nested name exactly (--context 'workflow / job') or use --from-protection."
+      result="missing"
+      exit 2
+    fi
+  else
+    missing_fp=""
+    missing_polls=0
+  fi
+
   if [[ "$verdict" == red ]]; then
     say "red: ${detail}"
     result="red"
@@ -922,12 +1063,12 @@ read_protection() {
   PROT=unreadable
   PROT_MISSING=""
   [[ -n "$base" ]] || return 0
-  if rules="$("$gh_bin" api "repos/${repo}/rules/branches/${base}" --jq '.[] | select(.type == "merge_queue" or .type == "required_status_checks") | if .type == "merge_queue" then "Q" else ((.parameters.required_status_checks // [])[] | "C " + ((.context // "") | tostring | @base64) + " " + (if .integration_id == null or .integration_id == -1 then "any" else (.integration_id | tostring) end)) end' 2>/dev/null)"; then
+  if rules="$("$gh_bin" api "repos/${repo}/rules/branches/${base}" --jq "$RULES_JQ" 2>/dev/null)"; then
     got=1
   else
     rules=""
   fi
-  if classic="$("$gh_bin" api "repos/${repo}/branches/${base}/protection/required_status_checks" --jq '(if ((.checks // []) | length) > 0 then .checks else (.contexts // [] | map({context: ., app_id: null})) end)[] | "C " + ((.context // "" | tostring) | @base64) + " " + (if .app_id == null or .app_id == -1 then "any" else (.app_id | tostring) end)' 2>/dev/null)"; then
+  if classic="$("$gh_bin" api "repos/${repo}/branches/${base}/protection/required_status_checks" --jq "$CLASSIC_JQ" 2>/dev/null)"; then
     got=1
   else
     classic=""

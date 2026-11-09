@@ -109,6 +109,7 @@ jobs:
   check:
     name: Base images are as fresh as their tags
     runs-on: ubuntu-24.04
+    # normal: ~1 min (p50 0.5, p95 0.9; last ~30 green runs)
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read  # check out the caller's repository; nothing is written

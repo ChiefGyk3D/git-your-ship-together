@@ -48,3 +48,13 @@ updates:
     cooldown:
       default-days: 7
     labels: [dependencies, docker]
+
+  # The published fixture image's base (fixture-image.yml), pinned by digest like the one above.
+  - package-ecosystem: docker
+    directory: /fixture/gyst-fixture
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7
+    labels: [dependencies, docker]

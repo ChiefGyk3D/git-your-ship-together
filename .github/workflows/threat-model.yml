@@ -97,6 +97,7 @@ jobs:
   check:
     name: Threat model
     runs-on: ubuntu-latest
+    # normal: ~1 min (p50 0.3, p95 0.4; last ~30 green runs)
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read

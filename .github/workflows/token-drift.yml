@@ -111,6 +111,7 @@ jobs:
   drift:
     name: Vendored file matches its pin and its source
     runs-on: ubuntu-24.04
+    # normal: ~1 min (p50 0.3, p95 1.2; last ~30 green runs)
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read  # check out the caller's repository; the live check reads a public repository through the same read-only token

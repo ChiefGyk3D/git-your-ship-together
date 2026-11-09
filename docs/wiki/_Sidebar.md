@@ -24,6 +24,7 @@
 - [Testing and the contract](Testing-and-the-contract.md)
 - [Contributing and developing](Contributing-and-developing.md)
 - [Maintaining this wiki](Maintaining-this-wiki.md)
+- [Verify main](Verify-main.md)
 - [FAQ](FAQ.md)
 
 **CI**
@@ -69,3 +70,4 @@
 - [wait-ci](Action-wait-ci.md)
 - [repin](Script-repin.md)
 - [Docs-only fast path and parallel CI](Docs-only-fast-path.md)
+- [Job timeouts](Job-timeouts.md)

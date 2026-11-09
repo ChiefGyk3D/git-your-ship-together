@@ -35,6 +35,7 @@ jobs:
   changes:
     name: changes
     runs-on: ubuntu-latest
+    # normal: ~1 min (p50 0.2, p95 0.4; last ~30 green runs)
     timeout-minutes: 5
     permissions:
       contents: read
@@ -78,7 +79,8 @@ jobs:
   actionlint:
     name: actionlint
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # normal: ~1 min (p50 0.3, p95 0.6; last ~30 green runs)
+    timeout-minutes: 5
     permissions:
       contents: read
     steps:
@@ -97,7 +99,8 @@ jobs:
   zizmor:
     name: zizmor
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # normal: ~1 min (p50 0.3, p95 0.5; last ~30 green runs)
+    timeout-minutes: 5
     permissions:
       contents: read
     steps:
@@ -120,6 +123,7 @@ jobs:
     # tests/test_wait_ci.py alone is about 540 process-bound scenarios; main took six minutes of the old ten and
     # the wait-ci pull request (#262) was cancelled at ten. A hung scenario still fails on its own: every run of the
     # script under test has a 60 second subprocess timeout.
+    # normal: ~12 min (p50 12.5, p95 16.2; last ~30 green runs)
     timeout-minutes: 20
     permissions:
       contents: read
@@ -150,8 +154,11 @@ jobs:
       - name: Require jq
         run: command -v jq >/dev/null || sudo apt-get install -y --no-install-recommends jq
 
+      # pytest-xdist (requirements-dev.txt): one worker per CPU. The tests share no port, fixed path or working
+      # directory (each scenario builds its own tmp_path and binds port 0), so the suite asserts the same things in
+      # a fraction of the wall time. -n is in the command, not in pyproject.toml, so a local `pytest` stays serial.
       - name: Run the tests
-        run: pytest -q
+        run: pytest -q -n auto
 
   # The fixture project (fixture/README.md) through python-ci.yml at this ref.
   # The grant is what a caller gives: python-ci narrows it to contents: read
@@ -167,6 +174,8 @@ jobs:
       contents: read
       id-token: write  # what a caller grants for Codecov and Doppler; python-ci keeps it off the test job
     with:
+      # normal: ~1 min (p50 0.8, p95 2.8; last ~30 green runs)
+      timeout-minutes: 10
       runners: '["ubuntu-24.04", "ubuntu-24.04-arm"]'
       distros: '["debian:12", "debian:13", "ubuntu:24.04", "kalilinux/kali-rolling", "parrotsec/core"]'
       distro-runners: '["ubuntu-24.04", "ubuntu-24.04-arm"]'
@@ -215,6 +224,8 @@ jobs:
     permissions:
       contents: read
     with:
+      # normal: ~1 min (p50 0.5, p95 1.0; last ~30 green runs)
+      timeout-minutes: 5
       runners: '["ubuntu-24.04", "ubuntu-24.04-arm"]'
       distros: '["debian:13", "kalilinux/kali-rolling"]'
       distro-runners: '["ubuntu-24.04", "ubuntu-24.04-arm"]'
@@ -245,6 +256,8 @@ jobs:
     permissions:
       contents: read
     with:
+      # normal: ~1 min (p50 0.5, p95 0.7; last ~30 green runs)
+      timeout-minutes: 5
       fuzz-dir: fixture/fuzz
       seconds-per-target: 5
       install-command: pip install --no-deps ./fixture
@@ -265,6 +278,8 @@ jobs:
       id-token: write  # likewise: PyPI Trusted Publishing and provenance, only when publish is true
       attestations: write  # likewise: the SLSA provenance record
     with:
+      # normal: ~1 min (p50 0.6, p95 0.9; last ~30 green runs)
+      timeout-minutes: 5
       publish: false
       package-directory: fixture
       verify-command: test "$VERSION" = "0.1.0"
@@ -288,6 +303,8 @@ jobs:
       id-token: write  # likewise: keyless signing and provenance, only when publish is true
       attestations: write  # likewise: the SLSA provenance record
     with:
+      # normal: ~1 min (p50 0.3, p95 0.5; last ~30 green runs)
+      timeout-minutes: 5
       publish: false
       build-command: |
         mkdir -p dist
@@ -310,6 +327,8 @@ jobs:
       contents: read
       id-token: write  # what a caller grants for the plan job's Doppler fetch; skipped here
     with:
+      # normal: ~1 min (p50 0.4, p95 0.9; last ~30 green runs)
+      timeout-minutes: 5
       directories: fixture/tofu
       test: true
       test-matrix: true  # one leg here; the matrix path runs against a real module
@@ -328,6 +347,8 @@ jobs:
     permissions:
       contents: read
     with:
+      # normal: ~1 min (p50 0.6, p95 0.7; last ~30 green runs)
+      timeout-minutes: 5
       sketches: fixture/firmware/blink
       workflow-lint: false
       egress-policy: block
@@ -346,6 +367,8 @@ jobs:
       pages: write  # the deploy job declares it for the path it never takes here
       id-token: write  # likewise: Pages verifies the deploy against it
     with:
+      # normal: ~1 min (p50 0.4, p95 0.5; last ~30 green runs)
+      timeout-minutes: 5
       deploy: false
       install-command: python -m pip --version
       build-command: |
@@ -364,6 +387,8 @@ jobs:
     permissions:
       contents: write  # the publish job declares it for the path it never takes here
     with:
+      # normal: ~1 min (p50 0.3, p95 0.5; last ~30 green runs)
+      timeout-minutes: 5
       publish: false
       generate-command: |
         mkdir -p "$OUT_DIR"
@@ -385,6 +410,8 @@ jobs:
       contents: read
       id-token: write  # what a caller grants for the Doppler fetch
     with:
+      # normal: ~1 min (p50 0.4, p95 0.6; last ~30 green runs)
+      timeout-minutes: 5
       project-url: https://github.com/orgs/N0TST/projects/2
       app-id: "1"  # a placeholder: a dry run with no key mints nothing
       dry-run: true
@@ -407,6 +434,8 @@ jobs:
       attestations: write  # likewise: the SLSA provenance record
       security-events: write  # the Trivy SARIF upload, which does run
     with:
+      # normal: ~1 min (p50 1.1, p95 1.3; last ~30 green runs)
+      timeout-minutes: 5
       push: false
       dockerfile: fixture/Dockerfile
       context: fixture
@@ -415,22 +444,78 @@ jobs:
       probe-command: --version
       trivyignores: fixture/.trivyignore
 
+  # Which image the two jobs below check, read from ONE file: fixture/gyst-fixture/DIGEST. While it says
+  # `unpublished` they keep checking the star-daemon image; once it holds a sha256 they check
+  # ghcr.io/chiefgyk3d/gyst-fixture@<that digest>, the image fixture-image.yml publishes through container-release.yml.
+  # The digest appears nowhere else (tests/test_fixture_image.py). A value that is neither fails here, so a typo cannot
+  # fall back to the old image.
+  fixture-pin:
+    name: fixture pin
+    needs: changes
+    if: needs.changes.outputs.docs-only != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      image: ${{ steps.pin.outputs.image }}
+      source-repository: ${{ steps.pin.outputs.source-repository }}
+      identity-regexp: ${{ steps.pin.outputs.identity-regexp }}
+      test-command: ${{ steps.pin.outputs.test-command }}
+    steps:
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: fixture/gyst-fixture/DIGEST
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - name: Read the pin
+        id: pin
+        env:
+          DIGEST_FILE: fixture/gyst-fixture/DIGEST
+        run: |
+          set -euo pipefail
+          pin="$(tr -d '[:space:]' < "$DIGEST_FILE")"
+          if [ "$pin" = unpublished ]; then
+            cat >> "$GITHUB_OUTPUT" << 'EOF'
+          image=ghcr.io/chiefgyk3d/star-daemon:latest
+          source-repository=ChiefGyk3D/Star-Daemon
+          identity-regexp=^https://github.com/ChiefGyk3D/
+          test-command=docker run --rm "$IMAGE" sh -c "python -m py_compile /app/star-daemon.py /app/star_daemon.py /app/star_announcer.py /app/github_stars.py /app/config.py /app/platforms.py"
+          EOF
+          elif [[ "$pin" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            cat >> "$GITHUB_OUTPUT" << EOF
+          image=ghcr.io/chiefgyk3d/gyst-fixture@$pin
+          source-repository=ChiefGyk3D/git-your-ship-together
+          identity-regexp=^https://github\\.com/ChiefGyk3D/git-your-ship-together/\\.github/workflows/container-release\\.yml@refs/heads/main\$
+          test-command=docker run --rm "\$IMAGE" | grep -Eqx '[0-9]+\\.[0-9]+\\.[0-9]+'
+          EOF
+          else
+            echo "::error::$DIGEST_FILE must hold 'unpublished' or one sha256:<64 lowercase hex> digest"
+            exit 1
+          fi
+
   # verify-published.yml against the image this account publishes through
   # container-release.yml: signature, SBOM attestation and provenance verified
   # from outside, then each platform pulled and its entrypoint checked. The
   # check is the one star-daemon's own release runs on the built image.
   fixture-verify:
     name: fixture verify
-    needs: changes
+    needs: [changes, fixture-pin]
     if: needs.changes.outputs.docs-only != 'true'
     uses: ./.github/workflows/verify-published.yml # zizmor: ignore[self-repository]
     permissions:
       contents: read  # gh attestation verify reads with the workflow's own token
       packages: read  # pull the public image from GHCR
     with:
-      image: ghcr.io/chiefgyk3d/star-daemon:latest
-      source-repository: ChiefGyk3D/Star-Daemon  # the repository that built it, not this one
-      test-command: docker run --rm "$IMAGE" sh -c "python -m py_compile /app/star-daemon.py /app/star_daemon.py /app/star_announcer.py /app/github_stars.py /app/config.py /app/platforms.py"
+      # normal: ~1 min (p50 0.9, p95 1.2; last ~30 green runs)
+      timeout-minutes: 5
+      image: ${{ needs.fixture-pin.outputs.image }}
+      source-repository: ${{ needs.fixture-pin.outputs.source-repository }}  # the repository that built it
+      identity-regexp: ${{ needs.fixture-pin.outputs.identity-regexp }}
+      test-command: ${{ needs.fixture-pin.outputs.test-command }}
 
   # verify-published.yml's rescan over the same published image: Trivy,
   # pinned by hash, against today's database, in block mode with the workflow's
@@ -440,15 +525,18 @@ jobs:
   # the next job, against an SBOM that carries one.
   fixture-rescan:
     name: fixture rescan
-    needs: changes
+    needs: [changes, fixture-pin]
     if: needs.changes.outputs.docs-only != 'true'
     uses: ./.github/workflows/verify-published.yml # zizmor: ignore[self-repository]
     permissions:
       contents: read  # the call's own read grant
       packages: read  # the verify job pulls the public image from GHCR
     with:
-      image: ghcr.io/chiefgyk3d/star-daemon:latest
-      source-repository: ChiefGyk3D/Star-Daemon  # the repository that built it, not this one
+      # normal: ~1 min (p50 0.5, p95 0.7; last ~30 green runs)
+      timeout-minutes: 5
+      image: ${{ needs.fixture-pin.outputs.image }}
+      source-repository: ${{ needs.fixture-pin.outputs.source-repository }}  # the repository that built it
+      identity-regexp: ${{ needs.fixture-pin.outputs.identity-regexp }}
       platforms: linux/amd64
       rescan: true
       rescan-severity: CRITICAL
@@ -466,6 +554,8 @@ jobs:
     permissions:
       contents: read
     with:
+      # normal: ~1 min (p50 0.3, p95 0.5; last ~30 green runs)
+      timeout-minutes: 5
       lock-files: fixture/vendored/tokens.lock.json
       generator-command: python3 fixture/vendored/gen_tokens.py
 
@@ -480,6 +570,9 @@ jobs:
     permissions:
       contents: read
       id-token: write  # what a caller grants for the Doppler fetch
+    with:
+      # normal: ~1 min (p50 0.3, p95 0.5; last ~30 green runs)
+      timeout-minutes: 5
 
   # pin-comments.yml at this ref over this repository's own workflows: every `# vX.Y.Z` comment must name the
   # commit it is pinned to. That the same check FAILS on a wrong comment, a missing one, a missing tag and an
@@ -492,6 +585,9 @@ jobs:
     uses: ./.github/workflows/pin-comments.yml # zizmor: ignore[self-repository]
     permissions:
       contents: read
+    with:
+      # normal: ~1 min (p50 0.5, p95 0.6; last ~30 green runs)
+      timeout-minutes: 5
 
   # token-drift.yml at this ref, in block mode with the workflow's own default list (api.github.com and github.com
   # only, so the live fetch needs nothing else, or this job goes red). `fixture-token-drift` checks a pin with the input
@@ -508,6 +604,8 @@ jobs:
     permissions:
       contents: read
     with:
+      # normal: ~1 min (p50 0.3, p95 1.2; last ~30 green runs)
+      timeout-minutes: 5
       lock-file: fixture/token-drift/ok/tokens.lock.json
       vendored-path: fixture/token-drift/ok/tokens.json
       source-repo: example/brand-tokens
@@ -521,6 +619,8 @@ jobs:
     permissions:
       contents: read
     with:
+      # normal: ~1 min (p50 0.3, p95 0.9; last ~30 green runs)
+      timeout-minutes: 5
       lock-file: fixture/token-drift/live/tokens.lock.json
       check-live: true
 
@@ -532,6 +632,8 @@ jobs:
     permissions:
       contents: read
     with:
+      # normal: ~1 min (p50 0.3, p95 1.0; last ~30 green runs)
+      timeout-minutes: 5
       lock-file: fixture/token-drift/planted-pin/tokens.lock.json
       advisory: true
 
@@ -543,6 +645,8 @@ jobs:
     permissions:
       contents: read
     with:
+      # normal: ~1 min (p50 0.3, p95 0.5; last ~30 green runs)
+      timeout-minutes: 5
       lock-file: fixture/token-drift/planted-live/tokens.lock.json
       check-live: true
       advisory: true
@@ -552,6 +656,7 @@ jobs:
     if: needs.changes.outputs.docs-only != 'true'
     needs: [changes, fixture-token-drift-planted-pin, fixture-token-drift-planted-live]
     runs-on: ubuntu-latest
+    # normal: ~1 min (p50 0.2, p95 0.3; last ~30 green runs)
     timeout-minutes: 5
     permissions: {}
     steps:
@@ -588,6 +693,8 @@ jobs:
     permissions:
       contents: read
     with:
+      # normal: ~1 min (p50 0.5, p95 0.9; last ~30 green runs)
+      timeout-minutes: 5
       dockerfile: fixture/Dockerfile
       exit-code: "0"
 
@@ -604,6 +711,8 @@ jobs:
     permissions:
       contents: read
     with:
+      # normal: ~1 min (p50 0.3, p95 0.5; last ~30 green runs)
+      build-timeout-minutes: 5
       setup-command: |
         mkdir -p "$RUNNER_TEMP/fixture-bin" "$RUNNER_TEMP/fixture-dl"
         echo download >"$RUNNER_TEMP/fixture-dl/note"
@@ -621,13 +730,14 @@ jobs:
       cache-tool-key-files: '["fixture/requirements.in"]'
       cache-pip-files: '["fixture/requirements.txt"]'
       areas: '{"docs": ["*.md", "docs/*"], "code": ["*"]}'
+      # Every check below takes about 30 seconds (p95 0.5 min, last ~30 green runs); the plan's own default is 15.
       jobs: |
         [
-          {"name": "site exists", "command": "test -s fixture-site/index.html"},
+          {"name": "site exists", "command": "test -s fixture-site/index.html", "timeout": 5},
           {"name": "code only", "command": "test -s fixture-site/index.html", "areas": ["code"], "timeout": 5},
-          {"name": "tool on path", "command": "test \"$(fixture-tool)\" = fixture-tool", "tools": true, "build": false},
-          {"name": "pip cache", "command": "mkdir -p ~/.cache/pip && echo fixture > ~/.cache/pip/fixture", "pip-cache": true, "build": false},
-          {"name": "second output", "command": "test \"$(cat \"$RUNNER_TEMP/fixture-extra/note.txt\")\" = 'second output'"}
+          {"name": "tool on path", "command": "test \"$(fixture-tool)\" = fixture-tool", "tools": true, "build": false, "timeout": 5},
+          {"name": "pip cache", "command": "mkdir -p ~/.cache/pip && echo fixture > ~/.cache/pip/fixture", "pip-cache": true, "build": false, "timeout": 5},
+          {"name": "second output", "command": "test \"$(cat \"$RUNNER_TEMP/fixture-extra/note.txt\")\" = 'second output'", "timeout": 5}
         ]
 
   # ci-gate.yml at this ref over the job above: the gate a caller with several workflows side by side requires.
@@ -650,7 +760,8 @@ jobs:
     needs: changes
     if: needs.changes.outputs.docs-only != 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    # normal: ~1 min (p50 0.9, p95 1.5; last ~30 green runs)
+    timeout-minutes: 5
     permissions:
       contents: read
     steps:
@@ -689,6 +800,8 @@ jobs:
       contents: read
       security-events: write  # the SARIF upload, which runs here
     with:
+      # normal: ~1 min (p50 1.1, p95 1.4; last ~30 green runs)
+      timeout-minutes: 5
       start-command: python3 fixture/dast/server.py --port 8080
       target-url: http://127.0.0.1:8080
       fail-on: low
@@ -710,7 +823,8 @@ jobs:
     needs: changes
     if: needs.changes.outputs.docs-only != 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    # normal: ~9 min (p50 8.6, p95 9.2; last ~30 green runs)
+    timeout-minutes: 30
     permissions:
       contents: read
     steps:
@@ -742,7 +856,8 @@ jobs:
     needs: [changes, fixture-package]
     if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && needs.changes.outputs.docs-only != 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # normal: ~1 min (p50 0.4, p95 0.5; last ~30 green runs)
+    timeout-minutes: 5
     permissions:
       contents: read
     steps:
@@ -782,6 +897,8 @@ jobs:
     permissions:
       contents: read
     with:
+      # normal: ~1 min (p50 0.3, p95 0.4; last ~30 green runs)
+      timeout-minutes: 5
       model-glob: fixture/threat-model/*.threat-dragon.json
       required-topics: prompt injection
       egress-policy: block
@@ -800,6 +917,8 @@ jobs:
       contents: read
       security-events: write  # declared by the upload jobs, which upload-sarif: false skips
     with:
+      # normal: ~1 min (p50 0.9, p95 1.1; last ~30 green runs)
+      timeout-minutes: 5
       skill-paths: fixture/agent-scan/clean-skill
       mcp-tool-files: fixture/agent-scan/mcp/clean-tools.json
       fail-on-severity: info
@@ -816,6 +935,8 @@ jobs:
       contents: read
       security-events: write  # declared by the upload jobs, which upload-sarif: false skips
     with:
+      # normal: ~1 min (p50 0.9, p95 1.1; last ~30 green runs)
+      timeout-minutes: 5
       skill-paths: fixture/agent-scan/planted-skill
       mcp-tool-files: fixture/agent-scan/mcp/planted-tools.json
       upload-sarif: false
@@ -827,6 +948,7 @@ jobs:
     if: needs.changes.outputs.docs-only != 'true'
     needs: [changes, fixture-agent-scan-planted]
     runs-on: ubuntu-latest
+    # normal: ~1 min (p50 0.2, p95 0.3; last ~30 green runs)
     timeout-minutes: 5
     permissions: {}
     steps:
@@ -865,7 +987,8 @@ jobs:
     needs: changes
     if: needs.changes.outputs.docs-only != 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # normal: ~1 min (p50 0.2, p95 0.3; last ~30 green runs)
+    timeout-minutes: 5
     permissions:
       contents: read  # check out the repository so the local ci-gate action and its script can be loaded; nothing is written
     steps:
@@ -899,7 +1022,8 @@ jobs:
     needs: changes
     if: needs.changes.outputs.docs-only != 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # normal: ~1 min (p50 0.2, p95 0.4; last ~30 green runs)
+    timeout-minutes: 5
     permissions:
       contents: read  # check out the repository so the local classify-changes action and its script can be loaded; nothing is written
       pull-requests: read  # classify-changes lists the pull request's changed files through the API; a fork's token has it too
@@ -935,8 +1059,9 @@ jobs:
   ci-green:
     name: CI green
     if: always()
-    needs: [changes, actionlint, zizmor, test, fixture-ci, fixture-bash, fixture-fuzz, fixture-tofu, fixture-arduino, fixture-package, fixture-sbom, fixture-artifact, fixture-pages, fixture-wiki, fixture-release, fixture-verify, fixture-rescan, fixture-drift, fixture-token-drift, fixture-token-drift-live, fixture-token-drift-planted-pin, fixture-token-drift-planted-live, token-drift-control, fixture-pin-comments, fixture-base-image, fixture-repin, fixture-parallel, fixture-gate, fixture-ci-gate-action, fixture-classify-action, rescan-live, fixture-project-sync, fixture-dast, dast-live, fixture-threat-model, fixture-agent-scan, fixture-agent-scan-planted, agent-scan-control]
+    needs: [changes, actionlint, zizmor, test, fixture-ci, fixture-bash, fixture-fuzz, fixture-tofu, fixture-arduino, fixture-package, fixture-sbom, fixture-artifact, fixture-pages, fixture-wiki, fixture-release, fixture-pin, fixture-verify, fixture-rescan, fixture-drift, fixture-token-drift, fixture-token-drift-live, fixture-token-drift-planted-pin, fixture-token-drift-planted-live, token-drift-control, fixture-pin-comments, fixture-base-image, fixture-repin, fixture-parallel, fixture-gate, fixture-ci-gate-action, fixture-classify-action, rescan-live, fixture-project-sync, fixture-dast, dast-live, fixture-threat-model, fixture-agent-scan, fixture-agent-scan-planted, agent-scan-control]
     runs-on: ubuntu-latest
+    # normal: ~1 min (p50 0.2, p95 0.4; last ~30 green runs)
     timeout-minutes: 5
     permissions:
       contents: read  # the gate action and script are read from the trusted checkout below
@@ -964,8 +1089,8 @@ jobs:
         uses: ./.github/actions/ci-gate # zizmor: ignore[self-repository]
         with:
           needs: ${{ toJSON(needs) }}
-          required-jobs: changes actionlint zizmor test fixture-ci fixture-bash fixture-fuzz fixture-package fixture-artifact fixture-tofu fixture-arduino fixture-pages fixture-wiki fixture-project-sync fixture-release fixture-verify fixture-rescan fixture-drift fixture-token-drift fixture-token-drift-live fixture-token-drift-planted-pin fixture-token-drift-planted-live token-drift-control fixture-pin-comments fixture-repin fixture-base-image fixture-parallel fixture-gate fixture-ci-gate-action fixture-classify-action rescan-live fixture-dast dast-live fixture-sbom fixture-threat-model fixture-agent-scan fixture-agent-scan-planted agent-scan-control
-          skippable-jobs: fixture-ci fixture-bash fixture-fuzz fixture-package fixture-artifact fixture-tofu fixture-arduino fixture-pages fixture-wiki fixture-project-sync fixture-release fixture-verify fixture-rescan fixture-drift fixture-token-drift fixture-token-drift-live fixture-token-drift-planted-pin fixture-token-drift-planted-live token-drift-control fixture-pin-comments fixture-repin fixture-base-image fixture-parallel fixture-gate fixture-ci-gate-action fixture-classify-action fixture-dast fixture-sbom fixture-threat-model fixture-agent-scan fixture-agent-scan-planted agent-scan-control rescan-live dast-live
+          required-jobs: changes actionlint zizmor test fixture-ci fixture-bash fixture-fuzz fixture-package fixture-artifact fixture-tofu fixture-arduino fixture-pages fixture-wiki fixture-project-sync fixture-release fixture-pin fixture-verify fixture-rescan fixture-drift fixture-token-drift fixture-token-drift-live fixture-token-drift-planted-pin fixture-token-drift-planted-live token-drift-control fixture-pin-comments fixture-repin fixture-base-image fixture-parallel fixture-gate fixture-ci-gate-action fixture-classify-action rescan-live fixture-dast dast-live fixture-sbom fixture-threat-model fixture-agent-scan fixture-agent-scan-planted agent-scan-control
+          skippable-jobs: fixture-ci fixture-bash fixture-fuzz fixture-package fixture-artifact fixture-tofu fixture-arduino fixture-pages fixture-wiki fixture-project-sync fixture-release fixture-pin fixture-verify fixture-rescan fixture-drift fixture-token-drift fixture-token-drift-live fixture-token-drift-planted-pin fixture-token-drift-planted-live token-drift-control fixture-pin-comments fixture-repin fixture-base-image fixture-parallel fixture-gate fixture-ci-gate-action fixture-classify-action fixture-dast fixture-sbom fixture-threat-model fixture-agent-scan fixture-agent-scan-planted agent-scan-control rescan-live dast-live
           classifier-job: changes
           fork-skippable-jobs: fixture-package fixture-artifact fixture-pages fixture-wiki fixture-release fixture-dast fixture-sbom fixture-threat-model fixture-agent-scan fixture-agent-scan-planted agent-scan-control
           fork-pull-request: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}

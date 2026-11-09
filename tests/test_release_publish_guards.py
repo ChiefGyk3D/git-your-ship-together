@@ -500,8 +500,19 @@ def sandbox(tmp_path):
     return tmp_path, work
 
 
-ABSENT = object()  # drop the key from a remote asset
-DEFAULT = object()  # derive the value from the tag
+class _Sentinel:
+    """A unique marker whose repr is the same in every process: the default repr holds a memory address, which gave
+    the parametrized ids of pytest-xdist workers different names (they must collect identical test ids)."""
+
+    def __init__(self, name: str):
+        self.name = name
+
+    def __repr__(self) -> str:
+        return self.name
+
+
+ABSENT = _Sentinel("ABSENT")  # drop the key from a remote asset
+DEFAULT = _Sentinel("DEFAULT")  # derive the value from the tag
 
 
 def run_upload(

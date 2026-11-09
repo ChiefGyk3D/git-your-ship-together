@@ -90,10 +90,12 @@ publish).
 |---|---|
 | `ci.yml` | actionlint, zizmor, the pytest contract, then every reusable workflow run against `fixture/` at the PR's ref |
 | `security-self.yml` | `security.yml` run on this repository |
+| `fixture-image.yml` | Publishes `ghcr.io/chiefgyk3d/gyst-fixture` (from `fixture/gyst-fixture/`) through `container-release.yml` on a manual run or a push to `main`; `fixture verify` and `fixture rescan` check it, pinned by digest |
 | `dependabot-auto-merge-self.yml` | `dependabot-auto-merge.yml` run on this repository's own bumps |
 | `audit.yml` | The weekly [baseline audit](Baseline-and-the-weekly-audit.md) and risk-register issues |
 | `fleet-status.yml` | Weekly and on demand: `scripts/fleet_status.py` writes one table to the job summary and a JSON artifact (pins behind, open alert counts by severity, default-branch protection and required checks, newest push result). Counts only, `contents: read`, no secret; what the job token cannot read is `n/a` |
 | `wiki.yml` | Publishes this wiki from `main`; see [Maintaining this wiki](Maintaining-this-wiki.md) |
+| `main-verify.yml` | After a push to `main`, every six hours and by hand: start `ci.yml` by `workflow_dispatch` when the head has no required check, fail when one is red or missing ([Verify main](Verify-main.md)) |
 
 ### Everything else
 
@@ -123,11 +125,13 @@ publish).
 | `scripts/parallel_ci_plan.py` | The input validation and path rules `parallel-ci.yml` inlines byte for byte; also runnable locally |
 | `scripts/parallel_ci_gate.py` | The gate rule `parallel-ci.yml` and `ci-gate.yml` inline byte for byte |
 | `scripts/classify_changes.py`, `scripts/ci_gate.py` | The logic behind the `classify-changes` and `ci-gate` actions ([Docs-only fast path](Docs-only-fast-path.md)) |
+| `scripts/verify_main.py` | The logic of `main-verify.yml` (assess, dispatch, confirm); stdlib only, run by the workflow from the checkout ([Verify main](Verify-main.md)) |
 | `scripts/check_token_drift.py` | The pin-and-source drift check `token-drift.yml` inlines byte for byte; also runnable locally |
 | `scripts/check_vendored_drift.py` | The drift check `vendored-drift.yml` inlines byte for byte; also runnable locally |
 | `scripts/check_pin_comments.py` | The pin-comment check `pin-comments.yml` inlines byte for byte; also runnable locally |
 | `scripts/base_image_digest.py` | The pin reader and report comparison `base-image-digest.yml` inlines byte for byte |
 | `scripts/fetch-release.sh` | `fetch_release URL OUT SHA256`: the one release-asset download `bash-ci`, `tofu-ci`, `arduino-ci`, `security`, `container-release`, `python-package-release`, `base-image-digest` and `verify-published` inline byte for byte: at most 5 tries with backoff and jitter inside 170 s, the pinned SHA-256 mandatory and fatal, the job token sent to github.com only where a job already holds one |
+| `scripts/trivy_sarif_summary.py` | The failed-scan diagnostic `container-release.yml` inlines byte for byte: rule id, path and count per hit and the totals by severity from the scan's SARIF (never the matched text); also runnable locally |
 | `scripts/doppler-ci-set.sh` | Set one Doppler secret without the value touching a command line |
 | `.github/requirements/` | `pip-audit` and `semgrep`: the one-line `.in` and the hash lock `security.yml` carries inline |
 | `scripts/tool_locks.py` | Resolves those locks (`--relock`) and copies them into `security.yml`; `--check` fails on a difference |

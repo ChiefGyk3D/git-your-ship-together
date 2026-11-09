@@ -69,6 +69,7 @@ jobs:
   ci-green:
     name: CI green
     runs-on: ubuntu-24.04
+    # normal: ~1 min (p50 0.3, p95 0.3; last ~30 green runs)
     timeout-minutes: 5
     permissions: {}
     outputs:
