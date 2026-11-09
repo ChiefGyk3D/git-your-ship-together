@@ -5,6 +5,14 @@ name what a caller sees after that.
 
 ## Unreleased
 
+### New: `wait-ci.sh --from-protection` and a fail-fast on a gate name that never reports (issue #378)
+
+Five merge captains hit a 10-minute hang or gated on the wrong thing: the default gate is a bare `CI green`, `--require-check` only adds to it, and a nested name (`ci / CI green`, `gate / CI green`) needed `--context`, which replaces the default. Nothing existing changes unless a caller uses the new flag; the fail-fast changes only how a wait that could never end is reported.
+
+- **`--from-protection`.** The gate is read from the default branch: its classic required status checks, then its active rulesets (the union, as GitHub enforces both), with app ids honored. It replaces the default gate, is mutually exclusive with `--context`, and `--require-check` still adds. No readable required check is exit 64 naming the branch.
+- **Fail fast.** A requested name that has not reported while every run on the pinned head is complete and the list read identical on 3 polls over at least 60 s now ends with exit 2 (`result` `missing`) and names the missing context and the check names that did report, instead of waiting for the hung timer. A run still open, or a late workflow that starts within that window, is waited for as before. Every other exit code, the head pin, the mergeability read and the settle rule are unchanged.
+- **`--help`.** The script prints its usage and options.
+
 ### Fixed: tool installs survive a GitHub download outage (issue #372, refs)
 
 On 2026-11-09 a GitHub incident timed out anonymous traffic (HTTP 504, curl exit 22) and every plain `curl -sSfL` tool install failed on its first try. A caller sees this after it re-pins; no input changes and no egress host is added.
