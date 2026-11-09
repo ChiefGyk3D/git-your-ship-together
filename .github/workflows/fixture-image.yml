@@ -7,7 +7,7 @@
 # The release path stays strict for every caller: the two inputs below are set here, for this one image, and the
 # defaults of container-release.yml (push events only, a vX.Y.Z tag ref only) are untouched.
 #
-# After a run, the published digest is in the job summary and the `digest` output. Put it in
+# After a run, the published digest is in the merge job's summary (container-release.yml writes it there). Put it in
 # fixture/gyst-fixture/DIGEST (the only place it is written); tests/test_fixture_image.py checks the file.
 
 name: Fixture image
@@ -59,31 +59,3 @@ jobs:
         type=raw,value=latest
         type=sha
       docker-test-command: docker run --rm "$IMAGE" | grep -Eqx '[0-9]+\.[0-9]+\.[0-9]+'
-
-  # The digest to write into fixture/gyst-fixture/DIGEST, in the run's summary where the person who triggered it
-  # reads it. The digest is the index digest container-release.yml signed and attested.
-  report:
-    name: report the digest
-    needs: publish
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions: {}
-    steps:
-      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
-        with:
-          egress-policy: audit
-      - name: Show the digest
-        env:
-          DIGEST: ${{ needs.publish.outputs.digest }}
-          IMAGE: ${{ needs.publish.outputs.image }}
-        run: |
-          set -euo pipefail
-          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::the publish job reported no valid digest"; exit 1; }
-          {
-            echo "### gyst-fixture published"
-            echo
-            echo "Image: \`$IMAGE\`"
-            echo
-            echo "Write this line, alone, into \`fixture/gyst-fixture/DIGEST\`: \`$DIGEST\`"
-          } >> "$GITHUB_STEP_SUMMARY"
-          echo "digest=$DIGEST"

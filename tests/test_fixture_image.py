@@ -211,14 +211,6 @@ def test_the_version_tag_follows_the_version_file_and_latest_is_kept():
     assert len([t for t in tags if re.fullmatch(r"type=raw,value=\d+\.\d+\.\d+", t)]) == 1
 
 
-def test_the_digest_is_reported_from_the_publish_output():
-    report = WF["jobs"]["report"]
-    assert report["needs"] == "publish"
-    step = next(s for s in report["steps"] if s.get("name") == "Show the digest")
-    assert step["env"]["DIGEST"] == "${{ needs.publish.outputs.digest }}"
-    assert "${{" not in step["run"]
-
-
 def test_the_verify_fixture_identity_matches_the_signing_workflow_path():
     """The certificate subject is the reusable workflow that signs (container-release.yml, called from
     fixture-image.yml on main), as container-release.yml documents: `SAN = https://github.com/<repo>/.github/workflows/
