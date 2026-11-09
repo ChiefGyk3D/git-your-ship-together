@@ -333,7 +333,7 @@ jobs:
               if [ "$left" -lt 1 ]; then break; fi
               cap=$((left < 45 ? left : 45))
               if [ -n "$token" ]; then have="header = \"Authorization: Bearer ${token}\""; else have="# anonymous"; fi
-              if code=$(printf '%s\n' "$have" | curl -sSfL --proto '=https' --proto-redir '=https' --tlsv1.2 \
+              if code=$(printf '%s\n' "$have" | curl -q -sSfL --proto '=https' --proto-redir '=https' --tlsv1.2 \
                 --connect-timeout 10 --max-time "$cap" -K - -w '%{http_code}' -o "$tmp" "$url"); then
                 rc=0
               else
@@ -576,7 +576,7 @@ jobs:
               if [ "$left" -lt 1 ]; then break; fi
               cap=$((left < 45 ? left : 45))
               if [ -n "$token" ]; then have="header = \"Authorization: Bearer ${token}\""; else have="# anonymous"; fi
-              if code=$(printf '%s\n' "$have" | curl -sSfL --proto '=https' --proto-redir '=https' --tlsv1.2 \
+              if code=$(printf '%s\n' "$have" | curl -q -sSfL --proto '=https' --proto-redir '=https' --tlsv1.2 \
                 --connect-timeout 10 --max-time "$cap" -K - -w '%{http_code}' -o "$tmp" "$url"); then
                 rc=0
               else
@@ -990,7 +990,7 @@ jobs:
               if [ "$left" -lt 1 ]; then break; fi
               cap=$((left < 45 ? left : 45))
               if [ -n "$token" ]; then have="header = \"Authorization: Bearer ${token}\""; else have="# anonymous"; fi
-              if code=$(printf '%s\n' "$have" | curl -sSfL --proto '=https' --proto-redir '=https' --tlsv1.2 \
+              if code=$(printf '%s\n' "$have" | curl -q -sSfL --proto '=https' --proto-redir '=https' --tlsv1.2 \
                 --connect-timeout 10 --max-time "$cap" -K - -w '%{http_code}' -o "$tmp" "$url"); then
                 rc=0
               else
@@ -1232,7 +1232,7 @@ jobs:
               if [ "$left" -lt 1 ]; then break; fi
               cap=$((left < 45 ? left : 45))
               if [ -n "$token" ]; then have="header = \"Authorization: Bearer ${token}\""; else have="# anonymous"; fi
-              if code=$(printf '%s\n' "$have" | curl -sSfL --proto '=https' --proto-redir '=https' --tlsv1.2 \
+              if code=$(printf '%s\n' "$have" | curl -q -sSfL --proto '=https' --proto-redir '=https' --tlsv1.2 \
                 --connect-timeout 10 --max-time "$cap" -K - -w '%{http_code}' -o "$tmp" "$url"); then
                 rc=0
               else
@@ -1604,7 +1604,7 @@ jobs:
               if [ "$left" -lt 1 ]; then break; fi
               cap=$((left < 45 ? left : 45))
               if [ -n "$token" ]; then have="header = \"Authorization: Bearer ${token}\""; else have="# anonymous"; fi
-              if code=$(printf '%s\n' "$have" | curl -sSfL --proto '=https' --proto-redir '=https' --tlsv1.2 \
+              if code=$(printf '%s\n' "$have" | curl -q -sSfL --proto '=https' --proto-redir '=https' --tlsv1.2 \
                 --connect-timeout 10 --max-time "$cap" -K - -w '%{http_code}' -o "$tmp" "$url"); then
                 rc=0
               else
@@ -1801,7 +1801,8 @@ jobs:
           path: ${{ runner.temp }}/tool-cache/tofu
           key: tool-tofu-${{ inputs.tofu-version }}-${{ runner.os }}-${{ runner.arch }}
 
-      - name: Install the binary at the pinned version
+      - name: Download the binary at the pinned version
+        if: inputs.binary == 'tofu'
         env:
           FETCH_RELEASE_TOKEN: ${{ github.token }}
           BINARY: ${{ inputs.binary }}
@@ -1850,7 +1851,7 @@ jobs:
               if [ "$left" -lt 1 ]; then break; fi
               cap=$((left < 45 ? left : 45))
               if [ -n "$token" ]; then have="header = \"Authorization: Bearer ${token}\""; else have="# anonymous"; fi
-              if code=$(printf '%s\n' "$have" | curl -sSfL --proto '=https' --proto-redir '=https' --tlsv1.2 \
+              if code=$(printf '%s\n' "$have" | curl -q -sSfL --proto '=https' --proto-redir '=https' --tlsv1.2 \
                 --connect-timeout 10 --max-time "$cap" -K - -w '%{http_code}' -o "$tmp" "$url"); then
                 rc=0
               else
@@ -1894,6 +1895,21 @@ jobs:
               if [ ! -f "$CACHE_DIR/tofu.zip" ]; then
                 fetch_release "https://github.com/opentofu/opentofu/releases/download/v${VERSION}/tofu_${VERSION}_linux_amd64.zip" "$CACHE_DIR/tofu.zip" "${SHA256}"
               fi
+              echo "${SHA256}  $CACHE_DIR/tofu.zip" | sha256sum -c -
+              ;;
+            terraform) : ;;
+            *) echo "::error::binary must be tofu or terraform, not $BINARY"; exit 1 ;;
+          esac
+
+      - name: Install the binary at the pinned version
+        env:
+          BINARY: ${{ inputs.binary }}
+          SHA256: ${{ inputs.tofu-sha256 }}
+          CACHE_DIR: ${{ runner.temp }}/tool-cache/tofu
+        run: |
+          set -euo pipefail
+          case "$BINARY" in
+            tofu)
               echo "${SHA256}  $CACHE_DIR/tofu.zip" | sha256sum -c -
               unzip -q -o "$CACHE_DIR/tofu.zip" tofu -d /tmp
               install -m 0755 /tmp/tofu /usr/local/bin/tofu
