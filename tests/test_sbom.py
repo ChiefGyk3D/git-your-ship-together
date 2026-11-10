@@ -65,14 +65,15 @@ def test_syft_is_pinned_by_version_and_sha256_and_checked_before_it_runs():
     inputs = CALL["inputs"]
     assert re.fullmatch(r"\d+\.\d+\.\d+", inputs["syft-version"]["default"])
     assert re.fullmatch(r"[0-9a-f]{64}", inputs["syft-sha256"]["default"])
-    env = step("build", "SBOMs with syft")["env"]
-    assert env["SYFT_VERSION"] == "${{ inputs.syft-version }}"
-    assert env["SYFT_SHA256"] == "${{ inputs.syft-sha256 }}"
-    run = step("build", "SBOMs with syft")["run"]
-    assert "anchore/syft/releases/download/v${SYFT_VERSION}/syft_${SYFT_VERSION}_linux_amd64.tar.gz" in run
-    assert 'echo "${SYFT_SHA256}  ${archive}" | sha256sum -c -' in run
-    assert run.index("sha256sum -c") < run.index('"$syft" scan'), "the hash is checked after syft already ran"
-    assert step("build", "SBOMs with syft")["env"]["SYFT_CHECK_FOR_APP_UPDATE"] == "false"
+    download = step("build", "Download syft")
+    assert download["env"]["SYFT_VERSION"] == "${{ inputs.syft-version }}"
+    assert download["env"]["SYFT_SHA256"] == "${{ inputs.syft-sha256 }}"
+    assert "anchore/syft/releases/download/v${SYFT_VERSION}/syft_${SYFT_VERSION}_linux_amd64.tar.gz" in download["run"]
+    assert 'echo "${SYFT_SHA256}  ${archive}" | sha256sum -c -' in download["run"]
+    generate = step("build", "Write the SBOMs")
+    assert generate["env"]["SYFT_CHECK_FOR_APP_UPDATE"] == "false"
+    assert '"$syft" scan' in generate["run"] and '"$syft"' not in download["run"]
+    assert names("build").index(download["name"]) < names("build").index(generate["name"])
 
 
 def test_there_is_one_syft_pin_in_the_repository():
