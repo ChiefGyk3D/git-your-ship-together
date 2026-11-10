@@ -4,7 +4,7 @@ import re
 from pathlib import Path
 
 FIXTURE = Path(__file__).resolve().parent.parent / "fixture"
-REQUIREMENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*==\S+")
+REQUIREMENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9._,-]+\])?==\S+")
 
 
 def requirement_blocks():
@@ -33,11 +33,11 @@ def test_every_fixture_requirement_is_pinned_with_a_hash():
 
 def test_every_direct_dependency_is_in_the_lock():
     direct = {
-        line.split("==")[0].lower()
+        line.split("==")[0].split("[")[0].lower()
         for line in (FIXTURE / "requirements.in").read_text().splitlines()
         if line and not line.startswith("#")
     }
-    locked = {block[0].split("==")[0].lower() for block in requirement_blocks()}
+    locked = {block[0].split("==")[0].split("[")[0].lower() for block in requirement_blocks()}
     assert direct <= locked, f"in requirements.in but not the lock: {sorted(direct - locked)}"
 
 
