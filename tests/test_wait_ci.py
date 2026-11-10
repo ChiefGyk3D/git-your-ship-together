@@ -188,7 +188,7 @@ def pulls_response(st):
         "merged": st["merged"],
         "head": {"sha": head},
         "merge_commit_sha": st.get("merge_commit_sha"),
-        "base": {"ref": "main"},
+        "base": {"ref": st.get("base_ref", "main")},
     }
 
 
@@ -2344,6 +2344,19 @@ def test_github_enforced_required_checks_satisfy_require_protection(world, extra
     assert p.returncode == 0, shown(p)
     assert "WARNING" not in p.stdout
     assert len(w.merges()) == 1
+
+
+def test_merge_protection_reads_encode_a_slash_in_the_base_branch_path(world):
+    w = world(
+        checks={A: [GATE]},
+        classic={"contexts": ["CI green"], "checks": []},
+        base_ref="release/v1",
+    )
+    p = w.run("--repo", SLUG, "--pr", "7", "--merge", "--require-protection", *FAST)
+    assert p.returncode == 0, shown(p)
+    policy_calls = [c for c in w.calls() if "/rules/branches/" in c or "/protection/required_status_checks" in c]
+    assert len(policy_calls) == 2
+    assert all("release%2Fv1" in c for c in policy_calls)
 
 
 @pytest.mark.parametrize(

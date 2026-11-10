@@ -9,6 +9,8 @@ name what a caller sees after that.
 
 `wait-ci` was hardened.
 
+- Protection reads percent-encode slashes in default and pull-request base branch names, including merge-time checks.
+
 ## v1.35.0 (2026-11-09)
 
 ### Changed: `project-sync.yml` calls safo v0.2.0 (issue #398)

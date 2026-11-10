@@ -399,6 +399,8 @@ protection_read() {
   return 1
 }
 
+protection_branch_path() { printf '%s' "${1//\//%2F}"; }
+
 # The state of the pull request from ONE response: merged, head.sha and merge_commit_sha are read together,
 # so a merge can be attributed to the head it merged and not to a head read a moment earlier. Every value is
 # validated (a full SHA, a boolean); a response with more than one line is refused.
@@ -569,7 +571,7 @@ read_world() {
 if [[ $from_protection -eq 1 ]]; then
   dbranch="$(gh_try api "repos/${repo}" --jq '.default_branch // "" | tostring')" || dbranch=""
   [[ "$dbranch" =~ ^[A-Za-z0-9._/-]{1,200}$ ]] || die_usage "--from-protection: cannot read the default branch of ${repo}"
-  dbranch_path="${dbranch//\//%2F}"
+  dbranch_path="$(protection_branch_path "$dbranch")"
   prot_rules=""
   prot_classic=""
   rules_rc=0
@@ -1092,17 +1094,18 @@ fi
 PROT=unreadable
 PROT_MISSING=""
 read_protection() {
-  local base="$PR_BASE" rules classic line have_queue=0 got=0 n ctx
+  local base="$PR_BASE" base_path rules classic line have_queue=0 got=0 n ctx
   local -A have=() anyapp=()
   PROT=unreadable
   PROT_MISSING=""
   [[ -n "$base" ]] || return 0
-  if rules="$("$gh_bin" api "repos/${repo}/rules/branches/${base}" --jq "$RULES_JQ" 2>/dev/null)"; then
+  base_path="$(protection_branch_path "$base")"
+  if rules="$("$gh_bin" api "repos/${repo}/rules/branches/${base_path}" --jq "$RULES_JQ" 2>/dev/null)"; then
     got=1
   else
     rules=""
   fi
-  if classic="$("$gh_bin" api "repos/${repo}/branches/${base}/protection/required_status_checks" --jq "$CLASSIC_JQ" 2>/dev/null)"; then
+  if classic="$("$gh_bin" api "repos/${repo}/branches/${base_path}/protection/required_status_checks" --jq "$CLASSIC_JQ" 2>/dev/null)"; then
     got=1
   else
     classic=""
