@@ -136,6 +136,20 @@ def test_invalid_regular_expression_is_clear_and_has_no_traceback():
     assert "Traceback" not in result.stdout + result.stderr
 
 
+def test_repeat_count_overflow_is_a_clear_configuration_error():
+    result = run_title("Fix title", pattern="a{999999999999999999999999999999999999999999999999999999999999}")
+    assert result.returncode == 2
+    assert "invalid regular expression" in result.stdout
+    assert "Traceback" not in result.stdout + result.stderr
+
+
+def test_overlong_pattern_is_rejected_before_compilation():
+    result = run_title("Fix title", pattern="a" * 4097)
+    assert result.returncode == 2
+    assert "pattern must be at most 4096 characters" in result.stdout
+    assert "Traceback" not in result.stdout + result.stderr
+
+
 def test_catastrophic_regular_expression_is_interrupted():
     started = time.monotonic()
     result = run_title("a" * 119 + "!", pattern=r"(a+)+$")

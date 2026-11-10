@@ -193,6 +193,7 @@ jobs:
               r"Rename|Replace|Require|Restore|Revert|Simplify|Support|Test|Update|Upgrade|Use|Write)\b[^\r\n]*[^.\r\n]\Z"
           )
           MATCH_TIMEOUT_SECONDS = 0.25
+          MAX_PATTERN_LENGTH = 4096
 
 
           class MatchTimeout(Exception):
@@ -254,9 +255,17 @@ jobs:
                   )
                   return 1
 
+              if len(pattern_text) > MAX_PATTERN_LENGTH:
+                  annotation(
+                      "error",
+                      f"title={title}; rule=pattern must be at most {MAX_PATTERN_LENGTH} characters; "
+                      f"fix=shorten the regular expression; count={count} characters",
+                  )
+                  return 2
+
               try:
                   pattern = re.compile(pattern_text)
-              except re.error as exc:
+              except (re.error, OverflowError) as exc:
                   annotation(
                       "error",
                       f"title={title}; rule=pattern must be a valid Python regular expression; "
