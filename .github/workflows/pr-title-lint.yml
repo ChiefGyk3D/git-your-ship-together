@@ -1,0 +1,309 @@
+# Reusable pull request title check. It reads the title from the event payload through an environment variable,
+# never checks out the pull request, and holds no token. Calls on any event except pull_request are a visible no-op.
+
+name: Pull request title lint (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      pattern:
+        description: Python-compatible regular expression matched against the whole title. The default requires an imperative-style title of 8 to 120 characters with no trailing period; `(Refs #12)` and `(Closes #12)` endings are accepted.
+        type: string
+        default: '(?=.{8,120}\Z)(?:Add|Adjust|Allow|Avoid|Build|Bump|Change|Clean|Document|Drop|Enable|Enforce|Ensure|Expose|Extend|Fix|Handle|Harden|Implement|Improve|Introduce|Make|Move|Prevent|Refactor|Release|Remove|Rename|Replace|Require|Restore|Revert|Simplify|Support|Test|Update|Upgrade|Use|Write)\b[^\r\n]*[^.\r\n]\Z'
+      max-length:
+        description: Maximum title length in Unicode characters, enforced before prefix or regular-expression matching.
+        type: number
+        default: 120
+      allow-prefixes:
+        description: Comma-separated prefixes allowed to bypass the pattern, for example `release:,chore(deps):`. They never bypass `max-length`.
+        type: string
+        default: ""
+      egress-policy:
+        description: harden-runner egress policy - `audit` logs outbound connections, `block` allows only `allowed-endpoints`.
+        type: string
+        default: block
+      egress-policy-secretless:
+        description: Accepted so callers can pass the standard egress inputs; this secretless job follows this value.
+        type: string
+        default: block
+      allowed-endpoints:
+        description: harden-runner allow-list for `block`, space-separated host:port entries. The defaults are only for the egress canary.
+        type: string
+        default: "api.github.com:443 github.com:443"
+      extra-allowed-endpoints:
+        description: Additional space-separated host:port entries appended to `allowed-endpoints`.
+        type: string
+        default: ""
+      timeout-minutes:
+        description: Job timeout.
+        type: number
+        default: 5
+
+permissions: {}
+
+jobs:
+  lint:
+    name: Pull request title follows the rule
+    runs-on: ubuntu-24.04
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions: {}
+    steps:
+      - name: Validate the egress policy inputs
+        timeout-minutes: 1
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        env:
+          POLICY_EGRESS_POLICY: ${{ inputs.egress-policy }}
+          POLICY_EGRESS_POLICY_SECRETLESS: ${{ inputs.egress-policy-secretless }}
+        run: |
+          set -u
+          bad=0
+          check() {
+            if [ "$2" = set ] && [ "$3" != audit ] && [ "$3" != block ]; then
+              echo "::error title=egress policy::the $1 input must be exactly 'audit' or 'block' (its value is ${#3} characters long)"
+              bad=1
+            fi
+          }
+          check egress-policy "${POLICY_EGRESS_POLICY+set}" "${POLICY_EGRESS_POLICY-}"
+          check egress-policy-secretless "${POLICY_EGRESS_POLICY_SECRETLESS+set}" "${POLICY_EGRESS_POLICY_SECRETLESS-}"
+          check distro-egress-policy "${POLICY_DISTRO_EGRESS_POLICY+set}" "${POLICY_DISTRO_EGRESS_POLICY-}"
+          check semgrep-egress-policy "${POLICY_SEMGREP_EGRESS_POLICY+set}" "${POLICY_SEMGREP_EGRESS_POLICY-}"
+          exit "$bad"
+
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: ${{ (inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block' }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
+          disable-sudo: true
+          disable-telemetry: ${{ ((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block') == 'block' }}
+
+      - name: Egress canary
+        if: ${{ runner.os == 'Linux' && (((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block') == 'block') }}
+        timeout-minutes: 2
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -u
+          NAMES="github.com api.github.com results-receiver.actions.githubusercontent.com"
+          PORT=443
+          canary_resolve() { timeout 5 getent ahostsv4 "$1" 2>/dev/null | awk '$2 == "STREAM" { print $1 }'; }
+          canary_probe() { timeout 3 bash -c "exec 3<>\"/dev/tcp/\$0/\$1\"" "$1" "$PORT" 2>/dev/null; }
+          canary_reach() {
+            local i
+            for i in 1 2 3 4; do
+              canary_probe "$1" && return 0
+              [ "$i" -lt 4 ] && sleep 1
+            done
+            return 1
+          }
+          canary_show() { local n=$1; shift; echo "+ $*"; { timeout 10 "$@" 2>&1 || true; } | head -n "$n" || true; }
+          canary_diag() {
+            local name
+            echo "::group::egress canary diagnostics (for the GitHub Support ticket)"
+            canary_show 5 uname -srmo
+            canary_show 20 cat /etc/resolv.conf
+            canary_show 20 bash -c "resolvectl status 2>/dev/null | grep -E '^ *(Current DNS Server|DNS Servers?|DNS Domain):'"
+            canary_show 20 bash -c "ss -lun | grep ':53 '"
+            for name in $NAMES pipelines.actions.githubusercontent.com; do
+              canary_show 20 getent ahostsv4 "$name"
+              canary_show 5 curl -sS -o /dev/null -w '%{http_code} %{remote_ip} %{time_connect}\n' --max-time 8 "https://$name"
+            done
+            echo "::endgroup::"
+          }
+          canary_main() {
+            local tmp name addr n=0 bad
+            tmp=$(mktemp -d) || return 1
+            for _ in 1 2 3; do
+              for name in $NAMES; do canary_resolve "$name" >>"$tmp/res.$name" & done
+              wait
+              sleep 1
+            done
+            for name in $NAMES; do
+              if [ -s "$tmp/res.$name" ]; then sort -u "$tmp/res.$name"; else echo "-"; fi | sed "s|^|$name |" >>"$tmp/pairs"
+            done
+            while read -r name addr; do
+              n=$((n + 1))
+              ( { [ "$addr" != "-" ] && canary_reach "$addr"; } || echo "$name $addr" >"$tmp/bad.$n" ) </dev/null &
+            done <"$tmp/pairs"
+            wait
+            bad=$(cat "$tmp"/bad.* 2>/dev/null | sort || true)
+            rm -rf "$tmp"
+            if [ -z "$bad" ]; then
+              echo "egress canary: all $n addresses of $NAMES accept TCP $PORT"
+              return 0
+            fi
+            echo "::error title=egress canary::egress broken on this runner (known westus2 DNS issue): rerun the job"
+            echo "unreachable addresses (name address; '-' means the name did not resolve):"
+            printf '%s\n' "$bad"
+            canary_diag
+            echo "egress canary failed, unreachable: $(printf '%s' "$bad" | tr '\n' ';')" >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
+            return 1
+          }
+          set -m
+          canary_main &
+          main=$!
+          (sleep 90; kill -TERM -- "-$main"; sleep 2; kill -KILL -- "-$main") >/dev/null 2>&1 &
+          dog=$!
+          wait "$main" && rc=0 || rc=$?
+          kill -TERM -- "-$dog" >/dev/null 2>&1 || true
+          if kill -0 -- "-$main" >/dev/null 2>&1; then
+            kill -TERM -- "-$main" >/dev/null 2>&1 || true
+            sleep 1
+            kill -KILL -- "-$main" >/dev/null 2>&1 || true
+          fi
+          if [ "$rc" -eq 143 ] || [ "$rc" -eq 137 ]; then
+            echo "::error title=egress canary::the canary hit its 90 s deadline: rerun the job"
+            rc=124
+          fi
+          exit "$rc"
+
+      - name: Notice unsupported event
+        if: github.event_name != 'pull_request'
+        run: echo "::notice title=PR title lint::event is not pull_request; title check is a no-op"
+
+      - name: Check the pull request title
+        if: github.event_name == 'pull_request'
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PATTERN: ${{ inputs.pattern }}
+          MAX_LENGTH: ${{ inputs.max-length }}
+          ALLOW_PREFIXES: ${{ inputs.allow-prefixes }}
+        run: |
+          python3 -I - <<'PY'
+          #!/usr/bin/env python3
+          """Check one pull request title from environment variables.
+
+          The title is read from ``PR_TITLE`` so event data never becomes shell source.
+          ``PATTERN`` is matched against the whole title.  Length is checked first, then
+          the regular expression is evaluated under a POSIX interval timer.  Python's
+          ``re`` module has no timeout argument; ``signal.setitimer`` is the stdlib way
+          to interrupt a catastrophic match on the Linux runner used by the workflow.
+          """
+
+          from __future__ import annotations
+
+          import os
+          import re
+          import signal
+          import sys
+
+          DEFAULT_PATTERN = (
+              r"(?=.{8,120}\Z)(?:Add|Adjust|Allow|Avoid|Build|Bump|Change|Clean|Document|Drop|Enable|Enforce|Ensure|"
+              r"Expose|Extend|Fix|Handle|Harden|Implement|Improve|Introduce|Make|Move|Prevent|Refactor|Release|Remove|"
+              r"Rename|Replace|Require|Restore|Revert|Simplify|Support|Test|Update|Upgrade|Use|Write)\b[^\r\n]*[^.\r\n]\Z"
+          )
+          MATCH_TIMEOUT_SECONDS = 0.25
+          MAX_PATTERN_LENGTH = 4096
+
+
+          class MatchTimeout(Exception):
+              """The configured regular expression did not finish in time."""
+
+
+          def workflow_escape(value: str) -> str:
+              """Keep arbitrary event data inside one GitHub workflow-command line."""
+              return value.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+
+
+          def annotation(level: str, message: str) -> None:
+              print(f"::{level} title=PR title lint::{workflow_escape(message)}")
+
+
+          def positive_integer(value: str) -> int:
+              try:
+                  number = int(value)
+              except ValueError:
+                  number = 0
+              if number <= 0:
+                  raise ValueError("max-length must be a positive integer")
+              return number
+
+
+          def timed_fullmatch(pattern: re.Pattern[str], title: str) -> bool:
+              """Run ``fullmatch`` with a real, interrupting stdlib timeout."""
+
+              def timeout(_signum: int, _frame: object) -> None:
+                  raise MatchTimeout
+
+              previous = signal.signal(signal.SIGALRM, timeout)
+              signal.setitimer(signal.ITIMER_REAL, MATCH_TIMEOUT_SECONDS)
+              try:
+                  return pattern.fullmatch(title) is not None
+              finally:
+                  signal.setitimer(signal.ITIMER_REAL, 0)
+                  signal.signal(signal.SIGALRM, previous)
+
+
+          def main() -> int:
+              title = os.environ.get("PR_TITLE", "")
+              pattern_text = os.environ.get("PATTERN", DEFAULT_PATTERN)
+              prefixes_text = os.environ.get("ALLOW_PREFIXES", "")
+
+              try:
+                  max_length = positive_integer(os.environ.get("MAX_LENGTH", "120"))
+              except ValueError as exc:
+                  annotation("error", f"title={title}; rule=valid configuration; fix={exc}; count={len(title)} characters")
+                  return 2
+
+              count = len(title)
+              if count > max_length:
+                  remove = count - max_length
+                  annotation(
+                      "error",
+                      f"title={title}; rule=title must be at most {max_length} characters; "
+                      f"fix=remove at least {remove} characters; count={count} characters",
+                  )
+                  return 1
+
+              if len(pattern_text) > MAX_PATTERN_LENGTH:
+                  annotation(
+                      "error",
+                      f"title={title}; rule=pattern must be at most {MAX_PATTERN_LENGTH} characters; "
+                      f"fix=shorten the regular expression; count={count} characters",
+                  )
+                  return 2
+
+              try:
+                  pattern = re.compile(pattern_text)
+              except (re.error, OverflowError) as exc:
+                  annotation(
+                      "error",
+                      f"title={title}; rule=pattern must be a valid Python regular expression; "
+                      f"fix=correct the invalid regular expression ({exc}); count={count} characters",
+                  )
+                  return 2
+
+              prefixes = tuple(prefix.strip() for prefix in prefixes_text.split(",") if prefix.strip())
+              if prefixes and title.startswith(prefixes):
+                  annotation(
+                      "notice",
+                      f"title={title}; rule=allowed prefix bypasses the pattern; fix=none; count={count} characters",
+                  )
+                  return 0
+
+              try:
+                  matched = timed_fullmatch(pattern, title)
+              except MatchTimeout:
+                  annotation(
+                      "error",
+                      f"title={title}; rule=pattern must finish within {MATCH_TIMEOUT_SECONDS:g} seconds; "
+                      f"fix=replace the regular expression timed out with a linear-time pattern; count={count} characters",
+                  )
+                  return 2
+
+              if not matched:
+                  annotation(
+                      "error",
+                      f"title={title}; rule=title must fully match the configured pattern; "
+                      f"fix=use an imperative title of 8 to {max_length} characters without a trailing period, "
+                      f"or change the pattern; count={count} characters",
+                  )
+                  return 1
+
+              annotation("notice", f"title={title}; rule=title matches; fix=none; count={count} characters")
+              return 0
+
+
+          if __name__ == "__main__":
+              sys.exit(main())
+          PY
