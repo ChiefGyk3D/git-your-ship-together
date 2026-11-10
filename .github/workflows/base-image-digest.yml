@@ -279,7 +279,7 @@ jobs:
               if [ "$left" -lt 1 ]; then break; fi
               cap=$((left < 45 ? left : 45))
               if [ -n "$token" ]; then have="header = \"Authorization: Bearer ${token}\""; else have="# anonymous"; fi
-              if code=$(printf '%s\n' "$have" | curl -sSfL --proto '=https' --proto-redir '=https' --tlsv1.2 \
+              if code=$(printf '%s\n' "$have" | curl -q -sSfL --proto '=https' --proto-redir '=https' --tlsv1.2 \
                 --connect-timeout 10 --max-time "$cap" -K - -w '%{http_code}' -o "$tmp" "$url"); then
                 rc=0
               else

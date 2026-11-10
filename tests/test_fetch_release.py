@@ -8,11 +8,15 @@ workflows to hold the copies identical and to keep any other step from curling a
 
 from __future__ import annotations
 
+import http.server
 import os
 import re
+import shutil
+import ssl
 import stat
 import subprocess
 import textwrap
+import threading
 import time
 from pathlib import Path
 
@@ -279,6 +283,115 @@ def test_curl_is_never_told_to_follow_credentials_or_use_plain_http():
     assert "--proto '=https'" in text and "--proto-redir '=https'" in text and "-K -" in text
 
 
+def curl_first_options(text: str) -> list[str]:
+    return re.findall(r"(?:^|[|;])\s*curl\s+(\S+)", text, re.M)
+
+
+def test_every_helper_curl_starts_with_the_hardening_option():
+    blocks = [(SCRIPT.name, source_block())]
+    blocks += [(f"{file}:{name}", block_of(step["run"])) for file, name, step, _ in release_steps()]
+    for where, block in blocks:
+        assert curl_first_options(block) == ["-q"], where
+
+
+def test_the_first_option_guard_bites():
+    hardened = "if x=$(printf x | curl -q -sSfL https://example.invalid); then :; fi"
+    assert curl_first_options(hardened) == ["-q"]
+    assert curl_first_options(hardened.replace("curl -q", "curl -sS")) != ["-q"]
+
+
+@pytest.fixture(scope="session")
+def fetch_tls_cert(tmp_path_factory):
+    if not shutil.which("openssl"):
+        message = "openssl is required by tests/test_fetch_release.py"
+        if os.environ.get("CI"):
+            pytest.fail(message)
+        pytest.skip(message)
+    cert = tmp_path_factory.mktemp("fetch-tls")
+    subprocess.run(
+        [
+            "openssl",
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-keyout",
+            str(cert / "key.pem"),
+            "-out",
+            str(cert / "cert.pem"),
+            "-days",
+            "2",
+            "-subj",
+            "/CN=localhost",
+            "-addext",
+            "subjectAltName=DNS:localhost,IP:127.0.0.1",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    return cert
+
+
+def test_the_helper_hardening_bites_against_a_loopback_server(tmp_path, fetch_tls_cert):
+    seen_headers = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *_args):
+            pass
+
+        def do_GET(self):
+            seen_headers.append(dict(self.headers))
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(GOOD)))
+            self.end_headers()
+            self.wfile.write(GOOD)
+
+    try:
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    except PermissionError:
+        if os.environ.get("CI"):
+            pytest.fail("CI must permit the loopback fixture")
+        pytest.skip("this sandbox does not permit loopback sockets")
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(fetch_tls_cert / "cert.pem", fetch_tls_cert / "key.pem")
+    server.socket = context.wrap_socket(server.socket, server_side=True)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        home = tmp_path / "home"
+        home.mkdir()
+        (home / ".curlrc").write_text('header = "X-GYST-Fixture: planted"\n')
+        out = tmp_path / "asset"
+        script = source_block() + (
+            f'\nfetch_release "https://localhost:{server.server_address[1]}/asset" "{out}" "{sha256(GOOD)}"\n'
+        )
+        env = {
+            **os.environ,
+            "HOME": str(home),
+            "CURL_HOME": str(home),
+            "XDG_CONFIG_HOME": str(home),
+            "CURL_CA_BUNDLE": str(fetch_tls_cert / "cert.pem"),
+            "NO_PROXY": "localhost,127.0.0.1",
+            "no_proxy": "localhost,127.0.0.1",
+        }
+        result = subprocess.run(
+            ["bash", "-eo", "pipefail", "-c", script],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert out.read_bytes() == GOOD
+        assert seen_headers and all("X-GYST-Fixture" not in headers for headers in seen_headers)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
 # ---------------------------------------------------------------- the workflows
 
 
@@ -378,14 +491,31 @@ def test_the_copy_check_bites():
 TOKEN_JOBS = {("python-package-release.yml", "build"), ("tofu-ci.yml", "plan")}
 
 
-def test_only_jobs_kept_in_block_hand_the_job_token_to_the_helper():
+def test_only_download_steps_in_jobs_kept_in_block_hand_the_job_token_to_the_helper():
     from test_egress_canary import KEPT_BLOCK
 
     assert TOKEN_JOBS <= KEPT_BLOCK
+    workflow_docs = {path.name: yaml.safe_load(path.read_text()) for path in WORKFLOW_FILES}
+    for file, doc in workflow_docs.items():
+        for job_name, job in (doc.get("jobs") or {}).items():
+            assert "FETCH_RELEASE_TOKEN" not in (job.get("env") or {}), (file, job_name, "job-level token")
+            holders = [step for step in (job.get("steps") or []) if "FETCH_RELEASE_TOKEN" in (step.get("env") or {})]
+            if holders:
+                assert (file, job_name) in TOKEN_JOBS and len(holders) == 1, (file, job_name, "token holder")
+                assert "/releases/download/" in holders[0].get("run", ""), (file, job_name, "non-download token holder")
     for f, name, step, job in release_steps():
         token = step.get("env", {}).get("FETCH_RELEASE_TOKEN")
         if (f, job) in TOKEN_JOBS:
             assert token == "${{ github.token }}", (f, job, name)
+            if f == "tofu-ci.yml":
+                assert step.get("if") == "inputs.binary == 'tofu'", (f, job, "token step runs without a download")
+            steps = workflow_docs[f]["jobs"][job]["steps"]
+            index = steps.index(step)
+            for later in steps[index + 1 :]:
+                assert "FETCH_RELEASE_TOKEN" not in (later.get("env") or {}), (f, job, later.get("name"))
+            downloaded_tool = '"$syft"' if f == "python-package-release.yml" else '"$BINARY" version'
+            assert downloaded_tool not in step["run"], (f, job, "downloaded tool runs in the download step")
+            assert any(downloaded_tool in str(later.get("run", "")) for later in steps[index + 1 :]), (f, job)
         else:
             assert token is None, (f, job, name, "a secretless job must hold no token")
             assert (f, job) not in KEPT_BLOCK or (f, job) in TOKEN_JOBS, (f, job, "kept in block: add it to TOKEN_JOBS")
