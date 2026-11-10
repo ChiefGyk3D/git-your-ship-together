@@ -188,7 +188,7 @@ def pulls_response(st):
         "merged": st["merged"],
         "head": {"sha": head},
         "merge_commit_sha": st.get("merge_commit_sha"),
-        "base": {"ref": "main"},
+        "base": {"ref": st.get("base_ref", "main")},
     }
 
 
@@ -196,6 +196,9 @@ def protection_response(st, kind):
     # GET rules/branches/main (kind "rules": the active rules) and branches/main/protection/required_status_checks
     # (kind "classic"). None in the state is what GitHub sends when nothing is configured or readable: 404.
     # The rules endpoint answers 200 with an empty list when no rule applies; the classic one answers 404.
+    status = st.get(f"{kind}_status")
+    if status is not None:
+        return status, None
     body = st.get(kind, [] if kind == "rules" else None)
     if body is None:
         return 404, None
@@ -264,7 +267,7 @@ if argv[:1] == ["api"]:
     if "/rules/branches/" in path or "/protection/required_status_checks" in path:
         code, body = protection_response(st, "rules" if "/rules/branches/" in path else "classic")
         if code != 200:
-            sys.stderr.write("HTTP 404 Not Found\n")
+            sys.stderr.write(f"HTTP {code} {'Not Found' if code == 404 else 'Error'}\n")
             sys.exit(1)
         emit(body)
         sys.exit(0)
@@ -2343,6 +2346,19 @@ def test_github_enforced_required_checks_satisfy_require_protection(world, extra
     assert len(w.merges()) == 1
 
 
+def test_merge_protection_reads_encode_a_slash_in_the_base_branch_path(world):
+    w = world(
+        checks={A: [GATE]},
+        classic={"contexts": ["CI green"], "checks": []},
+        base_ref="release/v1",
+    )
+    p = w.run("--repo", SLUG, "--pr", "7", "--merge", "--require-protection", *FAST)
+    assert p.returncode == 0, shown(p)
+    policy_calls = [c for c in w.calls() if "/rules/branches/" in c or "/protection/required_status_checks" in c]
+    assert len(policy_calls) == 2
+    assert all("release%2Fv1" in c for c in policy_calls)
+
+
 @pytest.mark.parametrize(
     "extra",
     [
@@ -2740,7 +2756,7 @@ def test_from_protection_still_fails_fast_when_the_protected_name_never_reports(
 
 
 def test_from_protection_with_neither_protection_nor_rules_is_a_usage_error(world):
-    w = world(checks={A: [GATE]})
+    w = world(checks={A: [GATE]}, classic=None, rules=None)
     p = w.run("--repo", SLUG, "--pr", "7", "--from-protection", *FAST)
     assert p.returncode == 64, shown(p)
     assert "--from-protection" in p.stderr and "main" in p.stderr
@@ -2806,6 +2822,64 @@ def test_from_protection_takes_the_union_of_protection_and_rulesets(world):
     assert "'gate / CI green' not reported" in p.stdout
     w2 = world(checks={A: [NESTED + [ok("gate / CI green")]]}, classic=PROT_NESTED, rules=RULE_NESTED)
     assert w2.run("--repo", SLUG, "--pr", "7", "--from-protection", *FAST).returncode == 0
+
+
+@pytest.mark.parametrize(
+    ("extra", "failed_read"),
+    [
+        ({"classic": PROT_NESTED, "rules_status": 500}, "ruleset"),
+        ({"classic_status": 500, "rules": RULE_NESTED}, "classic branch protection"),
+    ],
+)
+def test_from_protection_refuses_an_incomplete_policy_read(world, extra, failed_read):
+    w = world(checks={A: [NESTED + [ok("gate / CI green")]]}, **extra)
+    p = w.run("--repo", SLUG, "--pr", "7", "--from-protection", *FAST)
+    assert p.returncode == 64, shown(p)
+    assert failed_read in p.stderr
+    assert w.load()["check_polls"] == 0
+    policy_calls = [c for c in w.calls() if "/rules/branches/" in c or "/protection/required_status_checks" in c]
+    assert len(policy_calls) == 2
+
+
+def test_from_protection_rejects_a_required_name_ending_in_a_newline(world):
+    classic = {"contexts": ["CI green\n"], "checks": []}
+    w = world(checks={A: [GATE]}, classic=classic)
+    p = w.run("--repo", SLUG, "--pr", "7", "--from-protection", *FAST)
+    assert p.returncode == 64, shown(p)
+    assert "control character" in p.stderr
+    assert w.load()["check_polls"] == 0
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"classic": {"contexts": ["CI green\0"], "checks": []}},
+        {
+            "rules": [
+                {
+                    "type": "required_status_checks",
+                    "parameters": {"required_status_checks": [{"context": "CI green\0"}]},
+                }
+            ]
+        },
+    ],
+    ids=["classic", "ruleset"],
+)
+def test_from_protection_rejects_a_required_name_containing_nul(world, extra):
+    w = world(checks={A: [GATE]}, **extra)
+    p = w.run("--repo", SLUG, "--pr", "7", "--from-protection", *FAST)
+    assert p.returncode == 64, shown(p)
+    assert "control character" in p.stderr
+    assert w.load()["check_polls"] == 0
+
+
+def test_from_protection_encodes_a_slash_in_the_default_branch_path(world):
+    w = world(checks={A: [NESTED]}, classic=PROT_NESTED, default_branch="release/v1")
+    p = w.run("--repo", SLUG, "--pr", "7", "--from-protection", *FAST)
+    assert p.returncode == 0, shown(p)
+    policy_calls = [c for c in w.calls() if "/rules/branches/" in c or "/protection/required_status_checks" in c]
+    assert len(policy_calls) == 2
+    assert all("release%2Fv1" in c for c in policy_calls)
 
 
 def test_from_protection_cannot_be_allowed_red(world):

@@ -533,6 +533,16 @@ def test_the_version_comment_is_changed_only_where_it_directly_follows_the_sha(e
     )
 
 
+def test_the_adjacent_canonical_version_is_rewritten_even_when_it_differs_from_the_pin(env, lit):
+    path = lit / "tests" / "other.py"
+    path.write_text(f'PIN = "{OLD}" # v9.8.7\n')
+    git(lit, "add", ".")
+    git(lit, "commit", "-q", "-m", "more")
+    p = run(env, "apply", "--also-update-literals", lit)
+    assert p.returncode == 0, p.stderr
+    assert path.read_text() == f'PIN = "{NEW}" # v1.30.0\n'
+
+
 def test_apply_is_clean_on_a_repository_with_no_other_copies_with_and_without_the_flag(env):
     root = make_caller(env, {"ci.yml": wf()}, "plain")
     init_repo(env, root)
