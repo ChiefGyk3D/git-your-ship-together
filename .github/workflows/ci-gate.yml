@@ -49,7 +49,7 @@ on:
         type: string
         default: block
       allowed-endpoints:
-        description: harden-runner allow-list for `block`, space-separated host:port entries. The gate reaches nothing; the default is what the egress canary connects to. Wildcards are not supported.
+        description: harden-runner allow-list for `block`, space-separated host:port entries. The gate reaches nothing; the default is the harden-runner allow-list for the job's own steps (harden-runner and the runner's Actions hosts), unchanged. Wildcards are not supported.
         type: string
         default: "api.github.com:443 github.com:443"
       extra-allowed-endpoints:

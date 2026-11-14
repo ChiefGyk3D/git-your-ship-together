@@ -27,7 +27,7 @@ on:
         type: string
         default: block
       allowed-endpoints:
-        description: harden-runner allow-list for `block`, space-separated host:port entries. The defaults are only for the egress canary.
+        description: harden-runner allow-list for `block`, space-separated host:port entries. The defaults are the hosts the job's own steps (checkout, harden-runner) reach; they stay as they were.
         type: string
         default: "api.github.com:443 github.com:443"
       extra-allowed-endpoints:

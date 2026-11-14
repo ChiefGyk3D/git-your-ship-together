@@ -881,14 +881,22 @@ def test_the_record_and_the_docs_say_ex_0001_is_closed():
 ACTIONS = REPO / ".github" / "actions"
 
 
+# The canary's mechanism, whatever its steps or functions are called: a TCP probe through bash's /dev/tcp and a
+# name lookup through `getent ahosts`. No workflow or action here uses either (checked when this guard was written);
+# a legitimate future use must be scoped here on purpose, not waved through.
+CANARY_MECHANISM = re.compile(r"/dev/tcp/|getent\s+ahosts")
+
+
 def canary_leftovers(workflows: list[Path], actions: Path) -> list[str]:
-    """Every place under .github that still carries an `Egress canary` step or the `canary_probe` function, or an
-    action directory of that name. Loose collection (every yml, every step, the raw text); the assertion is strict."""
+    """Every place under .github that still carries an `Egress canary` step, the `canary_probe` function, the
+    canary's mechanism (`/dev/tcp/` probes, `getent ahosts` lookups) under any name, or an action directory of that
+    name. Loose collection (every yml, every step, the raw text); the assertion is strict."""
     found = []
     for path in sorted([*workflows, *actions.glob("*/action.yml")]):
         text = path.read_text()
         if "canary_probe" in text:
             found.append(f"{path.name}: canary_probe")
+        found += [f"{path.name}: network probe {m.group(0)!r}" for m in [CANARY_MECHANISM.search(text)] if m]
         doc = yaml.safe_load(text)
         jobs = (doc.get("jobs") or {}).values() if "jobs" in doc else [doc.get("runs") or {}]
         for job in jobs:
@@ -910,14 +918,15 @@ def test_the_canary_guard_bites(tmp_path):
     assert canary_leftovers([wf], tmp_path) == ["w.yml: canary_probe", "w.yml: step 'Egress canary'"]
     (tmp_path / "egress-canary").mkdir()
     assert "egress-canary: action directory" in canary_leftovers([], tmp_path)
+    (tmp_path / "egress-canary").rmdir()
     ok = tmp_path / "ok.yml"
     ok.write_text("jobs:\n  a:\n    steps:\n      - name: Build\n        run: true\n")
     assert canary_leftovers([ok], tmp_path / "none") == []
 
 
-def policy_defaults() -> dict[tuple[str, str], object]:
+def policy_defaults(workflows: list[Path] | None = None) -> dict[tuple[str, str], object]:
     found = {}
-    for path in WORKFLOWS:
+    for path in WORKFLOWS if workflows is None else workflows:
         triggers = yaml.safe_load(path.read_text()).get(True)  # PyYAML reads the key `on` as True
         call = triggers.get("workflow_call") if isinstance(triggers, dict) else None
         for key, spec in ((call or {}).get("inputs") or {}).items():
@@ -926,16 +935,94 @@ def policy_defaults() -> dict[tuple[str, str], object]:
     return found
 
 
-def test_every_secretless_default_is_still_block_and_egress_policy_is_still_exact():
-    """`egress-policy-secretless` defaults to block (EX-0001 closed); `egress-policy` keeps its documented default,
-    audit (the measuring mode, see docs/wiki/Egress-control.md), and no input defaults to anything else."""
-    defaults = policy_defaults()
-    secretless = {n: v for (n, k), v in defaults.items() if k == "egress-policy-secretless"}
-    assert len(secretless) >= 13, sorted(secretless)
-    assert sorted(n for n, v in secretless.items() if v != "block") == []
+# The reviewed `egress-policy` default of every reusable workflow that has the input, read from origin/main on
+# 2026-11-14. A default is a security decision (a token-bearing job that defaults to audit runs unrestricted), so a
+# change is made here, in the same diff, and a reviewer sees it.
+EGRESS_POLICY_BASELINE = {
+    "agent-scan.yml": "block",
+    "arduino-ci.yml": "audit",
+    "artifact-release.yml": "audit",
+    "base-image-digest.yml": "block",
+    "bash-ci.yml": "audit",
+    "ci-gate.yml": "block",
+    "container-release.yml": "audit",
+    "dast.yml": "audit",
+    "dependabot-auto-merge.yml": "audit",
+    "docs-pages.yml": "audit",
+    "lory-audit.yml": "audit",
+    "parallel-ci.yml": "block",
+    "pin-comments.yml": "block",
+    "pr-title-lint.yml": "block",
+    "project-sync.yml": "audit",
+    "python-ci.yml": "audit",
+    "python-docker-release.yml": "audit",
+    "python-fuzz.yml": "audit",
+    "python-package-release.yml": "audit",
+    "repin.yml": "block",
+    "security.yml": "audit",
+    "threat-model.yml": "audit",
+    "tofu-ci.yml": "audit",
+    "token-drift.yml": "block",
+    "vendored-drift.yml": "block",
+    "verify-published.yml": "block",
+    "wiki-publish.yml": "audit",
+}
+
+
+def policy_default_problems(defaults: dict[tuple[str, str], object]) -> list[str]:
+    problems = []
     plain = {n: v for (n, k), v in defaults.items() if k == "egress-policy"}
-    assert len(plain) >= 13, sorted(plain)
-    assert sorted(n for n, v in plain.items() if v not in ("audit", "block")) == []
+    for name, value in sorted(plain.items()):
+        if name not in EGRESS_POLICY_BASELINE:
+            problems.append(f"{name}: no baseline for its egress-policy default {value!r}; add one deliberately")
+        elif value != EGRESS_POLICY_BASELINE[name]:
+            want = EGRESS_POLICY_BASELINE[name]
+            problems.append(f"{name}: egress-policy defaults to {value!r}, the reviewed baseline is {want!r}")
+    problems += [
+        f"{n}: in the baseline but has no egress-policy input" for n in sorted(set(EGRESS_POLICY_BASELINE) - set(plain))
+    ]
+    problems += [
+        f"{n}: egress-policy-secretless defaults to {v!r}, it must be 'block' (EX-0001 closed)"
+        for (n, k), v in sorted(defaults.items())
+        if k == "egress-policy-secretless" and v != "block"
+    ]
+    return problems
+
+
+def test_every_egress_policy_default_equals_its_reviewed_baseline():
+    defaults = policy_defaults()
+    assert len({n for (n, k) in defaults if k == "egress-policy"}) >= 13, "the guard collected too few workflows"
+    assert len({n for (n, k) in defaults if k == "egress-policy-secretless"}) >= 13
+    assert policy_default_problems(defaults) == []
+
+
+def test_the_policy_default_guard_bites_on_the_real_workflows(tmp_path):
+    """Copy the real workflow text, flip one default from block to audit (and one secretless), run the real checker."""
+    for path in WORKFLOWS:
+        (tmp_path / path.name).write_text(path.read_text())
+    assert policy_default_problems(policy_defaults(sorted(tmp_path.glob("*.yml")))) == []
+    pin = tmp_path / "pin-comments.yml"
+    text = pin.read_text()
+    flipped = re.sub(r"(      egress-policy:\n(?:        .*\n)*?        default: )block", r"\1audit", text, count=1)
+    assert flipped != text
+    pin.write_text(flipped)
+    assert policy_default_problems(policy_defaults(sorted(tmp_path.glob("*.yml")))) == [
+        "pin-comments.yml: egress-policy defaults to 'audit', the reviewed baseline is 'block'"
+    ]
+    (tmp_path / "brand-new.yml").write_text(
+        "on:\n  workflow_call:\n    inputs:\n      egress-policy:\n        type: string\n        default: audit\n"
+    )
+    assert any("no baseline" in p for p in policy_default_problems(policy_defaults(sorted(tmp_path.glob("*.yml")))))
+    sec = tmp_path / "security.yml"
+    sec.write_text(
+        re.sub(
+            r"(      egress-policy-secretless:\n(?:        .*\n)*?        default: )block",
+            r"\1audit",
+            sec.read_text(),
+            count=1,
+        )
+    )
+    assert any("secretless" in p for p in policy_default_problems(policy_defaults(sorted(tmp_path.glob("*.yml")))))
 
 
 def test_every_harden_runner_step_blocks_unless_the_policy_says_exactly_audit():
@@ -950,7 +1037,22 @@ def test_every_harden_runner_step_blocks_unless_the_policy_says_exactly_audit():
     assert seen > 60
 
 
-def test_the_policy_default_guard_bites():
-    bad = {("a.yml", "egress-policy-secretless"): "block", ("b.yml", "egress-policy-secretless"): "audit"}
-    assert [n for (n, _k), v in bad.items() if v != "block"] == ["b.yml"]
-    assert not "${{ inputs.a == 'audit' && 'block' || 'audit' }}".endswith("'audit' || 'block' }}")
+def test_the_canary_guard_catches_the_mechanism_under_other_names(tmp_path):
+    """Copy the real workflows, add the probe under a new step and function name, run the real guard."""
+    for path in WORKFLOWS:
+        (tmp_path / path.name).write_text(path.read_text())
+    copies = sorted(tmp_path.glob("*.yml"))
+    assert canary_leftovers(copies, ACTIONS) == []
+    target = tmp_path / "pin-comments.yml"
+    text = target.read_text()
+    marker = "      - uses: actions/checkout"
+    probe = (
+        "      - name: Runner network health\n"
+        "        run: |\n"
+        '          probe_endpoint() { timeout 3 bash -c "exec 3<>/dev/tcp/$1/443"; }\n'
+        "          getent ahostsv4 github.com\n"
+    )
+    assert marker in text
+    target.write_text(text.replace(marker, probe + marker, 1))
+    found = canary_leftovers(copies, ACTIONS)
+    assert found == ["pin-comments.yml: network probe '/dev/tcp/'"], found
