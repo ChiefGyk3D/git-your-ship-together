@@ -21,7 +21,19 @@ import pytest
 import yaml
 
 REPO = Path(__file__).resolve().parent.parent
-WORKFLOWS = sorted((REPO / ".github" / "workflows").glob("*.yml"))
+
+
+def collect_workflows(root: Path) -> list[Path]:
+    """GitHub reads both `.yml` and `.yaml` from the workflows directory; so does every guard here."""
+    return sorted([*root.glob("*.yml"), *root.glob("*.yaml")])
+
+
+def collect_actions(root: Path) -> list[Path]:
+    """Both spellings of a composite action's file (`action.yml` and `action.yaml`)."""
+    return sorted([*root.glob("*/action.yml"), *root.glob("*/action.yaml")])
+
+
+WORKFLOWS = collect_workflows(REPO / ".github" / "workflows")
 
 
 CHECK = REPO / ".github" / "actions" / "egress-policy-check" / "action.yml"
@@ -881,22 +893,51 @@ def test_the_record_and_the_docs_say_ex_0001_is_closed():
 ACTIONS = REPO / ".github" / "actions"
 
 
-# The canary's mechanism, whatever its steps or functions are called: a TCP probe through bash's /dev/tcp and a
-# name lookup through `getent ahosts`. No workflow or action here uses either (checked when this guard was written);
-# a legitimate future use must be scoped here on purpose, not waved through.
-CANARY_MECHANISM = re.compile(r"/dev/tcp/|getent\s+ahosts")
+# The canary's mechanism, whatever its steps or functions are called: a fail-fast probe of whether a host answers.
+# Matched on the raw text (backslash continuations joined for the curl rule). Every pattern was run against the
+# tree when this guard was written; none matches a line there. What it deliberately does NOT flag:
+#   - curl that downloads (writes to a file or a pipe, `-o "$tmp"`, `-O`, `-K -`, `-w` plus a file): the release and
+#     tool downloads use `--connect-timeout` and `--max-time` as retry bounds, never to discard the body;
+#   - `gh api` and other API helpers (they carry a payload and use the response);
+#   - Python `socket.socket()` with `bind` (dast.yml picks a free local port; it never connects out);
+#   - `dig`, `nc` and `openssl` as part of a longer word or path (a word boundary is required).
+# A legitimate future use is scoped here on purpose, not waved through.
+CANARY_MECHANISM = re.compile(
+    r"/dev/tcp/"  # bash TCP probe
+    r"|getent\s+ahosts"  # resolver probe
+    r"|\b(?:nc|ncat|netcat)\b(?:\s+-\w+)*\s+-\w*z"  # nc -z, nc -vz, nc -w3 -z
+    r"|\bdig\s|\bnslookup\s"  # DNS probes
+    r"|\bopenssl\s+s_client\b"  # TLS handshake probe
+    r"|\bcreate_connection\b|\.connect(?:_ex)?\("  # Python connect (a bind is not a probe)
+)
+CURL_BODY_DISCARDED = re.compile(r"(?:-o|--output)[\s=]*/dev/null|>\s*/dev/null")
+CURL_TIMEOUT_BOUND = re.compile(r"--connect-timeout|--max-time|(?<!\S)-m\s")
+CURL_UNDER_TIMEOUT = re.compile(r"\btimeout\s+\d+\s+curl\b")
+
+
+def probe_matches(text: str) -> list[str]:
+    """Every probe shape in `text`: the mechanisms above, and a curl whose body is thrown away under a time bound
+    (`curl --connect-timeout 3 -o /dev/null host`) or run as `timeout N curl`."""
+    found = [m.group(0).strip() for m in CANARY_MECHANISM.finditer(text)]
+    joined = re.sub(r"\\\n\s*", " ", text)
+    for line in joined.splitlines():
+        if not re.search(r"\bcurl\b", line):
+            continue
+        if CURL_UNDER_TIMEOUT.search(line) or (CURL_BODY_DISCARDED.search(line) and CURL_TIMEOUT_BOUND.search(line)):
+            found.append("curl probe: " + line.strip()[:60])
+    return found
 
 
 def canary_leftovers(workflows: list[Path], actions: Path) -> list[str]:
     """Every place under .github that still carries an `Egress canary` step, the `canary_probe` function, the
-    canary's mechanism (`/dev/tcp/` probes, `getent ahosts` lookups) under any name, or an action directory of that
-    name. Loose collection (every yml, every step, the raw text); the assertion is strict."""
+    canary's mechanism under any name (`probe_matches`), or an action directory of that name. Loose collection (every
+    yml and yaml, every step, the raw text); the assertion is strict."""
     found = []
-    for path in sorted([*workflows, *actions.glob("*/action.yml")]):
+    for path in sorted([*workflows, *collect_actions(actions)]):
         text = path.read_text()
         if "canary_probe" in text:
             found.append(f"{path.name}: canary_probe")
-        found += [f"{path.name}: network probe {m.group(0)!r}" for m in [CANARY_MECHANISM.search(text)] if m]
+        found += [f"{path.name}: network probe {m!r}" for m in probe_matches(text)]
         doc = yaml.safe_load(text)
         jobs = (doc.get("jobs") or {}).values() if "jobs" in doc else [doc.get("runs") or {}]
         for job in jobs:
@@ -908,7 +949,7 @@ def canary_leftovers(workflows: list[Path], actions: Path) -> list[str]:
 
 
 def test_no_egress_canary_is_left():
-    assert len(WORKFLOWS) > 20 and len(list(ACTIONS.glob("*/action.yml"))) >= 4, "the guard collected nothing"
+    assert len(WORKFLOWS) > 20 and len(collect_actions(ACTIONS)) >= 4, "the guard collected nothing"
     assert canary_leftovers(WORKFLOWS, ACTIONS) == []
 
 
@@ -969,6 +1010,17 @@ EGRESS_POLICY_BASELINE = {
 }
 
 
+# The workflows that declare `egress-policy-secretless`, read from origin/main on 2026-11-14; every default is block.
+# Callers pass the input, so dropping a declaration fails their validation, and a new one needs a reviewed decision.
+SECRETLESS_BASELINE = {
+    "agent-scan.yml", "arduino-ci.yml", "base-image-digest.yml", "bash-ci.yml", "ci-gate.yml",
+    "container-release.yml", "dast.yml", "parallel-ci.yml", "pin-comments.yml", "pr-title-lint.yml",
+    "python-ci.yml", "python-docker-release.yml", "python-fuzz.yml", "python-package-release.yml",
+    "security.yml", "threat-model.yml", "tofu-ci.yml", "token-drift.yml", "vendored-drift.yml",
+    "verify-published.yml",
+}  # fmt: skip
+
+
 def policy_default_problems(defaults: dict[tuple[str, str], object]) -> list[str]:
     problems = []
     plain = {n: v for (n, k), v in defaults.items() if k == "egress-policy"}
@@ -980,6 +1032,14 @@ def policy_default_problems(defaults: dict[tuple[str, str], object]) -> list[str
             problems.append(f"{name}: egress-policy defaults to {value!r}, the reviewed baseline is {want!r}")
     problems += [
         f"{n}: in the baseline but has no egress-policy input" for n in sorted(set(EGRESS_POLICY_BASELINE) - set(plain))
+    ]
+    declared = {n for (n, k) in defaults if k == "egress-policy-secretless"}
+    problems += [
+        f"{n}: egress-policy-secretless is declared but has no baseline; add one deliberately"
+        for n in sorted(declared - SECRETLESS_BASELINE)
+    ]
+    problems += [
+        f"{n}: egress-policy-secretless was dropped (callers pass it)" for n in sorted(SECRETLESS_BASELINE - declared)
     ]
     problems += [
         f"{n}: egress-policy-secretless defaults to {v!r}, it must be 'block' (EX-0001 closed)"
@@ -1000,19 +1060,19 @@ def test_the_policy_default_guard_bites_on_the_real_workflows(tmp_path):
     """Copy the real workflow text, flip one default from block to audit (and one secretless), run the real checker."""
     for path in WORKFLOWS:
         (tmp_path / path.name).write_text(path.read_text())
-    assert policy_default_problems(policy_defaults(sorted(tmp_path.glob("*.yml")))) == []
+    assert policy_default_problems(policy_defaults(collect_workflows(tmp_path))) == []
     pin = tmp_path / "pin-comments.yml"
     text = pin.read_text()
     flipped = re.sub(r"(      egress-policy:\n(?:        .*\n)*?        default: )block", r"\1audit", text, count=1)
     assert flipped != text
     pin.write_text(flipped)
-    assert policy_default_problems(policy_defaults(sorted(tmp_path.glob("*.yml")))) == [
+    assert policy_default_problems(policy_defaults(collect_workflows(tmp_path))) == [
         "pin-comments.yml: egress-policy defaults to 'audit', the reviewed baseline is 'block'"
     ]
     (tmp_path / "brand-new.yml").write_text(
         "on:\n  workflow_call:\n    inputs:\n      egress-policy:\n        type: string\n        default: audit\n"
     )
-    assert any("no baseline" in p for p in policy_default_problems(policy_defaults(sorted(tmp_path.glob("*.yml")))))
+    assert any("no baseline" in p for p in policy_default_problems(policy_defaults(collect_workflows(tmp_path))))
     sec = tmp_path / "security.yml"
     sec.write_text(
         re.sub(
@@ -1022,7 +1082,7 @@ def test_the_policy_default_guard_bites_on_the_real_workflows(tmp_path):
             count=1,
         )
     )
-    assert any("secretless" in p for p in policy_default_problems(policy_defaults(sorted(tmp_path.glob("*.yml")))))
+    assert any("secretless" in p for p in policy_default_problems(policy_defaults(collect_workflows(tmp_path))))
 
 
 def test_every_harden_runner_step_blocks_unless_the_policy_says_exactly_audit():
@@ -1037,22 +1097,92 @@ def test_every_harden_runner_step_blocks_unless_the_policy_says_exactly_audit():
     assert seen > 60
 
 
-def test_the_canary_guard_catches_the_mechanism_under_other_names(tmp_path):
-    """Copy the real workflows, add the probe under a new step and function name, run the real guard."""
+# --- review round 2: every spelling, every mechanism, the secretless inventory ----------------------------
+
+MECHANISMS = {
+    "nc": "nc -z -w 3 github.com 443",
+    "curl-connect-timeout": "curl -sS --connect-timeout 3 -o /dev/null https://github.com",
+    "curl-under-timeout": "timeout 3 curl -sS https://github.com || exit 1",
+    "python-socket": "python3 -c 'import socket; socket.create_connection((\"github.com\", 443), 3)'",
+    "dig": "dig +short github.com",
+    "openssl": "openssl s_client -connect github.com:443 </dev/null",
+    "getent": "getent ahostsv4 github.com",
+    "dev-tcp": 'timeout 3 bash -c "exec 3<>/dev/tcp/github.com/443"',
+}
+
+
+def copy_real_workflows(dest: Path) -> list[Path]:
     for path in WORKFLOWS:
-        (tmp_path / path.name).write_text(path.read_text())
-    copies = sorted(tmp_path.glob("*.yml"))
+        (dest / path.name).write_text(path.read_text())
+    return collect_workflows(dest)
+
+
+@pytest.mark.parametrize("mechanism", sorted(MECHANISMS))
+def test_the_canary_guard_catches_every_mechanism_under_an_innocent_name(tmp_path, mechanism):
+    copies = copy_real_workflows(tmp_path)
     assert canary_leftovers(copies, ACTIONS) == []
     target = tmp_path / "pin-comments.yml"
     text = target.read_text()
     marker = "      - uses: actions/checkout"
-    probe = (
-        "      - name: Runner network health\n"
-        "        run: |\n"
-        '          probe_endpoint() { timeout 3 bash -c "exec 3<>/dev/tcp/$1/443"; }\n'
-        "          getent ahostsv4 github.com\n"
+    step = (
+        "      - name: Runner network health\n        run: |\n          probe_endpoint() {\n            "
+        + MECHANISMS[mechanism]
+        + "\n          }\n"
     )
     assert marker in text
-    target.write_text(text.replace(marker, probe + marker, 1))
+    target.write_text(text.replace(marker, step + marker, 1))
     found = canary_leftovers(copies, ACTIONS)
-    assert found == ["pin-comments.yml: network probe '/dev/tcp/'"], found
+    assert found and all(f.startswith("pin-comments.yml: network probe") for f in found), found
+
+
+def test_the_canary_guard_does_not_flag_a_download_or_a_port_bind():
+    download = 'curl -q -sSfL --connect-timeout 10 --max-time "$cap" -K - -w "%{http_code}" -o "$tmp" "$url"'
+    assert probe_matches(download) == []
+    assert probe_matches("probe = socket.socket()\nprobe.bind(('0.0.0.0', port))") == []
+    assert probe_matches("curl \\\n  --connect-timeout 10 \\\n  -o out.tgz https://example.invalid/x") == []
+
+
+def test_a_yaml_spelling_is_collected_and_guarded(tmp_path):
+    """A `.yaml` reusable workflow with an audit default and a probe is seen by the real collectors and guards."""
+    copies = copy_real_workflows(tmp_path)
+    (tmp_path / "bypass.yaml").write_text(
+        "on:\n  workflow_call:\n    inputs:\n      egress-policy:\n        type: string\n        default: audit\n"
+        "jobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - name: Runner network health\n"
+        "        run: nc -z github.com 443\n"
+    )
+    seen = collect_workflows(tmp_path)
+    assert tmp_path / "bypass.yaml" in seen and len(seen) == len(copies) + 1
+    assert any("bypass.yaml" in f for f in canary_leftovers(seen, ACTIONS))
+    assert any("bypass.yaml: no baseline" in p for p in policy_default_problems(policy_defaults(seen)))
+    actions = tmp_path / "actions"
+    (actions / "probe").mkdir(parents=True)
+    (actions / "probe" / "action.yaml").write_text(
+        "runs:\n  using: composite\n  steps:\n    - shell: bash\n      run: dig github.com\n"
+    )
+    assert collect_actions(actions) == [actions / "probe" / "action.yaml"]
+    assert any("action.yaml" in f for f in canary_leftovers([], actions))
+
+
+def test_the_secretless_inventory_is_pinned_both_ways(tmp_path):
+    copies = copy_real_workflows(tmp_path)
+    assert policy_default_problems(policy_defaults(copies)) == []
+    pin = tmp_path / "pin-comments.yml"
+    dropped = re.sub(r"      egress-policy-secretless:\n(?:        .*\n)+", "", pin.read_text(), count=1)
+    assert dropped != pin.read_text()
+    pin.write_text(dropped)
+    problems = policy_default_problems(policy_defaults(collect_workflows(tmp_path)))
+    assert problems == ["pin-comments.yml: egress-policy-secretless was dropped (callers pass it)"], problems
+    # a workflow outside the baseline gains the input
+    repin = tmp_path / "repin.yml"
+    text = repin.read_text()
+    assert ("repin.yml", "egress-policy-secretless") not in policy_defaults(collect_workflows(tmp_path))
+    added = re.sub(
+        r"(      egress-policy:\n(?:        .*\n)+)",
+        r"\1      egress-policy-secretless:\n        type: string\n        default: block\n",
+        text,
+        count=1,
+    )
+    assert added != text
+    repin.write_text(added)
+    problems = policy_default_problems(policy_defaults(collect_workflows(tmp_path)))
+    assert any(p.startswith("repin.yml: egress-policy-secretless is declared but has no baseline") for p in problems)
