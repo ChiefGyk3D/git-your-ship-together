@@ -60,7 +60,7 @@ Read in this order. Each one is short.
 
 ## What is in the repository
 
-Twenty-four reusable workflows and six composite actions:
+Twenty-four reusable workflows and five composite actions:
 
 | File | What it does |
 |---|---|

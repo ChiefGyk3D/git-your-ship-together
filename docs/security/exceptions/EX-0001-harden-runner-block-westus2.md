@@ -176,7 +176,7 @@ inputs. (harden-runner is therefore the second step of those jobs.)
 The list of hosted labels, in one place. Source: GitHub Docs, "GitHub-hosted runners" reference, section
 "Standard GitHub-hosted runners" (https://docs.github.com/en/actions/reference/runners/github-hosted-runners;
 the table is `data/reusables/actions/supported-github-runners.md` in github/docs, read 2026-10-24).
-Larger runners have custom names and are deliberately not in the list. `tests/test_egress_canary.py` parses
+Larger runners have custom names and are deliberately not in the list. `tests/test_egress_policy.py` (`test_the_runner_check_follows_the_hosted_list`) parses
 this block and requires every workflow to embed exactly this list.
 
 <!-- hosted-runner-labels:begin -->
@@ -250,7 +250,7 @@ expression; exactly, by the policy check that runs first).
 Ambiguous means the job holds no stored secret but sits in a release or write path; the rule was "if
 unsure, keep it in `block`". Every secretless job was re-audited for `github.token`, `GITHUB_TOKEN`,
 `GH_TOKEN`, `secrets.*`, a `token` or `password` in a `with:`, `gh` calls and token-consuming actions; the
-result is in the pull request. `tests/test_egress_canary.py` pins the table against the YAML: a job that
+result is in the pull request. `tests/test_egress_policy.py` (`test_a_job_follows_the_secretless_input_only_if_it_holds_nothing`) pins the table against the YAML: a job that
 holds any of those, or whose artifact or outputs feed a job kept in `block`, cannot follow the secretless
 input.
 
@@ -286,7 +286,7 @@ away after the run; the token is minted per run and expires with it; the scope c
 and nothing that publishes, pushes, tags, releases, deploys or writes a package, a workflow or code; there is
 no stored secret, no OIDC token and no Doppler access in the job. In `audit` a compromised step could send that
 token to any host while the job runs, and in the meantime use it to write comments on the repository's pull
-requests; it could not change code or reach a secret. `tests/test_egress_canary.py` pins that this job holds
+requests; it could not change code or reach a secret. `tests/test_egress_policy.py` (`test_the_widened_jobs_hold_exactly_what_the_record_says`) pins that this job holds
 exactly `pull-requests: write` beyond `contents: read` and nothing from the secret markers, so a further grant
 fails the test.
 
@@ -337,8 +337,8 @@ Moving them is a separate maintainer decision; this record does not make it.
   `timeout` and `getent`, which macOS lacks (`getent` is also missing in Git Bash on Windows); without the
   condition a macOS matrix leg failed with the misleading "known westus2 DNS issue" message (issue #196,
   v1.25.1). This exception concerns harden-runner `block` on Linux runners, and the canary is a diagnostic, so
-  skipping it on macOS and Windows weakens no control. `tests/test_egress_canary.py` fails if a canary step
-  lacks the condition.
+  skipping it on macOS and Windows weakens no control. `tests/test_egress_canary.py` failed if a canary step
+  lacked the condition (historical: this file became `tests/test_egress_policy.py` on 2026-11-14 under #412; the canary-only tests were removed).
 - Timeouts were cut to about three times the slowest healthy p99 (python-ci 15, bash-ci 10, tofu-ci 16,
   security 15, docs-pages 10, wiki-publish 10 minutes), so a stuck job costs minutes, not half an hour.
 
@@ -395,7 +395,7 @@ Every cache and artifact that can cross a trust class, with the decision:
 | `python-package-release` `build`, `artifact-release` `build` | none (a publishing build never reads a cache; a test holds this) | no change |
 | artifacts: `python-ci` `test` to `coverage`, `dast` `scan` to `upload`, `agent-scan` `skill-scan` to `skill-upload` and `mcp-scan` to `mcp-upload`, `docs-pages` `build` to `deploy`, `wiki-publish` `generate` to `publish`, `verify-published` `verify-release` to `rescan` | job to job within one run | the producer of each that feeds a privileged consumer is kept under `egress-policy` (see the table above), except `python-ci` `test`, whose artifact is a coverage report ("Widening of 2026-10-26"); `rescan` is secretless and only reads what block-class jobs wrote |
 
-`tests/test_egress_canary.py` collects every cache site in every workflow and requires each one to be either a
+`tests/test_egress_policy.py` (`test_no_cache_is_used_when_the_job_is_audit`) collects every cache site in every workflow and requires each one to be either a
 hash-verified tool cache or gated on its own job's effective policy, then evaluates the gate for audit, block,
 invalid policies, every runtime environment and runner label. A cache that is left on in audit fails the test.
 
@@ -436,6 +436,6 @@ added. Each job: print the region, check out, `setup-python` with `cache: pip`, 
 artifact. Use a `strategy.matrix` of 50 entries per arm so that westus2 is hit several times, then tabulate
 (region, arm, outcome) from the job logs. The exception ends when the `block` arms pass on westus2.
 
-The canary has been tested against stubs only (`tests/test_egress_canary.py`). It has not yet been seen on a
+The canary has been tested against stubs only (`tests/test_egress_canary.py`, historical: this file became `tests/test_egress_policy.py` on 2026-11-14 under #412; the canary-only tests were removed). It has not yet been seen on a
 real broken westus2 runner; the first such failure should be checked for the diagnostics block in the job
 log and attached to the GitHub Support ticket.
