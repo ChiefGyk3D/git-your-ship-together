@@ -2,7 +2,7 @@
 
 The input is explicit: `true` (the default, today's behavior) or `false`. One always-running job,
 `advanced-security-check`, fails the called workflow loudly unless the value is exactly one of the two. It is a loud
-failure, not a gate: no job has `needs`, so the scans run exactly as before even when the check fails (a flaky canary
+failure, not a gate: no job has `needs`, so the scans run exactly as before even when the check fails (a flaky check
 there must not switch the scans off). GitHub compares strings case-insensitively, so `False` skips CodeQL and
 dependency review, and the check job is what keeps that run from ever being green.
 """
@@ -82,7 +82,7 @@ def test_the_check_job_always_runs_and_does_no_checkout():
     assert job["steps"][0]["name"] == "Validate the egress policy inputs"
     names = [s.get("name") for s in steps_of(job)]
     assert str(steps_of(job)[0].get("uses", "")).startswith("step-security/harden-runner@")
-    assert "Egress canary" in names
+    assert "Egress canary" not in names
     assert names[-1] == VALIDATE
     assert not any("checkout" in str(s.get("uses", "")) for s in steps_of(job))
 

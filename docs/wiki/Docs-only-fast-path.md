@@ -26,7 +26,7 @@ any leg was cancelled, and `success` only when every leg succeeded. `ci-green` f
 for `test-dirs` when `test` was asked for, so a skipped matrix (for instance because the leg list failed) is a missing check, not
 a pass. `tests/test_docs_only_fast_path.py` runs that shell for every result.
 
-Cost: every leg repeats the runner start, harden-runner, the egress canary, checkout and the tofu install, about 40 to 60
+Cost: every leg repeats the runner start, harden-runner, checkout and the tofu install, about 40 to 60
 seconds. That is why it is a choice. It pays when the directories' `tofu test` time dominates, as it does for a repository with
 many stacks and modules.
 

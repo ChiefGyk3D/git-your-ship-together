@@ -92,7 +92,6 @@ Twenty-four reusable workflows and six composite actions:
 | `.github/workflows/security.yml` | CodeQL (the `actions` language included by default), gitleaks, a dependency audit (pip-audit, and any other tool by command), Semgrep, dependency review on pull requests (with a licence denylist), optional Snyk, optional OpenSSF Scorecard |
 | `.github/workflows/dependabot-auto-merge.yml` | Queues a Dependabot bump to merge itself once the required checks pass, up to a size you choose |
 | `.github/actions/doppler-secrets` | Fetches a Doppler config as masked environment variables (default), or with `export: outputs` as one masked JSON output only the steps you hand it to can read; `names` narrows either to an allow-list. Over OIDC or a Service Token. The workflows inline a copy of its decide step (see the design rules); this is the source |
-| `.github/actions/egress-canary` | Fails a job fast when any address of `github.com`, `api.github.com` or the Actions results receiver is unreachable under harden-runner `block`. The workflows inline a copy of it; this is the source |
 | `.github/actions/wait-ci` | Pins a commit and waits for its required check (`CI green` by default, exact name) to pass, then optionally squash-merges exactly that commit with `--match-head-commit`. Also requires every other check run on that commit to be complete and not red, and waits while one is open (an optional `allow-red` list records a named exception, `require-check` names late workflows, and a green is believed only after two identical reads one interval apart). `scripts/wait-ci.sh --from-protection` reads the gate from the default branch's required checks (nested names like `ci / CI green` included), and a gate name that never reports while everything else is done fails fast with exit 2 (`missing`) listing the names that did report. Exit codes: 0 green, 1 gate red, 2 timeout or missing, 3 hung, 4 head moved, 5 queued, 6 another check red. Wraps `scripts/wait-ci.sh`; a monitor's tool, not a step of the run it waits on. See [wait-ci](docs/wiki/Action-wait-ci.md) |
 | `.github/actions/classify-changes` | Says whether a pull request changes only paths the caller calls docs only (for example `docs/**`, `tests/**`, `*.md`), from the changed-file list the API returns, never from the checkout. Output `docs-only=true` only when every path matches, none is under `.github/` or the caller's never-skip list, the head has not moved and the count matches the event's; anything unconfirmed is `false`, so the job runs. Wraps `scripts/classify_changes.py`. See [Docs-only fast path and parallel CI](docs/wiki/Docs-only-fast-path.md) |
 | `.github/actions/ci-gate` | The body of a caller's own `CI green` job: every needed job must be `success`, and the one exception is a named job `skipped` while the classify-changes job succeeded with `docs-only=true`. A pull request from a fork may also skip the jobs named in the optional `fork-skippable-jobs` (they need a token a fork does not get), only when the caller's `fork-pull-request` is `true`. A skip for any other reason, a failure, a cancellation or a job missing from `needs` fails. The caller passes `needs: ${{ toJSON(needs) }}` as an input (it has no default, and an empty or non-JSON value fails); v1.32.0's and v1.33.0's copies cannot be loaded by a runner, use v1.33.1 or later. A composite action called as a step, not the reusable workflow `ci-gate.yml` above. Wraps `scripts/ci_gate.py`. See [Docs-only fast path and parallel CI](docs/wiki/Docs-only-fast-path.md) |
@@ -1493,7 +1492,7 @@ Inputs of `pr-title-lint.yml`:
 | `max-length` | `120` | Unicode character ceiling, enforced before prefix and regular-expression matching |
 | `allow-prefixes` | empty | Comma-separated prefixes that bypass `pattern`, never `max-length` |
 | `egress-policy`, `egress-policy-secretless` | `block` | Standard validated harden-runner inputs; this job follows the secretless value |
-| `allowed-endpoints`, `extra-allowed-endpoints` | GitHub canary hosts, empty | Standard allow-list inputs; the title check itself makes no request |
+| `allowed-endpoints`, `extra-allowed-endpoints` | GitHub hosts, empty | Standard allow-list inputs; the title check itself makes no request |
 | `timeout-minutes` | `5` | Job timeout |
 
 The stdlib script checks length first and wraps `re.fullmatch` in a 0.25 second POSIX interval timer, because Python's `re`
@@ -1822,7 +1821,7 @@ Inputs of `ci-gate.yml`:
 |---|---|---|
 | `needs-json` | required | JSON object of the needed jobs: `toJSON(needs)`, or a map of job id to result |
 | `deliberate-skips` | `[]` | JSON list of job ids that may be skipped without failing the gate |
-| `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `block`, the canary's two hosts, empty | harden-runner; the gate reaches nothing |
+| `egress-policy`, `allowed-endpoints`, `extra-allowed-endpoints` | `block`, the two GitHub hosts, empty | harden-runner; the gate reaches nothing |
 | `egress-policy-secretless` | `block` | harden-runner policy for the gate job, which holds no secret; exactly `audit` or `block` |
 
 Output: `result` (`success` or `failure`).
@@ -3213,7 +3212,7 @@ with v2.22.3; and arms a and c (the audit and no-tool controls) hit westus2 only
 
 **If it recurs.** A caller opts back into `audit` for its secretless jobs with `egress-policy-secretless: audit`
 (the input, the exact-string policy check and the runtime `github-hosted` control are all kept). The fail-fast
-egress canary stays in every job that can run in `block`, as a diagnostic that names the symptom in seconds.
+egress canary was removed on 2026-11-14 (#412); a recurrence shows as a hung or failed `block` job.
 Open a new dated exception entry before relying on `audit` across repositories.
 
 ### History: what the exception did (2026-10-24 to 2026-11-02)
@@ -3253,7 +3252,7 @@ latest (it was closed earlier, see above):
 - No cache in an audit job: the pip, buildx and Arduino-package caches are on only when the job's own effective
   policy is `block`, so code running in audit cannot poison a cache a block-mode job restores. Audit-mode jobs
   install without the cache. Hash-verified tool caches are unchanged.
-- A fail-fast canary as a step of every job that can run in `block` (below).
+- A fail-fast canary as a step of every job that can run in `block` (removed on 2026-11-14, see below).
 - Lower default timeouts, so a stuck job costs minutes: `python-ci` 15 (was 30), `bash-ci` 10 (was 15),
   `tofu-ci` 16 (was 20), `security` 15 (was 30), `docs-pages` 10 (was 30), `wiki-publish` 10 (was 30).
   Each is at least three times the slowest healthy p99 measured for that workflow. A caller that relied on
@@ -3264,53 +3263,15 @@ latest (it was closed earlier, see above):
 **Opting back in (while the exception lasted).** `egress-policy-secretless: block` on a caller restored `block`
 for the secretless jobs. The flip is now the other way round: `audit` opts out.
 
-### The egress canary
+### The egress canary (removed)
 
-`.github/actions/egress-canary/action.yml` is the source; each workflow inlines a byte-identical copy of its
-script (a reusable workflow cannot name the commit it runs from), and `tests/test_egress_canary.py` holds the
-copies identical. The same holds for `.github/actions/egress-policy-check`, the input validation that runs
-just before it. The canary step runs only when the runner is Linux (`runner.os == 'Linux'`) **and** the job's
-effective policy is `block`; it uses no secret and reads no input. It is Linux-only because it needs `timeout`
-and `getent`, which macOS lacks (and Git Bash on Windows lacks `getent`), and because the westus2 defect (see
-[Known CI platform issue: westus2 (EX-0001)](#known-ci-platform-issue-westus2-ex-0001)) concerned
-harden-runner `block` on Linux runners. On a macOS or Windows matrix leg the step is skipped; it is a diagnostic,
-so skipping it weakens no control (v1.25.1, issue #196).
-
-It detects exactly the dropped-IP symptom. It resolves every A record of `github.com`, `api.github.com` and
-`results-receiver.actions.githubusercontent.com` with `getent ahostsv4` (three lookups each, unioned, so a
-name that answers differently over time is covered), then opens a TCP connection to port 443 of **each**
-address with bash `/dev/tcp`. On a healthy runner the agent saw every answer, so every connection succeeds
-and the step prints one line. On a westus2 runner the agent has recorded only some of the addresses, so a
-connection to another answer of the same name is refused in a few milliseconds. An address that is refused
-or times out four times in a row, a second apart, and a name that does not resolve, fail the step with:
-
-```
-egress broken on this runner (known westus2 DNS issue): rerun the job
-```
-
-The per-address rule is deliberate: it is what detects the defect. Its cost is a false-positive risk: a
-load balancer that keeps listing an address that has stopped answering would fail a healthy `block` job.
-The retries absorb a transient refusal; a persistent one costs a rerun. IPv6 is not probed.
-
-Nothing can hang. Every lookup has a 5 second limit and every connection 3 seconds; the probes run in
-parallel; the whole of the canary runs in its own process group under a 90 second watchdog that kills the
-group (TERM, then KILL) and is cancelled when the canary finishes; and the workflow step carries
-`timeout-minutes: 2`, which bounds the inline step as a whole. A healthy step takes about 5 seconds. The
-three hosts are in each such job's allow-list (`results-receiver.actions.githubusercontent.com:443` is added
-explicitly; `github.com:443` and `api.github.com:443` too where a default list lacked them).
-
-When it fails it prints, straight to the live job log (not to a file, which a hung job loses): `uname -srmo`
-(no hostname), `/etc/resolv.conf`, the DNS server and domain lines of `resolvectl status`, the UDP listeners on
-port 53 (no process names), and for the three hosts plus
-`pipelines.actions.githubusercontent.com` the `getent ahostsv4` answer and the status, remote address and
-connect time of a `curl` request, each bounded by `timeout 10`; and the list of unreachable addresses. It
-also writes a one-line step summary naming the addresses. These lines are what to attach to a
-GitHub Support ticket; they contain resolver and host addresses, so read them before attaching. It prints no
-environment variable and reads no credential.
-
-Limit: if a lookup returns a single address and that is the one the agent recorded, the canary passes while a
-later process might resolve to another address. It catches the dropped-IP symptom when the answers differ;
-it is a fail-fast aid, not a guarantee.
+Until 2026-11-14 every job that could run in `block` carried an `Egress canary` step that probed the GitHub hosts and
+failed the job with "egress broken on this runner (known westus2 DNS issue)". EX-0001 closed on 2026-11-02 after
+harden-runner v2.22.3 fixed the defect, and the step outlived it: it failed a real run on a runner with bad DNS, a
+fault the job itself would have survived. It was removed under #412, and `tests/test_egress_policy.py` fails if an
+`Egress canary` step or the `canary_probe` function returns. The `block` defaults, the `egress-policy` and
+`egress-policy-secretless` inputs and the exact-string `egress-policy-check` are unchanged. The allow-lists keep the
+Actions hosts they gained for it.
 
 ## Repository settings that no YAML can set
 

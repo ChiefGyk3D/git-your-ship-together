@@ -86,7 +86,7 @@ the judging step deletes whole. curl starts with `--disable`, so no user curl co
 status fails the job. Every other value, including the
 branch name, reaches the shell through an environment variable. The URL is fixed in the workflow and there is no input for it,
 and curl does not follow redirects, so the token cannot be sent to another host. The egress allow-list is fixed in the workflow
-(the Lory API and what the runner and the egress canary need); no input adds a host. Because this job holds a secret it follows
+(the Lory API and what the runner needs); no input adds a host. Because this job holds a secret it follows
 `egress-policy` (exactly `audit` or `block`) and not the secretless input of security exception EX-0001.
 
 ## How it is tested

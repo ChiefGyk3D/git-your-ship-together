@@ -144,9 +144,7 @@ def downloads() -> list:
             steps = steps_of(job)
             for index, step in enumerate(steps):
                 body = step.get("run")
-                if (
-                    isinstance(body, str) and "curl" in body and step.get("name") != "Egress canary"
-                ):  # its curl is a diagnostic, not a download
+                if isinstance(body, str) and "curl" in body:
                     found.append(pytest.param(name, job_name, steps, index, tools, id=f"{name}:{job_name}"))
     return found
 

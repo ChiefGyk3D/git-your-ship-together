@@ -21,7 +21,7 @@ COMPOSITE = REPO / ".github" / "actions" / "doppler-secrets" / "action.yml"
 
 ALLOW_LIST = (
     "api.doppler.com:443 api.github.com:443 files.pythonhosted.org:443 github.com:443 pypi.org:443"
-    " results-receiver.actions.githubusercontent.com:443"  # the egress canary connects to it (EX-0001)
+    " results-receiver.actions.githubusercontent.com:443"  # the Actions results host (kept after #412)
 )
 
 
@@ -121,11 +121,7 @@ def test_the_audit_reads_each_owner_with_its_own_token_and_fails_the_job_on_fail
     assert step["env"]["AUDIT_TOKEN_ORG"] == "${{ steps.app-org.outputs.token }}"
     assert users["app-user"]["with"]["owner"].startswith("ChiefGyk3D")
     assert users["app-org"]["with"]["owner"].startswith("Renegade-Penguin")
-    summary = next(
-        s
-        for s in steps("audit")
-        if "GITHUB_STEP_SUMMARY" in s.get("run", "") and "canary" not in s.get("name", "").lower()
-    )
+    summary = next(s for s in steps("audit") if "GITHUB_STEP_SUMMARY" in s.get("run", ""))
     assert summary["if"] == "always()"
 
 

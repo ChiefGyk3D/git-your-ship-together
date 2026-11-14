@@ -1,7 +1,7 @@
 """lory-audit.yml: the structure it promises and the shell it carries, run against stub responses.
 
-The general rules (pinning, permissions, harden-runner, injection, documented inputs, the egress canary) are held
-for every reusable workflow in test_workflows.py and test_egress_canary.py. This file holds what only this workflow
+The general rules (pinning, permissions, harden-runner, injection, documented inputs, the egress policy) are held
+for every reusable workflow in test_workflows.py and test_egress_policy.py. This file holds what only this workflow
 owes: the token reaches one step and never a command line, the response is never copied anywhere, and every way
 the call can go wrong fails the job. The
 two scripts are extracted from the YAML and run as shipped; `curl` is a stub on PATH, so nothing reaches the network.
@@ -72,7 +72,7 @@ def test_the_token_is_in_exactly_one_step_and_only_through_env():
 
 def test_no_run_script_contains_a_template_expression_at_all():
     runs = [s["run"] for s in JOB["steps"] if "run" in s]
-    assert len(runs) >= 4
+    assert len(runs) >= 3  # the policy check and the two scripts (the canary was the fourth, #412)
     for body in runs:
         assert "${{" not in body
 
@@ -94,7 +94,6 @@ def test_there_is_no_checkout_and_the_steps_are_the_expected_ones():
     assert not [u for u in uses if u.startswith("actions/checkout@")], "nothing here needs the tree"
     assert [s.get("name") for s in JOB["steps"] if "name" in s] == [
         "Validate the egress policy inputs",
-        "Egress canary",
         "Call the Lory pipeline scan API",
         "Judge the Lory response",
     ]
@@ -122,7 +121,6 @@ def test_no_input_can_add_an_endpoint_or_change_where_the_job_may_connect():
         "lorikeetsecurity.com:443",
         "results-receiver.actions.githubusercontent.com:443",
     }
-    assert JOB["steps"][2]["name"] == "Egress canary"
     egress = CALL["inputs"]["egress-policy"]
     assert egress["type"] == "string" and egress["default"] == "audit"
 

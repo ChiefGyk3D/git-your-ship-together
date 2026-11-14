@@ -16,8 +16,8 @@
 # command to the log.
 #
 # The workflows inline a copy of the `run:` script below, with the `env:` of
-# the inputs they declare (see egress-canary for why);
-# tests/test_egress_canary.py holds every copy byte-identical to this file.
+# the inputs they declare (a reusable workflow cannot call an action by path, see docs/wiki/Design-rules.md);
+# tests/test_egress_policy.py holds every copy byte-identical to this file.
 name: Egress policy check
 description: Fail unless every egress policy input is exactly audit or block.
 runs:

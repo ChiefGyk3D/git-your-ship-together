@@ -64,7 +64,6 @@ def is_safe(step: dict) -> bool:
     name = str(step.get("name", ""))
     return (
         name.startswith("Validate the egress policy inputs")
-        or name.startswith("Egress canary")
         or name in (GUARD_STEP, "Checksums")
         or uses.startswith(("step-security/harden-runner@", "actions/download-artifact@"))
     )

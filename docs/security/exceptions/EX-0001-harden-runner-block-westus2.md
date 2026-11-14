@@ -19,6 +19,7 @@
 
 Closed on **2026-11-02** by the maintainer, under ChiefGyk3D/git-your-ship-together#278, after the test below.
 The status is **closed**, not expired: it ended by decision on evidence, before its 2026-11-07 expiry.
+The fail-fast egress canary described below was removed on 2026-11-14 under #412; its test file is now `tests/test_egress_policy.py`.
 
 ### Evidence: a 600-job experiment on harden-runner v2.22.3 (2026-11-02)
 
