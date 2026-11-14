@@ -14,6 +14,7 @@ import itertools
 import json
 import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -29,8 +30,18 @@ def collect_workflows(root: Path) -> list[Path]:
 
 
 def collect_actions(root: Path) -> list[Path]:
-    """Both spellings of a composite action's file (`action.yml` and `action.yaml`)."""
-    return sorted([*root.glob("*/action.yml"), *root.glob("*/action.yaml")])
+    """Both spellings of a composite action's file (`action.yml` and `action.yaml`), at any depth: a nested action
+    (`actions/network/probe/action.yml`) is called by `uses: ./.github/actions/network/probe` all the same."""
+    return sorted([*root.rglob("action.yml"), *root.rglob("action.yaml")])
+
+
+SCRIPT_SUFFIXES = (".sh", ".bash", ".py", ".ps1")
+
+
+def collect_scripts(roots: list[Path]) -> list[Path]:
+    """Every shell, Python and PowerShell file under the given roots (`.github/` and `scripts/`): a workflow can run
+    one by path, so a probe there is as much a canary as one inlined in a `run:` block."""
+    return sorted({p for root in roots for p in root.rglob("*") if p.is_file() and p.suffix in SCRIPT_SUFFIXES})
 
 
 WORKFLOWS = collect_workflows(REPO / ".github" / "workflows")
@@ -893,47 +904,76 @@ def test_the_record_and_the_docs_say_ex_0001_is_closed():
 ACTIONS = REPO / ".github" / "actions"
 
 
-# The canary's mechanism, whatever its steps or functions are called: a fail-fast probe of whether a host answers.
-# Matched on the raw text (backslash continuations joined for the curl rule). Every pattern was run against the
-# tree when this guard was written; none matches a line there. What it deliberately does NOT flag:
+# The canary's mechanism, whatever its steps, functions or files are called: a fail-fast probe of whether a host
+# answers. Matched on the raw text of every workflow and action manifest (so every `run:` block) and of every
+# .sh/.bash/.py/.ps1 file under .github/ and scripts/ (backslash continuations joined for the curl rule). Every
+# pattern was run against that whole tree when this guard was written; none matches a canary-like line there.
+# What it deliberately does NOT flag:
 #   - curl that downloads (writes to a file or a pipe, `-o "$tmp"`, `-O`, `-K -`, `-w` plus a file): the release and
-#     tool downloads use `--connect-timeout` and `--max-time` as retry bounds, never to discard the body;
-#   - `gh api` and other API helpers (they carry a payload and use the response);
+#     tool downloads (fetch-release.sh, the pinned-hash steps) use `--connect-timeout` and `--max-time` only as retry
+#     bounds and never discard the body or ask for headers only;
+#   - `gh api`, `git ls-remote` and other API helpers (they carry a payload and use the answer);
 #   - Python `socket.socket()` with `bind` (dast.yml picks a free local port; it never connects out);
-#   - `dig`, `nc` and `openssl` as part of a longer word or path (a word boundary is required).
+#   - Python `urlopen` whose answer is used (`with ... urlopen(...) as r`, `x = urlopen(...)`: tool_locks.py reads
+#     the PyPI JSON, audit_baseline.py reads the GitHub API); only a bare `urlopen(..., timeout=...)` whose answer is
+#     thrown away is a probe. The one such line, dast.yml waiting for its own loopback target (`urlopen(sys.argv[1],
+#     timeout=3, context=c)`), is exempt by exact text in LOOPBACK_READINESS;
+#   - `dig`, `nc`, `host`, `ping` and `openssl` as part of a longer word or path, or `host` anywhere but at the start
+#     of a command (a word boundary and command position are required).
 # A legitimate future use is scoped here on purpose, not waved through.
 CANARY_MECHANISM = re.compile(
     r"/dev/tcp/"  # bash TCP probe
     r"|getent\s+ahosts"  # resolver probe
-    r"|\b(?:nc|ncat|netcat)\b(?:\s+-\w+)*\s+-\w*z"  # nc -z, nc -vz, nc -w3 -z
+    r"|\b(?:nc|ncat|netcat)\b(?:\s+-\w+(?:\s+\d+)?)*\s+-\w*z\w*"  # nc -z, -zv, -vz, -w3 -z
+    r"|\b(?:nc|ncat|netcat)\s+(?:-\w+\s+(?:\d+\s+)?)*[\w.$\"{}-]+\s+\d+\b"  # nc [-w 3] host port
+    r"|(?:^|[;&|({`]|\$\()[ \t]*host\s+[\w.$\"'{}-]+"  # `host name`, only at the start of a command
     r"|\bdig\s|\bnslookup\s"  # DNS probes
+    r"|\bping\s+(?:-\w+\s+)*-\w*c"  # ping -c N
+    r"|(?:^|[;&|(])[ \t]*telnet\s+\S"  # telnet host port
+    r"|Test-NetConnection"  # PowerShell
+    r"|\bwget\b[^\n]*--spider"  # wget --spider
     r"|\bopenssl\s+s_client\b"  # TLS handshake probe
     r"|\bcreate_connection\b|\.connect(?:_ex)?\("  # Python connect (a bind is not a probe)
+    r"|\bHTTPS?Connection\(",  # Python http.client
+    re.MULTILINE,
 )
 CURL_BODY_DISCARDED = re.compile(r"(?:-o|--output)[\s=]*/dev/null|>\s*/dev/null")
 CURL_TIMEOUT_BOUND = re.compile(r"--connect-timeout|--max-time|(?<!\S)-m\s")
 CURL_UNDER_TIMEOUT = re.compile(r"\btimeout\s+\d+\s+curl\b")
+CURL_HEADERS_ONLY = re.compile(r"(?<!\S)-\w*I\w*(?=\s)|(?<!\S)--head\b")
+URLOPEN = re.compile(r"\burlopen\(")
+URLOPEN_ANSWER_USED = re.compile(r"(?:\bwith\s|=\s*|\breturn\s|\bload\()[\w.\s]*$")
+LOOPBACK_READINESS = "urllib.request.urlopen(sys.argv[1], timeout=3, context=c)"  # dast.yml, its own loopback target
 
 
 def probe_matches(text: str) -> list[str]:
-    """Every probe shape in `text`: the mechanisms above, and a curl whose body is thrown away under a time bound
-    (`curl --connect-timeout 3 -o /dev/null host`) or run as `timeout N curl`."""
+    """Every probe shape in `text`: the mechanisms above; a curl whose body is thrown away under a time bound
+    (`curl --connect-timeout 3 -o /dev/null host`), run as `timeout N curl`, or asking for headers only (`-I`,
+    `--head`, `-fsSI`); and a bare `urlopen(..., timeout=...)` whose answer is discarded."""
     found = [m.group(0).strip() for m in CANARY_MECHANISM.finditer(text)]
     joined = re.sub(r"\\\n\s*", " ", text)
     for line in joined.splitlines():
-        if not re.search(r"\bcurl\b", line):
-            continue
-        if CURL_UNDER_TIMEOUT.search(line) or (CURL_BODY_DISCARDED.search(line) and CURL_TIMEOUT_BOUND.search(line)):
+        if re.search(r"\bcurl\b", line) and (
+            CURL_UNDER_TIMEOUT.search(line)
+            or CURL_HEADERS_ONLY.search(line)
+            or (CURL_BODY_DISCARDED.search(line) and CURL_TIMEOUT_BOUND.search(line))
+        ):
             found.append("curl probe: " + line.strip()[:60])
+        for m in URLOPEN.finditer(line):
+            if "timeout=" in line[m.end() :] and not URLOPEN_ANSWER_USED.search(line[: m.start()]):
+                if LOOPBACK_READINESS not in line:
+                    found.append("urlopen probe: " + line.strip()[:60])
     return found
 
 
-def canary_leftovers(workflows: list[Path], actions: Path) -> list[str]:
-    """Every place under .github that still carries an `Egress canary` step, the `canary_probe` function, the
-    canary's mechanism under any name (`probe_matches`), or an action directory of that name. Loose collection (every
-    yml and yaml, every step, the raw text); the assertion is strict."""
+def canary_leftovers(workflows: list[Path], actions: Path, script_roots: list[Path] | None = None) -> list[str]:
+    """Every place under .github (and scripts/) that still carries an `Egress canary` step, the `canary_probe`
+    function, the canary's mechanism under any name (`probe_matches`), or an action directory of that name. Loose
+    collection (every yml and yaml, every action manifest at any depth, every script file, the raw text); the
+    assertion is strict."""
     found = []
-    for path in sorted([*workflows, *collect_actions(actions)]):
+    manifests = [*workflows, *collect_actions(actions)]
+    for path in sorted(manifests):
         text = path.read_text()
         if "canary_probe" in text:
             found.append(f"{path.name}: canary_probe")
@@ -944,13 +984,22 @@ def canary_leftovers(workflows: list[Path], actions: Path) -> list[str]:
             for step in job.get("steps") or []:
                 if str(step.get("name", "")).lower().startswith("egress canary"):
                     found.append(f"{path.name}: step {step['name']!r}")
-    found += [f"{d.name}: action directory" for d in actions.glob("*canary*")]
+    for path in collect_scripts(script_roots or []):
+        text = path.read_text()
+        if "canary_probe" in text:
+            found.append(f"{path.name}: canary_probe")
+        found += [f"{path.name}: network probe {m!r}" for m in probe_matches(text)]
+    found += [f"{d.name}: action directory" for d in actions.rglob("*canary*")]
     return found
+
+
+SCRIPT_ROOTS = [REPO / ".github", REPO / "scripts"]
 
 
 def test_no_egress_canary_is_left():
     assert len(WORKFLOWS) > 20 and len(collect_actions(ACTIONS)) >= 4, "the guard collected nothing"
-    assert canary_leftovers(WORKFLOWS, ACTIONS) == []
+    assert len(collect_scripts(SCRIPT_ROOTS)) >= 15, "the guard collected too few scripts"
+    assert canary_leftovers(WORKFLOWS, ACTIONS, SCRIPT_ROOTS) == []
 
 
 def test_the_canary_guard_bites(tmp_path):
@@ -1108,6 +1157,16 @@ MECHANISMS = {
     "openssl": "openssl s_client -connect github.com:443 </dev/null",
     "getent": "getent ahostsv4 github.com",
     "dev-tcp": 'timeout 3 bash -c "exec 3<>/dev/tcp/github.com/443"',
+    "nc-zv": "nc -zv github.com 443",
+    "nc-host-port": "nc -w 3 github.com 443",
+    "curl-head": "curl -fsSI --max-time 3 https://github.com",
+    "wget-spider": "wget --spider --timeout=3 https://github.com",
+    "host": "host github.com",
+    "ping": "ping -c1 github.com",
+    "telnet": "telnet github.com 443",
+    "python-urlopen": "python3 -c 'import urllib.request; urllib.request.urlopen(\"https://github.com\", timeout=3)'",
+    "python-httpsconnection": "python3 -c 'import http.client; http.client.HTTPSConnection(\"github.com\", timeout=3)'",
+    "test-netconnection": "Test-NetConnection github.com -Port 443",
 }
 
 
@@ -1117,11 +1176,27 @@ def copy_real_workflows(dest: Path) -> list[Path]:
     return collect_workflows(dest)
 
 
+class Tree:
+    """A copy of the real `.github/` and `scripts/` in a temp dir, and the real guard pointed at it."""
+
+    def __init__(self, root: Path):
+        self.root = root
+        shutil.copytree(REPO / ".github", root / ".github", ignore=shutil.ignore_patterns("__pycache__"))
+        shutil.copytree(REPO / "scripts", root / "scripts", ignore=shutil.ignore_patterns("__pycache__"))
+        self.workflows = root / ".github" / "workflows"
+        self.actions = root / ".github" / "actions"
+
+    def leftovers(self) -> list[str]:
+        return canary_leftovers(
+            collect_workflows(self.workflows), self.actions, [self.root / ".github", self.root / "scripts"]
+        )
+
+
 @pytest.mark.parametrize("mechanism", sorted(MECHANISMS))
 def test_the_canary_guard_catches_every_mechanism_under_an_innocent_name(tmp_path, mechanism):
-    copies = copy_real_workflows(tmp_path)
-    assert canary_leftovers(copies, ACTIONS) == []
-    target = tmp_path / "pin-comments.yml"
+    tree = Tree(tmp_path)
+    assert tree.leftovers() == []
+    target = tree.workflows / "pin-comments.yml"
     text = target.read_text()
     marker = "      - uses: actions/checkout"
     step = (
@@ -1131,8 +1206,48 @@ def test_the_canary_guard_catches_every_mechanism_under_an_innocent_name(tmp_pat
     )
     assert marker in text
     target.write_text(text.replace(marker, step + marker, 1))
-    found = canary_leftovers(copies, ACTIONS)
+    found = tree.leftovers()
     assert found and all(f.startswith("pin-comments.yml: network probe") for f in found), found
+
+
+def test_a_nested_action_with_a_probe_called_from_a_workflow_fails_the_guard(tmp_path):
+    tree = Tree(tmp_path)
+    nested = tree.actions / "network" / "probe"
+    nested.mkdir(parents=True)
+    (nested / "action.yml").write_text(
+        "name: Probe\nruns:\n  using: composite\n  steps:\n    - shell: bash\n      run: wget --spider --timeout=3 https://github.com\n"
+    )
+    target = tree.workflows / "pin-comments.yml"
+    text = target.read_text()
+    marker = "      - uses: actions/checkout"
+    target.write_text(text.replace(marker, "      - uses: ./.github/actions/network/probe\n" + marker, 1))
+    assert tree.leftovers() == ["action.yml: network probe 'wget --spider'"], tree.leftovers()
+
+
+def test_a_script_with_a_probe_called_from_a_workflow_fails_the_guard(tmp_path):
+    tree = Tree(tmp_path)
+    (tree.root / "scripts" / "egress-check.sh").write_text("#!/usr/bin/env bash\nnc -zv github.com 443\n")
+    target = tree.workflows / "pin-comments.yml"
+    text = target.read_text()
+    marker = "      - uses: actions/checkout"
+    step = "      - name: Runner network health\n        run: bash scripts/egress-check.sh\n"
+    target.write_text(text.replace(marker, step + marker, 1))
+    assert tree.leftovers() == ["egress-check.sh: network probe 'nc -zv'"], tree.leftovers()
+
+
+@pytest.mark.parametrize("name", ["egress-check.py", "probe.bash", "probe.ps1"])
+def test_every_script_suffix_under_github_and_scripts_is_scanned(tmp_path, name):
+    tree = Tree(tmp_path)
+    (tree.root / ".github" / name).write_text("nc -zv github.com 443\n")
+    assert [f for f in tree.leftovers() if f.startswith(name)], tree.leftovers()
+
+
+def test_the_urlopen_rule_flags_a_bare_probe_and_spares_a_used_answer():
+    assert probe_matches('urllib.request.urlopen("https://github.com", timeout=3)') != []
+    assert probe_matches('with urllib.request.urlopen(f"https://pypi.org/{n}", timeout=60) as r:') == []
+    assert probe_matches("with urllib.request.urlopen(req, timeout=30) as resp:") == []
+    assert probe_matches("r = urllib.request.urlopen(req, timeout=30)") == []
+    assert probe_matches(f"x; {LOOPBACK_READINESS}") == []
 
 
 def test_the_canary_guard_does_not_flag_a_download_or_a_port_bind():
@@ -1152,7 +1267,7 @@ def test_a_yaml_spelling_is_collected_and_guarded(tmp_path):
     )
     seen = collect_workflows(tmp_path)
     assert tmp_path / "bypass.yaml" in seen and len(seen) == len(copies) + 1
-    assert any("bypass.yaml" in f for f in canary_leftovers(seen, ACTIONS))
+    assert any("bypass.yaml" in f for f in canary_leftovers(seen, ACTIONS, SCRIPT_ROOTS))
     assert any("bypass.yaml: no baseline" in p for p in policy_default_problems(policy_defaults(seen)))
     actions = tmp_path / "actions"
     (actions / "probe").mkdir(parents=True)
