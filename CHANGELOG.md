@@ -5,6 +5,8 @@ name what a caller sees after that.
 
 ## Unreleased
 
+## v1.36.0 (2026-11-14)
+
 ### Removed: the egress canary (issue #412)
 
 The `Egress canary` step is gone from every reusable workflow, and so is `.github/actions/egress-canary`. EX-0001 closed on 2026-11-02 after harden-runner v2.22.3 fixed the westus2 defect; the step outlived it and failed a real run on a runner with bad DNS ("egress broken on this runner (known westus2 DNS issue): rerun the job").
