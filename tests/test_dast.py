@@ -133,12 +133,11 @@ def test_the_upload_job_holds_the_one_write_and_runs_none_of_the_callers_code():
     names = [str(s.get("uses", "")) for s in steps_of(upload)]
     assert not any(n.startswith("actions/checkout@") for n in names), "the write must not sit beside a checkout"
     shells = [s for s in steps_of(upload) if s.get("run")]
-    # The one shell is the egress canary: a fixed script that reads no input and no caller file.
+    # The one shell is the egress policy check: a fixed script that reads no input but the policy and no caller file.
     assert [s["name"] for s in shells] in (
         [],
-        ["Egress canary"],
-        ["Validate the egress policy inputs", "Egress canary"],
-    ), "the upload job runs no shell but the canary"
+        ["Validate the egress policy inputs"],
+    ), "the upload job runs no shell but the policy check"
     sarif = steps_of(upload)[-1]
     assert sarif["uses"].startswith("github/codeql-action/upload-sarif@")
     assert sarif["with"]["category"] == "${{ inputs.sarif-category }}", (

@@ -33,10 +33,9 @@ default of `audit`. A 600-job experiment on harden-runner v2.22.3 (150 jobs per 
 `block`). Caveats: the root cause is not shown, only the symptom is gone with v2.22.3, and two control arms hit
 westus2 only 5 and 8 times (145 and 142 ok on other regions).
 
-If it recurs, a caller sets `egress-policy-secretless: audit` on the workflow call. The **egress canary**
-(`.github/actions/egress-canary`; Linux-only because it needs `timeout` and `getent`, so macOS and Windows matrix
-legs skip it) stays in every job that can run in `block` and fails in seconds with "rerun the job" instead of
-hanging. The scope, the evidence, the closure and the history are in
+If it recurs, a caller sets `egress-policy-secretless: audit` on the workflow call. The fail-fast **egress
+canary** that once sat in every `block` job was removed on 2026-11-14 (#412): it outlived the exception and failed a
+real run on a runner with bad DNS. `tests/test_egress_policy.py` keeps it out. The scope, the evidence, the closure and the history are in
 [EX-0001](../security/exceptions/EX-0001-harden-runner-block-westus2.md).
 Full description: [README](../../README.md#known-ci-platform-issue-westus2-ex-0001).
 

@@ -105,7 +105,7 @@ def without_runner_check(expression: str) -> str:
     """The effective-policy expression with the hosted-runner clause of EX-0001 removed.
 
     A job whose runner label a caller chooses also requires `contains(fromJSON([hosted labels]), <runner>)` for
-    audit; tests/test_egress_canary.py pins that clause and its list, this reduces the rest to the plain form.
+    audit; tests/test_egress_policy.py pins that clause and its list, this reduces the rest to the plain form.
     """
     plain = re.sub(r" && contains\(fromJSON\('[^']*'\), (?:matrix|inputs)\.runner\)", "", expression)
     plain = plain.replace(" && runner.environment == 'github-hosted'", "")
@@ -128,7 +128,7 @@ def jobs(doc: dict) -> dict:
 
 def steps_of(job: dict) -> list[dict]:
     """A job's steps. The leading egress policy check runs before harden-runner and touches no network;
-    the guard tests that say "harden-runner is first" look through it. tests/test_egress_canary.py pins that it is
+    the guard tests that say "harden-runner is first" look through it. tests/test_egress_policy.py pins that it is
     the first step, and that it is the only one that precedes harden-runner."""
     steps = [s for s in (job.get("steps") or []) if isinstance(s, dict)]
     if steps and steps[0].get("name") == "Validate the egress policy inputs":
@@ -401,7 +401,7 @@ def test_every_reusable_job_starts_with_harden_runner(path):
         own = {"distro": "distro-egress-policy", "semgrep": "semgrep-egress-policy"}.get(job_name)
         # Fail closed: a job is audit only when the input it answers to says exactly `audit`, otherwise block
         # (EX-0001). A job with no secret answers to egress-policy-secretless, one that holds one to egress-policy;
-        # tests/test_egress_canary.py pins which is which. distro and semgrep keep their own input as well:
+        # tests/test_egress_policy.py pins which is which. distro and semgrep keep their own input as well:
         # audit when either says audit.
         allowed = {
             "${{ inputs.egress-policy == 'audit' && 'audit' || 'block' }}",
@@ -690,7 +690,7 @@ def test_the_distro_job_is_gated_and_has_its_own_egress_policy(name):
     assert "inputs.egress-policy-secretless" in with_["disable-telemetry"]
     assert with_["allowed-endpoints"] == (
         "${{ inputs.distro-allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }}"
-        # the egress canary's hosts
+        # the Actions hosts, kept in every allow-list when the egress canary was removed (#412)
         " results-receiver.actions.githubusercontent.com:443 github.com:443 api.github.com:443"
     )
     spec = triggers(doc)["workflow_call"]["inputs"]["distro-egress-policy"]
@@ -749,7 +749,6 @@ def test_a_workflow_that_fetches_nothing_holds_no_token_at_all(name):
 
 
 DOWNLOAD = re.compile(r"\bcurl\b")
-CANARY_STEP = "Egress canary"  # tests/test_egress_canary.py holds its text identical everywhere
 # The one curl that calls an API instead of downloading a tool. The exemption is a name AND a shape: the step must
 # still look like a bounded API call, and a step of that name that stops looking like one loses it.
 API_CALL_STEPS = {("lory-audit.yml", "Call the Lory pipeline scan API")}
@@ -804,8 +803,6 @@ def download_problem(workflow: str, step: dict) -> str | None:
     body = step.get("run")
     if not isinstance(body, str) or not DOWNLOAD.search(body):
         return None
-    if step.get("name") == CANARY_STEP:
-        return None  # its only curl is a diagnostic header request to the Actions hosts; nothing is saved or run
     if (workflow, step.get("name")) in API_CALL_STEPS:
         problems = api_call_problems(body)
         return "; ".join(problems) if problems else None

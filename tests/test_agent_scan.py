@@ -1,7 +1,7 @@
 """agent-scan.yml: optional, advisory scans of agent content with two Cisco AI Defense scanners.
 
 The general rules (pinning, permissions, harden-runner, injection, documented inputs, the lock files) are held for
-every reusable workflow in test_workflows.py, test_egress_canary.py and test_tool_locks.py. This file holds what is
+every reusable workflow in test_workflows.py, test_egress_policy.py and test_tool_locks.py. This file holds what is
 particular to this one:
 
 * the structure it promises: off unless a caller names paths, advisory unless a caller names a threshold, static
@@ -88,8 +88,8 @@ def test_only_the_upload_jobs_hold_the_one_write_and_they_run_nothing_of_the_rep
         assert spec["needs"] == scan
         uses = [str(s.get("uses", "")) for s in steps(job)]
         assert not any(u.startswith("actions/checkout@") for u in uses), "the upload job checks nothing out"
-        plain = [s for s in steps(job) if s.get("name") not in ("Validate the egress policy inputs", "Egress canary")]
-        assert not any("run" in s for s in plain), "only the egress policy check and canary are scripts"
+        plain = [s for s in steps(job) if s.get("name") != "Validate the egress policy inputs"]
+        assert not any("run" in s for s in plain), "only the egress policy check is a script"
         assert any(u.startswith("actions/download-artifact@") for u in uses)
         assert any(u.startswith("github/codeql-action/upload-sarif@") for u in uses)
 
@@ -108,10 +108,10 @@ def test_no_secret_no_opt_out_and_no_token_in_the_file():
     code = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
     for banned in ("continue-on-error", "secrets.", "DOPPLER", "GITHUB_TOKEN", "github.token"):
         assert banned not in code, f"agent-scan.yml contains {banned!r}"
-    # The egress canary is a shared script with its own `|| true`s, held identical by test_egress_canary.py.
+    # The policy check is a shared script, held identical by test_egress_policy.py.
     for job in doc()["jobs"].values():
         for step in job["steps"]:
-            if step.get("name") not in ("Validate the egress policy inputs", "Egress canary"):
+            if step.get("name") != "Validate the egress policy inputs":
                 assert "|| true" not in yaml.safe_dump(step), step.get("name", step.get("uses"))
 
 

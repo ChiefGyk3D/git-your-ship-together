@@ -486,13 +486,13 @@ def test_the_copy_check_bites():
 
 
 # Jobs that follow `egress-policy-secretless` run harden-runner in audit, so they must hold no token at all
-# (tests/test_egress_canary.py). Only a job already kept in block may hand the job token to the helper; the
+# (tests/test_egress_policy.py). Only a job already kept in block may hand the job token to the helper; the
 # secretless ones download anonymously, with the same retries and the same mandatory hash.
 TOKEN_JOBS = {("python-package-release.yml", "build"), ("tofu-ci.yml", "plan")}
 
 
 def test_only_download_steps_in_jobs_kept_in_block_hand_the_job_token_to_the_helper():
-    from test_egress_canary import KEPT_BLOCK
+    from test_egress_policy import KEPT_BLOCK
 
     assert TOKEN_JOBS <= KEPT_BLOCK
     workflow_docs = {path.name: yaml.safe_load(path.read_text()) for path in WORKFLOW_FILES}

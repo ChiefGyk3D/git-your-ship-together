@@ -5,6 +5,16 @@ name what a caller sees after that.
 
 ## Unreleased
 
+### Removed: the egress canary (issue #412)
+
+The `Egress canary` step is gone from every reusable workflow, and so is `.github/actions/egress-canary`. EX-0001 closed on 2026-11-02 after harden-runner v2.22.3 fixed the westus2 defect; the step outlived it and failed a real run on a runner with bad DNS ("egress broken on this runner (known westus2 DNS issue): rerun the job").
+
+What you see after you re-pin:
+
+- Jobs that could run harden-runner `block` have one step fewer, and a job no longer fails on a flaky lookup of the GitHub hosts before it starts.
+- Nothing else changes: `egress-policy` and `egress-policy-secretless` keep their defaults, harden-runner runs as before, `egress-policy-check` still rejects anything but `audit` or `block`, and the allow-lists are unchanged.
+- `tests/test_egress_canary.py` became `tests/test_egress_policy.py`, with the canary-only tests dropped a guard that no canary step, `canary_probe` function or `/dev/tcp/` and `getent ahosts` probe comes back, and a pinned baseline of every workflow's `egress-policy` default (changing one now needs a reviewed edit to the test).
+
 ### Fixed: `wait-ci` was hardened (issue #404)
 
 `wait-ci` was hardened.

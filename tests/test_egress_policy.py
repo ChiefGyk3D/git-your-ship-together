@@ -1,13 +1,11 @@
-"""The egress canary: the script's logic, and where the workflows put it.
+"""The egress policy: the exact-string input check, the policy expressions, the defaults, and no canary.
 
-The script lives in `.github/actions/egress-canary/action.yml` and is inlined, byte for byte, as the
-third step of every job that can run harden-runner in `block` (a reusable workflow cannot name the
-commit it runs from, so it cannot call the action by path; see docs/wiki/Design-rules.md).
+The egress canary (a step that probed GitHub from the runner after harden-runner) was removed on 2026-11-14
+(#412): EX-0001 closed on 2026-11-02 and the step outlived it. `test_no_egress_canary_is_left` keeps it out.
 
-The logic tests source the script up to its entry point (the first `export -f` line), replace the
-functions that touch the network with stubs, and run the real `canary_main` under `bash -eo pipefail`,
-the shell GitHub gives a `shell: bash` step. A second composite action, `egress-policy-check`, holds the
-input validation that precedes the canary; its copies are held identical the same way.
+`egress-policy-check` is a composite action whose `run:` script is inlined, byte for byte, as the first step of
+every job that has a policy input (a reusable workflow cannot name the commit it runs from, so it cannot call the
+action by path; see docs/wiki/Design-rules.md). Its copies are held identical here.
 """
 
 import copy
@@ -16,76 +14,37 @@ import itertools
 import json
 import os
 import re
-import socket
+import shutil
 import subprocess
-import textwrap
-import time
 from pathlib import Path
 
 import pytest
 import yaml
 
 REPO = Path(__file__).resolve().parent.parent
-ACTION = REPO / ".github" / "actions" / "egress-canary" / "action.yml"
-WORKFLOWS = sorted((REPO / ".github" / "workflows").glob("*.yml"))
-HOSTS = ["github.com", "api.github.com", "results-receiver.actions.githubusercontent.com"]
 
 
-def canary_script() -> str:
-    return yaml.safe_load(ACTION.read_text())["runs"]["steps"][0]["run"]
+def collect_workflows(root: Path) -> list[Path]:
+    """GitHub reads both `.yml` and `.yaml` from the workflows directory; so does every guard here."""
+    return sorted([*root.glob("*.yml"), *root.glob("*.yaml")])
 
 
-WATCHDOG = '(sleep 90; kill -TERM -- "-$main"; sleep 2; kill -KILL -- "-$main") >/dev/null 2>&1 &'
+def collect_actions(root: Path) -> list[Path]:
+    """Both spellings of a composite action's file (`action.yml` and `action.yaml`), at any depth: a nested action
+    (`actions/network/probe/action.yml`) is called by `uses: ./.github/actions/network/probe` all the same."""
+    return sorted([*root.rglob("action.yml"), *root.rglob("action.yaml")])
 
 
-def entry_index(lines: list[str]) -> int:
-    entry = lines.index("set -m")
-    assert lines[entry + 1] == "canary_main &", "canary_main must run as a job of its own process group"
-    assert lines[entry + 3] == WATCHDOG, "canary_main must run under a 90 s watchdog that kills the group"
-    return entry
+SCRIPT_SUFFIXES = (".sh", ".bash", ".py", ".ps1")
 
 
-def sourceable() -> str:
-    lines = canary_script().rstrip("\n").split("\n")
-    return "\n".join(lines[: entry_index(lines)]) + "\n"
+def collect_scripts(roots: list[Path]) -> list[Path]:
+    """Every shell, Python and PowerShell file under the given roots (`.github/` and `scripts/`): a workflow can run
+    one by path, so a probe there is as much a canary as one inlined in a `run:` block."""
+    return sorted({p for root in roots for p in root.rglob("*") if p.is_file() and p.suffix in SCRIPT_SUFFIXES})
 
 
-def full_script(stubs: str = "", deadline: int | None = None) -> str:
-    """The script as shipped, with stub functions defined just before the entry point."""
-    lines = canary_script().rstrip("\n").split("\n")
-    entry = entry_index(lines)
-    text = "\n".join(lines[:entry]) + "\n" + textwrap.dedent(stubs) + "\n" + "\n".join(lines[entry:]) + "\n"
-    return text if deadline is None else text.replace("sleep 90;", f"sleep {deadline};")
-
-
-def process_alive(marker: str) -> bool:
-    """True when any process has `marker` as an argument (read from /proc, so this test never matches itself)."""
-    for entry in Path("/proc").glob("[0-9]*/cmdline"):
-        try:
-            if marker.encode() in entry.read_bytes().split(b"\0"):
-                return True
-        except OSError:
-            continue
-    return False
-
-
-def kill_leftovers(marker: str) -> None:
-    """Tidy up after a test whose assertion failed: stop any process that still has `marker` as an argument."""
-    for entry in Path("/proc").glob("[0-9]*/cmdline"):
-        try:
-            if marker.encode() in entry.read_bytes().split(b"\0"):
-                os.kill(int(entry.parent.name), 9)
-        except (OSError, ValueError):
-            continue
-
-
-def wait_gone(marker: str, seconds: float = 4.0) -> bool:
-    end = time.monotonic() + seconds
-    while time.monotonic() < end:
-        if not process_alive(marker):
-            return True
-        time.sleep(0.1)
-    return not process_alive(marker)
+WORKFLOWS = collect_workflows(REPO / ".github" / "workflows")
 
 
 CHECK = REPO / ".github" / "actions" / "egress-policy-check" / "action.yml"
@@ -93,236 +52,6 @@ CHECK = REPO / ".github" / "actions" / "egress-policy-check" / "action.yml"
 
 def check_script() -> str:
     return yaml.safe_load(CHECK.read_text())["runs"]["steps"][0]["run"]
-
-
-def run_canary(tmp_path, stubs: str, env: dict | None = None):
-    summary = tmp_path / "summary.md"
-    summary.write_text("")
-    script = sourceable() + textwrap.dedent(stubs) + "\nsleep() { :; }\ncanary_main\n"
-    full_env = {**os.environ, "GITHUB_STEP_SUMMARY": str(summary), **(env or {})}
-    done = subprocess.run(
-        ["bash", "-eo", "pipefail", "-c", script], capture_output=True, text=True, timeout=60, env=full_env
-    )
-    return done.returncode, done.stdout + done.stderr, summary.read_text()
-
-
-# One A record for api.github.com and results-receiver, two for github.com.
-RESOLVE = """
-canary_resolve() {
-  case "$1" in
-    github.com) printf '140.82.1.1\\n140.82.1.2\\n' ;;
-    api.github.com) echo 140.82.2.1 ;;
-    results-receiver.actions.githubusercontent.com) echo 140.82.3.1 ;;
-  esac
-}
-canary_show() { shift; echo "+ $*"; }
-"""
-
-
-def test_a_healthy_runner_passes_quietly(tmp_path):
-    code, out, summary = run_canary(tmp_path, RESOLVE + "canary_probe() { return 0; }")
-    assert code == 0, out
-    assert "all 4 addresses" in out
-    assert "diagnostics" not in out and "+ uname" not in out
-    assert summary == "", "a healthy run writes no step summary"
-
-
-def test_one_dropped_address_fails_names_it_and_prints_the_diagnostics(tmp_path):
-    stub = RESOLVE + 'canary_probe() { [ "$1" != 140.82.1.2 ]; }'
-    code, out, summary = run_canary(tmp_path, stub)
-    assert code == 1, out
-    assert "egress broken on this runner (known westus2 DNS issue): rerun the job" in out
-    assert "github.com 140.82.1.2" in out
-    assert "140.82.1.1\n" not in out.split("unreachable addresses")[1].split("::group::")[0]
-    for expected in [
-        "+ uname -srmo",
-        "+ cat /etc/resolv.conf",
-        "resolvectl status",
-        "ss -lun",
-        "+ getent ahostsv4 pipelines.actions.githubusercontent.com",
-        "+ curl -sS -o /dev/null -w %{http_code} %{remote_ip} %{time_connect}\\n --max-time 8 https://pipelines.actions.githubusercontent.com",
-        *(f"+ getent ahostsv4 {h}" for h in HOSTS),
-        *(f"--max-time 8 https://{h}" for h in HOSTS),
-    ]:
-        assert expected in out, f"diagnostic missing: {expected}"
-    assert "-Ivs" not in out and " -v " not in out, "no verbose curl: its output carries request headers"
-    assert "uname -a" not in out and "ss -lunp" not in out, "no hostname and no process names in the diagnostics"
-    assert "egress canary failed" in summary and "EX-0001" not in summary and "github.com 140.82.1.2" in summary
-    assert summary.count("\n") == 1, "the step summary is one line"
-
-
-def test_a_name_that_does_not_resolve_fails(tmp_path):
-    stub = (
-        RESOLVE + 'canary_resolve() { [ "$1" = github.com ] && echo 140.82.1.1; true; }\ncanary_probe() { return 0; }'
-    )
-    code, out, summary = run_canary(tmp_path, stub)
-    assert code == 1
-    assert "api.github.com -" in out and "results-receiver.actions.githubusercontent.com -" in out
-
-
-def counting_probe(tmp_path, fail_first: int) -> str:
-    """A probe that fails its first `fail_first` calls for each address (one counter file per address)."""
-    return f"canary_probe() {{ echo x >> {tmp_path}/calls.$1; [ $(wc -l < {tmp_path}/calls.$1) -gt {fail_first} ]; }}"
-
-
-def calls(tmp_path, address: str) -> int:
-    return (tmp_path / f"calls.{address}").read_text().count("x")
-
-
-def test_a_refusal_is_retried_three_times_before_it_counts(tmp_path):
-    code, out, _ = run_canary(tmp_path, RESOLVE + counting_probe(tmp_path, fail_first=3))
-    assert code == 0, out
-    assert calls(tmp_path, "140.82.2.1") == 4, "three refusals, then the fourth try connects"
-
-
-def test_an_address_that_never_answers_is_tried_four_times_and_fails(tmp_path):
-    code, out, _ = run_canary(tmp_path, RESOLVE + counting_probe(tmp_path, fail_first=10**6))
-    assert code == 1, out
-    assert calls(tmp_path, "140.82.2.1") == 4, "one try plus three retries, no more"
-
-
-def test_four_refusals_in_a_row_are_unreachable(tmp_path):
-    code, out, _ = run_canary(tmp_path, RESOLVE + counting_probe(tmp_path, fail_first=4))
-    assert code == 1, out
-    assert "api.github.com 140.82.2.1" in out
-
-
-def test_all_lookups_are_unioned(tmp_path):
-    """A name that answers with a different address on each lookup has every address probed."""
-    counter = tmp_path / "n"
-    stub = (
-        RESOLVE
-        + f"""
-canary_resolve() {{
-  case "$1" in
-    github.com) echo "140.82.9.$(( $(wc -l < {counter} 2>/dev/null || echo 0) + 1 ))"; echo x >> {counter} ;;
-    api.github.com) echo 140.82.2.1 ;;
-    results-receiver.actions.githubusercontent.com) echo 140.82.3.1 ;;
-  esac
-}}
-canary_probe() {{ echo "probe $1" >> {tmp_path}/probes; return 0; }}
-"""
-    )
-    code, out, _ = run_canary(tmp_path, stub)
-    assert code == 0, out
-    probed = (tmp_path / "probes").read_text().split("\n")
-    assert sum(1 for p in probed if p.startswith("probe 140.82.9.")) >= 2, probed
-
-
-def test_the_real_resolver_keeps_only_stream_lines(tmp_path):
-    fake = tmp_path / "bin"
-    fake.mkdir()
-    getent = fake / "getent"
-    getent.write_text(
-        "#!/bin/sh\n"
-        '[ "$1" = ahostsv4 ] || exit 2\n'
-        "printf '140.82.1.1 STREAM %s\\n140.82.1.1 DGRAM\\n140.82.1.1 RAW\\n' \"$2\"\n"
-    )
-    getent.chmod(0o755)
-    script = sourceable() + "canary_resolve github.com\n"
-    done = subprocess.run(
-        ["bash", "-eo", "pipefail", "-c", script],
-        capture_output=True,
-        text=True,
-        timeout=20,
-        env={**os.environ, "PATH": f"{fake}:{os.environ['PATH']}"},
-    )
-    assert done.stdout == "140.82.1.1\n", done.stdout + done.stderr
-
-
-def real_probe(addr: str, port: int):
-    script = sourceable() + f"PORT={port}\ncanary_probe {addr}\n"
-    start = time.monotonic()
-    done = subprocess.run(["bash", "-eo", "pipefail", "-c", script], capture_output=True, text=True, timeout=30)
-    return done.returncode, time.monotonic() - start
-
-
-def test_the_real_probe_connects_to_a_listener_and_fails_on_a_closed_port():
-    with socket.socket() as listener:
-        listener.bind(("127.0.0.1", 0))
-        listener.listen(1)
-        assert real_probe("127.0.0.1", listener.getsockname()[1])[0] == 0
-        port = listener.getsockname()[1]
-    assert real_probe("127.0.0.1", port)[0] != 0, "a closed port must count as unreachable"
-
-
-def test_the_real_probe_cannot_hang():
-    """A black-holed address (TEST-NET-1) is refused, unroutable or silent; none may take over 3 s plus slack."""
-    code, elapsed = real_probe("192.0.2.1", 443)
-    assert code != 0
-    assert elapsed < 6, f"the probe took {elapsed:.1f}s; its own limit is 3s"
-
-
-def test_the_guard_bites_a_probe_that_always_succeeds_hides_a_dropped_address(tmp_path):
-    """Negative case: with the failure counting removed the dropped-address test above would pass."""
-    mutated = canary_script().replace('echo "$name $addr" >"$tmp/bad.$n"', "true")
-    assert mutated != canary_script()
-    lines = mutated.rstrip("\n").split("\n")
-    script = (
-        "\n".join(lines[: next(i for i, line in enumerate(lines) if line == "canary_main &")])
-        + RESOLVE
-        + "canary_probe() { return 1; }\nsleep() { :; }\ncanary_main\n"
-    )
-    done = subprocess.run(["bash", "-eo", "pipefail", "-c", script], capture_output=True, text=True, timeout=60)
-    assert done.returncode == 0, (
-        "the mutant must let a fully dropped runner through, proving the test above measures something"
-    )
-
-
-# --- where the workflows put it ------------------------------------------------------------------
-
-
-def run_full(tmp_path, script: str, extra_path: Path | None = None):
-    path = f"{extra_path}:{os.environ['PATH']}" if extra_path else os.environ["PATH"]
-    return subprocess.run(
-        ["bash", "-eo", "pipefail", "-c", script],
-        capture_output=True,
-        text=True,
-        timeout=60,
-        env={**os.environ, "PATH": path, "GITHUB_STEP_SUMMARY": str(tmp_path / "s")},
-    )
-
-
-def test_the_whole_canary_runs_under_a_deadline(tmp_path):
-    """The script as shipped, with the deadline cut to 1 s and a resolver that takes 3 s: exit 124 and a message."""
-    fake = tmp_path / "bin"
-    fake.mkdir()
-    (fake / "getent").write_text("#!/bin/sh\nsleep 3\n")
-    (fake / "getent").chmod(0o755)
-    done = run_full(tmp_path, full_script(deadline=1), fake)
-    assert done.returncode == 124, done.stdout + done.stderr
-    assert "90 s deadline" in done.stdout
-
-
-def test_a_deadline_kills_the_whole_process_tree(tmp_path):
-    """A resolver that leaves a grandchild behind: after the deadline no process of the group remains."""
-    try:
-        stubs = "canary_resolve() { sleep 4711 & wait; }"
-        done = run_full(tmp_path, full_script(stubs, deadline=1))
-        assert done.returncode == 124, done.stdout + done.stderr
-        assert wait_gone("4711"), "a grandchild of canary_main survived the deadline"
-    finally:
-        kill_leftovers("4711")
-
-
-def test_a_normal_finish_leaves_no_stray_process(tmp_path):
-    """A probe that backgrounds something and returns: the group is cleaned up when canary_main is done."""
-    try:
-        stubs = RESOLVE + "canary_probe() { sleep 4712 & return 0; }"
-        done = run_full(tmp_path, full_script(stubs))
-        assert done.returncode == 0, done.stdout + done.stderr
-        assert wait_gone("4712"), "a background child survived a normal finish"
-    finally:
-        kill_leftovers("4712")
-
-
-def test_a_normal_finish_does_not_wait_for_the_watchdog(tmp_path):
-    start = time.monotonic()
-    # A deadline no other process on the machine uses, so a `sleep 90` from an unrelated job cannot match.
-    done = run_full(tmp_path, full_script(RESOLVE + "canary_probe() { return 0; }", deadline=9097))
-    assert done.returncode == 0, done.stdout + done.stderr
-    assert time.monotonic() - start < 20, "the watchdog's sleep must be cancelled when the canary is done"
-    assert wait_gone("9097"), "the watchdog's sleep outlived the step"
 
 
 def run_check(env: dict[str, str]):
@@ -568,12 +297,11 @@ def test_the_evaluator_follows_github_semantics():
 
 
 @pytest.mark.parametrize("path,name,job,steps", list(workflow_jobs()), ids=lambda v: v if isinstance(v, str) else "")
-def test_every_job_gets_the_policy_check_and_the_canary_right_after_harden_runner(path, name, job, steps):
+def test_every_job_gets_the_policy_check_before_harden_runner(path, name, job, steps):
     policy = steps[0]["with"]["egress-policy"]
     if path.name in ("ci.yml", "main-verify.yml"):
         pytest.skip("this repository's own workflows are audit by construction, there is nothing to guard")
     hardcoded = policy == "block"  # audit.yml
-    offset = 1
     declared = declared_policy_inputs(path)
     if not hardcoded:
         check = job["steps"][0]
@@ -584,28 +312,11 @@ def test_every_job_gets_the_policy_check_and_the_canary_right_after_harden_runne
             f"{path.name}:{name}: one environment variable per policy input, never a joined string"
         )
         assert check["working-directory"] == "${{ github.workspace }}" and check["shell"] == "bash"
-    canary = steps[offset]
-    assert canary.get("name") == "Egress canary", f"{path.name}:{name} has no canary after the checks"
-    assert canary["timeout-minutes"] == 2
-    assert canary["shell"] == "bash"
-    # A job's defaults.run.working-directory may not exist before checkout (python-package-release `build`).
-    assert canary["working-directory"] == "${{ github.workspace }}", (
-        f"{path.name}:{name}: canary lacks working-directory"
-    )
-    assert canary["run"] == canary_script(), f"{path.name}:{name} canary differs from the composite action"
-    allowed = effective_allow_list(path, steps[0]["with"]["allowed-endpoints"])
-    for host in HOSTS:
-        assert f"{host}:443" in allowed.split(), (
-            f"{path.name}:{name}: block must allow {host}, the canary connects to it"
-        )
-    assert "uses" not in canary and "secrets" not in canary["run"].lower()
     if hardcoded:
-        assert "if" not in canary
         return
-    # One effective policy, written three times: harden-runner, its telemetry switch and the canary's `if`.
+    # One effective policy, written twice: harden-runner and its telemetry switch.
     inner = policy[len("${{ ") : -len(" }}")]
     assert steps[0]["with"]["disable-telemetry"] == "${{ (" + inner + ") == 'block' }}"
-    assert canary["if"] == "${{ runner.os == 'Linux' && ((" + inner + ") == 'block') }}"
     dynamic = str(job.get("runs-on")) in ("${{ matrix.runner }}", "${{ inputs.runner }}")
     secretless = (path.name, name) not in KEPT_BLOCK
     if secretless and not dynamic:
@@ -625,9 +336,6 @@ def test_every_job_gets_the_policy_check_and_the_canary_right_after_harden_runne
                 assert evaluate(steps[0]["with"]["disable-telemetry"], values, runner, environment) is (
                     result == "block"
                 )
-                assert evaluate(canary["if"], values, runner, environment) is (result == "block")
-                for other_os in ("macOS", "Windows"):  # `timeout` and `getent` are Linux tools (issue #196)
-                    assert evaluate(canary["if"], values, runner, environment, other_os) is False
                 wants_audit = any(v.lower() == "audit" for v in values.values())  # GitHub compares case-insensitively
                 runtime_hosted = (not secretless) or (environment or "").lower() == "github-hosted"
                 label_hosted = (not secretless) or (not dynamic) or runner_is_hosted(runner)
@@ -655,13 +363,6 @@ def test_the_effective_policy_follows_the_right_inputs():
         else:
             assert used == {"egress-policy-secretless"}, f"{path.name}:{name}"
     assert seen > 60
-
-
-def test_the_canary_is_never_called_by_path_from_a_workflow():
-    """A caller's workspace, not this repository, would resolve `./.github/actions/...`."""
-    for path, name, _job, steps in workflow_jobs():
-        for step in steps:
-            assert "egress-canary" not in str(step.get("uses", "")), f"{path.name}:{name} calls the action by path"
 
 
 # --- which jobs may follow the secretless input -----------------------------------------------------
@@ -782,7 +483,7 @@ def what_a_job_holds(job: dict) -> list[str]:
     if grants.pop("security-events", "write") != "write":
         found.append("security-events")
     found += [f"{scope}: {level}" for scope, level in grants.items()]
-    steps = [s for s in job.get("steps") or [] if s.get("name") != "Egress canary"]
+    steps = list(job.get("steps") or [])
     scanned = {k: v for k, v in job.items() if k != "steps"}
     scanned["steps"] = steps
     texts = list(strings_in(scanned))
@@ -917,28 +618,6 @@ def test_the_guard_accepts_a_sarif_upload_and_a_read_only_job():
     assert what_a_job_holds({"permissions": {"contents": "read"}, "steps": [{"run": "true"}]}) == []
 
 
-def test_the_canary_overrides_every_job_default_working_directory_and_shell():
-    seen_default = 0
-    for path, name, job, steps in workflow_jobs():
-        canary = next((s for s in steps if s.get("name") == "Egress canary"), None)
-        if canary is None:
-            continue
-        run_defaults = (job.get("defaults") or {}).get("run") or {}
-        if "working-directory" in run_defaults:
-            seen_default += 1
-            assert canary.get("working-directory") == "${{ github.workspace }}", f"{path.name}:{name}"
-        if "shell" in run_defaults:
-            assert canary.get("shell") == "bash", f"{path.name}:{name}"
-        top = (yaml.safe_load(path.read_text()).get("defaults") or {}).get("run") or {}
-        assert not top, f"{path.name} has workflow-level run defaults; extend this test"
-    assert seen_default >= 1, "python-package-release build sets a default working-directory; the guard must see it"
-
-
-def test_the_action_sets_the_working_directory_too():
-    step = yaml.safe_load(ACTION.read_text())["runs"]["steps"][0]
-    assert step["working-directory"] == "${{ github.workspace }}" and step["shell"] == "bash"
-
-
 # --- caches: an audit-mode job neither restores nor saves one --------------------------------------
 #
 # Code that runs in an audit job can write a poisoned cache that a later block-mode job (possibly one holding
@@ -1066,50 +745,6 @@ def test_the_expressions_depend_on_the_policy_check_for_exactness():
     expression = "${{ inputs.a == 'audit' && 'audit' || 'block' }}"
     assert evaluate(expression, {"a": "AUDIT"}) == "audit"
     assert run_check({"POLICY_EGRESS_POLICY": "AUDIT"}).returncode == 1
-
-
-# --- the canary is Linux-only (issue #196) -----------------------------------------------------------
-
-CANARY_NAME = "Egress canary"
-
-
-def canary_steps():
-    """Every canary step in every workflow, hardcoded-audit.yml ones included."""
-    for path in WORKFLOWS:
-        for name, job in yaml.safe_load(path.read_text())["jobs"].items():
-            for step in job.get("steps") or []:
-                if step.get("name") == CANARY_NAME:
-                    yield path, name, job, step
-
-
-def linux_gate_problem(job: dict, step: dict) -> str | None:
-    """None when the canary cannot run on macOS or Windows (`timeout` and `getent` are missing there): its `if`
-    requires `runner.os == 'Linux'`, or the job runs on a fixed ubuntu label."""
-    if "runner.os == 'Linux' &&" in str(step.get("if", "")):
-        return None
-    if re.fullmatch(r"ubuntu-[\w.]+", str(job.get("runs-on"))) and "if" not in step:
-        return None  # audit.yml: hardcoded block on a fixed Linux runner
-    return "canary can run on a non-Linux runner"
-
-
-def test_every_canary_runs_only_on_linux():
-    seen = 0
-    for path, name, job, step in canary_steps():
-        seen += 1
-        assert linux_gate_problem(job, step) is None, f"{path.name}:{name}: {linux_gate_problem(job, step)}"
-    assert seen > 60
-
-
-def test_the_linux_guard_bites():
-    """Mutation: drop the Linux condition from a real canary and the guard must object."""
-    dynamic = [(j, s) for _p, _n, j, s in canary_steps() if str(j.get("runs-on")).startswith("${{ ")]
-    assert len(dynamic) >= 6, "the matrix-runner jobs (python-ci, bash-ci, container-release, python-fuzz) must be seen"
-    for job, step in dynamic:
-        assert linux_gate_problem(job, step) is None
-        mutated = {**step, "if": step["if"].replace("runner.os == 'Linux' && ", "")}
-        assert mutated["if"] != step["if"]
-        assert linux_gate_problem(job, mutated) is not None
-        assert linux_gate_problem(job, {k: v for k, v in step.items() if k != "if"}) is not None
 
 
 SECRET_SPELLINGS = [
@@ -1262,3 +897,407 @@ def test_the_record_and_the_docs_say_ex_0001_is_closed():
     assert "**Status: closed on 2026-11-02.**" in readme
     wiki = (REPO / "docs" / "wiki" / "Egress-control.md").read_text()
     assert "Closed on 2026-11-02" in wiki and "egress-policy-secretless: audit" in wiki
+
+
+# --- the egress canary is gone (#412) ---------------------------------------------------------------
+
+ACTIONS = REPO / ".github" / "actions"
+
+
+# The canary's mechanism, whatever its steps, functions or files are called: a fail-fast probe of whether a host
+# answers. Matched on the raw text of every workflow and action manifest (so every `run:` block) and of every
+# .sh/.bash/.py/.ps1 file under .github/ and scripts/ (backslash continuations joined for the curl rule). Every
+# pattern was run against that whole tree when this guard was written; none matches a canary-like line there.
+# What it deliberately does NOT flag:
+#   - curl that downloads (writes to a file or a pipe, `-o "$tmp"`, `-O`, `-K -`, `-w` plus a file): the release and
+#     tool downloads (fetch-release.sh, the pinned-hash steps) use `--connect-timeout` and `--max-time` only as retry
+#     bounds and never discard the body or ask for headers only;
+#   - `gh api`, `git ls-remote` and other API helpers (they carry a payload and use the answer);
+#   - Python `socket.socket()` with `bind` (dast.yml picks a free local port; it never connects out);
+#   - Python `urlopen` whose answer is used (`with ... urlopen(...) as r`, `x = urlopen(...)`: tool_locks.py reads
+#     the PyPI JSON, audit_baseline.py reads the GitHub API); only a bare `urlopen(..., timeout=...)` whose answer is
+#     thrown away is a probe. The one such line, dast.yml waiting for its own loopback target (`urlopen(sys.argv[1],
+#     timeout=3, context=c)`), is exempt by exact text in LOOPBACK_READINESS;
+#   - `dig`, `nc`, `host`, `ping` and `openssl` as part of a longer word or path, or `host` anywhere but at the start
+#     of a command (a word boundary and command position are required).
+# A legitimate future use is scoped here on purpose, not waved through.
+CANARY_MECHANISM = re.compile(
+    r"/dev/tcp/"  # bash TCP probe
+    r"|getent\s+ahosts"  # resolver probe
+    r"|\b(?:nc|ncat|netcat)\b(?:\s+-\w+(?:\s+\d+)?)*\s+-\w*z\w*"  # nc -z, -zv, -vz, -w3 -z
+    r"|\b(?:nc|ncat|netcat)\s+(?:-\w+\s+(?:\d+\s+)?)*[\w.$\"{}-]+\s+\d+\b"  # nc [-w 3] host port
+    r"|(?:^|[;&|({`]|\$\()[ \t]*host\s+[\w.$\"'{}-]+"  # `host name`, only at the start of a command
+    r"|\bdig\s|\bnslookup\s"  # DNS probes
+    r"|\bping\s+(?:-\w+\s+)*-\w*c"  # ping -c N
+    r"|(?:^|[;&|(])[ \t]*telnet\s+\S"  # telnet host port
+    r"|Test-NetConnection"  # PowerShell
+    r"|\bwget\b[^\n]*--spider"  # wget --spider
+    r"|\bopenssl\s+s_client\b"  # TLS handshake probe
+    r"|\bcreate_connection\b|\.connect(?:_ex)?\("  # Python connect (a bind is not a probe)
+    r"|\bHTTPS?Connection\(",  # Python http.client
+    re.MULTILINE,
+)
+CURL_BODY_DISCARDED = re.compile(r"(?:-o|--output)[\s=]*/dev/null|>\s*/dev/null")
+CURL_TIMEOUT_BOUND = re.compile(r"--connect-timeout|--max-time|(?<!\S)-m\s")
+CURL_UNDER_TIMEOUT = re.compile(r"\btimeout\s+\d+\s+curl\b")
+CURL_HEADERS_ONLY = re.compile(r"(?<!\S)-\w*I\w*(?=\s)|(?<!\S)--head\b")
+URLOPEN = re.compile(r"\burlopen\(")
+URLOPEN_ANSWER_USED = re.compile(r"(?:\bwith\s|=\s*|\breturn\s|\bload\()[\w.\s]*$")
+LOOPBACK_READINESS = "urllib.request.urlopen(sys.argv[1], timeout=3, context=c)"  # dast.yml, its own loopback target
+
+
+def probe_matches(text: str) -> list[str]:
+    """Every probe shape in `text`: the mechanisms above; a curl whose body is thrown away under a time bound
+    (`curl --connect-timeout 3 -o /dev/null host`), run as `timeout N curl`, or asking for headers only (`-I`,
+    `--head`, `-fsSI`); and a bare `urlopen(..., timeout=...)` whose answer is discarded."""
+    found = [m.group(0).strip() for m in CANARY_MECHANISM.finditer(text)]
+    joined = re.sub(r"\\\n\s*", " ", text)
+    for line in joined.splitlines():
+        if re.search(r"\bcurl\b", line) and (
+            CURL_UNDER_TIMEOUT.search(line)
+            or CURL_HEADERS_ONLY.search(line)
+            or (CURL_BODY_DISCARDED.search(line) and CURL_TIMEOUT_BOUND.search(line))
+        ):
+            found.append("curl probe: " + line.strip()[:60])
+        for m in URLOPEN.finditer(line):
+            if "timeout=" in line[m.end() :] and not URLOPEN_ANSWER_USED.search(line[: m.start()]):
+                if LOOPBACK_READINESS not in line:
+                    found.append("urlopen probe: " + line.strip()[:60])
+    return found
+
+
+def canary_leftovers(workflows: list[Path], actions: Path, script_roots: list[Path] | None = None) -> list[str]:
+    """Every place under .github (and scripts/) that still carries an `Egress canary` step, the `canary_probe`
+    function, the canary's mechanism under any name (`probe_matches`), or an action directory of that name. Loose
+    collection (every yml and yaml, every action manifest at any depth, every script file, the raw text); the
+    assertion is strict."""
+    found = []
+    manifests = [*workflows, *collect_actions(actions)]
+    for path in sorted(manifests):
+        text = path.read_text()
+        if "canary_probe" in text:
+            found.append(f"{path.name}: canary_probe")
+        found += [f"{path.name}: network probe {m!r}" for m in probe_matches(text)]
+        doc = yaml.safe_load(text)
+        jobs = (doc.get("jobs") or {}).values() if "jobs" in doc else [doc.get("runs") or {}]
+        for job in jobs:
+            for step in job.get("steps") or []:
+                if str(step.get("name", "")).lower().startswith("egress canary"):
+                    found.append(f"{path.name}: step {step['name']!r}")
+    for path in collect_scripts(script_roots or []):
+        text = path.read_text()
+        if "canary_probe" in text:
+            found.append(f"{path.name}: canary_probe")
+        found += [f"{path.name}: network probe {m!r}" for m in probe_matches(text)]
+    found += [f"{d.name}: action directory" for d in actions.rglob("*canary*")]
+    return found
+
+
+SCRIPT_ROOTS = [REPO / ".github", REPO / "scripts"]
+
+
+def test_no_egress_canary_is_left():
+    assert len(WORKFLOWS) > 20 and len(collect_actions(ACTIONS)) >= 4, "the guard collected nothing"
+    assert len(collect_scripts(SCRIPT_ROOTS)) >= 15, "the guard collected too few scripts"
+    assert canary_leftovers(WORKFLOWS, ACTIONS, SCRIPT_ROOTS) == []
+
+
+def test_the_canary_guard_bites(tmp_path):
+    wf = tmp_path / "w.yml"
+    wf.write_text("jobs:\n  a:\n    steps:\n      - name: Egress canary\n        run: canary_probe() { true; }\n")
+    assert canary_leftovers([wf], tmp_path) == ["w.yml: canary_probe", "w.yml: step 'Egress canary'"]
+    (tmp_path / "egress-canary").mkdir()
+    assert "egress-canary: action directory" in canary_leftovers([], tmp_path)
+    (tmp_path / "egress-canary").rmdir()
+    ok = tmp_path / "ok.yml"
+    ok.write_text("jobs:\n  a:\n    steps:\n      - name: Build\n        run: true\n")
+    assert canary_leftovers([ok], tmp_path / "none") == []
+
+
+def policy_defaults(workflows: list[Path] | None = None) -> dict[tuple[str, str], object]:
+    found = {}
+    for path in WORKFLOWS if workflows is None else workflows:
+        triggers = yaml.safe_load(path.read_text()).get(True)  # PyYAML reads the key `on` as True
+        call = triggers.get("workflow_call") if isinstance(triggers, dict) else None
+        for key, spec in ((call or {}).get("inputs") or {}).items():
+            if key in ("egress-policy", "egress-policy-secretless"):
+                found[(path.name, key)] = spec.get("default")
+    return found
+
+
+# The reviewed `egress-policy` default of every reusable workflow that has the input, read from origin/main on
+# 2026-11-14. A default is a security decision (a token-bearing job that defaults to audit runs unrestricted), so a
+# change is made here, in the same diff, and a reviewer sees it.
+EGRESS_POLICY_BASELINE = {
+    "agent-scan.yml": "block",
+    "arduino-ci.yml": "audit",
+    "artifact-release.yml": "audit",
+    "base-image-digest.yml": "block",
+    "bash-ci.yml": "audit",
+    "ci-gate.yml": "block",
+    "container-release.yml": "audit",
+    "dast.yml": "audit",
+    "dependabot-auto-merge.yml": "audit",
+    "docs-pages.yml": "audit",
+    "lory-audit.yml": "audit",
+    "parallel-ci.yml": "block",
+    "pin-comments.yml": "block",
+    "pr-title-lint.yml": "block",
+    "project-sync.yml": "audit",
+    "python-ci.yml": "audit",
+    "python-docker-release.yml": "audit",
+    "python-fuzz.yml": "audit",
+    "python-package-release.yml": "audit",
+    "repin.yml": "block",
+    "security.yml": "audit",
+    "threat-model.yml": "audit",
+    "tofu-ci.yml": "audit",
+    "token-drift.yml": "block",
+    "vendored-drift.yml": "block",
+    "verify-published.yml": "block",
+    "wiki-publish.yml": "audit",
+}
+
+
+# The workflows that declare `egress-policy-secretless`, read from origin/main on 2026-11-14; every default is block.
+# Callers pass the input, so dropping a declaration fails their validation, and a new one needs a reviewed decision.
+SECRETLESS_BASELINE = {
+    "agent-scan.yml", "arduino-ci.yml", "base-image-digest.yml", "bash-ci.yml", "ci-gate.yml",
+    "container-release.yml", "dast.yml", "parallel-ci.yml", "pin-comments.yml", "pr-title-lint.yml",
+    "python-ci.yml", "python-docker-release.yml", "python-fuzz.yml", "python-package-release.yml",
+    "security.yml", "threat-model.yml", "tofu-ci.yml", "token-drift.yml", "vendored-drift.yml",
+    "verify-published.yml",
+}  # fmt: skip
+
+
+def policy_default_problems(defaults: dict[tuple[str, str], object]) -> list[str]:
+    problems = []
+    plain = {n: v for (n, k), v in defaults.items() if k == "egress-policy"}
+    for name, value in sorted(plain.items()):
+        if name not in EGRESS_POLICY_BASELINE:
+            problems.append(f"{name}: no baseline for its egress-policy default {value!r}; add one deliberately")
+        elif value != EGRESS_POLICY_BASELINE[name]:
+            want = EGRESS_POLICY_BASELINE[name]
+            problems.append(f"{name}: egress-policy defaults to {value!r}, the reviewed baseline is {want!r}")
+    problems += [
+        f"{n}: in the baseline but has no egress-policy input" for n in sorted(set(EGRESS_POLICY_BASELINE) - set(plain))
+    ]
+    declared = {n for (n, k) in defaults if k == "egress-policy-secretless"}
+    problems += [
+        f"{n}: egress-policy-secretless is declared but has no baseline; add one deliberately"
+        for n in sorted(declared - SECRETLESS_BASELINE)
+    ]
+    problems += [
+        f"{n}: egress-policy-secretless was dropped (callers pass it)" for n in sorted(SECRETLESS_BASELINE - declared)
+    ]
+    problems += [
+        f"{n}: egress-policy-secretless defaults to {v!r}, it must be 'block' (EX-0001 closed)"
+        for (n, k), v in sorted(defaults.items())
+        if k == "egress-policy-secretless" and v != "block"
+    ]
+    return problems
+
+
+def test_every_egress_policy_default_equals_its_reviewed_baseline():
+    defaults = policy_defaults()
+    assert len({n for (n, k) in defaults if k == "egress-policy"}) >= 13, "the guard collected too few workflows"
+    assert len({n for (n, k) in defaults if k == "egress-policy-secretless"}) >= 13
+    assert policy_default_problems(defaults) == []
+
+
+def test_the_policy_default_guard_bites_on_the_real_workflows(tmp_path):
+    """Copy the real workflow text, flip one default from block to audit (and one secretless), run the real checker."""
+    for path in WORKFLOWS:
+        (tmp_path / path.name).write_text(path.read_text())
+    assert policy_default_problems(policy_defaults(collect_workflows(tmp_path))) == []
+    pin = tmp_path / "pin-comments.yml"
+    text = pin.read_text()
+    flipped = re.sub(r"(      egress-policy:\n(?:        .*\n)*?        default: )block", r"\1audit", text, count=1)
+    assert flipped != text
+    pin.write_text(flipped)
+    assert policy_default_problems(policy_defaults(collect_workflows(tmp_path))) == [
+        "pin-comments.yml: egress-policy defaults to 'audit', the reviewed baseline is 'block'"
+    ]
+    (tmp_path / "brand-new.yml").write_text(
+        "on:\n  workflow_call:\n    inputs:\n      egress-policy:\n        type: string\n        default: audit\n"
+    )
+    assert any("no baseline" in p for p in policy_default_problems(policy_defaults(collect_workflows(tmp_path))))
+    sec = tmp_path / "security.yml"
+    sec.write_text(
+        re.sub(
+            r"(      egress-policy-secretless:\n(?:        .*\n)*?        default: )block",
+            r"\1audit",
+            sec.read_text(),
+            count=1,
+        )
+    )
+    assert any("secretless" in p for p in policy_default_problems(policy_defaults(collect_workflows(tmp_path))))
+
+
+def test_every_harden_runner_step_blocks_unless_the_policy_says_exactly_audit():
+    """The effective policy of every harden-runner step is `block`, or an expression whose fallback is `block`."""
+    seen = 0
+    for path, name, _job, steps in workflow_jobs():
+        if path.name in ("ci.yml", "main-verify.yml"):
+            continue  # this repository's own workflows are audit by construction
+        seen += 1
+        policy = steps[0]["with"]["egress-policy"]
+        assert policy == "block" or policy.endswith("'audit' || 'block' }}"), f"{path.name}:{name}: {policy}"
+    assert seen > 60
+
+
+# --- review round 2: every spelling, every mechanism, the secretless inventory ----------------------------
+
+MECHANISMS = {
+    "nc": "nc -z -w 3 github.com 443",
+    "curl-connect-timeout": "curl -sS --connect-timeout 3 -o /dev/null https://github.com",
+    "curl-under-timeout": "timeout 3 curl -sS https://github.com || exit 1",
+    "python-socket": "python3 -c 'import socket; socket.create_connection((\"github.com\", 443), 3)'",
+    "dig": "dig +short github.com",
+    "openssl": "openssl s_client -connect github.com:443 </dev/null",
+    "getent": "getent ahostsv4 github.com",
+    "dev-tcp": 'timeout 3 bash -c "exec 3<>/dev/tcp/github.com/443"',
+    "nc-zv": "nc -zv github.com 443",
+    "nc-host-port": "nc -w 3 github.com 443",
+    "curl-head": "curl -fsSI --max-time 3 https://github.com",
+    "wget-spider": "wget --spider --timeout=3 https://github.com",
+    "host": "host github.com",
+    "ping": "ping -c1 github.com",
+    "telnet": "telnet github.com 443",
+    "python-urlopen": "python3 -c 'import urllib.request; urllib.request.urlopen(\"https://github.com\", timeout=3)'",
+    "python-httpsconnection": "python3 -c 'import http.client; http.client.HTTPSConnection(\"github.com\", timeout=3)'",
+    "test-netconnection": "Test-NetConnection github.com -Port 443",
+}
+
+
+def copy_real_workflows(dest: Path) -> list[Path]:
+    for path in WORKFLOWS:
+        (dest / path.name).write_text(path.read_text())
+    return collect_workflows(dest)
+
+
+class Tree:
+    """A copy of the real `.github/` and `scripts/` in a temp dir, and the real guard pointed at it."""
+
+    def __init__(self, root: Path):
+        self.root = root
+        shutil.copytree(REPO / ".github", root / ".github", ignore=shutil.ignore_patterns("__pycache__"))
+        shutil.copytree(REPO / "scripts", root / "scripts", ignore=shutil.ignore_patterns("__pycache__"))
+        self.workflows = root / ".github" / "workflows"
+        self.actions = root / ".github" / "actions"
+
+    def leftovers(self) -> list[str]:
+        return canary_leftovers(
+            collect_workflows(self.workflows), self.actions, [self.root / ".github", self.root / "scripts"]
+        )
+
+
+@pytest.mark.parametrize("mechanism", sorted(MECHANISMS))
+def test_the_canary_guard_catches_every_mechanism_under_an_innocent_name(tmp_path, mechanism):
+    tree = Tree(tmp_path)
+    assert tree.leftovers() == []
+    target = tree.workflows / "pin-comments.yml"
+    text = target.read_text()
+    marker = "      - uses: actions/checkout"
+    step = (
+        "      - name: Runner network health\n        run: |\n          probe_endpoint() {\n            "
+        + MECHANISMS[mechanism]
+        + "\n          }\n"
+    )
+    assert marker in text
+    target.write_text(text.replace(marker, step + marker, 1))
+    found = tree.leftovers()
+    assert found and all(f.startswith("pin-comments.yml: network probe") for f in found), found
+
+
+def test_a_nested_action_with_a_probe_called_from_a_workflow_fails_the_guard(tmp_path):
+    tree = Tree(tmp_path)
+    nested = tree.actions / "network" / "probe"
+    nested.mkdir(parents=True)
+    (nested / "action.yml").write_text(
+        "name: Probe\nruns:\n  using: composite\n  steps:\n    - shell: bash\n      run: wget --spider --timeout=3 https://github.com\n"
+    )
+    target = tree.workflows / "pin-comments.yml"
+    text = target.read_text()
+    marker = "      - uses: actions/checkout"
+    target.write_text(text.replace(marker, "      - uses: ./.github/actions/network/probe\n" + marker, 1))
+    assert tree.leftovers() == ["action.yml: network probe 'wget --spider'"], tree.leftovers()
+
+
+def test_a_script_with_a_probe_called_from_a_workflow_fails_the_guard(tmp_path):
+    tree = Tree(tmp_path)
+    (tree.root / "scripts" / "egress-check.sh").write_text("#!/usr/bin/env bash\nnc -zv github.com 443\n")
+    target = tree.workflows / "pin-comments.yml"
+    text = target.read_text()
+    marker = "      - uses: actions/checkout"
+    step = "      - name: Runner network health\n        run: bash scripts/egress-check.sh\n"
+    target.write_text(text.replace(marker, step + marker, 1))
+    assert tree.leftovers() == ["egress-check.sh: network probe 'nc -zv'"], tree.leftovers()
+
+
+@pytest.mark.parametrize("name", ["egress-check.py", "probe.bash", "probe.ps1"])
+def test_every_script_suffix_under_github_and_scripts_is_scanned(tmp_path, name):
+    tree = Tree(tmp_path)
+    (tree.root / ".github" / name).write_text("nc -zv github.com 443\n")
+    assert [f for f in tree.leftovers() if f.startswith(name)], tree.leftovers()
+
+
+def test_the_urlopen_rule_flags_a_bare_probe_and_spares_a_used_answer():
+    assert probe_matches('urllib.request.urlopen("https://github.com", timeout=3)') != []
+    assert probe_matches('with urllib.request.urlopen(f"https://pypi.org/{n}", timeout=60) as r:') == []
+    assert probe_matches("with urllib.request.urlopen(req, timeout=30) as resp:") == []
+    assert probe_matches("r = urllib.request.urlopen(req, timeout=30)") == []
+    assert probe_matches(f"x; {LOOPBACK_READINESS}") == []
+
+
+def test_the_canary_guard_does_not_flag_a_download_or_a_port_bind():
+    download = 'curl -q -sSfL --connect-timeout 10 --max-time "$cap" -K - -w "%{http_code}" -o "$tmp" "$url"'
+    assert probe_matches(download) == []
+    assert probe_matches("probe = socket.socket()\nprobe.bind(('0.0.0.0', port))") == []
+    assert probe_matches("curl \\\n  --connect-timeout 10 \\\n  -o out.tgz https://example.invalid/x") == []
+
+
+def test_a_yaml_spelling_is_collected_and_guarded(tmp_path):
+    """A `.yaml` reusable workflow with an audit default and a probe is seen by the real collectors and guards."""
+    copies = copy_real_workflows(tmp_path)
+    (tmp_path / "bypass.yaml").write_text(
+        "on:\n  workflow_call:\n    inputs:\n      egress-policy:\n        type: string\n        default: audit\n"
+        "jobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - name: Runner network health\n"
+        "        run: nc -z github.com 443\n"
+    )
+    seen = collect_workflows(tmp_path)
+    assert tmp_path / "bypass.yaml" in seen and len(seen) == len(copies) + 1
+    assert any("bypass.yaml" in f for f in canary_leftovers(seen, ACTIONS, SCRIPT_ROOTS))
+    assert any("bypass.yaml: no baseline" in p for p in policy_default_problems(policy_defaults(seen)))
+    actions = tmp_path / "actions"
+    (actions / "probe").mkdir(parents=True)
+    (actions / "probe" / "action.yaml").write_text(
+        "runs:\n  using: composite\n  steps:\n    - shell: bash\n      run: dig github.com\n"
+    )
+    assert collect_actions(actions) == [actions / "probe" / "action.yaml"]
+    assert any("action.yaml" in f for f in canary_leftovers([], actions))
+
+
+def test_the_secretless_inventory_is_pinned_both_ways(tmp_path):
+    copies = copy_real_workflows(tmp_path)
+    assert policy_default_problems(policy_defaults(copies)) == []
+    pin = tmp_path / "pin-comments.yml"
+    dropped = re.sub(r"      egress-policy-secretless:\n(?:        .*\n)+", "", pin.read_text(), count=1)
+    assert dropped != pin.read_text()
+    pin.write_text(dropped)
+    problems = policy_default_problems(policy_defaults(collect_workflows(tmp_path)))
+    assert problems == ["pin-comments.yml: egress-policy-secretless was dropped (callers pass it)"], problems
+    # a workflow outside the baseline gains the input
+    repin = tmp_path / "repin.yml"
+    text = repin.read_text()
+    assert ("repin.yml", "egress-policy-secretless") not in policy_defaults(collect_workflows(tmp_path))
+    added = re.sub(
+        r"(      egress-policy:\n(?:        .*\n)+)",
+        r"\1      egress-policy-secretless:\n        type: string\n        default: block\n",
+        text,
+        count=1,
+    )
+    assert added != text
+    repin.write_text(added)
+    problems = policy_default_problems(policy_defaults(collect_workflows(tmp_path)))
+    assert any(p.startswith("repin.yml: egress-policy-secretless is declared but has no baseline") for p in problems)

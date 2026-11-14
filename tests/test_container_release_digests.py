@@ -39,7 +39,6 @@ APPROVED_TERMS = {
 # Steps that may run without the gate: they hold no push, signing or attestation ability, or are gated by an
 # output that only a gated step sets. A new step must be gated or be added here on purpose.
 BUILD_UNGATED = {
-    "Egress canary",
     "Image metadata",
     "Require a non-root user",
     "Check the image",
@@ -57,7 +56,6 @@ BUILD_UNGATED_USES = (
 )
 MERGE_UNGATED = {
     "Validate the egress policy inputs",
-    "Egress canary",
     "Fetch CI secrets from Doppler (OIDC)",  # gated by steps.doppler, which only a gated step sets
     "Fetch CI secrets from Doppler (Service Token)",
     "Resolve image names",
@@ -228,7 +226,6 @@ def test_the_local_only_job_has_no_package_write_and_no_publish_step():
 
 # The checks are one copy of text in two jobs; this holds them identical so they cannot drift.
 SHARED_STEPS = (
-    "Egress canary",
     "Image metadata",
     "Require a non-root user",
     "Check the image",
