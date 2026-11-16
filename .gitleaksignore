@@ -1,0 +1,10 @@
+# Test fixtures in tests/test_identscan.py on the unmerged branch
+# feat/identscan (commit c580c48). They are fake values, not secrets.
+# Owner decision 2026-11-16, issue #416: allowlist exactly these findings by
+# fingerprint (commit:file:rule:line); no path-wide or rule-wide allowlist.
+# The two private-key findings at line 293 share one fingerprint.
+c580c48b303d88dac4e98c1ca076cbc4337074bc:tests/test_identscan.py:generic-api-key:612
+c580c48b303d88dac4e98c1ca076cbc4337074bc:tests/test_identscan.py:generic-api-key:613
+c580c48b303d88dac4e98c1ca076cbc4337074bc:tests/test_identscan.py:jwt:288
+c580c48b303d88dac4e98c1ca076cbc4337074bc:tests/test_identscan.py:jwt:610
+c580c48b303d88dac4e98c1ca076cbc4337074bc:tests/test_identscan.py:private-key:293
