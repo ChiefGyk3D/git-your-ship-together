@@ -1,12 +1,13 @@
 # Versions that replace what semgrep's own metadata pins, because the pinned ones have
-# open advisories (issue #230). Used by scripts/tool_locks.py --relock (uv --overrides).
+# open advisories (issue #230, and GHSA-mf5v-w3w3-f6cg from the 2026-11-16 scan).
+# Used by scripts/tool_locks.py --relock (uv --overrides).
 # Re-check each line on a semgrep bump: drop it once semgrep itself requires a fixed version.
 mcp==1.30.0
-opentelemetry-api==1.45.1
-opentelemetry-sdk==1.45.1
-opentelemetry-exporter-otlp-proto-http==1.45.1
-opentelemetry-exporter-otlp-proto-common==1.45.1
-opentelemetry-proto==1.45.1
+opentelemetry-api==1.45.2
+opentelemetry-sdk==1.45.2
+opentelemetry-exporter-otlp-proto-http==1.45.2
+opentelemetry-exporter-otlp-proto-common==1.45.2
+opentelemetry-proto==1.45.2
 opentelemetry-semantic-conventions==0.66b1
 opentelemetry-instrumentation==0.66b1
 opentelemetry-instrumentation-requests==0.66b1
