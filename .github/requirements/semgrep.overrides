@@ -1,8 +1,10 @@
 # Versions that replace what semgrep's own metadata pins, because the pinned ones have
-# open advisories (issue #230, and GHSA-mf5v-w3w3-f6cg from the 2026-11-16 scan).
+# open advisories (issue #230, GHSA-mf5v-w3w3-f6cg from the 2026-11-16 scan, and
+# GHSA-53pm-wgxf-c6qf from the 2026-11-23 scan).
 # Used by scripts/tool_locks.py --relock (uv --overrides).
 # Re-check each line on a semgrep bump: drop it once semgrep itself requires a fixed version.
 mcp==1.30.0
+wcmatch==11.2
 opentelemetry-api==1.45.2
 opentelemetry-sdk==1.45.2
 opentelemetry-exporter-otlp-proto-http==1.45.2
