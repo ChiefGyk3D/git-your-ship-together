@@ -23,6 +23,7 @@ DOC = load(WORKFLOWS / "security.yml")
 INPUTS = triggers(DOC)["workflow_call"]["inputs"]
 SEMGREP = jobs(DOC)["semgrep"]
 SCAN = next(s for s in steps_of(SEMGREP) if s.get("name") == "Scan (Semgrep)")
+SEMGREP_SUMMARY = WORKFLOWS.parent.parent / "scripts" / "semgrep_findings.py"
 DEFAULT_PACKS = sorted(set(re.findall(r"\bp/[\w-]+", SCAN["run"] + INPUTS["semgrep-config"]["default"])))
 
 
@@ -156,6 +157,79 @@ def test_semgrep_uploads_sarif_with_its_category_even_after_a_finding():
     )
     assert upload["with"] == {"sarif_file": "semgrep.sarif", "category": "semgrep"}
     assert "always()" in upload["if"] and "hashFiles('semgrep.sarif')" in upload["if"]
+
+
+def test_failed_semgrep_scans_are_reported_without_masking_the_scan_and_retained():
+    steps = steps_of(SEMGREP)
+    names = [step.get("name", "") for step in steps]
+    scan = names.index("Scan (Semgrep)")
+    report = names.index("Report Semgrep findings")
+    artifact = names.index("Keep Semgrep findings")
+    sarif = names.index("Upload Semgrep results")
+    assert scan < report < artifact < sarif
+
+    scan_step = steps[scan]
+    assert "continue-on-error" not in scan_step
+    assert "|| true" not in scan_step["run"]
+
+    report_step = steps[report]
+    assert report_step["if"] == "always()"
+    assert "python3 -I" in report_step["run"]
+    assert "GITHUB_STEP_SUMMARY" in report_step["run"]
+    inline = report_step["run"].split("#!/usr/bin/env python3\n", 1)[1].split("\nPY\n", 1)[0]
+    assert "#!/usr/bin/env python3\n" + inline + "\n" == SEMGREP_SUMMARY.read_text()
+
+    artifact_step = steps[artifact]
+    assert artifact_step["if"] == "always()"
+    assert artifact_step["uses"] == "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9"
+    assert artifact_step["with"] == {
+        "name": "semgrep-findings",
+        "path": "semgrep.sarif",
+        "if-no-files-found": "ignore",
+        "retention-days": 5,
+    }
+
+    source = SEMGREP_SUMMARY.read_text()
+    assert all(field in source for field in ("ruleId", "uri", "startLine", "level"))
+    assert 'get("message"' not in source and 'get("text"' not in source
+
+
+def test_semgrep_findings_script_whitelists_sarif_fields_escapes_controls_and_caps_output(tmp_path):
+    fake_secret = "sk" + "_test_" + ("x" * 24)
+    results = []
+    for number in range(105):
+        results.append(
+            {
+                "ruleId": "python.lang.security\nforged heading" if number == 0 else "fixture.rule",
+                "level": "error\tcritical" if number == 0 else "warning",
+                "message": {"text": f"matched code: {fake_secret}"},
+                "locations": [
+                    {
+                        "physicalLocation": {
+                            "artifactLocation": {"uri": f"src/file-{number}.py"},
+                            "region": {"startLine": number + 1, "snippet": {"text": fake_secret}},
+                        }
+                    }
+                ],
+            }
+        )
+    report = tmp_path / "semgrep.sarif"
+    report.write_text(json.dumps({"version": "2.1.0", "runs": [{"results": results}]}))
+
+    done = subprocess.run(
+        [sys.executable, "-I", str(SEMGREP_SUMMARY), str(report)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    lines = done.stdout.splitlines()
+    assert lines[0] == (
+        "RuleID=python.lang.security\\nforged heading File=src/file-0.py StartLine=1 Severity=error\\tcritical"
+    )
+    assert len(lines) == 100
+    assert lines[-1] == "... 6 more findings not shown"
+    assert fake_secret not in done.stdout
+    assert "matched code" not in done.stdout and "message" not in done.stdout and "snippet" not in done.stdout
 
 
 def test_there_is_no_gate_job_for_semgrep_to_join():

@@ -1418,6 +1418,100 @@ jobs:
           if [ "$CONTINUE" != "true" ]; then args+=(--error); fi
           semgrep scan --metrics=off --sarif --output semgrep.sarif "${args[@]}" .
 
+      # Read only rule id, file, start line and severity from SARIF. Never
+      # print the message or snippet. json.dumps escapes controls so a finding
+      # stays on one log line. Keep this block byte-identical to
+      # scripts/semgrep_findings.py; its unit test runs the readable copy.
+      - name: Report Semgrep findings
+        if: always()
+        timeout-minutes: 1
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          output=$(mktemp)
+          python3 -I - semgrep.sarif > "$output" <<'PY'
+          #!/usr/bin/env python3
+          """Print only safe location fields from Semgrep SARIF reports."""
+
+          from __future__ import annotations
+
+          import json
+          import sys
+          from pathlib import Path
+
+          LIMIT = 100
+
+
+          def escaped(value: object) -> str:
+              return json.dumps(str(value), ensure_ascii=True)[1:-1]
+
+
+          def main(paths: list[str]) -> int:
+              findings: list[tuple[object, object, object, object]] = []
+              for name in paths:
+                  path = Path(name)
+                  if not path.is_file():
+                      continue
+                  report = json.loads(path.read_text(encoding="utf-8"))
+                  if not isinstance(report, dict):
+                      raise ValueError(f"{path}: expected a SARIF object")
+                  for run in report.get("runs", []):
+                      if not isinstance(run, dict):
+                          continue
+                      for result in run.get("results", []):
+                          if not isinstance(result, dict):
+                              continue
+                          location = next((item for item in result.get("locations", []) if isinstance(item, dict)), {})
+                          physical = location.get("physicalLocation", {}) if isinstance(location, dict) else {}
+                          artifact = physical.get("artifactLocation", {}) if isinstance(physical, dict) else {}
+                          region = physical.get("region", {}) if isinstance(physical, dict) else {}
+                          findings.append(
+                              (
+                                  result.get("ruleId", ""),
+                                  artifact.get("uri", "") if isinstance(artifact, dict) else "",
+                                  region.get("startLine", "") if isinstance(region, dict) else "",
+                                  result.get("level", ""),
+                              )
+                          )
+
+              shown = LIMIT if len(findings) <= LIMIT else LIMIT - 1
+              for rule_id, file, start_line, severity in findings[:shown]:
+                  print(
+                      f"RuleID={escaped(rule_id)} File={escaped(file)} "
+                      f"StartLine={escaped(start_line)} Severity={escaped(severity)}"
+                  )
+              if len(findings) > shown:
+                  print(f"... {len(findings) - shown} more findings not shown")
+              return 0
+
+
+          if __name__ == "__main__":
+              raise SystemExit(main(sys.argv[1:]))
+          PY
+          if [ -s "$output" ]; then
+            echo "Semgrep findings (at most 100):"
+            cat "$output"
+            if [ -n "${GITHUB_STEP_SUMMARY-}" ]; then
+              {
+                echo "### Semgrep findings (at most 100)"
+                echo
+                echo '```text'
+                cat "$output"
+                echo '```'
+              } >> "$GITHUB_STEP_SUMMARY"
+            fi
+          fi
+
+      - name: Keep Semgrep findings
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: semgrep-findings
+          path: semgrep.sarif
+          if-no-files-found: ignore
+          retention-days: 5
+
       - name: Note the skipped Advanced Security features
         if: inputs.advanced-security == 'false'
         timeout-minutes: 1
