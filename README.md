@@ -850,7 +850,7 @@ Inputs of `dast.yml`:
 | `extra-allowed-endpoints` | empty | Appended to the list, for hosts the service or its install command reaches |
 | `timeout-minutes` | `20` | Timeout of the scan job (install, service start and scan); raise it for a `full` scan of a large service |
 | `runs-on` | `'"ubuntu-24.04"'` | Runner for every job, as a JSON string (`runs-on` takes a string, an array or an object), e.g. `'["self-hosted","linux"]'`; see the workflow header for harden-runner on self-hosted runners |
-| `allow-self-hosted-public` | `false` | Let a public repository run these jobs on a self-hosted runner; only for ephemeral one-job-per-VM runners isolated from secrets and the network. A self-hosted runner never runs a `pull_request_target` event or a fork pull request, whatever this says |
+| `allow-self-hosted` | `false` | On a runner that is not GitHub-hosted the jobs fail unless this is `true`, the caller's attestation that the runner is ephemeral, one job per VM, and isolated from secrets and the network. A self-hosted runner takes only push, schedule, workflow_dispatch, release and same-repository pull_request events, whatever this says |
 
 ### Tofu CI
 
@@ -2500,7 +2500,7 @@ Inputs of `security.yml`:
 | `semgrep-egress-policy` | `block` | harden-runner policy for the Semgrep job only |
 | `semgrep-allowed-endpoints` | the measured list | The Semgrep job's own allow-list: PyPI for the pip install, `semgrep.dev` for the rule registry, and GitHub for the SARIF upload. `extra-allowed-endpoints` is appended to it, for a private rule registry or a config fetched from another host |
 | `runs-on` | `'"ubuntu-latest"'` | Runner for every job, as a JSON string (`runs-on` takes a string, an array or an object), e.g. `'["self-hosted","linux"]'`; see the workflow header for harden-runner on self-hosted runners |
-| `allow-self-hosted-public` | `false` | Let a public repository run these jobs on a self-hosted runner; only for ephemeral one-job-per-VM runners isolated from secrets and the network. A self-hosted runner never runs a `pull_request_target` event or a fork pull request, whatever this says |
+| `allow-self-hosted` | `false` | On a runner that is not GitHub-hosted the jobs fail unless this is `true`, the caller's attestation that the runner is ephemeral, one job per VM, and isolated from secrets and the network. A self-hosted runner takes only push, schedule, workflow_dispatch, release and same-repository pull_request events, whatever this says |
 | `snyk` | `false` | Snyk Code and Snyk Open Source; needs `SNYK_TOKEN` in the Doppler config. Runs only on a trusted ref, never on a pull request |
 | `snyk-on` | `schedule` | When Snyk runs: `schedule` is the weekly cron and `workflow_dispatch` only; `push` adds every push to the default branch and every tag. Snyk's free plan meters tests per month across the whole account, one Code and one Open Source test per run, and ten repositories on `push` spent a month's Code tests in a day. Never on a pull request |
 | `snyk-install-command` | empty | For a repository with no lock (`pip-audit-requirements: ""`) that declares its dependencies in `pyproject.toml`: the install Snyk Open Source scans a freeze of, such as `pip install .`. Empty with no lock leaves Snyk's discovery, which reads no PEP 621 `pyproject.toml` and ends in a "nothing to scan" warning |

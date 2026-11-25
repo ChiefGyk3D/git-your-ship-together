@@ -48,11 +48,13 @@ in the hosted list of EX-0001, so every other runner gets `block`. On a self-hos
 a StepSecurity Enterprise subscription; without one it is a no-op, so `block` is not enforced there (verified against its
 README on 2026-11-25; the workflow header has the details).
 
-A step right after harden-runner in every job enforces the trust domain: on a self-hosted runner the job fails unless the
-repository is private or `allow-self-hosted-public: true` (only for ephemeral one-job-per-VM runners isolated from secrets and
-the network), and it always fails for a `pull_request_target` event or a fork pull request. Pull request code must not run on
-a persistent runner that a later trusted job could land on; secret-bearing jobs belong on GitHub-hosted runners or a distinct
-ephemeral trusted pool.
+A step right after harden-runner in every job enforces the trust domain: on any runner that is not GitHub-hosted the job fails unless
+`allow-self-hosted: true`, which is the caller's attestation that the runner is ephemeral, one job per VM, and isolated from
+secrets and the network. Even then, a self-hosted runner takes only `push`, `schedule`, `workflow_dispatch`, `release` and
+same-repository `pull_request` events; `merge_group`, `workflow_run`, `issue_comment`, `pull_request_target`, a fork's pull
+request, a pull request with an unnamed head repository and any unknown event fail. This keeps out code from outside the
+repository's own writers; it does not isolate the runner, so a persistent runner must not be shared with a job that holds OIDC
+or Doppler access. Secret-bearing jobs belong on GitHub-hosted runners or a distinct ephemeral trusted pool.
 
 ## A security-only repository
 

@@ -83,12 +83,17 @@
 # an object or a self-hosted runner always gets the `block` value.
 #
 # Trust domain: a job on a self-hosted runner fails in its step right after
-# harden-runner unless the repository is private or `allow-self-hosted-public`
-# is true, and always fails for a `pull_request_target` event or a fork's pull
-# request. Pull request code (DAST install and start commands, dependency
-# tooling) must not run on a persistent runner that a later trusted push or
-# schedule job, holding OIDC or Doppler access, could land on. Secret-bearing
-# jobs belong on GitHub-hosted runners or a distinct ephemeral trusted pool.
+# harden-runner unless `allow-self-hosted` is true, the caller's attestation
+# that the runner is ephemeral, one job per VM, and isolated from secrets and the
+# network. Even then a self-hosted runner takes only push,
+# schedule, workflow_dispatch, release and same-repository pull_request events
+# (an allowlist: merge_group, workflow_run, issue_comment, pull_request_target,
+# a fork's pull request, a pull request whose head repository is unnamed, and
+# any unknown event fail). That keeps out code from outside the repository's
+# own writers; it does not isolate the runner. Same-repository code still runs
+# there, so a persistent runner must not be shared with a job holding OIDC or
+# Doppler access. Secret-bearing jobs belong on GitHub-hosted runners or a
+# distinct ephemeral trusted pool.
 #
 # step-security/harden-runner on a self-hosted runner (read 2026-11-25, README
 # of the pinned v2.22.3 commit, section "Features and Pricing Tiers"). Verified:
@@ -212,8 +217,8 @@ on:
         description: 'Runner for every job, as a JSON string, because `runs-on` takes a string, an array or an object: `"ubuntu-24.04"`, `["self-hosted","linux"]` or `{"group":"my-group","labels":["linux"]}`. The default parses to the label this workflow always used. Invalid JSON fails the job at expression time. Jobs that follow `egress-policy-secretless` reach `audit` only on a GitHub-hosted runner and a label in the hosted list (EX-0001); see the workflow header for how harden-runner behaves on a self-hosted runner.'
         type: string
         default: '"ubuntu-24.04"'
-      allow-self-hosted-public:
-        description: 'Let a PUBLIC repository run these jobs on a self-hosted runner (default false: the job fails). Set it only for ephemeral one-job-per-VM runners isolated from secrets and the network, since a public repository runs pull request code that a persistent runner would keep. A self-hosted runner never runs a `pull_request_target` event or a fork pull request, whatever this says. Secret-bearing jobs belong on GitHub-hosted runners or a distinct ephemeral trusted pool.'
+      allow-self-hosted:
+        description: 'Let these jobs run on a self-hosted runner (default false: on any runner that is not GitHub-hosted the job fails). Setting it true is the caller''s attestation that the runner is ephemeral, one job per VM, and isolated from secrets and the network. Even then a self-hosted runner takes only push, schedule, workflow_dispatch, release and same-repository pull_request events. Secret-bearing jobs belong on GitHub-hosted runners or a distinct ephemeral trusted pool.'
         type: boolean
         default: false
 
@@ -272,18 +277,28 @@ jobs:
         env:
           RUNNER_ENV: ${{ runner.environment }}
           EVENT_NAME: ${{ github.event_name }}
-          REPO_PRIVATE: ${{ github.event.repository.private }}
-          HEAD_FORK: ${{ github.event.pull_request.head.repo.fork }}
-          ALLOW_PUBLIC: ${{ inputs.allow-self-hosted-public }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          THIS_REPO: ${{ github.repository }}
+          ALLOW_SELF_HOSTED: ${{ inputs.allow-self-hosted }}
         run: |
           set -u
           [ "${RUNNER_ENV,,}" = github-hosted ] && exit 0
-          if [ "${EVENT_NAME,,}" = pull_request_target ] || [ "${HEAD_FORK,,}" = true ]; then
-            echo "::error title=self-hosted runner::a self-hosted runner never runs a pull_request_target event or a fork's pull request"
-            exit 1
-          fi
-          if [ "${REPO_PRIVATE,,}" != true ] && [ "${ALLOW_PUBLIC,,}" != true ]; then
-            echo "::error title=self-hosted runner::a public repository may use a self-hosted runner only with allow-self-hosted-public: true, and only an ephemeral one-job-per-VM runner isolated from secrets and the network"
+          # Allowlist: only events whose code the repository's own writers control.
+          case "${EVENT_NAME,,}" in
+            push | schedule | workflow_dispatch | release) ;;
+            pull_request)
+              if [ -z "$HEAD_REPO" ] || [ -z "$THIS_REPO" ] || [ "${HEAD_REPO,,}" != "${THIS_REPO,,}" ]; then
+                echo "::error title=self-hosted runner::a self-hosted runner never runs a pull request from a fork or from a repository it cannot name"
+                exit 1
+              fi
+              ;;
+            *)
+              echo "::error title=self-hosted runner::a self-hosted runner runs only push, schedule, workflow_dispatch, release and same-repository pull_request events"
+              exit 1
+              ;;
+          esac
+          if [ "${ALLOW_SELF_HOSTED,,}" != true ]; then
+            echo "::error title=self-hosted runner::a self-hosted runner needs allow-self-hosted: true, which attests that it is ephemeral, one job per VM, and isolated from secrets and the network"
             exit 1
           fi
 
@@ -1337,18 +1352,28 @@ jobs:
         env:
           RUNNER_ENV: ${{ runner.environment }}
           EVENT_NAME: ${{ github.event_name }}
-          REPO_PRIVATE: ${{ github.event.repository.private }}
-          HEAD_FORK: ${{ github.event.pull_request.head.repo.fork }}
-          ALLOW_PUBLIC: ${{ inputs.allow-self-hosted-public }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          THIS_REPO: ${{ github.repository }}
+          ALLOW_SELF_HOSTED: ${{ inputs.allow-self-hosted }}
         run: |
           set -u
           [ "${RUNNER_ENV,,}" = github-hosted ] && exit 0
-          if [ "${EVENT_NAME,,}" = pull_request_target ] || [ "${HEAD_FORK,,}" = true ]; then
-            echo "::error title=self-hosted runner::a self-hosted runner never runs a pull_request_target event or a fork's pull request"
-            exit 1
-          fi
-          if [ "${REPO_PRIVATE,,}" != true ] && [ "${ALLOW_PUBLIC,,}" != true ]; then
-            echo "::error title=self-hosted runner::a public repository may use a self-hosted runner only with allow-self-hosted-public: true, and only an ephemeral one-job-per-VM runner isolated from secrets and the network"
+          # Allowlist: only events whose code the repository's own writers control.
+          case "${EVENT_NAME,,}" in
+            push | schedule | workflow_dispatch | release) ;;
+            pull_request)
+              if [ -z "$HEAD_REPO" ] || [ -z "$THIS_REPO" ] || [ "${HEAD_REPO,,}" != "${THIS_REPO,,}" ]; then
+                echo "::error title=self-hosted runner::a self-hosted runner never runs a pull request from a fork or from a repository it cannot name"
+                exit 1
+              fi
+              ;;
+            *)
+              echo "::error title=self-hosted runner::a self-hosted runner runs only push, schedule, workflow_dispatch, release and same-repository pull_request events"
+              exit 1
+              ;;
+          esac
+          if [ "${ALLOW_SELF_HOSTED,,}" != true ]; then
+            echo "::error title=self-hosted runner::a self-hosted runner needs allow-self-hosted: true, which attests that it is ephemeral, one job per VM, and isolated from secrets and the network"
             exit 1
           fi
 

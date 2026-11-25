@@ -69,6 +69,13 @@ def guard_problems(doc: dict) -> list[str]:
             for s in before
         ):
             bad.append(f"{name}: a step runs before the guard")
+        step = steps[names.index(GUARD)]
+        if "if" in step:
+            bad.append(f"{name}: the guard has an `if`")
+        if step.get("continue-on-error") not in (None, False):
+            bad.append(f"{name}: the guard has continue-on-error")
+        if job.get("continue-on-error") not in (None, False):
+            bad.append(f"{name}: the job has continue-on-error")
     return bad
 
 
@@ -91,6 +98,15 @@ def test_removing_the_guard_from_any_job_is_caught(name):
         mutated = copy.deepcopy(doc)
         mutated["jobs"][victim]["steps"] = [s for s in mutated["jobs"][victim]["steps"] if s.get("name") != GUARD]
         assert guard_problems(mutated) == [f"{victim}: guard missing"]
+    for victim in doc["jobs"]:
+        for key, value, word in (("if", False, "`if`"), ("continue-on-error", True, "continue-on-error")):
+            neutered = copy.deepcopy(doc)
+            step = next(s for s in neutered["jobs"][victim]["steps"] if s.get("name") == GUARD)
+            step[key] = value
+            assert any(word in x for x in guard_problems(neutered)), (victim, key)
+        neutered = copy.deepcopy(doc)
+        neutered["jobs"][victim]["continue-on-error"] = True
+        assert any("the job has" in x for x in guard_problems(neutered)), victim
     late = copy.deepcopy(doc)
     first = next(iter(late["jobs"].values()))["steps"]
     first.insert(0, {"name": "x", "run": "true"})
@@ -102,8 +118,14 @@ def test_the_guard_inputs_come_through_env_never_interpolated(name):
     for job in load(name)["jobs"].values():
         step = next(s for s in job["steps"] if s.get("name") == GUARD)
         assert "${{" not in step["run"]
-        assert set(step["env"]) == {"RUNNER_ENV", "EVENT_NAME", "REPO_PRIVATE", "HEAD_FORK", "ALLOW_PUBLIC"}
-    spec = load(name)[True]["workflow_call"]["inputs"]["allow-self-hosted-public"]
+        assert set(step["env"]) == {
+            "RUNNER_ENV",
+            "EVENT_NAME",
+            "HEAD_REPO",
+            "THIS_REPO",
+            "ALLOW_SELF_HOSTED",
+        }
+    spec = load(name)[True]["workflow_call"]["inputs"]["allow-self-hosted"]
     assert spec["type"] == "boolean" and spec["default"] is False
 
 
@@ -111,9 +133,9 @@ def run_guard(name: str, **env: str) -> subprocess.CompletedProcess:
     base = {
         "RUNNER_ENV": "github-hosted",
         "EVENT_NAME": "pull_request",
-        "REPO_PRIVATE": "false",
-        "HEAD_FORK": "false",
-        "ALLOW_PUBLIC": "false",
+        "HEAD_REPO": "o/r",
+        "THIS_REPO": "o/r",
+        "ALLOW_SELF_HOSTED": "false",
     }
     clean = {k: v for k, v in os.environ.items() if k not in base}
     return subprocess.run(
@@ -125,20 +147,36 @@ def run_guard(name: str, **env: str) -> subprocess.CompletedProcess:
     )
 
 
-# (environment, event, private, head fork, allow input) -> exit code
+# (environment, event, head repository, this repository, allow input) -> exit code
 CASES = [
     (dict(), 0),  # hosted public pull request: unchanged behavior
-    (dict(RUNNER_ENV="GitHub-Hosted", HEAD_FORK="true"), 0),  # hosted fork PR is fine
-    (dict(RUNNER_ENV="self-hosted"), 1),  # public, not allowed
-    (dict(RUNNER_ENV="self-hosted", REPO_PRIVATE=""), 1),  # unknown fails closed
-    (dict(RUNNER_ENV=""), 1),
-    (dict(RUNNER_ENV="self-hosted", REPO_PRIVATE="true"), 0),  # private repository
-    (dict(RUNNER_ENV="self-hosted", ALLOW_PUBLIC="true"), 0),  # explicit opt-in
-    (dict(RUNNER_ENV="self-hosted", ALLOW_PUBLIC="true", HEAD_FORK="true"), 1),  # fork never, even with the input
-    (dict(RUNNER_ENV="self-hosted", ALLOW_PUBLIC="true", REPO_PRIVATE="true", EVENT_NAME="pull_request_target"), 1),
-    (dict(RUNNER_ENV="self-hosted", REPO_PRIVATE="true", HEAD_FORK="TRUE"), 1),
-    (dict(RUNNER_ENV="self-hosted", ALLOW_PUBLIC="yes"), 1),  # only exactly true
+    (dict(RUNNER_ENV="GitHub-Hosted", HEAD_REPO="fork/r"), 0),  # hosted fork PR is fine
+    (dict(RUNNER_ENV="", ALLOW_SELF_HOSTED="false"), 1),  # an unknown environment is treated as self-hosted
+    (dict(RUNNER_ENV="self-hosted"), 1),  # not attested
+    (dict(RUNNER_ENV="self-hosted", ALLOW_SELF_HOSTED=""), 1),  # a missing value fails closed
+    (dict(RUNNER_ENV="self-hosted", ALLOW_SELF_HOSTED="TRUE"), 0),  # the comparison ignores case, like GitHub's
+    (dict(RUNNER_ENV="self-hosted", ALLOW_SELF_HOSTED="true"), 0),  # attested, same-repository PR allowed
+    (dict(RUNNER_ENV="self-hosted", ALLOW_SELF_HOSTED="true", HEAD_REPO="Fork/r"), 1),  # fork PR refused
+    (dict(RUNNER_ENV="self-hosted", ALLOW_SELF_HOSTED="true", HEAD_REPO=""), 1),  # deleted fork: empty head repo
+    (dict(RUNNER_ENV="self-hosted", ALLOW_SELF_HOSTED="true", THIS_REPO=""), 1),
+    (dict(RUNNER_ENV="self-hosted", ALLOW_SELF_HOSTED="true", HEAD_REPO="O/R"), 0),  # case-insensitive full name
+    (dict(RUNNER_ENV="self-hosted", ALLOW_SELF_HOSTED="yes"), 1),  # only exactly true
 ]
+for _event in ("push", "schedule", "workflow_dispatch", "release", "PUSH"):
+    CASES.append((dict(RUNNER_ENV="self-hosted", ALLOW_SELF_HOSTED="true", EVENT_NAME=_event, HEAD_REPO=""), 0))
+for _event in (
+    "merge_group",
+    "workflow_run",
+    "issue_comment",
+    "pull_request_target",
+    "pull_request_review",
+    "pull_request_review_comment",
+    "repository_dispatch",
+    "something_new",
+    "",
+):
+    # refused whatever the opt-in or the privacy of the repository says
+    CASES.append((dict(RUNNER_ENV="self-hosted", ALLOW_SELF_HOSTED="true", EVENT_NAME=_event), 1))
 
 
 @pytest.mark.parametrize("name", sorted(DEFAULTS))
@@ -149,5 +187,10 @@ def test_the_guard_decides_correctly(name, env, code):
 
 
 def test_the_guard_never_executes_hostile_values():
-    done = run_guard("security.yml", RUNNER_ENV="self-hosted", EVENT_NAME="$(touch /nonexistent/x)", HEAD_FORK="`id`")
+    done = run_guard("security.yml", RUNNER_ENV="self-hosted", EVENT_NAME="$(touch /nonexistent/x)", HEAD_REPO="`id`")
     assert done.returncode == 1 and "uid=" not in done.stdout + done.stderr
+
+
+def test_no_workflow_reads_the_repository_visibility():
+    for name in DEFAULTS:
+        assert "repository.private" not in (WORKFLOWS / name).read_text()
