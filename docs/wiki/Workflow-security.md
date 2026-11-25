@@ -34,6 +34,8 @@ A pull request's tree scan can only match a `file:rule:line` ignore entry, not t
 (`commit:file:rule:line`) gitleaks writes for a history finding; the job warns about such entries by line number, file and rule
 (never the commit or a value) and the README's "Migrating `.gitleaksignore` entries" says how to move them.
 
+When a gitleaks history or working-tree scan finds a secret shape, the job log and job summary list at most 100 findings using only the rule id, file, start line and entropy, plus the short commit id for history findings. Control characters are escaped; matched text, secret values and other content fields are not printed. The redacted JSON reports are also available for 5 days in the `gitleaks-findings` artifact, even when `gitleaks-upload-sarif: false` or `advanced-security: false` makes code scanning unavailable.
+
 ## A security-only repository
 
 `security.yml` has no gate job. A repository whose only GYST caller is this one adds a `gate` job that calls
