@@ -10,6 +10,7 @@ import copy
 import json
 import os
 import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -54,6 +55,24 @@ def test_the_header_documents_harden_runner_on_self_hosted_runners(name):
 GUARD = "Refuse an untrusted self-hosted runner"
 
 
+GUARD_ENV = {"RUNNER_ENV", "EVENT_NAME", "HEAD_REPO", "THIS_REPO", "ALLOW_SELF_HOSTED"}
+# Variables that change how bash behaves, or what it runs, when the script starts.
+SHELL_ENV = {
+    "BASH_ENV",
+    "ENV",
+    "SHELLOPTS",
+    "BASHOPTS",
+    "PS4",
+    "IFS",
+    "PATH",
+    "BASH_XTRACEFD",
+    "CDPATH",
+    "GLOBIGNORE",
+    "LD_PRELOAD",
+    "PROMPT_COMMAND",
+}
+
+
 def guard_problems(doc: dict) -> list[str]:
     """Jobs without the guard, or with it too late (anything but the policy check and harden-runner before it)."""
     bad = []
@@ -76,6 +95,17 @@ def guard_problems(doc: dict) -> list[str]:
             bad.append(f"{name}: the guard has continue-on-error")
         if job.get("continue-on-error") not in (None, False):
             bad.append(f"{name}: the job has continue-on-error")
+        if step.get("shell") != "bash":
+            bad.append(f"{name}: the guard shell is not exactly bash")
+        if "shell" in (job.get("defaults") or {}).get("run", {}) or "shell" in (doc.get("defaults") or {}).get(
+            "run", {}
+        ):
+            bad.append(f"{name}: a defaults.run.shell override")
+        if set(step.get("env") or {}) != GUARD_ENV:
+            bad.append(f"{name}: the guard env is not exactly its inputs")
+        for where, env in (("job", job.get("env")), ("workflow", doc.get("env"))):
+            if isinstance(env, dict) and set(env) & SHELL_ENV:
+                bad.append(f"{name}: the {where} env can change shell behavior")
     return bad
 
 
@@ -107,6 +137,32 @@ def test_removing_the_guard_from_any_job_is_caught(name):
         neutered = copy.deepcopy(doc)
         neutered["jobs"][victim]["continue-on-error"] = True
         assert any("the job has" in x for x in guard_problems(neutered)), victim
+    for victim in doc["jobs"]:
+        for shell in ("bash {0} || true", "sh", "bash -e {0}", None):
+            neutered = copy.deepcopy(doc)
+            step = next(s for s in neutered["jobs"][victim]["steps"] if s.get("name") == GUARD)
+            if shell is None:
+                del step["shell"]
+            else:
+                step["shell"] = shell
+            assert any("shell is not exactly" in x for x in guard_problems(neutered)), (victim, shell)
+        neutered = copy.deepcopy(doc)
+        neutered["jobs"][victim]["defaults"] = {"run": {"shell": "sh"}}
+        assert any("defaults.run.shell" in x for x in guard_problems(neutered)), victim
+        neutered = copy.deepcopy(doc)
+        neutered["defaults"] = {"run": {"shell": "sh"}}
+        assert any("defaults.run.shell" in x for x in guard_problems(neutered)), victim
+        for var in sorted(SHELL_ENV):
+            for where in ("step", "job", "workflow"):
+                neutered = copy.deepcopy(doc)
+                if where == "step":
+                    step = next(s for s in neutered["jobs"][victim]["steps"] if s.get("name") == GUARD)
+                    step["env"][var] = "/dev/null"
+                elif where == "job":
+                    neutered["jobs"][victim]["env"] = {var: "/dev/null"}
+                else:
+                    neutered["env"] = {var: "/dev/null"}
+                assert guard_problems(neutered), (victim, var, where)
     late = copy.deepcopy(doc)
     first = next(iter(late["jobs"].values()))["steps"]
     first.insert(0, {"name": "x", "run": "true"})
@@ -138,13 +194,19 @@ def run_guard(name: str, **env: str) -> subprocess.CompletedProcess:
         "ALLOW_SELF_HOSTED": "false",
     }
     clean = {k: v for k, v in os.environ.items() if k not in base}
-    return subprocess.run(
-        ["bash", "-eo", "pipefail", "-c", guard_script(load(name))],
-        capture_output=True,
-        text=True,
-        timeout=20,
-        env={**clean, **base, **env},
-    )
+    doc = load(name)
+    shell = next(s for s in next(iter(doc["jobs"].values()))["steps"] if s.get("name") == GUARD)["shell"]
+    assert shell == "bash"  # GitHub expands `bash` to: bash --noprofile --norc -eo pipefail {0}
+    with tempfile.TemporaryDirectory() as tmp:
+        script = Path(tmp) / "step.sh"
+        script.write_text(guard_script(doc))
+        return subprocess.run(
+            ["bash", "--noprofile", "--norc", "-eo", "pipefail", str(script)],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            env={**clean, **base, **env},
+        )
 
 
 # (environment, event, head repository, this repository, allow input) -> exit code
