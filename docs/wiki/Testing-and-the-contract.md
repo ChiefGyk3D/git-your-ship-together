@@ -48,6 +48,7 @@ lock.
 | `tests/test_python_support.py` | `.github/python-support.json` is the one list of supported CPython versions with their security-support end dates; the `python-ci.yml` default matrix, `scripts/new-repo.sh` and the README equal it; every `python-version` input default is listed; no listed version is past its end date, judged against an injected clock |
 | `tests/test_tool_locks.py` | No workflow runs an unhashed `pip install`; `security.yml`'s inline pip-audit and Semgrep locks equal `.github/requirements/*.txt`; the Snyk install refuses a lock without hashes |
 | `tests/test_advanced_security.py` | `advanced-security`: the validation job rejects every invalid value (run under bash), always runs, and is a loud failure, not a gate (no job has `needs`); conditions skip only on `false`; uploads gated, scans not; the summary note |
+| `tests/test_runs_on_input.py` | The `runs-on` input of `security.yml` and `dast.yml`: the default parses to today's label, every job reads it, and every job has the self-hosted trust-domain guard right after harden-runner (the guard script runs under bash against hostile and edge values; removing it from any job is caught) |
 | `tests/test_security_jobs.py` | Semgrep defaults and content-driven config; the gitleaks job as a pinned binary with its canary |
 | `tests/test_gitleaks_scope.py` | The `gitleaks-scope` input (default `pr-commits`): a decision table over event and input value, fail closed on any other value, no expression in `run:`, and (network) the pinned binary on a pull request range; the `gitleaks-hash-manifest-paths` input: the generated overlay, every unusable path refused, and (network) the pinned binary allowing a SHA-256 only for the listed file and the one rule, never another rule or path, layered on the base commit's config |
 | `tests/test_security_caller_gate.py` | The README security caller ends in a `gate` job over `ci-gate.yml` (`if: always()`, no token); a failed, cancelled or skipped scan is a red gate; the audit derives `gate / CI green` from a `ci-gate.yml` call and nothing from `security.yml` alone |
@@ -77,6 +78,11 @@ lock.
 | `tests/test_wiki.py` | **This wiki**: every reusable workflow has a page whose generated table follows its YAML; regenerating is a no-op and a stale tree is caught; links resolve and cited tests exist; and every workflow, script, composite action, audit check, test file and baseline file is mentioned somewhere |
 | `tests/test_wiki_release_facts.py` | **Version facts in the wiki are generated**: the release placeholders render from a temp repository's tags (newest by version, the peeled commit SHA, the date, the merges since), and no hand page types a 40-hex SHA or a `# vX.Y.Z` pin comment |
 | `tests/test_pr_python_versions.py` | The `pr-python-versions` input of python-ci: empty by default so the matrix is unchanged, a reduced matrix on pull requests only, bad values refused, and `ci-green` still failing on a failed leg |
+
+The pinned digests and the mutation tests (`tests/test_runs_on_input.py`) catch accidental and partial changes to the egress
+policy check and the self-hosted guard. A change that edits a guarded script and its pinned digest together is stopped only by
+review, which is what `.github/CODEOWNERS` is for. Branch protection does not yet require code-owner review, so until it does
+that review is a convention, not an enforced rule.
 
 (The exact set of files is whatever is in `tests/`; `test_wiki.py` is what catches a new one the wiki
 has not mentioned.)

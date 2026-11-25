@@ -133,11 +133,25 @@ def test_the_upload_job_holds_the_one_write_and_runs_none_of_the_callers_code():
     names = [str(s.get("uses", "")) for s in steps_of(upload)]
     assert not any(n.startswith("actions/checkout@") for n in names), "the write must not sit beside a checkout"
     shells = [s for s in steps_of(upload) if s.get("run")]
-    # The one shell is the egress policy check: a fixed script that reads no input but the policy and no caller file.
+    # The shells are the egress policy check (a fixed script that reads no input but the policy and no caller file)
+    # and the self-hosted guard, which runs before the one write, reads only env values and no caller file.
+    guard_name = "Refuse an untrusted self-hosted runner"
     assert [s["name"] for s in shells] in (
         [],
         ["Validate the egress policy inputs"],
-    ), "the upload job runs no shell but the policy check"
+        [guard_name],
+        ["Validate the egress policy inputs", guard_name],
+    ), "the upload job runs no shell but the policy check and the self-hosted guard"
+    for s in shells:
+        if s["name"] == guard_name:
+            others = [
+                x["run"]
+                for j in jobs(load(WORKFLOW)).values()
+                for x in steps_of(j)
+                if x.get("name") == guard_name and j is not upload
+            ]
+            assert others and all(s["run"] == o for o in others), "the guard is byte-identical to the other jobs'"
+            assert "${{" not in s["run"], "the guard script interpolates nothing"
     sarif = steps_of(upload)[-1]
     assert sarif["uses"].startswith("github/codeql-action/upload-sarif@")
     assert sarif["with"]["category"] == "${{ inputs.sarif-category }}", (

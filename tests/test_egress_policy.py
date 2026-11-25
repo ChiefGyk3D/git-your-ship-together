@@ -251,7 +251,11 @@ def evaluate(expression: str, values: dict[str, str], runner=None, environment="
         )
         return "H(R)"
 
-    body = re.sub(r"contains\(fromJSON\('(\[[^']*\])'\), (?:matrix|inputs)\.runner\)", hosted, body)
+    body = re.sub(
+        r"contains\(fromJSON\('(\[[^']*\])'\), (?:matrix\.runner|inputs\.runner|fromJSON\(inputs\.runs-on\))\)",
+        hosted,
+        body,
+    )
     body = re.sub(r"hashFiles\([^)]*\) != ''", "T", body)  # a manifest exists: the cache is wanted
     # parallel-ci.yml: a pin file was named (a needs output is not empty) and the matrix leg asks for the cache
     body = re.sub(r"needs\.[\w.-]+ != ''", "T", body)
@@ -317,13 +321,17 @@ def test_every_job_gets_the_policy_check_before_harden_runner(path, name, job, s
     # One effective policy, written twice: harden-runner and its telemetry switch.
     inner = policy[len("${{ ") : -len(" }}")]
     assert steps[0]["with"]["disable-telemetry"] == "${{ (" + inner + ") == 'block' }}"
-    dynamic = str(job.get("runs-on")) in ("${{ matrix.runner }}", "${{ inputs.runner }}")
+    dynamic = str(job.get("runs-on")) in (
+        "${{ matrix.runner }}",
+        "${{ inputs.runner }}",
+        "${{ fromJSON(inputs.runs-on) }}",
+    )
     secretless = (path.name, name) not in KEPT_BLOCK
     if secretless and not dynamic:
         assert job["runs-on"].lower() in {x.lower() for x in hosted_labels()}, f"{path.name}:{name}: not a hosted label"
     assert ("contains(fromJSON(" in policy) is (secretless and dynamic), f"{path.name}:{name}: runner check misplaced"
     runners = RUNNER_CASES if dynamic else [None]
-    used = sorted(set(re.findall(r"inputs\.([\w-]+)", policy)) - {"runner"})
+    used = sorted(set(re.findall(r"inputs\.([\w-]+)", policy)) - {"runner", "runs-on"})
     assert ("runner.environment == 'github-hosted'" in policy) is secretless, (
         f"{path.name}:{name}: runtime check misplaced"
     )
@@ -353,7 +361,7 @@ def test_the_effective_policy_follows_the_right_inputs():
         if path.name in ("ci.yml", "audit.yml", "main-verify.yml", "fleet-status.yml"):
             continue
         seen += 1
-        used = set(re.findall(r"inputs\.([\w-]+)", steps[0]["with"]["egress-policy"])) - {"runner"}
+        used = set(re.findall(r"inputs\.([\w-]+)", steps[0]["with"]["egress-policy"])) - {"runner", "runs-on"}
         if (path.name, name) in KEPT_BLOCK:
             assert used == {"egress-policy"}, f"{path.name}:{name}"
         elif (path.name, name) in {("python-ci.yml", "distro"), ("bash-ci.yml", "distro")}:
@@ -664,8 +672,12 @@ def test_no_cache_is_used_when_the_job_is_audit(path, name, job, steps):
     if path.name in ("ci.yml", "audit.yml", "main-verify.yml", "fleet-status.yml"):
         pytest.skip("hardcoded policy")
     assert uncached_problems(f"{path.name}:{name}", job, policy) == []
-    used = sorted(set(re.findall(r"inputs\.([\w-]+)", policy)) - {"runner"})
-    dynamic = str(job.get("runs-on")) in ("${{ matrix.runner }}", "${{ inputs.runner }}")
+    used = sorted(set(re.findall(r"inputs\.([\w-]+)", policy)) - {"runner", "runs-on"})
+    dynamic = str(job.get("runs-on")) in (
+        "${{ matrix.runner }}",
+        "${{ inputs.runner }}",
+        "${{ fromJSON(inputs.runs-on) }}",
+    )
     for label, kind, expr in cache_sites(job):
         if kind == "hash-verified tool cache":
             continue

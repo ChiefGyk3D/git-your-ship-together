@@ -107,7 +107,11 @@ def without_runner_check(expression: str) -> str:
     A job whose runner label a caller chooses also requires `contains(fromJSON([hosted labels]), <runner>)` for
     audit; tests/test_egress_policy.py pins that clause and its list, this reduces the rest to the plain form.
     """
-    plain = re.sub(r" && contains\(fromJSON\('[^']*'\), (?:matrix|inputs)\.runner\)", "", expression)
+    plain = re.sub(
+        r" && contains\(fromJSON\('[^']*'\), (?:matrix\.runner|inputs\.runner|fromJSON\(inputs\.runs-on\))\)",
+        "",
+        expression,
+    )
     plain = plain.replace(" && runner.environment == 'github-hosted'", "")
     plain = plain.replace("((", "(").replace("))", ")")
     return re.sub(r"\((inputs\.[\w-]+ == 'audit')\)", r"\1", plain)

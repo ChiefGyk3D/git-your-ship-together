@@ -1,0 +1,399 @@
+"""The `runs-on` input of security.yml and dast.yml (slice 1 of self-hosted runner support).
+
+`runs-on` takes a string, an array or an object, so the input is a JSON string and every job reads it with
+`fromJSON(inputs.runs-on)`. The default parses to the label the workflow used before the input existed, so a caller
+that does not pass it sees no change. A job that follows the secretless egress input may only reach `audit` on a
+GitHub-hosted label (EX-0001); the label check follows the input, see tests/test_egress_policy.py for the oracle.
+"""
+
+import copy
+import hashlib
+import json
+import os
+import subprocess
+import tempfile
+from pathlib import Path
+
+import pytest
+import yaml
+
+REPO = Path(__file__).resolve().parent.parent
+WORKFLOWS = REPO / ".github" / "workflows"
+# workflow file -> the label every job used before the input existed
+DEFAULTS = {"security.yml": "ubuntu-latest", "dast.yml": "ubuntu-24.04"}
+EXPECTED = "${{ fromJSON(inputs.runs-on) }}"
+
+
+def load(name: str) -> dict:
+    return yaml.safe_load((WORKFLOWS / name).read_text())
+
+
+def test_something_was_collected():
+    assert sum(len(load(n)["jobs"]) for n in DEFAULTS) >= 10
+
+
+@pytest.mark.parametrize("name,label", sorted(DEFAULTS.items()))
+def test_the_input_default_parses_to_todays_label(name, label):
+    doc = load(name)
+    spec = doc[True]["workflow_call"]["inputs"]["runs-on"]
+    assert spec["type"] == "string" and spec.get("required") is not True
+    assert json.loads(spec["default"]) == label
+    assert "JSON" in spec["description"]
+
+
+@pytest.mark.parametrize("name", sorted(DEFAULTS))
+def test_every_job_uses_the_input(name):
+    for job_name, job in load(name)["jobs"].items():
+        assert job["runs-on"] == EXPECTED, f"{name}:{job_name}"
+
+
+@pytest.mark.parametrize("name", sorted(DEFAULTS))
+def test_the_header_documents_harden_runner_on_self_hosted_runners(name):
+    head = (WORKFLOWS / name).read_text().split("\nname:")[0].lower()
+    assert "self-hosted" in head and "no-op" in head and "2026-11-25" in head and "verified" in head
+
+
+GUARD = "Refuse an untrusted self-hosted runner"
+
+
+GUARD_ENV = {
+    "RUNNER_ENV": "${{ runner.environment }}",
+    "EVENT_NAME": "${{ github.event_name }}",
+    "HEAD_REPO": "${{ github.event.pull_request.head.repo.full_name }}",
+    "THIS_REPO": "${{ github.repository }}",
+    "ALLOW_SELF_HOSTED": "${{ inputs.allow-self-hosted }}",
+}
+VALIDATOR = "Validate the egress policy inputs"
+HARDEN = "step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43"  # v2.22.3
+HARDEN_WITH = {"egress-policy", "allowed-endpoints", "disable-telemetry", "disable-sudo"}
+CHECK_ACTION = REPO / ".github" / "actions" / "egress-policy-check" / "action.yml"
+# Everything that can decide whether a job runs, and the environment it starts with, as the jobs have it today:
+# an allowlist, so a new `if`, `needs`, `strategy` or env key is a change this test makes the author look at.
+JOB_SCHEDULING = {
+    ("dast.yml", "scan"): {
+        "env": {
+            "ZAP_IMAGE": "ghcr.io/zaproxy/zaproxy:2.17.0@"
+            "sha256:781a2bdaea47324e7bab583e2263f21d257b0aee61ed51521a5be45f5f5081ef"
+        }
+    },
+    ("dast.yml", "upload"): {
+        "if": "always() && inputs.upload-sarif && needs.scan.outputs.sarif == 'true' && "
+        "(github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)",
+        "needs": "scan",
+    },
+    ("security.yml", "advanced-security-check"): {},
+    ("security.yml", "codeql"): {"if": "inputs.codeql && inputs.advanced-security != 'false'"},
+    ("security.yml", "dependency-audit"): {"if": "inputs.pip-audit-requirements != '' || inputs.audit-command != ''"},
+    ("security.yml", "dependency-review"): {
+        "if": "inputs.dependency-review && github.event_name == 'pull_request' && inputs.advanced-security != 'false'"
+    },
+    ("security.yml", "gitleaks"): {"if": "inputs.gitleaks"},
+    ("security.yml", "scorecard"): {
+        "if": "inputs.scorecard && github.event_name != 'pull_request' && "
+        "github.ref == format('refs/heads/{0}', github.event.repository.default_branch)"
+    },
+    ("security.yml", "semgrep"): {"if": "inputs.semgrep"},
+    ("security.yml", "snyk"): {
+        "if": "inputs.snyk && github.event_name != 'pull_request' && "
+        "(inputs.snyk-on == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')"
+    },
+}
+# Job keys that may exist at all; `strategy`, `container`, `services`, `defaults`, `continue-on-error` may not.
+JOB_KEYS = {"name", "runs-on", "timeout-minutes", "permissions", "steps", "outputs", "if", "needs", "env"}
+WORKFLOW_KEYS = {"name", True, "permissions", "jobs"}  # `on` parses to True
+
+
+# Immutable pins: SHA-256 of the exact script text. The equality with the composite action alone would pass a
+# backdoor written into the action and every inline copy together. Change a constant only deliberately, when the
+# validator or the guard legitimately changes, after reading the diff of the script itself.
+VALIDATOR_SHA256 = "3d1b25b484795c2d26e5e997ccc1f102e1273b68f13e7fad8590490ce0453c72"
+GUARD_SHA256 = "6c68af57a121dab2f3b9fda0f7baebb7407b1e429e26cd6bd255edda4654260c"
+PIN_HINT = "update the SHA-256 constant in tests/test_runs_on_input.py deliberately if this script legitimately changed"
+
+
+def sha(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def check_script() -> str:
+    return yaml.safe_load(CHECK_ACTION.read_text())["runs"]["steps"][0]["run"]
+
+
+def guard_problems(doc: dict, file: str | None = None, action_script: str | None = None) -> list[str]:
+    """Jobs without an operative guard. Allowlist based: the two steps before the guard are pinned exactly, the
+    guard's own keys and environment are pinned exactly, and nothing at step, job or workflow level may add an
+    environment variable, a shell default, a condition or a matrix that is not already there."""
+    bad = []
+    if set(doc) - WORKFLOW_KEYS:
+        bad.append(f"workflow: unexpected keys {sorted(map(str, set(doc) - WORKFLOW_KEYS))}")
+    for name, job in doc["jobs"].items():
+        steps = job["steps"]
+        names = [s.get("name") for s in steps]
+        if names.count(GUARD) != 1:
+            bad.append(f"{name}: guard missing")
+            continue
+        if set(job) - JOB_KEYS:
+            bad.append(f"{name}: unexpected job keys {sorted(set(job) - JOB_KEYS)}")
+        if job.get("continue-on-error") not in (None, False):
+            bad.append(f"{name}: the job has continue-on-error")
+        if file is not None:
+            expected = JOB_SCHEDULING[(file, name)]
+            for key in ("if", "needs", "env"):
+                if job.get(key) != expected.get(key):
+                    bad.append(f"{name}: the job {key} differs from the known value")
+        if names.index(GUARD) != 2:
+            bad.append(f"{name}: the guard is not the third step")
+            continue
+        first, second, step = steps[0], steps[1], steps[2]
+        if (
+            first.get("name") != VALIDATOR
+            or first.get("run") != (action_script if action_script is not None else check_script())
+            or set(first) != {"name", "timeout-minutes", "shell", "working-directory", "env", "run"}
+            or first["shell"] != "bash"
+            or any(
+                k != "POLICY_" + k[7:] or v != "${{ inputs." + k[7:].lower().replace("_", "-") + " }}"
+                for k, v in first["env"].items()
+            )
+        ):
+            bad.append(f"{name}: the policy validator is not the exact expected step")
+        if (
+            second.get("uses") != HARDEN
+            or set(second) != {"uses", "with"}
+            or not set(second["with"]) <= HARDEN_WITH
+            or not {"egress-policy", "allowed-endpoints", "disable-telemetry"} <= set(second["with"])
+        ):
+            bad.append(f"{name}: harden-runner is not the exact pinned step")
+        if sha(first.get("run", "")) != VALIDATOR_SHA256:
+            bad.append(f"{name}: the validator script differs from its pinned SHA-256; {PIN_HINT}")
+        if sha(step.get("run", "")) != GUARD_SHA256:
+            bad.append(f"{name}: the guard script differs from its pinned SHA-256; {PIN_HINT}")
+        if "if" in step:
+            bad.append(f"{name}: the guard has an `if`")
+        if step.get("continue-on-error") not in (None, False):
+            bad.append(f"{name}: the guard has continue-on-error")
+        if step.get("shell") != "bash":
+            bad.append(f"{name}: the guard shell is not exactly bash")
+        if set(step) != {"name", "timeout-minutes", "shell", "env", "run"}:
+            bad.append(f"{name}: the guard step has unexpected keys")
+        if "shell" in (job.get("defaults") or {}).get("run", {}) or "shell" in (doc.get("defaults") or {}).get(
+            "run", {}
+        ):
+            bad.append(f"{name}: a defaults.run.shell override")
+        if step.get("env") != GUARD_ENV:
+            bad.append(f"{name}: the guard env is not exactly its inputs")
+        if doc.get("env"):
+            bad.append(f"{name}: the workflow sets env")
+        if job.get("env") and (file is None or job.get("env") != JOB_SCHEDULING[(file, name)].get("env")):
+            bad.append(f"{name}: the job sets env that is not the known value")
+    return bad
+
+
+def guard_script(doc: dict) -> str:
+    return next(s for s in next(iter(doc["jobs"].values()))["steps"] if s.get("name") == GUARD)["run"]
+
+
+@pytest.mark.parametrize("name", sorted(DEFAULTS))
+def test_every_job_has_the_guard_early_and_identical(name):
+    doc = load(name)
+    assert guard_problems(doc, name) == []
+    scripts = {j["steps"][[s.get("name") for s in j["steps"]].index(GUARD)]["run"] for j in doc["jobs"].values()}
+    assert len(scripts) == 1
+
+
+def mutations(doc: dict, victim: str):
+    """(label, mutated copy) pairs, each of which stops the guard from refusing in `victim`."""
+
+    def fresh():
+        d = copy.deepcopy(doc)
+        return d, d["jobs"][victim], d["jobs"][victim]["steps"]
+
+    def guard(steps):
+        return next(s for s in steps if s.get("name") == GUARD)
+
+    d, job, steps = fresh()
+    job["steps"] = [s for s in steps if s.get("name") != GUARD]
+    yield "guard removed", d
+    for key, value in (("if", False), ("continue-on-error", True), ("shell", "bash {0} || true"), ("shell", "sh")):
+        d, job, steps = fresh()
+        guard(steps)[key] = value
+        yield f"guard {key}={value}", d
+    d, job, steps = fresh()
+    del guard(steps)["shell"]
+    yield "guard shell removed", d
+    d, job, steps = fresh()
+    job["continue-on-error"] = True
+    yield "job continue-on-error", d
+    for where in ("job", "workflow"):
+        d, job, steps = fresh()
+        (job if where == "job" else d)["defaults"] = {"run": {"shell": "sh"}}
+        yield f"{where} defaults.run.shell", d
+    # inherited environment: any key at all, an exported bash function included, on the step, job or workflow
+    for var in ("BASH_FUNC_exit%%", "BASH_ENV", "SHELLOPTS", "PS4", "SOMETHING_NEW"):
+        for where in ("step", "job", "workflow"):
+            d, job, steps = fresh()
+            value = "() { return 0; }" if var.startswith("BASH_FUNC_") else "/dev/null"
+            if where == "step":
+                guard(steps)["env"][var] = value
+            elif where == "job":
+                job["env"] = {**job.get("env", {}), var: value}
+            else:
+                d["env"] = {var: value}
+            yield f"{where} env {var}", d
+    # steps before the guard: the validator and harden-runner are pinned exactly
+    d, job, steps = fresh()
+    steps[0]["run"] = "echo attacker-controlled"
+    yield "validator replaced", d
+    d, job, steps = fresh()
+    steps[0]["run"] = steps[0]["run"] + "\ntrue"
+    yield "validator extended", d
+    d, job, steps = fresh()
+    steps[1]["uses"] = "attacker/harden-runner-backdoor@main"
+    yield "harden-runner replaced", d
+    d, job, steps = fresh()
+    steps[1]["uses"] = steps[1]["uses"].replace("@46b0", "@0000")
+    yield "harden-runner repinned", d
+    d, job, steps = fresh()
+    steps.insert(2, {"name": "extra", "run": "echo before the guard"})
+    yield "extra step before the guard", d
+    d, job, steps = fresh()
+    steps.insert(0, {"name": "extra", "run": "echo first"})
+    yield "extra first step", d
+    # scheduling: the job may not be skipped or emptied
+    d, job, steps = fresh()
+    job["if"] = False
+    yield "job if false", d
+    d, job, steps = fresh()
+    job["if"] = "${{ cancelled() }}"
+    yield "job if cancelled", d
+    d, job, steps = fresh()
+    job["strategy"] = {"matrix": {"include": []}}
+    yield "empty matrix", d
+    d, job, steps = fresh()
+    job["needs"] = "advanced-security-check"
+    yield "new needs", d
+    d, job, steps = fresh()
+    job["container"] = "alpine"
+    yield "container", d
+
+
+@pytest.mark.parametrize("name", sorted(DEFAULTS))
+def test_every_way_of_neutering_the_guard_is_caught_in_every_job(name):
+    doc = load(name)
+    assert guard_problems(doc, name) == []
+    seen = 0
+    for victim in doc["jobs"]:
+        for label, mutated in mutations(doc, victim):
+            seen += 1
+            assert guard_problems(mutated, name), (victim, label)
+    assert seen >= 35 * len(doc["jobs"])
+
+
+@pytest.mark.parametrize("name", sorted(DEFAULTS))
+def test_the_guard_inputs_come_through_env_never_interpolated(name):
+    for job in load(name)["jobs"].values():
+        step = next(s for s in job["steps"] if s.get("name") == GUARD)
+        assert "${{" not in step["run"]
+        assert set(step["env"]) == {
+            "RUNNER_ENV",
+            "EVENT_NAME",
+            "HEAD_REPO",
+            "THIS_REPO",
+            "ALLOW_SELF_HOSTED",
+        }
+    spec = load(name)[True]["workflow_call"]["inputs"]["allow-self-hosted"]
+    assert spec["type"] == "boolean" and spec["default"] is False
+
+
+def run_guard(name: str, **env: str) -> subprocess.CompletedProcess:
+    base = {
+        "RUNNER_ENV": "github-hosted",
+        "EVENT_NAME": "pull_request",
+        "HEAD_REPO": "o/r",
+        "THIS_REPO": "o/r",
+        "ALLOW_SELF_HOSTED": "false",
+    }
+    clean = {k: v for k, v in os.environ.items() if k not in base}
+    doc = load(name)
+    shell = next(s for s in next(iter(doc["jobs"].values()))["steps"] if s.get("name") == GUARD)["shell"]
+    assert shell == "bash"  # GitHub expands `bash` to: bash --noprofile --norc -eo pipefail {0}
+    with tempfile.TemporaryDirectory() as tmp:
+        script = Path(tmp) / "step.sh"
+        script.write_text(guard_script(doc))
+        return subprocess.run(
+            ["bash", "--noprofile", "--norc", "-eo", "pipefail", str(script)],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            env={**clean, **base, **env},
+        )
+
+
+# (environment, event, head repository, this repository, allow input) -> exit code
+CASES = [
+    (dict(), 0),  # hosted public pull request: unchanged behavior
+    (dict(RUNNER_ENV="GitHub-Hosted", HEAD_REPO="fork/r"), 0),  # hosted fork PR is fine
+    (dict(RUNNER_ENV="", ALLOW_SELF_HOSTED="false"), 1),  # an unknown environment is treated as self-hosted
+    (dict(RUNNER_ENV="self-hosted"), 1),  # not attested
+    (dict(RUNNER_ENV="self-hosted", ALLOW_SELF_HOSTED=""), 1),  # a missing value fails closed
+    (dict(RUNNER_ENV="self-hosted", ALLOW_SELF_HOSTED="TRUE"), 0),  # the comparison ignores case, like GitHub's
+    (dict(RUNNER_ENV="self-hosted", ALLOW_SELF_HOSTED="true"), 0),  # attested, same-repository PR allowed
+    (dict(RUNNER_ENV="self-hosted", ALLOW_SELF_HOSTED="true", HEAD_REPO="Fork/r"), 1),  # fork PR refused
+    (dict(RUNNER_ENV="self-hosted", ALLOW_SELF_HOSTED="true", HEAD_REPO=""), 1),  # deleted fork: empty head repo
+    (dict(RUNNER_ENV="self-hosted", ALLOW_SELF_HOSTED="true", THIS_REPO=""), 1),
+    (dict(RUNNER_ENV="self-hosted", ALLOW_SELF_HOSTED="true", HEAD_REPO="O/R"), 0),  # case-insensitive full name
+    (dict(RUNNER_ENV="self-hosted", ALLOW_SELF_HOSTED="yes"), 1),  # only exactly true
+]
+for _event in ("push", "schedule", "workflow_dispatch", "release", "PUSH"):
+    CASES.append((dict(RUNNER_ENV="self-hosted", ALLOW_SELF_HOSTED="true", EVENT_NAME=_event, HEAD_REPO=""), 0))
+for _event in (
+    "merge_group",
+    "workflow_run",
+    "issue_comment",
+    "pull_request_target",
+    "pull_request_review",
+    "pull_request_review_comment",
+    "repository_dispatch",
+    "something_new",
+    "",
+):
+    # refused whatever the opt-in or the privacy of the repository says
+    CASES.append((dict(RUNNER_ENV="self-hosted", ALLOW_SELF_HOSTED="true", EVENT_NAME=_event), 1))
+
+
+@pytest.mark.parametrize("name", sorted(DEFAULTS))
+@pytest.mark.parametrize("env,code", CASES)
+def test_the_guard_decides_correctly(name, env, code):
+    done = run_guard(name, **env)
+    assert done.returncode == code, done.stdout + done.stderr
+
+
+def test_the_guard_never_executes_hostile_values():
+    done = run_guard("security.yml", RUNNER_ENV="self-hosted", EVENT_NAME="$(touch /nonexistent/x)", HEAD_REPO="`id`")
+    assert done.returncode == 1 and "uid=" not in done.stdout + done.stderr
+
+
+def test_no_workflow_reads_the_repository_visibility():
+    for name in DEFAULTS:
+        assert "repository.private" not in (WORKFLOWS / name).read_text()
+
+
+@pytest.mark.parametrize("name", sorted(DEFAULTS))
+def test_a_synchronized_backdoor_in_the_action_and_every_copy_is_caught(name):
+    doc = load(name)
+    assert guard_problems(doc, name) == []
+    bad_action = "id >/dev/null\n" + check_script()
+    for victim in doc["jobs"]:
+        mutated = copy.deepcopy(doc)
+        for job in mutated["jobs"].values():
+            job["steps"][0]["run"] = bad_action
+        problems = guard_problems(mutated, name, action_script=bad_action)
+        assert any("pinned SHA-256" in x and "validator" in x for x in problems), victim
+        mutated = copy.deepcopy(doc)
+        guard = next(s for s in mutated["jobs"][victim]["steps"] if s.get("name") == GUARD)
+        guard["run"] = "id >/dev/null\n" + guard["run"]
+        assert any("guard script differs" in x for x in guard_problems(mutated, name)), victim
+
+
+def test_the_pins_match_the_files_today():
+    assert sha(check_script()) == VALIDATOR_SHA256, PIN_HINT
+    assert sha(guard_script(load("security.yml"))) == GUARD_SHA256, PIN_HINT

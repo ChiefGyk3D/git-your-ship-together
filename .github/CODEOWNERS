@@ -1,0 +1,11 @@
+# Review owners for the files that guard self-hosted runners and the egress policy. The test pins (SHA-256
+# digests of the validator and guard scripts) catch accidental and partial changes; a change that edits a script and
+# its pin together is stopped only by review, which is what this file asks for.
+/.github/actions/egress-policy-check/ @ChiefGyk3D
+/.github/workflows/security.yml @ChiefGyk3D
+/.github/workflows/dast.yml @ChiefGyk3D
+/tests/test_runs_on_input.py @ChiefGyk3D
+/tests/test_dast.py @ChiefGyk3D
+/tests/test_egress_policy.py @ChiefGyk3D
+/tests/test_advanced_security.py @ChiefGyk3D
+/.github/CODEOWNERS @ChiefGyk3D
