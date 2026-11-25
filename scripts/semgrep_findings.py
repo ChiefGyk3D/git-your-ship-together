@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Print only safe location fields from Semgrep SARIF reports."""
+"""Print and export only safe location fields from Semgrep SARIF reports."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 LIMIT = 100
+OUTPUT = Path("semgrep-findings.json")
 
 
 def escaped(value: object) -> str:
@@ -15,7 +16,7 @@ def escaped(value: object) -> str:
 
 
 def main(paths: list[str]) -> int:
-    findings: list[tuple[object, object, object, object]] = []
+    findings: list[dict[str, object]] = []
     for name in paths:
         path = Path(name)
         if not path.is_file():
@@ -34,19 +35,21 @@ def main(paths: list[str]) -> int:
                 artifact = physical.get("artifactLocation", {}) if isinstance(physical, dict) else {}
                 region = physical.get("region", {}) if isinstance(physical, dict) else {}
                 findings.append(
-                    (
-                        result.get("ruleId", ""),
-                        artifact.get("uri", "") if isinstance(artifact, dict) else "",
-                        region.get("startLine", "") if isinstance(region, dict) else "",
-                        result.get("level", ""),
-                    )
+                    {
+                        "rule_id": result.get("ruleId", ""),
+                        "file": artifact.get("uri", "") if isinstance(artifact, dict) else "",
+                        "start_line": region.get("startLine", "") if isinstance(region, dict) else "",
+                        "severity": result.get("level", ""),
+                    }
                 )
 
+    OUTPUT.write_text(json.dumps(findings[:LIMIT], ensure_ascii=True) + "\n", encoding="utf-8")
+
     shown = LIMIT if len(findings) <= LIMIT else LIMIT - 1
-    for rule_id, file, start_line, severity in findings[:shown]:
+    for finding in findings[:shown]:
         print(
-            f"RuleID={escaped(rule_id)} File={escaped(file)} "
-            f"StartLine={escaped(start_line)} Severity={escaped(severity)}"
+            f"RuleID={escaped(finding['rule_id'])} File={escaped(finding['file'])} "
+            f"StartLine={escaped(finding['start_line'])} Severity={escaped(finding['severity'])}"
         )
     if len(findings) > shown:
         print(f"... {len(findings) - shown} more findings not shown")

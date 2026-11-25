@@ -7,7 +7,7 @@ name what a caller sees after that.
 
 ### Fixed: failed Semgrep scans show safe finding locations (issue #435)
 
-A Semgrep finding now prints at most 100 compact lines to the job log and job summary after the scan. Each line contains only the rule id, file, start line and severity, with control characters escaped. Matched code, messages and snippets are never printed. The SARIF report is retained for 5 days in the `semgrep-findings` artifact, including when the scan fails or Advanced Security is unavailable. The scan still owns the job outcome, with no masked exit code.
+A Semgrep finding now prints at most 100 compact lines to the job log and job summary after the scan. Each line contains only the rule id, file, start line and severity, with control characters escaped. Matched code, messages and snippets are never printed. A redacted JSON report containing only those four fields for at most 100 findings is retained for 5 days in the `semgrep-findings` artifact, including when the scan fails or Advanced Security is unavailable. The raw SARIF stays local to the job except for the existing code scanning upload when enabled. The scan still owns the job outcome, with no masked exit code.
 
 ### Fixed: failed gitleaks scans show safe finding locations (issue #433)
 

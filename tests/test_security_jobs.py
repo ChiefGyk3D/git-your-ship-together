@@ -184,10 +184,11 @@ def test_failed_semgrep_scans_are_reported_without_masking_the_scan_and_retained
     assert artifact_step["uses"] == "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9"
     assert artifact_step["with"] == {
         "name": "semgrep-findings",
-        "path": "semgrep.sarif",
+        "path": "semgrep-findings.json",
         "if-no-files-found": "ignore",
         "retention-days": 5,
     }
+    assert "semgrep.sarif" not in artifact_step["with"]["path"]
 
     source = SEMGREP_SUMMARY.read_text()
     assert all(field in source for field in ("ruleId", "uri", "startLine", "level"))
@@ -203,14 +204,20 @@ def test_semgrep_findings_script_whitelists_sarif_fields_escapes_controls_and_ca
                 "ruleId": "python.lang.security\nforged heading" if number == 0 else "fixture.rule",
                 "level": "error\tcritical" if number == 0 else "warning",
                 "message": {"text": f"matched code: {fake_secret}"},
+                "fingerprints": {"secret": fake_secret},
                 "locations": [
                     {
                         "physicalLocation": {
                             "artifactLocation": {"uri": f"src/file-{number}.py"},
-                            "region": {"startLine": number + 1, "snippet": {"text": fake_secret}},
+                            "region": {
+                                "startLine": number + 1,
+                                "snippet": {"text": fake_secret},
+                                "contextRegion": {"snippet": {"text": fake_secret}},
+                            },
                         }
                     }
                 ],
+                "codeFlows": [{"message": {"text": fake_secret}}],
             }
         )
     report = tmp_path / "semgrep.sarif"
@@ -221,6 +228,7 @@ def test_semgrep_findings_script_whitelists_sarif_fields_escapes_controls_and_ca
         check=True,
         capture_output=True,
         text=True,
+        cwd=tmp_path,
     )
     lines = done.stdout.splitlines()
     assert lines[0] == (
@@ -230,6 +238,23 @@ def test_semgrep_findings_script_whitelists_sarif_fields_escapes_controls_and_ca
     assert lines[-1] == "... 6 more findings not shown"
     assert fake_secret not in done.stdout
     assert "matched code" not in done.stdout and "message" not in done.stdout and "snippet" not in done.stdout
+    outputs = [path for path in tmp_path.iterdir() if path != report]
+    assert outputs == [tmp_path / "semgrep-findings.json"]
+    assert all(fake_secret not in path.read_text() for path in outputs)
+    redacted = json.loads(outputs[0].read_text())
+    assert len(redacted) == 100
+    assert redacted[0] == {
+        "rule_id": "python.lang.security\nforged heading",
+        "file": "src/file-0.py",
+        "start_line": 1,
+        "severity": "error\tcritical",
+    }
+    assert set().union(*(finding.keys() for finding in redacted)) == {
+        "rule_id",
+        "file",
+        "start_line",
+        "severity",
+    }
 
 
 def test_there_is_no_gate_job_for_semgrep_to_join():
@@ -349,6 +374,7 @@ def test_failed_gitleaks_scans_are_reported_and_redacted_json_is_retained():
         "if-no-files-found": "ignore",
         "retention-days": 5,
     }
+    assert ".sarif" not in artifact_step["with"]["path"]
     source = GITLEAKS_SUMMARY.read_text()
     assert all(f"finding.get('{field}'" in source for field in ("RuleID", "File", "StartLine", "Entropy", "Commit"))
     assert "finding.get('Match'" not in source and "finding.get('Secret'" not in source
