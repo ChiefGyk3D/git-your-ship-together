@@ -7,6 +7,7 @@ GitHub-hosted label (EX-0001); the label check follows the input, see tests/test
 """
 
 import copy
+import hashlib
 import json
 import os
 import subprocess
@@ -102,11 +103,23 @@ JOB_KEYS = {"name", "runs-on", "timeout-minutes", "permissions", "steps", "outpu
 WORKFLOW_KEYS = {"name", True, "permissions", "jobs"}  # `on` parses to True
 
 
+# Immutable pins: SHA-256 of the exact script text. The equality with the composite action alone would pass a
+# backdoor written into the action and every inline copy together. Change a constant only deliberately, when the
+# validator or the guard legitimately changes, after reading the diff of the script itself.
+VALIDATOR_SHA256 = "3d1b25b484795c2d26e5e997ccc1f102e1273b68f13e7fad8590490ce0453c72"
+GUARD_SHA256 = "6c68af57a121dab2f3b9fda0f7baebb7407b1e429e26cd6bd255edda4654260c"
+PIN_HINT = "update the SHA-256 constant in tests/test_runs_on_input.py deliberately if this script legitimately changed"
+
+
+def sha(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
 def check_script() -> str:
     return yaml.safe_load(CHECK_ACTION.read_text())["runs"]["steps"][0]["run"]
 
 
-def guard_problems(doc: dict, file: str | None = None) -> list[str]:
+def guard_problems(doc: dict, file: str | None = None, action_script: str | None = None) -> list[str]:
     """Jobs without an operative guard. Allowlist based: the two steps before the guard are pinned exactly, the
     guard's own keys and environment are pinned exactly, and nothing at step, job or workflow level may add an
     environment variable, a shell default, a condition or a matrix that is not already there."""
@@ -134,7 +147,7 @@ def guard_problems(doc: dict, file: str | None = None) -> list[str]:
         first, second, step = steps[0], steps[1], steps[2]
         if (
             first.get("name") != VALIDATOR
-            or first.get("run") != check_script()
+            or first.get("run") != (action_script if action_script is not None else check_script())
             or set(first) != {"name", "timeout-minutes", "shell", "working-directory", "env", "run"}
             or first["shell"] != "bash"
             or any(
@@ -150,6 +163,10 @@ def guard_problems(doc: dict, file: str | None = None) -> list[str]:
             or not {"egress-policy", "allowed-endpoints", "disable-telemetry"} <= set(second["with"])
         ):
             bad.append(f"{name}: harden-runner is not the exact pinned step")
+        if sha(first.get("run", "")) != VALIDATOR_SHA256:
+            bad.append(f"{name}: the validator script differs from its pinned SHA-256; {PIN_HINT}")
+        if sha(step.get("run", "")) != GUARD_SHA256:
+            bad.append(f"{name}: the guard script differs from its pinned SHA-256; {PIN_HINT}")
         if "if" in step:
             bad.append(f"{name}: the guard has an `if`")
         if step.get("continue-on-error") not in (None, False):
@@ -358,3 +375,25 @@ def test_the_guard_never_executes_hostile_values():
 def test_no_workflow_reads_the_repository_visibility():
     for name in DEFAULTS:
         assert "repository.private" not in (WORKFLOWS / name).read_text()
+
+
+@pytest.mark.parametrize("name", sorted(DEFAULTS))
+def test_a_synchronized_backdoor_in_the_action_and_every_copy_is_caught(name):
+    doc = load(name)
+    assert guard_problems(doc, name) == []
+    bad_action = "id >/dev/null\n" + check_script()
+    for victim in doc["jobs"]:
+        mutated = copy.deepcopy(doc)
+        for job in mutated["jobs"].values():
+            job["steps"][0]["run"] = bad_action
+        problems = guard_problems(mutated, name, action_script=bad_action)
+        assert any("pinned SHA-256" in x and "validator" in x for x in problems), victim
+        mutated = copy.deepcopy(doc)
+        guard = next(s for s in mutated["jobs"][victim]["steps"] if s.get("name") == GUARD)
+        guard["run"] = "id >/dev/null\n" + guard["run"]
+        assert any("guard script differs" in x for x in guard_problems(mutated, name)), victim
+
+
+def test_the_pins_match_the_files_today():
+    assert sha(check_script()) == VALIDATOR_SHA256, PIN_HINT
+    assert sha(guard_script(load("security.yml"))) == GUARD_SHA256, PIN_HINT
