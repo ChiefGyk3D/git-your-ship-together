@@ -48,6 +48,12 @@ in the hosted list of EX-0001, so every other runner gets `block`. On a self-hos
 a StepSecurity Enterprise subscription; without one it is a no-op, so `block` is not enforced there (verified against its
 README on 2026-11-25; the workflow header has the details).
 
+A step right after harden-runner in every job enforces the trust domain: on a self-hosted runner the job fails unless the
+repository is private or `allow-self-hosted-public: true` (only for ephemeral one-job-per-VM runners isolated from secrets and
+the network), and it always fails for a `pull_request_target` event or a fork pull request. Pull request code must not run on
+a persistent runner that a later trusted job could land on; secret-bearing jobs belong on GitHub-hosted runners or a distinct
+ephemeral trusted pool.
+
 ## A security-only repository
 
 `security.yml` has no gate job. A repository whose only GYST caller is this one adds a `gate` job that calls

@@ -46,6 +46,14 @@
 # docs/security/exceptions/EX-0001-harden-runner-block-westus2.md, so an array,
 # an object or a self-hosted runner always gets the `block` value.
 #
+# Trust domain: a job on a self-hosted runner fails in its step right after
+# harden-runner unless the repository is private or `allow-self-hosted-public`
+# is true, and always fails for a `pull_request_target` event or a fork's pull
+# request. Pull request code (DAST install and start commands, dependency
+# tooling) must not run on a persistent runner that a later trusted push or
+# schedule job, holding OIDC or Doppler access, could land on. Secret-bearing
+# jobs belong on GitHub-hosted runners or a distinct ephemeral trusted pool.
+#
 # step-security/harden-runner on a self-hosted runner (read 2026-11-25, README
 # of the pinned v2.22.3 commit, section "Features and Pricing Tiers"). Verified:
 # it needs a StepSecurity Enterprise subscription there, even for a public
@@ -236,6 +244,10 @@ on:
         description: 'Runner for every job, as a JSON string, because `runs-on` takes a string, an array or an object: `"ubuntu-latest"`, `["self-hosted","linux"]` or `{"group":"my-group","labels":["linux"]}`. The default parses to the label this workflow always used. Invalid JSON fails the job at expression time. Jobs that follow `egress-policy-secretless` reach `audit` only on a GitHub-hosted runner and a label in the hosted list (EX-0001); see the workflow header for how harden-runner behaves on a self-hosted runner.'
         type: string
         default: '"ubuntu-latest"'
+      allow-self-hosted-public:
+        description: 'Let a PUBLIC repository run these jobs on a self-hosted runner (default false: the job fails). Set it only for ephemeral one-job-per-VM runners isolated from secrets and the network, since a public repository runs pull request code that a persistent runner would keep. A self-hosted runner never runs a `pull_request_target` event or a fork pull request, whatever this says. Secret-bearing jobs belong on GitHub-hosted runners or a distinct ephemeral trusted pool.'
+        type: boolean
+        default: false
     secrets:
       DOPPLER_TOKEN:
         description: Doppler Service Token fallback when OIDC is not configured.
@@ -282,6 +294,27 @@ jobs:
           # The agent may only stop reporting to StepSecurity in block mode.
           disable-telemetry: ${{ ((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted' && contains(fromJSON('["ubuntu-latest","ubuntu-22.04","ubuntu-24.04","ubuntu-26.04","ubuntu-22.04-arm","ubuntu-24.04-arm","ubuntu-26.04-arm","ubuntu-slim","windows-latest","windows-2022","windows-2025","windows-2025-vs2026","windows-11-arm","windows-11-vs2026-arm","macos-latest","macos-14","macos-15","macos-15-intel","macos-26","macos-26-intel"]'), fromJSON(inputs.runs-on))) && 'audit' || 'block') == 'block' }}
 
+
+      - name: Refuse an untrusted self-hosted runner
+        timeout-minutes: 1
+        shell: bash
+        env:
+          RUNNER_ENV: ${{ runner.environment }}
+          EVENT_NAME: ${{ github.event_name }}
+          REPO_PRIVATE: ${{ github.event.repository.private }}
+          HEAD_FORK: ${{ github.event.pull_request.head.repo.fork }}
+          ALLOW_PUBLIC: ${{ inputs.allow-self-hosted-public }}
+        run: |
+          set -u
+          [ "${RUNNER_ENV,,}" = github-hosted ] && exit 0
+          if [ "${EVENT_NAME,,}" = pull_request_target ] || [ "${HEAD_FORK,,}" = true ]; then
+            echo "::error title=self-hosted runner::a self-hosted runner never runs a pull_request_target event or a fork's pull request"
+            exit 1
+          fi
+          if [ "${REPO_PRIVATE,,}" != true ] && [ "${ALLOW_PUBLIC,,}" != true ]; then
+            echo "::error title=self-hosted runner::a public repository may use a self-hosted runner only with allow-self-hosted-public: true, and only an ephemeral one-job-per-VM runner isolated from secrets and the network"
+            exit 1
+          fi
 
       - name: Validate the advanced-security input
         timeout-minutes: 1
@@ -341,6 +374,27 @@ jobs:
           disable-telemetry: ${{ ((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted' && contains(fromJSON('["ubuntu-latest","ubuntu-22.04","ubuntu-24.04","ubuntu-26.04","ubuntu-22.04-arm","ubuntu-24.04-arm","ubuntu-26.04-arm","ubuntu-slim","windows-latest","windows-2022","windows-2025","windows-2025-vs2026","windows-11-arm","windows-11-vs2026-arm","macos-latest","macos-14","macos-15","macos-15-intel","macos-26","macos-26-intel"]'), fromJSON(inputs.runs-on))) && 'audit' || 'block') == 'block' }}
 
 
+      - name: Refuse an untrusted self-hosted runner
+        timeout-minutes: 1
+        shell: bash
+        env:
+          RUNNER_ENV: ${{ runner.environment }}
+          EVENT_NAME: ${{ github.event_name }}
+          REPO_PRIVATE: ${{ github.event.repository.private }}
+          HEAD_FORK: ${{ github.event.pull_request.head.repo.fork }}
+          ALLOW_PUBLIC: ${{ inputs.allow-self-hosted-public }}
+        run: |
+          set -u
+          [ "${RUNNER_ENV,,}" = github-hosted ] && exit 0
+          if [ "${EVENT_NAME,,}" = pull_request_target ] || [ "${HEAD_FORK,,}" = true ]; then
+            echo "::error title=self-hosted runner::a self-hosted runner never runs a pull_request_target event or a fork's pull request"
+            exit 1
+          fi
+          if [ "${REPO_PRIVATE,,}" != true ] && [ "${ALLOW_PUBLIC,,}" != true ]; then
+            echo "::error title=self-hosted runner::a public repository may use a self-hosted runner only with allow-self-hosted-public: true, and only an ephemeral one-job-per-VM runner isolated from secrets and the network"
+            exit 1
+          fi
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -393,6 +447,27 @@ jobs:
           # The agent may only stop reporting to StepSecurity in block mode.
           disable-telemetry: ${{ ((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted' && contains(fromJSON('["ubuntu-latest","ubuntu-22.04","ubuntu-24.04","ubuntu-26.04","ubuntu-22.04-arm","ubuntu-24.04-arm","ubuntu-26.04-arm","ubuntu-slim","windows-latest","windows-2022","windows-2025","windows-2025-vs2026","windows-11-arm","windows-11-vs2026-arm","macos-latest","macos-14","macos-15","macos-15-intel","macos-26","macos-26-intel"]'), fromJSON(inputs.runs-on))) && 'audit' || 'block') == 'block' }}
 
+
+      - name: Refuse an untrusted self-hosted runner
+        timeout-minutes: 1
+        shell: bash
+        env:
+          RUNNER_ENV: ${{ runner.environment }}
+          EVENT_NAME: ${{ github.event_name }}
+          REPO_PRIVATE: ${{ github.event.repository.private }}
+          HEAD_FORK: ${{ github.event.pull_request.head.repo.fork }}
+          ALLOW_PUBLIC: ${{ inputs.allow-self-hosted-public }}
+        run: |
+          set -u
+          [ "${RUNNER_ENV,,}" = github-hosted ] && exit 0
+          if [ "${EVENT_NAME,,}" = pull_request_target ] || [ "${HEAD_FORK,,}" = true ]; then
+            echo "::error title=self-hosted runner::a self-hosted runner never runs a pull_request_target event or a fork's pull request"
+            exit 1
+          fi
+          if [ "${REPO_PRIVATE,,}" != true ] && [ "${ALLOW_PUBLIC,,}" != true ]; then
+            echo "::error title=self-hosted runner::a public repository may use a self-hosted runner only with allow-self-hosted-public: true, and only an ephemeral one-job-per-VM runner isolated from secrets and the network"
+            exit 1
+          fi
 
       - name: Validate the gitleaks-scope input
         timeout-minutes: 1
@@ -968,6 +1043,27 @@ jobs:
           disable-telemetry: ${{ ((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted' && contains(fromJSON('["ubuntu-latest","ubuntu-22.04","ubuntu-24.04","ubuntu-26.04","ubuntu-22.04-arm","ubuntu-24.04-arm","ubuntu-26.04-arm","ubuntu-slim","windows-latest","windows-2022","windows-2025","windows-2025-vs2026","windows-11-arm","windows-11-vs2026-arm","macos-latest","macos-14","macos-15","macos-15-intel","macos-26","macos-26-intel"]'), fromJSON(inputs.runs-on))) && 'audit' || 'block') == 'block' }}
 
 
+      - name: Refuse an untrusted self-hosted runner
+        timeout-minutes: 1
+        shell: bash
+        env:
+          RUNNER_ENV: ${{ runner.environment }}
+          EVENT_NAME: ${{ github.event_name }}
+          REPO_PRIVATE: ${{ github.event.repository.private }}
+          HEAD_FORK: ${{ github.event.pull_request.head.repo.fork }}
+          ALLOW_PUBLIC: ${{ inputs.allow-self-hosted-public }}
+        run: |
+          set -u
+          [ "${RUNNER_ENV,,}" = github-hosted ] && exit 0
+          if [ "${EVENT_NAME,,}" = pull_request_target ] || [ "${HEAD_FORK,,}" = true ]; then
+            echo "::error title=self-hosted runner::a self-hosted runner never runs a pull_request_target event or a fork's pull request"
+            exit 1
+          fi
+          if [ "${REPO_PRIVATE,,}" != true ] && [ "${ALLOW_PUBLIC,,}" != true ]; then
+            echo "::error title=self-hosted runner::a public repository may use a self-hosted runner only with allow-self-hosted-public: true, and only an ephemeral one-job-per-VM runner isolated from secrets and the network"
+            exit 1
+          fi
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -1147,6 +1243,27 @@ jobs:
           disable-telemetry: ${{ ((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted' && contains(fromJSON('["ubuntu-latest","ubuntu-22.04","ubuntu-24.04","ubuntu-26.04","ubuntu-22.04-arm","ubuntu-24.04-arm","ubuntu-26.04-arm","ubuntu-slim","windows-latest","windows-2022","windows-2025","windows-2025-vs2026","windows-11-arm","windows-11-vs2026-arm","macos-latest","macos-14","macos-15","macos-15-intel","macos-26","macos-26-intel"]'), fromJSON(inputs.runs-on))) && 'audit' || 'block') == 'block' }}
 
 
+      - name: Refuse an untrusted self-hosted runner
+        timeout-minutes: 1
+        shell: bash
+        env:
+          RUNNER_ENV: ${{ runner.environment }}
+          EVENT_NAME: ${{ github.event_name }}
+          REPO_PRIVATE: ${{ github.event.repository.private }}
+          HEAD_FORK: ${{ github.event.pull_request.head.repo.fork }}
+          ALLOW_PUBLIC: ${{ inputs.allow-self-hosted-public }}
+        run: |
+          set -u
+          [ "${RUNNER_ENV,,}" = github-hosted ] && exit 0
+          if [ "${EVENT_NAME,,}" = pull_request_target ] || [ "${HEAD_FORK,,}" = true ]; then
+            echo "::error title=self-hosted runner::a self-hosted runner never runs a pull_request_target event or a fork's pull request"
+            exit 1
+          fi
+          if [ "${REPO_PRIVATE,,}" != true ] && [ "${ALLOW_PUBLIC,,}" != true ]; then
+            echo "::error title=self-hosted runner::a public repository may use a self-hosted runner only with allow-self-hosted-public: true, and only an ephemeral one-job-per-VM runner isolated from secrets and the network"
+            exit 1
+          fi
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -1201,6 +1318,27 @@ jobs:
           # The agent may only stop reporting to StepSecurity in block mode.
           disable-telemetry: ${{ (((inputs.egress-policy-secretless == 'audit' || inputs.semgrep-egress-policy == 'audit') && runner.environment == 'github-hosted' && contains(fromJSON('["ubuntu-latest","ubuntu-22.04","ubuntu-24.04","ubuntu-26.04","ubuntu-22.04-arm","ubuntu-24.04-arm","ubuntu-26.04-arm","ubuntu-slim","windows-latest","windows-2022","windows-2025","windows-2025-vs2026","windows-11-arm","windows-11-vs2026-arm","macos-latest","macos-14","macos-15","macos-15-intel","macos-26","macos-26-intel"]'), fromJSON(inputs.runs-on))) && 'audit' || 'block') == 'block' }}
 
+
+      - name: Refuse an untrusted self-hosted runner
+        timeout-minutes: 1
+        shell: bash
+        env:
+          RUNNER_ENV: ${{ runner.environment }}
+          EVENT_NAME: ${{ github.event_name }}
+          REPO_PRIVATE: ${{ github.event.repository.private }}
+          HEAD_FORK: ${{ github.event.pull_request.head.repo.fork }}
+          ALLOW_PUBLIC: ${{ inputs.allow-self-hosted-public }}
+        run: |
+          set -u
+          [ "${RUNNER_ENV,,}" = github-hosted ] && exit 0
+          if [ "${EVENT_NAME,,}" = pull_request_target ] || [ "${HEAD_FORK,,}" = true ]; then
+            echo "::error title=self-hosted runner::a self-hosted runner never runs a pull_request_target event or a fork's pull request"
+            exit 1
+          fi
+          if [ "${REPO_PRIVATE,,}" != true ] && [ "${ALLOW_PUBLIC,,}" != true ]; then
+            echo "::error title=self-hosted runner::a public repository may use a self-hosted runner only with allow-self-hosted-public: true, and only an ephemeral one-job-per-VM runner isolated from secrets and the network"
+            exit 1
+          fi
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1611,6 +1749,27 @@ jobs:
           disable-telemetry: ${{ (inputs.egress-policy == 'audit' && 'audit' || 'block') == 'block' }}
 
 
+      - name: Refuse an untrusted self-hosted runner
+        timeout-minutes: 1
+        shell: bash
+        env:
+          RUNNER_ENV: ${{ runner.environment }}
+          EVENT_NAME: ${{ github.event_name }}
+          REPO_PRIVATE: ${{ github.event.repository.private }}
+          HEAD_FORK: ${{ github.event.pull_request.head.repo.fork }}
+          ALLOW_PUBLIC: ${{ inputs.allow-self-hosted-public }}
+        run: |
+          set -u
+          [ "${RUNNER_ENV,,}" = github-hosted ] && exit 0
+          if [ "${EVENT_NAME,,}" = pull_request_target ] || [ "${HEAD_FORK,,}" = true ]; then
+            echo "::error title=self-hosted runner::a self-hosted runner never runs a pull_request_target event or a fork's pull request"
+            exit 1
+          fi
+          if [ "${REPO_PRIVATE,,}" != true ] && [ "${ALLOW_PUBLIC,,}" != true ]; then
+            echo "::error title=self-hosted runner::a public repository may use a self-hosted runner only with allow-self-hosted-public: true, and only an ephemeral one-job-per-VM runner isolated from secrets and the network"
+            exit 1
+          fi
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -1920,6 +2079,27 @@ jobs:
           # The agent may only stop reporting to StepSecurity in block mode.
           disable-telemetry: ${{ (inputs.egress-policy == 'audit' && 'audit' || 'block') == 'block' }}
 
+
+      - name: Refuse an untrusted self-hosted runner
+        timeout-minutes: 1
+        shell: bash
+        env:
+          RUNNER_ENV: ${{ runner.environment }}
+          EVENT_NAME: ${{ github.event_name }}
+          REPO_PRIVATE: ${{ github.event.repository.private }}
+          HEAD_FORK: ${{ github.event.pull_request.head.repo.fork }}
+          ALLOW_PUBLIC: ${{ inputs.allow-self-hosted-public }}
+        run: |
+          set -u
+          [ "${RUNNER_ENV,,}" = github-hosted ] && exit 0
+          if [ "${EVENT_NAME,,}" = pull_request_target ] || [ "${HEAD_FORK,,}" = true ]; then
+            echo "::error title=self-hosted runner::a self-hosted runner never runs a pull_request_target event or a fork's pull request"
+            exit 1
+          fi
+          if [ "${REPO_PRIVATE,,}" != true ] && [ "${ALLOW_PUBLIC,,}" != true ]; then
+            echo "::error title=self-hosted runner::a public repository may use a self-hosted runner only with allow-self-hosted-public: true, and only an ephemeral one-job-per-VM runner isolated from secrets and the network"
+            exit 1
+          fi
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
