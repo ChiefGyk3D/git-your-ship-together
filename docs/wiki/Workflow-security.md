@@ -38,6 +38,16 @@ When a gitleaks history or working-tree scan finds a secret shape, the separate 
 
 When Semgrep finds an issue, a separate post-scan step runs `scripts/semgrep_findings.py`, which lists at most 100 findings in the job log and job summary using only the rule id, file, start line and severity and writes the safe retained JSON. Control characters are escaped, and matched code, messages and snippets are never printed. A redacted JSON report containing only those four fields for at most 100 findings is retained for 5 days in the `semgrep-findings` artifact, even when the scan fails or `advanced-security: false` makes code scanning unavailable. The raw `semgrep.sarif` stays local to the job except for the existing code scanning upload when enabled. These reporting steps do not mask or replace the scan's exit code.
 
+## Choosing the runner
+
+The `runs-on` input is a JSON string that every job reads through `fromJSON(inputs.runs-on)`, because `runs-on` takes a
+string, an array or an object: `'"ubuntu-latest"'` (the default), `'["self-hosted","linux"]'` or
+`'{"group":"my-group","labels":["linux"]}'`. Nothing can validate it before `runs-on` resolves, so invalid JSON fails the job
+at expression time. A job that follows `egress-policy-secretless` reaches `audit` only on a GitHub-hosted runner with a label
+in the hosted list of EX-0001, so every other runner gets `block`. On a self-hosted runner `step-security/harden-runner` needs
+a StepSecurity Enterprise subscription; without one it is a no-op, so `block` is not enforced there (verified against its
+README on 2026-11-25; the workflow header has the details).
+
 ## A security-only repository
 
 `security.yml` has no gate job. A repository whose only GYST caller is this one adds a `gate` job that calls

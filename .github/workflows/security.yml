@@ -33,6 +33,31 @@
 # gitleaks runs as the pinned MIT binary, so it needs no licence under any
 # account and no secret. A `.gitleaks.toml` at the caller's root is picked up
 # automatically for allowlisting documented placeholders.
+#
+# Runner (`runs-on`): every job reads the `runs-on` input, a JSON string, through
+# `fromJSON(inputs.runs-on)`, because `runs-on` itself takes a string, an array
+# or an object. Pass `'"ubuntu-latest"'`, `'["self-hosted","linux"]'` or
+# `'{"group":"my-group","labels":["linux"]}'`. The default is `'"ubuntu-latest"'`, the
+# label this workflow used before the input existed. A value that is not valid
+# JSON fails the first job at expression time, before any step runs, since
+# nothing can validate an input before `runs-on` resolves; an unknown label
+# leaves the job queued. A job that follows `egress-policy-secretless` reaches
+# `audit` only on a GitHub-hosted runner and a label in the hosted list of
+# docs/security/exceptions/EX-0001-harden-runner-block-westus2.md, so an array,
+# an object or a self-hosted runner always gets the `block` value.
+#
+# step-security/harden-runner on a self-hosted runner (read 2026-11-25, README
+# of the pinned v2.22.3 commit, section "Features and Pricing Tiers"). Verified:
+# it needs a StepSecurity Enterprise subscription there, even for a public
+# repository, and without one the action is a no-op: the step succeeds, nothing
+# is monitored and nothing is enforced. Verified: with a subscription the agent
+# is installed on the runner itself and the workflow needs no change. Inferred,
+# not tested here: the `egress-policy`, `allowed-endpoints` and
+# `disable-telemetry` inputs still validate and pass through unchanged, so every
+# egress-policy input keeps working as before, but a `block` value is a no-op
+# on a self-hosted runner without that subscription, so do not rely on it
+# there.
+#
 
 name: Security (reusable)
 
@@ -207,6 +232,10 @@ on:
         description: Per-job timeout.
         type: number
         default: 15
+      runs-on:
+        description: 'Runner for every job, as a JSON string, because `runs-on` takes a string, an array or an object: `"ubuntu-latest"`, `["self-hosted","linux"]` or `{"group":"my-group","labels":["linux"]}`. The default parses to the label this workflow always used. Invalid JSON fails the job at expression time. Jobs that follow `egress-policy-secretless` reach `audit` only on a GitHub-hosted runner and a label in the hosted list (EX-0001); see the workflow header for how harden-runner behaves on a self-hosted runner.'
+        type: string
+        default: '"ubuntu-latest"'
     secrets:
       DOPPLER_TOKEN:
         description: Doppler Service Token fallback when OIDC is not configured.
@@ -218,7 +247,7 @@ permissions:
 jobs:
   advanced-security-check:
     name: Advanced Security setting
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(inputs.runs-on) }}
     # normal: ~1 min (p50 0.3, p95 0.9; last ~30 green runs)
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions: {}  # no repository operation; the job only checks an input
@@ -248,10 +277,10 @@ jobs:
 
       - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
         with:
-          egress-policy: ${{ (inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block' }}
+          egress-policy: ${{ (inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted' && contains(fromJSON('["ubuntu-latest","ubuntu-22.04","ubuntu-24.04","ubuntu-26.04","ubuntu-22.04-arm","ubuntu-24.04-arm","ubuntu-26.04-arm","ubuntu-slim","windows-latest","windows-2022","windows-2025","windows-2025-vs2026","windows-11-arm","windows-11-vs2026-arm","macos-latest","macos-14","macos-15","macos-15-intel","macos-26","macos-26-intel"]'), fromJSON(inputs.runs-on))) && 'audit' || 'block' }}
           allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
           # The agent may only stop reporting to StepSecurity in block mode.
-          disable-telemetry: ${{ ((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block') == 'block' }}
+          disable-telemetry: ${{ ((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted' && contains(fromJSON('["ubuntu-latest","ubuntu-22.04","ubuntu-24.04","ubuntu-26.04","ubuntu-22.04-arm","ubuntu-24.04-arm","ubuntu-26.04-arm","ubuntu-slim","windows-latest","windows-2022","windows-2025","windows-2025-vs2026","windows-11-arm","windows-11-vs2026-arm","macos-latest","macos-14","macos-15","macos-15-intel","macos-26","macos-26-intel"]'), fromJSON(inputs.runs-on))) && 'audit' || 'block') == 'block' }}
 
 
       - name: Validate the advanced-security input
@@ -274,7 +303,7 @@ jobs:
   codeql:
     name: CodeQL
     if: inputs.codeql && inputs.advanced-security != 'false'
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(inputs.runs-on) }}
     # normal: ~1 min (p50 1.2, p95 2.1; last ~30 green runs)
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
@@ -306,10 +335,10 @@ jobs:
 
       - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
         with:
-          egress-policy: ${{ (inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block' }}
+          egress-policy: ${{ (inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted' && contains(fromJSON('["ubuntu-latest","ubuntu-22.04","ubuntu-24.04","ubuntu-26.04","ubuntu-22.04-arm","ubuntu-24.04-arm","ubuntu-26.04-arm","ubuntu-slim","windows-latest","windows-2022","windows-2025","windows-2025-vs2026","windows-11-arm","windows-11-vs2026-arm","macos-latest","macos-14","macos-15","macos-15-intel","macos-26","macos-26-intel"]'), fromJSON(inputs.runs-on))) && 'audit' || 'block' }}
           allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
           # The agent may only stop reporting to StepSecurity in block mode.
-          disable-telemetry: ${{ ((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block') == 'block' }}
+          disable-telemetry: ${{ ((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted' && contains(fromJSON('["ubuntu-latest","ubuntu-22.04","ubuntu-24.04","ubuntu-26.04","ubuntu-22.04-arm","ubuntu-24.04-arm","ubuntu-26.04-arm","ubuntu-slim","windows-latest","windows-2022","windows-2025","windows-2025-vs2026","windows-11-arm","windows-11-vs2026-arm","macos-latest","macos-14","macos-15","macos-15-intel","macos-26","macos-26-intel"]'), fromJSON(inputs.runs-on))) && 'audit' || 'block') == 'block' }}
 
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -327,7 +356,7 @@ jobs:
   gitleaks:
     name: Secret scan (gitleaks)
     if: inputs.gitleaks
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(inputs.runs-on) }}
     # normal: ~1 min (p50 0.5, p95 0.7; last ~30 green runs)
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
@@ -359,10 +388,10 @@ jobs:
 
       - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
         with:
-          egress-policy: ${{ (inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block' }}
+          egress-policy: ${{ (inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted' && contains(fromJSON('["ubuntu-latest","ubuntu-22.04","ubuntu-24.04","ubuntu-26.04","ubuntu-22.04-arm","ubuntu-24.04-arm","ubuntu-26.04-arm","ubuntu-slim","windows-latest","windows-2022","windows-2025","windows-2025-vs2026","windows-11-arm","windows-11-vs2026-arm","macos-latest","macos-14","macos-15","macos-15-intel","macos-26","macos-26-intel"]'), fromJSON(inputs.runs-on))) && 'audit' || 'block' }}
           allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
           # The agent may only stop reporting to StepSecurity in block mode.
-          disable-telemetry: ${{ ((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block') == 'block' }}
+          disable-telemetry: ${{ ((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted' && contains(fromJSON('["ubuntu-latest","ubuntu-22.04","ubuntu-24.04","ubuntu-26.04","ubuntu-22.04-arm","ubuntu-24.04-arm","ubuntu-26.04-arm","ubuntu-slim","windows-latest","windows-2022","windows-2025","windows-2025-vs2026","windows-11-arm","windows-11-vs2026-arm","macos-latest","macos-14","macos-15","macos-15-intel","macos-26","macos-26-intel"]'), fromJSON(inputs.runs-on))) && 'audit' || 'block') == 'block' }}
 
 
       - name: Validate the gitleaks-scope input
@@ -902,7 +931,7 @@ jobs:
   dependency-audit:
     name: Dependency audit
     if: inputs.pip-audit-requirements != '' || inputs.audit-command != ''
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(inputs.runs-on) }}
     # normal: ~1 min (p50 0.7, p95 1.1; last ~30 green runs)
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
@@ -933,10 +962,10 @@ jobs:
 
       - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
         with:
-          egress-policy: ${{ (inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block' }}
+          egress-policy: ${{ (inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted' && contains(fromJSON('["ubuntu-latest","ubuntu-22.04","ubuntu-24.04","ubuntu-26.04","ubuntu-22.04-arm","ubuntu-24.04-arm","ubuntu-26.04-arm","ubuntu-slim","windows-latest","windows-2022","windows-2025","windows-2025-vs2026","windows-11-arm","windows-11-vs2026-arm","macos-latest","macos-14","macos-15","macos-15-intel","macos-26","macos-26-intel"]'), fromJSON(inputs.runs-on))) && 'audit' || 'block' }}
           allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
           # The agent may only stop reporting to StepSecurity in block mode.
-          disable-telemetry: ${{ ((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block') == 'block' }}
+          disable-telemetry: ${{ ((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted' && contains(fromJSON('["ubuntu-latest","ubuntu-22.04","ubuntu-24.04","ubuntu-26.04","ubuntu-22.04-arm","ubuntu-24.04-arm","ubuntu-26.04-arm","ubuntu-slim","windows-latest","windows-2022","windows-2025","windows-2025-vs2026","windows-11-arm","windows-11-vs2026-arm","macos-latest","macos-14","macos-15","macos-15-intel","macos-26","macos-26-intel"]'), fromJSON(inputs.runs-on))) && 'audit' || 'block') == 'block' }}
 
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1080,7 +1109,7 @@ jobs:
   dependency-review:
     name: Dependency review
     if: inputs.dependency-review && github.event_name == 'pull_request' && inputs.advanced-security != 'false'
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(inputs.runs-on) }}
     # normal: ~1 min (p50 0.3, p95 0.9; last ~30 green runs)
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
@@ -1112,10 +1141,10 @@ jobs:
 
       - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
         with:
-          egress-policy: ${{ (inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block' }}
+          egress-policy: ${{ (inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted' && contains(fromJSON('["ubuntu-latest","ubuntu-22.04","ubuntu-24.04","ubuntu-26.04","ubuntu-22.04-arm","ubuntu-24.04-arm","ubuntu-26.04-arm","ubuntu-slim","windows-latest","windows-2022","windows-2025","windows-2025-vs2026","windows-11-arm","windows-11-vs2026-arm","macos-latest","macos-14","macos-15","macos-15-intel","macos-26","macos-26-intel"]'), fromJSON(inputs.runs-on))) && 'audit' || 'block' }}
           allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
           # The agent may only stop reporting to StepSecurity in block mode.
-          disable-telemetry: ${{ ((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block') == 'block' }}
+          disable-telemetry: ${{ ((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted' && contains(fromJSON('["ubuntu-latest","ubuntu-22.04","ubuntu-24.04","ubuntu-26.04","ubuntu-22.04-arm","ubuntu-24.04-arm","ubuntu-26.04-arm","ubuntu-slim","windows-latest","windows-2022","windows-2025","windows-2025-vs2026","windows-11-arm","windows-11-vs2026-arm","macos-latest","macos-14","macos-15","macos-15-intel","macos-26","macos-26-intel"]'), fromJSON(inputs.runs-on))) && 'audit' || 'block') == 'block' }}
 
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1133,7 +1162,7 @@ jobs:
   semgrep:
     name: Semgrep
     if: inputs.semgrep
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(inputs.runs-on) }}
     # normal: ~1 min (p50 0.8, p95 1.0; last ~30 green runs)
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
@@ -1167,10 +1196,10 @@ jobs:
 
       - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
         with:
-          egress-policy: ${{ ((inputs.egress-policy-secretless == 'audit' || inputs.semgrep-egress-policy == 'audit') && runner.environment == 'github-hosted') && 'audit' || 'block' }}
+          egress-policy: ${{ ((inputs.egress-policy-secretless == 'audit' || inputs.semgrep-egress-policy == 'audit') && runner.environment == 'github-hosted' && contains(fromJSON('["ubuntu-latest","ubuntu-22.04","ubuntu-24.04","ubuntu-26.04","ubuntu-22.04-arm","ubuntu-24.04-arm","ubuntu-26.04-arm","ubuntu-slim","windows-latest","windows-2022","windows-2025","windows-2025-vs2026","windows-11-arm","windows-11-vs2026-arm","macos-latest","macos-14","macos-15","macos-15-intel","macos-26","macos-26-intel"]'), fromJSON(inputs.runs-on))) && 'audit' || 'block' }}
           allowed-endpoints: ${{ inputs.semgrep-allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
           # The agent may only stop reporting to StepSecurity in block mode.
-          disable-telemetry: ${{ (((inputs.egress-policy-secretless == 'audit' || inputs.semgrep-egress-policy == 'audit') && runner.environment == 'github-hosted') && 'audit' || 'block') == 'block' }}
+          disable-telemetry: ${{ (((inputs.egress-policy-secretless == 'audit' || inputs.semgrep-egress-policy == 'audit') && runner.environment == 'github-hosted' && contains(fromJSON('["ubuntu-latest","ubuntu-22.04","ubuntu-24.04","ubuntu-26.04","ubuntu-22.04-arm","ubuntu-24.04-arm","ubuntu-26.04-arm","ubuntu-slim","windows-latest","windows-2022","windows-2025","windows-2025-vs2026","windows-11-arm","windows-11-vs2026-arm","macos-latest","macos-14","macos-15","macos-15-intel","macos-26","macos-26-intel"]'), fromJSON(inputs.runs-on))) && 'audit' || 'block') == 'block' }}
 
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1543,7 +1572,7 @@ jobs:
     # Never on a pull request: the job holds an OIDC token for SNYK_TOKEN, and
     # a pull request's code must not run beside one.
     if: inputs.snyk && github.event_name != 'pull_request' && (inputs.snyk-on == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(inputs.runs-on) }}
     # normal: no fixture history
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
@@ -1853,7 +1882,7 @@ jobs:
     # Scorecard publishes only from the default branch; on a pull request it
     # would score the base and mislead.
     if: inputs.scorecard && github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(inputs.runs-on) }}
     # normal: ~1 min (p50 1.0, p95 1.6; last ~30 green runs)
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:

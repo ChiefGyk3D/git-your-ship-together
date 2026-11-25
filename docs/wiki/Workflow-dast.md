@@ -189,6 +189,16 @@ halves are tests, because a check that only passes proves nothing. So is every w
 credential in one: each is a refused case, and the refusal is checked to print nothing it refused. `tests/test_dast.py` runs the job's steps against canned reports and against a fake `docker` that records which ZAP
 script and flags each `scan-type` produces, and this repository's `dast-live` CI job runs all of it against the real image.
 
+## Choosing the runner
+
+The `runs-on` input is a JSON string that every job reads through `fromJSON(inputs.runs-on)`, because `runs-on` takes a
+string, an array or an object: `'"ubuntu-24.04"'` (the default), `'["self-hosted","linux"]'` or
+`'{"group":"my-group","labels":["linux"]}'`. Nothing can validate it before `runs-on` resolves, so invalid JSON fails the job
+at expression time. A job that follows `egress-policy-secretless` reaches `audit` only on a GitHub-hosted runner with a label
+in the hosted list of EX-0001, so every other runner gets `block`. On a self-hosted runner `step-security/harden-runner` needs
+a StepSecurity Enterprise subscription; without one it is a no-op, so `block` is not enforced there (verified against its
+README on 2026-11-25; the workflow header has the details).
+
 ## A minimal caller
 
 ```yaml

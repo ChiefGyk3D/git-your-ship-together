@@ -69,6 +69,31 @@
 # Commands and values a caller supplies reach the shell through an environment
 # variable, never by template expansion into the script, so a value can only
 # ever be data.
+#
+# Runner (`runs-on`): every job reads the `runs-on` input, a JSON string, through
+# `fromJSON(inputs.runs-on)`, because `runs-on` itself takes a string, an array
+# or an object. Pass `'"ubuntu-latest"'`, `'["self-hosted","linux"]'` or
+# `'{"group":"my-group","labels":["linux"]}'`. The default is `'"ubuntu-24.04"'`, the
+# label this workflow used before the input existed. A value that is not valid
+# JSON fails the first job at expression time, before any step runs, since
+# nothing can validate an input before `runs-on` resolves; an unknown label
+# leaves the job queued. A job that follows `egress-policy-secretless` reaches
+# `audit` only on a GitHub-hosted runner and a label in the hosted list of
+# docs/security/exceptions/EX-0001-harden-runner-block-westus2.md, so an array,
+# an object or a self-hosted runner always gets the `block` value.
+#
+# step-security/harden-runner on a self-hosted runner (read 2026-11-25, README
+# of the pinned v2.22.3 commit, section "Features and Pricing Tiers"). Verified:
+# it needs a StepSecurity Enterprise subscription there, even for a public
+# repository, and without one the action is a no-op: the step succeeds, nothing
+# is monitored and nothing is enforced. Verified: with a subscription the agent
+# is installed on the runner itself and the workflow needs no change. Inferred,
+# not tested here: the `egress-policy`, `allowed-endpoints` and
+# `disable-telemetry` inputs still validate and pass through unchanged, so every
+# egress-policy input keeps working as before, but a `block` value is a no-op
+# on a self-hosted runner without that subscription, so do not rely on it
+# there.
+#
 
 name: DAST (reusable)
 
@@ -175,6 +200,10 @@ on:
         description: Timeout of the scan job, which covers the install, the service start and the scan.
         type: number
         default: 20
+      runs-on:
+        description: 'Runner for every job, as a JSON string, because `runs-on` takes a string, an array or an object: `"ubuntu-24.04"`, `["self-hosted","linux"]` or `{"group":"my-group","labels":["linux"]}`. The default parses to the label this workflow always used. Invalid JSON fails the job at expression time. Jobs that follow `egress-policy-secretless` reach `audit` only on a GitHub-hosted runner and a label in the hosted list (EX-0001); see the workflow header for how harden-runner behaves on a self-hosted runner.'
+        type: string
+        default: '"ubuntu-24.04"'
 
 permissions:
   contents: read
@@ -182,7 +211,7 @@ permissions:
 jobs:
   scan:
     name: ZAP baseline scan
-    runs-on: ubuntu-24.04
+    runs-on: ${{ fromJSON(inputs.runs-on) }}
     # normal: ~1 min (p50 1.1, p95 1.4; last ~30 green runs)
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
@@ -1231,7 +1260,7 @@ jobs:
     if: >-
       always() && inputs.upload-sarif && needs.scan.outputs.sarif == 'true' &&
       (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on: ubuntu-24.04
+    runs-on: ${{ fromJSON(inputs.runs-on) }}
     # normal: ~1 min (p50 0.4, p95 0.6; last ~30 green runs)
     timeout-minutes: 10
     permissions:
@@ -1262,11 +1291,11 @@ jobs:
 
       - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
         with:
-          egress-policy: ${{ (inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block' }}
+          egress-policy: ${{ (inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted' && contains(fromJSON('["ubuntu-latest","ubuntu-22.04","ubuntu-24.04","ubuntu-26.04","ubuntu-22.04-arm","ubuntu-24.04-arm","ubuntu-26.04-arm","ubuntu-slim","windows-latest","windows-2022","windows-2025","windows-2025-vs2026","windows-11-arm","windows-11-vs2026-arm","macos-latest","macos-14","macos-15","macos-15-intel","macos-26","macos-26-intel"]'), fromJSON(inputs.runs-on))) && 'audit' || 'block' }}
           allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
           disable-sudo: true
           # The agent may only stop reporting to StepSecurity in block mode.
-          disable-telemetry: ${{ ((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block') == 'block' }}
+          disable-telemetry: ${{ ((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted' && contains(fromJSON('["ubuntu-latest","ubuntu-22.04","ubuntu-24.04","ubuntu-26.04","ubuntu-22.04-arm","ubuntu-24.04-arm","ubuntu-26.04-arm","ubuntu-slim","windows-latest","windows-2022","windows-2025","windows-2025-vs2026","windows-11-arm","windows-11-vs2026-arm","macos-latest","macos-14","macos-15","macos-15-intel","macos-26","macos-26-intel"]'), fromJSON(inputs.runs-on))) && 'audit' || 'block') == 'block' }}
 
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
