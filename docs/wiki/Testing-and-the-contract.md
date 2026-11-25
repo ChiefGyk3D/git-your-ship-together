@@ -79,6 +79,11 @@ lock.
 | `tests/test_wiki_release_facts.py` | **Version facts in the wiki are generated**: the release placeholders render from a temp repository's tags (newest by version, the peeled commit SHA, the date, the merges since), and no hand page types a 40-hex SHA or a `# vX.Y.Z` pin comment |
 | `tests/test_pr_python_versions.py` | The `pr-python-versions` input of python-ci: empty by default so the matrix is unchanged, a reduced matrix on pull requests only, bad values refused, and `ci-green` still failing on a failed leg |
 
+The pinned digests and the mutation tests (`tests/test_runs_on_input.py`) catch accidental and partial changes to the egress
+policy check and the self-hosted guard. A change that edits a guarded script and its pinned digest together is stopped only by
+review, which is what `.github/CODEOWNERS` is for. Branch protection does not yet require code-owner review, so until it does
+that review is a convention, not an enforced rule.
+
 (The exact set of files is whatever is in `tests/`; `test_wiki.py` is what catches a new one the wiki
 has not mentioned.)
 

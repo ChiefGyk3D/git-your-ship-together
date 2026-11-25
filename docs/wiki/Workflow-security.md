@@ -56,6 +56,11 @@ request, a pull request with an unnamed head repository and any unknown event fa
 repository's own writers; it does not isolate the runner, so a persistent runner must not be shared with a job that holds OIDC
 or Doppler access. Secret-bearing jobs belong on GitHub-hosted runners or a distinct ephemeral trusted pool.
 
+The pinned digests and the mutation tests (`tests/test_runs_on_input.py`) catch accidental and partial changes to the egress
+policy check and the self-hosted guard. A change that edits a guarded script and its pinned digest together is stopped only by
+review, which is what `.github/CODEOWNERS` is for. Branch protection does not yet require code-owner review, so until it does
+that review is a convention, not an enforced rule.
+
 ## A security-only repository
 
 `security.yml` has no gate job. A repository whose only GYST caller is this one adds a `gate` job that calls
