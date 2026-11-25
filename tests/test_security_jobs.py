@@ -8,9 +8,11 @@ already cover these jobs; this file pins what is specific to them.
 from __future__ import annotations
 
 import io
+import json
 import os
 import re
 import subprocess
+import sys
 from urllib.request import Request, urlopen
 
 import pytest
@@ -21,6 +23,7 @@ DOC = load(WORKFLOWS / "security.yml")
 INPUTS = triggers(DOC)["workflow_call"]["inputs"]
 SEMGREP = jobs(DOC)["semgrep"]
 SCAN = next(s for s in steps_of(SEMGREP) if s.get("name") == "Scan (Semgrep)")
+SEMGREP_SUMMARY = WORKFLOWS.parent.parent / "scripts" / "semgrep_findings.py"
 DEFAULT_PACKS = sorted(set(re.findall(r"\bp/[\w-]+", SCAN["run"] + INPUTS["semgrep-config"]["default"])))
 
 
@@ -156,6 +159,104 @@ def test_semgrep_uploads_sarif_with_its_category_even_after_a_finding():
     assert "always()" in upload["if"] and "hashFiles('semgrep.sarif')" in upload["if"]
 
 
+def test_failed_semgrep_scans_are_reported_without_masking_the_scan_and_retained():
+    steps = steps_of(SEMGREP)
+    names = [step.get("name", "") for step in steps]
+    scan = names.index("Scan (Semgrep)")
+    report = names.index("Report Semgrep findings")
+    artifact = names.index("Keep Semgrep findings")
+    sarif = names.index("Upload Semgrep results")
+    assert scan < report < artifact < sarif
+
+    scan_step = steps[scan]
+    assert "continue-on-error" not in scan_step
+    assert "|| true" not in scan_step["run"]
+
+    report_step = steps[report]
+    assert report_step["if"] == "always()"
+    assert "python3 -I" in report_step["run"]
+    assert "GITHUB_STEP_SUMMARY" in report_step["run"]
+    inline = report_step["run"].split("#!/usr/bin/env python3\n", 1)[1].split("\nPY\n", 1)[0]
+    assert "#!/usr/bin/env python3\n" + inline + "\n" == SEMGREP_SUMMARY.read_text()
+
+    artifact_step = steps[artifact]
+    assert artifact_step["if"] == "always()"
+    assert artifact_step["uses"] == "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9"
+    assert artifact_step["with"] == {
+        "name": "semgrep-findings",
+        "path": "semgrep-findings.json",
+        "if-no-files-found": "ignore",
+        "retention-days": 5,
+    }
+    assert "semgrep.sarif" not in artifact_step["with"]["path"]
+
+    source = SEMGREP_SUMMARY.read_text()
+    assert all(field in source for field in ("ruleId", "uri", "startLine", "level"))
+    assert 'get("message"' not in source and 'get("text"' not in source
+
+
+def test_semgrep_findings_script_whitelists_sarif_fields_escapes_controls_and_caps_output(tmp_path):
+    fake_secret = "sk" + "_test_" + ("x" * 24)
+    results = []
+    for number in range(105):
+        results.append(
+            {
+                "ruleId": "python.lang.security\nforged heading" if number == 0 else "fixture.rule",
+                "level": "error\tcritical" if number == 0 else "warning",
+                "message": {"text": f"matched code: {fake_secret}"},
+                "fingerprints": {"secret": fake_secret},
+                "locations": [
+                    {
+                        "physicalLocation": {
+                            "artifactLocation": {"uri": f"src/file-{number}.py"},
+                            "region": {
+                                "startLine": number + 1,
+                                "snippet": {"text": fake_secret},
+                                "contextRegion": {"snippet": {"text": fake_secret}},
+                            },
+                        }
+                    }
+                ],
+                "codeFlows": [{"message": {"text": fake_secret}}],
+            }
+        )
+    report = tmp_path / "semgrep.sarif"
+    report.write_text(json.dumps({"version": "2.1.0", "runs": [{"results": results}]}))
+
+    done = subprocess.run(
+        [sys.executable, "-I", str(SEMGREP_SUMMARY), str(report)],
+        check=True,
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+    )
+    lines = done.stdout.splitlines()
+    assert lines[0] == (
+        "RuleID=python.lang.security\\nforged heading File=src/file-0.py StartLine=1 Severity=error\\tcritical"
+    )
+    assert len(lines) == 100
+    assert lines[-1] == "... 6 more findings not shown"
+    assert fake_secret not in done.stdout
+    assert "matched code" not in done.stdout and "message" not in done.stdout and "snippet" not in done.stdout
+    outputs = [path for path in tmp_path.iterdir() if path != report]
+    assert outputs == [tmp_path / "semgrep-findings.json"]
+    assert all(fake_secret not in path.read_text() for path in outputs)
+    redacted = json.loads(outputs[0].read_text())
+    assert len(redacted) == 100
+    assert redacted[0] == {
+        "rule_id": "python.lang.security\nforged heading",
+        "file": "src/file-0.py",
+        "start_line": 1,
+        "severity": "error\tcritical",
+    }
+    assert set().union(*(finding.keys() for finding in redacted)) == {
+        "rule_id",
+        "file",
+        "start_line",
+        "severity",
+    }
+
+
 def test_there_is_no_gate_job_for_semgrep_to_join():
     """security.yml has no summary job; callers require the called jobs' own checks. Revisit if one is added."""
     assert not [n for n, j in jobs(DOC).items() if "needs" in j]
@@ -188,6 +289,7 @@ def test_new_inputs_are_in_the_readme():
 
 
 GITLEAKS = jobs(DOC)["gitleaks"]
+GITLEAKS_SUMMARY = WORKFLOWS.parent.parent / "scripts" / "gitleaks_findings.py"
 
 
 def test_gitleaks_is_a_pinned_binary_not_a_licensed_action():
@@ -219,7 +321,7 @@ def test_gitleaks_scans_the_pr_range_on_a_pull_request_by_default_and_uploads_sa
     assert "$SCAN_ARGS" in scan["run"] and '--log-opts="$LOG_OPTS"' in scan["run"]
     # a pull request is narrowed to base..head by default; push and schedule stay --all (tests/test_gitleaks_scope.py)
     assert INPUTS["gitleaks-scope"]["default"] == "pr-commits"
-    assert "--report-format sarif --report-path gitleaks.sarif" in scan["run"]
+    assert "--report-format json --report-path gitleaks-history.json" in scan["run"]
     upload = next(s for s in steps_of(GITLEAKS) if "upload-sarif" in str(s.get("uses", "")))
     assert upload["with"] == {"sarif_file": "gitleaks.sarif", "category": "gitleaks"}
     assert upload["if"].startswith("always()")
@@ -234,6 +336,99 @@ def test_gitleaks_upload_is_skippable_but_the_scan_is_not():
     assert "hashFiles('gitleaks.sarif')" in upload["if"]
     scan = next(s for s in steps_of(GITLEAKS) if s.get("name", "").startswith("Scan the commits"))
     assert "if" not in scan and "$SCAN_ARGS" in scan["run"]
+
+
+def test_failed_gitleaks_scans_are_reported_and_redacted_json_is_retained():
+    steps = steps_of(GITLEAKS)
+    names = [step.get("name", "") for step in steps]
+    history = names.index("Scan the commits (gitleaks)")
+    tree = names.index("Scan the working tree (gitleaks)")
+    report = names.index("Report gitleaks findings")
+    artifact = names.index("Keep gitleaks findings")
+    sarif = names.index("Upload gitleaks results")
+    assert history < tree < report < artifact < sarif
+
+    history_step = steps[history]
+    tree_step = steps[tree]
+    for scan, path in ((history_step, "gitleaks-history.json"), (tree_step, "gitleaks-working-tree.json")):
+        assert f"--report-format json --report-path {path}" in scan["run"]
+        resolve = next(item for item in steps if item.get("name") == "Resolve the gitleaks scan scope")
+        assert "--redact" in resolve["run"]
+        assert "continue-on-error" not in scan
+        assert "|| true" not in scan["run"]
+
+    report_step = steps[report]
+    assert report_step["if"] == "always()"
+    assert "python3 -I" in report_step["run"]
+    assert "GITHUB_STEP_SUMMARY" in report_step["run"]
+    assert ".Match" not in report_step["run"] and ".Secret" not in report_step["run"]
+    inline = report_step["run"].split("#!/usr/bin/env python3\n", 1)[1].split("\nPY\n", 1)[0]
+    assert "#!/usr/bin/env python3\n" + inline + "\n" == GITLEAKS_SUMMARY.read_text()
+
+    artifact_step = steps[artifact]
+    assert artifact_step["if"] == "always()"
+    assert artifact_step["uses"] == "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9"
+    assert artifact_step["with"] == {
+        "name": "gitleaks-findings",
+        "path": "gitleaks-history.json\ngitleaks-working-tree.json\n",
+        "if-no-files-found": "ignore",
+        "retention-days": 5,
+    }
+    assert ".sarif" not in artifact_step["with"]["path"]
+    source = GITLEAKS_SUMMARY.read_text()
+    assert all(f"finding.get('{field}'" in source for field in ("RuleID", "File", "StartLine", "Entropy", "Commit"))
+    assert "finding.get('Match'" not in source and "finding.get('Secret'" not in source
+
+
+def test_gitleaks_findings_script_whitelists_fields_and_escapes_controls(tmp_path):
+    fake_secret = "sk" + "_test_" + ("x" * 24)
+    report = tmp_path / "history.json"
+    report.write_text(
+        json.dumps(
+            [
+                {
+                    "RuleID": "stripe-access-token\nforged heading",
+                    "File": "fixtures/stripe\tshape.txt",
+                    "StartLine": 17,
+                    "Entropy": 4.321,
+                    "Commit": "0123456789abcdef0123456789abcdef01234567",
+                    "Match": f"token={fake_secret}",
+                    "Secret": fake_secret,
+                    "Description": f"found {fake_secret}",
+                }
+            ]
+        )
+    )
+    done = subprocess.run(
+        [sys.executable, "-I", str(GITLEAKS_SUMMARY), str(report)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert done.stdout == (
+        "RuleID=stripe-access-token\\nforged heading "
+        "File=fixtures/stripe\\tshape.txt StartLine=17 Entropy=4.321 Commit=0123456\n"
+    )
+    assert fake_secret not in done.stdout
+    assert "token=" not in done.stdout and "Description" not in done.stdout
+
+
+def test_gitleaks_findings_script_caps_output_at_100_lines(tmp_path):
+    report = tmp_path / "tree.json"
+    report.write_text(
+        json.dumps(
+            [{"RuleID": "fixture", "File": f"fixture-{n}.txt", "StartLine": n, "Entropy": 1.0} for n in range(105)]
+        )
+    )
+    done = subprocess.run(
+        [sys.executable, "-I", str(GITLEAKS_SUMMARY), str(report)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    lines = done.stdout.splitlines()
+    assert len(lines) == 100
+    assert lines[-1] == "... 6 more findings not shown"
 
 
 def test_gitleaks_canary_is_wired_before_the_scan():

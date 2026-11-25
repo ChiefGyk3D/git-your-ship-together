@@ -34,6 +34,10 @@ A pull request's tree scan can only match a `file:rule:line` ignore entry, not t
 (`commit:file:rule:line`) gitleaks writes for a history finding; the job warns about such entries by line number, file and rule
 (never the commit or a value) and the README's "Migrating `.gitleaksignore` entries" says how to move them.
 
+When a gitleaks history or working-tree scan finds a secret shape, the separate reporting step runs `scripts/gitleaks_findings.py`, which reads the scan's redacted JSON reports and lists at most 100 findings in the job log and job summary using only the rule id, file, start line and entropy, plus the short commit id for history findings. Control characters are escaped; matched text, secret values and other content fields are not printed. The redacted JSON reports are also available for 5 days in the `gitleaks-findings` artifact, even when `gitleaks-upload-sarif: false` or `advanced-security: false` makes code scanning unavailable.
+
+When Semgrep finds an issue, a separate post-scan step runs `scripts/semgrep_findings.py`, which lists at most 100 findings in the job log and job summary using only the rule id, file, start line and severity and writes the safe retained JSON. Control characters are escaped, and matched code, messages and snippets are never printed. A redacted JSON report containing only those four fields for at most 100 findings is retained for 5 days in the `semgrep-findings` artifact, even when the scan fails or `advanced-security: false` makes code scanning unavailable. The raw `semgrep.sarif` stays local to the job except for the existing code scanning upload when enabled. These reporting steps do not mask or replace the scan's exit code.
+
 ## A security-only repository
 
 `security.yml` has no gate job. A repository whose only GYST caller is this one adds a `gate` job that calls

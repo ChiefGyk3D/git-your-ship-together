@@ -757,12 +757,12 @@ jobs:
         run: |
           set -euo pipefail
           read -r -a args <<< "$SCAN_ARGS"
-          gitleaks git "${args[@]}" --report-format sarif --report-path gitleaks.sarif --log-opts="$LOG_OPTS" .
+          args+=(--report-format json --report-path gitleaks-history.json --log-opts="$LOG_OPTS")
+          gitleaks git "${args[@]}" .
 
       # Only for a narrowed pull request: the history scan no longer sees every
       # ref, so the checked-out tree is scanned as well. It runs even when the
-      # commits scan failed, so one run reports both. No SARIF: a second report
-      # under the same category would replace the first.
+      # commits scan failed, so one run reports both.
       - name: Scan the working tree (gitleaks)
         if: always() && steps.scope.outputs.tree == 'true'
         env:
@@ -770,7 +770,113 @@ jobs:
         run: |
           set -euo pipefail
           read -r -a args <<< "$SCAN_ARGS"
+          args+=(--report-format json --report-path gitleaks-working-tree.json)
           gitleaks dir "${args[@]}" .
+
+      # Read only a fixed field allow-list from the redacted JSON. In
+      # particular, never print Match, Secret, Description or another content
+      # field. json.dumps escapes controls so a finding stays on one log line
+      # and cannot forge a workflow command. Keep this block byte-identical to
+      # scripts/gitleaks_findings.py; its unit test runs the readable copy.
+      - name: Report gitleaks findings
+        if: always()
+        timeout-minutes: 1
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          output=$(mktemp)
+          python3 -I - gitleaks-history.json gitleaks-working-tree.json > "$output" <<'PY'
+          #!/usr/bin/env python3
+          """Print only the safe location fields from redacted gitleaks JSON reports."""
+
+          from __future__ import annotations
+
+          import json
+          import sys
+          from pathlib import Path
+
+          LIMIT = 100
+
+
+          def escaped(value: object) -> str:
+              return json.dumps(str(value), ensure_ascii=True)[1:-1]
+
+
+          def main(paths: list[str]) -> int:
+              findings: list[dict[str, object]] = []
+              for name in paths:
+                  path = Path(name)
+                  if not path.is_file():
+                      continue
+                  report = json.loads(path.read_text(encoding="utf-8"))
+                  if not isinstance(report, list):
+                      raise ValueError(f"{path}: expected a JSON list")
+                  findings.extend(item for item in report if isinstance(item, dict))
+
+              shown = LIMIT if len(findings) <= LIMIT else LIMIT - 1
+              for finding in findings[:shown]:
+                  fields = (
+                      f"RuleID={escaped(finding.get('RuleID', ''))}",
+                      f"File={escaped(finding.get('File', ''))}",
+                      f"StartLine={escaped(finding.get('StartLine', ''))}",
+                      f"Entropy={escaped(finding.get('Entropy', ''))}",
+                  )
+                  commit = finding.get('Commit')
+                  suffix = f" Commit={escaped(str(commit)[:7])}" if commit else ""
+                  print(" ".join(fields) + suffix)
+              if len(findings) > shown:
+                  print(f"... {len(findings) - shown} more findings not shown")
+              return 0
+
+
+          if __name__ == "__main__":
+              raise SystemExit(main(sys.argv[1:]))
+          PY
+          if [ -s "$output" ]; then
+            echo "gitleaks findings (at most 100):"
+            cat "$output"
+            if [ -n "${GITHUB_STEP_SUMMARY-}" ]; then
+              {
+                echo "### gitleaks findings (at most 100)"
+                echo
+                echo '```text'
+                cat "$output"
+                echo '```'
+              } >> "$GITHUB_STEP_SUMMARY"
+            fi
+          fi
+
+      - name: Keep gitleaks findings
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: gitleaks-findings
+          path: |
+            gitleaks-history.json
+            gitleaks-working-tree.json
+          if-no-files-found: ignore
+          retention-days: 5
+
+      # Code scanning still receives native SARIF when the caller enables it.
+      # JSON is the gating scan's report; this redacted export is informational
+      # and uses exit 0 for findings so it cannot replace that scan's outcome.
+      - name: Prepare gitleaks SARIF
+        if: always() && inputs.gitleaks-upload-sarif && inputs.advanced-security != 'false'
+        env:
+          LOG_OPTS: ${{ steps.scope.outputs.log_opts }}
+          SCAN_ARGS: ${{ steps.scope.outputs.scan_args }}
+        run: |
+          set -euo pipefail
+          read -r -a original <<< "$SCAN_ARGS"
+          args=()
+          skip=false
+          for arg in "${original[@]}"; do
+            if [ "$skip" = true ]; then skip=false; continue; fi
+            if [ "$arg" = --exit-code ]; then skip=true; continue; fi
+            args+=("$arg")
+          done
+          gitleaks git "${args[@]}" --exit-code 0 --report-format sarif --report-path gitleaks.sarif --log-opts="$LOG_OPTS" .
 
       - name: Note the skipped Advanced Security features
         if: inputs.advanced-security == 'false'
@@ -1313,6 +1419,103 @@ jobs:
           for config in $CONFIGS; do args+=(--config "$config"); done
           if [ "$CONTINUE" != "true" ]; then args+=(--error); fi
           semgrep scan --metrics=off --sarif --output semgrep.sarif "${args[@]}" .
+
+      # Read only rule id, file, start line and severity from SARIF. Never
+      # print the message or snippet. json.dumps escapes controls so a finding
+      # stays on one log line. Keep this block byte-identical to
+      # scripts/semgrep_findings.py; its unit test runs the readable copy.
+      - name: Report Semgrep findings
+        if: always()
+        timeout-minutes: 1
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          output=$(mktemp)
+          python3 -I - semgrep.sarif > "$output" <<'PY'
+          #!/usr/bin/env python3
+          """Print and export only safe location fields from Semgrep SARIF reports."""
+
+          from __future__ import annotations
+
+          import json
+          import sys
+          from pathlib import Path
+
+          LIMIT = 100
+          OUTPUT = Path("semgrep-findings.json")
+
+
+          def escaped(value: object) -> str:
+              return json.dumps(str(value), ensure_ascii=True)[1:-1]
+
+
+          def main(paths: list[str]) -> int:
+              findings: list[dict[str, object]] = []
+              for name in paths:
+                  path = Path(name)
+                  if not path.is_file():
+                      continue
+                  report = json.loads(path.read_text(encoding="utf-8"))
+                  if not isinstance(report, dict):
+                      raise ValueError(f"{path}: expected a SARIF object")
+                  for run in report.get("runs", []):
+                      if not isinstance(run, dict):
+                          continue
+                      for result in run.get("results", []):
+                          if not isinstance(result, dict):
+                              continue
+                          location = next((item for item in result.get("locations", []) if isinstance(item, dict)), {})
+                          physical = location.get("physicalLocation", {}) if isinstance(location, dict) else {}
+                          artifact = physical.get("artifactLocation", {}) if isinstance(physical, dict) else {}
+                          region = physical.get("region", {}) if isinstance(physical, dict) else {}
+                          findings.append(
+                              {
+                                  "rule_id": result.get("ruleId", ""),
+                                  "file": artifact.get("uri", "") if isinstance(artifact, dict) else "",
+                                  "start_line": region.get("startLine", "") if isinstance(region, dict) else "",
+                                  "severity": result.get("level", ""),
+                              }
+                          )
+
+              OUTPUT.write_text(json.dumps(findings[:LIMIT], ensure_ascii=True) + "\n", encoding="utf-8")
+
+              shown = LIMIT if len(findings) <= LIMIT else LIMIT - 1
+              for finding in findings[:shown]:
+                  print(
+                      f"RuleID={escaped(finding['rule_id'])} File={escaped(finding['file'])} "
+                      f"StartLine={escaped(finding['start_line'])} Severity={escaped(finding['severity'])}"
+                  )
+              if len(findings) > shown:
+                  print(f"... {len(findings) - shown} more findings not shown")
+              return 0
+
+
+          if __name__ == "__main__":
+              raise SystemExit(main(sys.argv[1:]))
+          PY
+          if [ -s "$output" ]; then
+            echo "Semgrep findings (at most 100):"
+            cat "$output"
+            if [ -n "${GITHUB_STEP_SUMMARY-}" ]; then
+              {
+                echo "### Semgrep findings (at most 100)"
+                echo
+                echo '```text'
+                cat "$output"
+                echo '```'
+              } >> "$GITHUB_STEP_SUMMARY"
+            fi
+          fi
+
+      - name: Keep Semgrep findings
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: semgrep-findings
+          path: semgrep-findings.json
+          if-no-files-found: ignore
+          retention-days: 5
 
       - name: Note the skipped Advanced Security features
         if: inputs.advanced-security == 'false'
