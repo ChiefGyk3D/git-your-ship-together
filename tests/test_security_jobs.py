@@ -417,10 +417,7 @@ def test_gitleaks_findings_script_caps_output_at_100_lines(tmp_path):
     report = tmp_path / "tree.json"
     report.write_text(
         json.dumps(
-            [
-                {"RuleID": "fixture", "File": f"fixture-{n}.txt", "StartLine": n, "Entropy": 1.0}
-                for n in range(105)
-            ]
+            [{"RuleID": "fixture", "File": f"fixture-{n}.txt", "StartLine": n, "Entropy": 1.0} for n in range(105)]
         )
     )
     done = subprocess.run(
