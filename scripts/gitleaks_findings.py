@@ -33,7 +33,7 @@ def main(paths: list[str]) -> int:
             f"StartLine={escaped(finding.get('StartLine', ''))}",
             f"Entropy={escaped(finding.get('Entropy', ''))}",
         )
-        commit = finding.get("Commit")
+        commit = finding.get('Commit')
         suffix = f" Commit={escaped(str(commit)[:7])}" if commit else ""
         print(" ".join(fields) + suffix)
     if len(findings) > shown:

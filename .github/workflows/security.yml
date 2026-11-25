@@ -757,7 +757,8 @@ jobs:
         run: |
           set -euo pipefail
           read -r -a args <<< "$SCAN_ARGS"
-          gitleaks git "${args[@]}" --report-format json --report-path gitleaks-history.json --log-opts="$LOG_OPTS" .
+          args+=(--report-format json --report-path gitleaks-history.json --log-opts="$LOG_OPTS")
+          gitleaks git "${args[@]}" .
 
       # Only for a narrowed pull request: the history scan no longer sees every
       # ref, so the checked-out tree is scanned as well. It runs even when the
@@ -769,7 +770,8 @@ jobs:
         run: |
           set -euo pipefail
           read -r -a args <<< "$SCAN_ARGS"
-          gitleaks dir "${args[@]}" --report-format json --report-path gitleaks-working-tree.json .
+          args+=(--report-format json --report-path gitleaks-working-tree.json)
+          gitleaks dir "${args[@]}" .
 
       # Read only a fixed field allow-list from the redacted JSON. In
       # particular, never print Match, Secret, Description or another content
@@ -820,7 +822,7 @@ jobs:
                       f"StartLine={escaped(finding.get('StartLine', ''))}",
                       f"Entropy={escaped(finding.get('Entropy', ''))}",
                   )
-                  commit = finding.get("Commit")
+                  commit = finding.get('Commit')
                   suffix = f" Commit={escaped(str(commit)[:7])}" if commit else ""
                   print(" ".join(fields) + suffix)
               if len(findings) > shown:
