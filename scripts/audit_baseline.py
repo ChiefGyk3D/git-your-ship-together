@@ -81,6 +81,16 @@ class Result:
     detail: str
 
 
+class _NoRedirects(urllib.request.HTTPRedirectHandler):
+    """Refuse every redirect: the request carries the token, and no API answer here needs one followed."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirects)
+
+
 def github_fetcher(token: str) -> Fetcher:
     def fetch(path: str) -> tuple[int, dict | list]:
         req = urllib.request.Request(
@@ -92,10 +102,12 @@ def github_fetcher(token: str) -> Fetcher:
             },
         )
         try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
+            with _OPENER.open(req, timeout=30) as resp:
                 raw = resp.read()
                 return resp.status, (json.loads(raw) if raw else {})
         except urllib.error.HTTPError as err:
+            if 300 <= err.code < 400:  # a refused redirect: say so, never echo what the other side sent
+                return err.code, {"message": "redirect refused"}
             raw = err.read()
             try:
                 return err.code, json.loads(raw) if raw else {}
@@ -548,6 +560,8 @@ def format_expiring(entries: list[dict]) -> list[str]:
 
 # The owner rule: a new release is held at least this many days before it is proposed.
 MIN_COOLDOWN_DAYS = 7
+# GitHub's list of ecosystems grows, so a name is checked for shape, not against a copy of that list.
+ECOSYSTEM_NAME = re.compile(r"[a-z][a-z0-9-]{0,39}")
 COOLDOWN_KEYS = ("default-days", "semver-major-days", "semver-minor-days", "semver-patch-days")
 
 
@@ -635,12 +649,19 @@ def cooldown_problems(config: object) -> list[str]:
     if not isinstance(updates, list) or not updates:
         return ["dependabot.yml has no update entries"]
     problems = []
+    version = config.get("version")
+    if type(version) is not int or version != 2:
+        problems.append("dependabot.yml does not say `version: 2`")
     for index, entry in enumerate(updates):
         if not isinstance(entry, dict):
             problems.append(f"update entry #{index + 1} is not a mapping")
             continue
+        ecosystem = entry.get("package-ecosystem")
+        if type(ecosystem) is not str or not ECOSYSTEM_NAME.fullmatch(ecosystem):
+            problems.append(f"update entry #{index + 1} has no valid package-ecosystem")
+            continue
         where = entry.get("directory") if "directory" in entry else entry.get("directories", "/")
-        label = f"{shown(entry.get('package-ecosystem'))} in {shown(where)}"
+        label = f"{ecosystem} in {shown(where)}"
         cooldown = entry.get("cooldown")
         if not isinstance(cooldown, dict):
             problems.append(f"{label} has no cooldown")
@@ -658,12 +679,32 @@ def cooldown_problems(config: object) -> list[str]:
     return problems
 
 
+def is_plain_file(file: object, path: str) -> bool:
+    """Whether a Contents API answer is the regular file asked for, whole: not a symlink, submodule or truncated."""
+    if not isinstance(file, dict):
+        return False
+    if file.get("type") != "file" or file.get("encoding") != "base64" or file.get("path") != path:
+        return False
+    content = file.get("content")
+    if type(content) is not str:
+        return False
+    size = file.get("size")
+    if type(size) is int:
+        try:
+            return len(base64.b64decode(content)) == size
+        except ValueError:
+            return False
+    return True
+
+
 def check_dependabot(repo: str, fetch: Fetcher) -> Result:
     code, file = fetch(f"/repos/{repo}/contents/.github/dependabot.yml")
     if code == 404:
         return Result(repo, "dependabot-config", FAIL, "no .github/dependabot.yml")
     if code != 200 or not isinstance(file, dict) or "content" not in file:
         return Result(repo, "dependabot-config", UNKNOWN, unreadable(code, file))
+    if not is_plain_file(file, ".github/dependabot.yml"):
+        return Result(repo, "dependabot-config", UNKNOWN, "the contents answer is not a plain base64 file")
     try:
         import yaml  # noqa: F401
     except ImportError:

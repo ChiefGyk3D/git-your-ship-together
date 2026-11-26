@@ -47,6 +47,19 @@ def encoded(text: str) -> dict:
     return {"content": base64.b64encode(text.encode()).decode(), "encoding": "base64"}
 
 
+def dep_file(text: str | bytes, **overrides) -> dict:
+    """The Contents API answer for .github/dependabot.yml: a regular base64 file, whole."""
+    raw = text.encode() if isinstance(text, str) else text
+    body = {
+        "type": "file",
+        "path": ".github/dependabot.yml",
+        "encoding": "base64",
+        "size": len(raw),
+        "content": base64.b64encode(raw).decode(),
+    }
+    return {**body, **overrides}
+
+
 def wrapped(text: str) -> dict:
     """The contents API as GitHub sends it: base64 wrapped at 60 columns with newlines in it."""
     content = base64.encodebytes(text.encode()).decode()
@@ -107,7 +120,7 @@ def good_answers() -> dict[str, tuple[int, dict | list]]:
         f"{r}/contents/.github/workflows/ci.yml": (200, encoded(CALLER)),
         f"{r}/contents/.github/dependabot.yml": (
             200,
-            encoded("version: 2\nupdates:\n  - package-ecosystem: pip\n    cooldown:\n      default-days: 7\n"),
+            dep_file("version: 2\nupdates:\n  - package-ecosystem: pip\n    cooldown:\n      default-days: 7\n"),
         ),
         f"{r}/contents/.githooks/pre-commit": (
             200,
@@ -387,7 +400,7 @@ def test_a_repository_that_does_not_call_the_shared_workflows_fails():
 
 def test_dependabot_without_cooldown_fails_and_missing_file_fails():
     answers = good_answers()
-    answers[f"/repos/{REPO_NAME}/contents/.github/dependabot.yml"] = (200, encoded("version: 2\nupdates: []\n"))
+    answers[f"/repos/{REPO_NAME}/contents/.github/dependabot.yml"] = (200, dep_file("version: 2\nupdates: []\n"))
     assert by_check(audit.audit_repo(REPO_NAME, fetcher(answers)))["dependabot-config"][0] == audit.FAIL
     answers[f"/repos/{REPO_NAME}/contents/.github/dependabot.yml"] = (404, {"message": "Not Found"})
     assert by_check(audit.audit_repo(REPO_NAME, fetcher(answers)))["dependabot-config"][0] == audit.FAIL
@@ -1006,7 +1019,7 @@ def cooldown_entry(ecosystem: str, cooldown: str | None) -> str:
 
 def dependabot_check(*entries: str) -> tuple[str, str]:
     answers = good_answers()
-    answers[DEPENDABOT_PATH] = (200, encoded("version: 2\nupdates:\n" + "".join(entries)))
+    answers[DEPENDABOT_PATH] = (200, dep_file("version: 2\nupdates:\n" + "".join(entries)))
     return by_check(audit.audit_repo(REPO_NAME, fetcher(answers)))["dependabot-config"]
 
 
@@ -1051,9 +1064,9 @@ def test_a_cooldown_that_is_not_a_whole_number_of_days_fails():
 
 def test_a_dependabot_yml_with_no_update_entries_or_unparseable_is_not_a_pass():
     answers = good_answers()
-    answers[DEPENDABOT_PATH] = (200, encoded("version: 2\nupdates: []\n"))
+    answers[DEPENDABOT_PATH] = (200, dep_file("version: 2\nupdates: []\n"))
     assert by_check(audit.audit_repo(REPO_NAME, fetcher(answers)))["dependabot-config"][0] == audit.FAIL
-    answers[DEPENDABOT_PATH] = (200, encoded("updates: [unclosed\n"))
+    answers[DEPENDABOT_PATH] = (200, dep_file("updates: [unclosed\n"))
     assert by_check(audit.audit_repo(REPO_NAME, fetcher(answers)))["dependabot-config"][0] == audit.UNKNOWN
 
 
@@ -1066,7 +1079,7 @@ def _answers_with_cooldown(days: int) -> dict:
     answers = good_answers()
     answers[DEPENDABOT_PATH] = (
         200,
-        encoded("version: 2\nupdates:\n" + cooldown_entry("pip", f"      default-days: {days}\n")),
+        dep_file("version: 2\nupdates:\n" + cooldown_entry("pip", f"      default-days: {days}\n")),
     )
     return answers
 
@@ -1080,7 +1093,7 @@ def test_the_templates_hold_a_seven_day_cooldown_on_every_ecosystem_the_audit_re
     template = yaml.safe_load((REPO / "examples" / "dependabot-template.yml").read_text())
     assert {u["package-ecosystem"] for u in template["updates"]} >= {"github-actions", "pip", "docker", "npm", "gomod"}
     answers = good_answers()
-    answers[DEPENDABOT_PATH] = (200, encoded((REPO / "examples" / "dependabot-template.yml").read_text()))
+    answers[DEPENDABOT_PATH] = (200, dep_file((REPO / "examples" / "dependabot-template.yml").read_text()))
     assert by_check(audit.audit_repo(REPO_NAME, fetcher(answers)))["dependabot-config"][0] == audit.PASS
 
 
@@ -1090,7 +1103,7 @@ def test_the_templates_hold_a_seven_day_cooldown_on_every_ecosystem_the_audit_re
 def dependabot_check_text(text: str | bytes) -> tuple[str, str]:
     answers = good_answers()
     raw = text.encode() if isinstance(text, str) else text
-    answers[DEPENDABOT_PATH] = (200, {"content": base64.b64encode(raw).decode(), "encoding": "base64"})
+    answers[DEPENDABOT_PATH] = (200, dep_file(raw))
     return by_check(audit.audit_repo(REPO_NAME, fetcher(answers)))["dependabot-config"]
 
 
@@ -1148,7 +1161,7 @@ def test_foreign_values_in_the_label_are_one_clean_line_and_never_forge_a_line()
     status, detail = dependabot_check_text(hostile)
     assert status == audit.FAIL
     assert "\n" not in detail and "\r" not in detail and chr(27) not in detail and "::" not in detail
-    assert detail.count(audit.COMPLEX) >= 2
+    assert detail.count(audit.COMPLEX) >= 1
     assert "d" * 150 not in detail and "[a, b]" not in detail and "k: v" not in detail
     report = audit.render([audit.Result(REPO_NAME, "dependabot-config", status, detail)])
     assert not any(line.lstrip().startswith("::") for line in report.splitlines())
@@ -1173,3 +1186,119 @@ def test_a_cooldown_check_that_raises_is_unknown_and_the_audit_goes_on(monkeypat
     assert by_check(results)["dependabot-config"][0] == audit.UNKNOWN
     assert "dependabot-ecosystem" in by_check(results)
     assert audit.exit_code(results, allow_unknown=False) == 2
+
+
+# --- round 2: ecosystem, version, the file object, redirects -----------------------
+
+
+def config_check(text: str) -> tuple[str, str]:
+    return dependabot_check_text(text)
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        "  - directory: /\n    cooldown:\n      default-days: 7\n",
+        '  - package-ecosystem: ""\n    directory: /\n    cooldown:\n      default-days: 7\n',
+        "  - package-ecosystem: true\n    directory: /\n    cooldown:\n      default-days: 7\n",
+        "  - package-ecosystem: {a: b}\n    directory: /\n    cooldown:\n      default-days: 7\n",
+        "  - package-ecosystem: [pip]\n    directory: /\n    cooldown:\n      default-days: 7\n",
+        '  - package-ecosystem: "pip\\n::error::x"\n    directory: /\n    cooldown:\n      default-days: 7\n',
+    ],
+)
+def test_an_entry_without_a_valid_package_ecosystem_fails_even_with_a_good_cooldown(entry):
+    status, detail = config_check("version: 2\nupdates:\n" + entry)
+    assert status == audit.FAIL, detail
+    assert "package-ecosystem" in detail and "\n" not in detail and "::" not in detail
+
+
+@pytest.mark.parametrize(
+    "version", ["", "version: 1\n", 'version: "2"\n', "version: true\n", "version: 3\n", "version: 2.0\n"]
+)
+def test_a_document_that_is_not_version_two_fails(version):
+    status, detail = config_check(version + "updates:\n" + GOOD_ENTRY)
+    assert status == audit.FAIL, detail
+    assert "version: 2" in detail
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"type": "symlink", "target": "../elsewhere/dependabot.yml"},
+        {"type": "submodule"},
+        {"type": "dir"},
+        {"encoding": "none"},
+        {"path": ".github/other.yml"},
+        {"size": 10_000},
+        {"content": "!!!not base64!!!"},
+        {"content": 7},
+    ],
+)
+def test_a_contents_answer_that_is_not_the_whole_regular_file_is_unknown(changes):
+    answers = good_answers()
+    answers[DEPENDABOT_PATH] = (200, dep_file("version: 2\nupdates:\n" + GOOD_ENTRY, **changes))
+    assert by_check(audit.audit_repo(REPO_NAME, fetcher(answers)))["dependabot-config"][0] == audit.UNKNOWN
+    answers[DEPENDABOT_PATH] = (200, [dep_file("x")])
+    assert by_check(audit.audit_repo(REPO_NAME, fetcher(answers)))["dependabot-config"][0] == audit.UNKNOWN
+
+
+def test_a_whole_regular_file_still_passes():
+    assert dependabot_check_text("version: 2\nupdates:\n" + GOOD_ENTRY)[0] == audit.PASS
+
+
+def serve(handler_cls):
+    import http.server
+    import threading
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), handler_cls)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, thread
+
+
+def test_a_redirect_is_refused_and_the_second_host_never_sees_the_token(monkeypatch):
+    import http.server
+
+    seen = []
+
+    class Target(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            seen.append(self.headers.get("Authorization"))
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b'{"content": "x"}')
+
+        def log_message(self, *args):
+            pass
+
+    target, target_thread = serve(Target)
+
+    class Redirector(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(302)
+            self.send_header("Location", f"http://127.0.0.1:{target.server_address[1]}/collect")
+            self.end_headers()
+            self.wfile.write(b"secret-looking redirect body")
+
+        def log_message(self, *args):
+            pass
+
+    front, front_thread = serve(Redirector)
+    try:
+        monkeypatch.setattr(audit, "API", f"http://127.0.0.1:{front.server_address[1]}")
+        code, body = audit.github_fetcher("tok-123")("/repos/o/r/contents/.github/dependabot.yml")
+    finally:
+        for server, thread in ((front, front_thread), (target, target_thread)):
+            server.shutdown()
+            server.server_close()
+            thread.join()
+    assert seen == [], "the redirect target must not be contacted at all"
+    assert code == 302
+    assert "tok-123" not in str(body) and "secret-looking" not in str(body)
+
+
+def test_a_refused_redirect_reads_as_unknown_in_the_check():
+    answers = good_answers()
+    answers[DEPENDABOT_PATH] = (302, {"message": "redirect refused"})
+    status, detail = by_check(audit.audit_repo(REPO_NAME, fetcher(answers)))["dependabot-config"]
+    assert status == audit.UNKNOWN and "302" in detail

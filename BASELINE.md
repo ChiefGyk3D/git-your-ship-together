@@ -197,7 +197,12 @@ enforced. `dependabot-config` reads the value, not just the key: it fails when
 the file is missing, when an update entry for any ecosystem has no `cooldown`,
 when `default-days` is absent or under 7, or when a `semver-*-days` override
 is under 7. The cooldown applies to version updates only, so it never delays a
-Dependabot security update. `examples/dependabot-template.yml` is the starting
+Dependabot security update. The file must also say `version: 2`, and every
+update entry needs a `package-ecosystem` of the right shape (lower-case name,
+not checked against GitHub's list, which grows). The contents answer must be
+a whole regular file at that path, so a symlink, submodule or truncated read
+is UNKNOWN. The audit's API calls refuse every redirect, so the token never
+follows one to another host. `examples/dependabot-template.yml` is the starting
 point (GitHub Actions, pip, docker, npm and gomod).
 
 Checked: `workflows-pinned`, `uses-shared-workflows`, `dependabot-config`,
