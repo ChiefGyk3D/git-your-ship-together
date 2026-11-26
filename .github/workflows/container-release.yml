@@ -2098,7 +2098,14 @@ jobs:
           # identity, issuer, repository and commit constraints. A signature
           # that is found and does not verify, or any other error, fails on
           # the first attempt, and the last attempt failing fails the step.
+          # Fatal text is classified first: a stderr that carries any
+          # verification-failure pattern is never retried, even when it also
+          # carries "not visible yet" or transient text.
+          verify_fatal() {
+            grep -Eqi 'no matching (signatures|attestations)|mismatch|does not match|doesn.t match|expected .* got|none of the expected identities|invalid signature|signature (verification )?failed|certificate|x509|identity|issuer|workflow[- ](repository|sha)' <<< "$1"
+          }
           not_visible_yet() {
+            if verify_fatal "$1"; then return 1; fi
             grep -Eqi 'no signatures found|no attestations found|(^|[ :[(])(408|425|429|5[0-9]{2})( |]|\)|$)|context deadline exceeded|i/o timeout|timed out|connection reset|connection refused|temporarily unavailable|unexpected EOF|TLS handshake timeout' <<< "$1"
           }
           verify_retry() {

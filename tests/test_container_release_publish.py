@@ -468,6 +468,97 @@ def test_a_missing_docker_hub_signature_fails_after_ghcr_verified(tmp_path, stub
     assert len(calls(stub, "cosign verify ")) == 5, "one ghcr call, then 4 bounded Docker Hub attempts"
 
 
+def verify_vector(image: str) -> str:
+    return (
+        f"cosign verify {image}@{DIGEST}"
+        f" --certificate-identity-regexp {IDENTITY}"
+        f" --certificate-oidc-issuer {ISSUER}"
+        f" --certificate-github-workflow-repository {REPO}"
+        f" --certificate-github-workflow-sha {SHA}"
+    )
+
+
+def attest_vector(image: str) -> str:
+    return (
+        f"cosign verify-attestation --type spdxjson {image}@{DIGEST}"
+        f" --certificate-identity-regexp {IDENTITY}"
+        f" --certificate-oidc-issuer {ISSUER}"
+        f" --certificate-github-workflow-repository {REPO}"
+        f" --certificate-github-workflow-sha {SHA}"
+    )
+
+
+def test_every_signature_verify_attempt_has_the_exact_argument_vector(tmp_path, stub):
+    for n in (1, 2, 3):
+        script_err(stub, "verify", str(n), 1, "Error: no signatures found")
+    done = run_step(tmp_path, VERIFY, stub, SIGN="true", SBOM="false", DOCKERHUB="")
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert calls(stub, "cosign verify ") == [verify_vector("ghcr.io/o/r")] * 4
+
+
+def test_every_attestation_verify_attempt_has_the_exact_argument_vector(tmp_path, stub):
+    for n in (1, 2, 3):
+        script_err(stub, "verify-attestation", str(n), 1, "Error: no attestations found")
+    done = run_step(tmp_path, VERIFY, stub, SIGN="false", SBOM="true", DOCKERHUB="")
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert calls(stub, "cosign verify-attestation") == [attest_vector("ghcr.io/o/r")] * 4
+
+
+def test_both_registries_get_the_exact_vectors_on_the_clean_path(tmp_path, stub):
+    done = run_step(tmp_path, VERIFY, stub, SIGN="true", SBOM="true")
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert calls(stub, "cosign verify ") == [verify_vector("ghcr.io/o/r"), verify_vector("docker.io/u/r")]
+    assert calls(stub, "cosign verify-attestation") == [
+        attest_vector("ghcr.io/o/r"),
+        attest_vector("docker.io/u/r"),
+    ]
+
+
+MIXED_SIGNATURE = "Error: no matching signatures: identity mismatch\nregistry response: no signatures found"
+MIXED_ATTESTATION = "Error: no matching attestations: issuer mismatch\nregistry response: no attestations found"
+
+
+def test_a_fatal_signature_error_with_not_found_text_is_not_retried(tmp_path, stub):
+    script_err(stub, "verify", "default", 1, MIXED_SIGNATURE)
+    done = run_step(tmp_path, VERIFY, stub, SIGN="true", SBOM="false", DOCKERHUB="")
+    assert done.returncode == 1
+    assert len(calls(stub, "cosign verify ")) == 1
+
+
+def test_a_fatal_attestation_error_with_not_found_text_is_not_retried(tmp_path, stub):
+    script_err(stub, "verify-attestation", "default", 1, MIXED_ATTESTATION)
+    done = run_step(tmp_path, VERIFY, stub, SIGN="false", SBOM="true", DOCKERHUB="")
+    assert done.returncode == 1
+    assert len(calls(stub, "cosign verify-attestation")) == 1
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Error: none of the expected identities matched\nerror: 503 service unavailable",
+        "Error: signature mismatch\ni/o timeout",
+        "Error: expected issuer https://a got https://b\nunexpected EOF",
+        "Error: certificate chain invalid\nconnection reset",
+        "Error: invalid signature\ntimed out",
+        "Error: repository does not match\nno signatures found",
+    ],
+)
+def test_a_fatal_error_beside_transient_text_is_not_retried(tmp_path, stub, message):
+    script_err(stub, "verify", "default", 1, message)
+    done = run_step(tmp_path, VERIFY, stub, SIGN="true", SBOM="false", DOCKERHUB="")
+    assert done.returncode == 1
+    assert len(calls(stub, "cosign verify ")) == 1
+
+
+def test_a_transient_only_error_still_retries_and_succeeds(tmp_path, stub):
+    script_err(stub, "verify", "1", 1, "Error: GET https://registry: i/o timeout")
+    script_err(stub, "verify-attestation", "1", 1, "Error: 503 Service Unavailable")
+    done = run_step(tmp_path, VERIFY, stub, SIGN="true", SBOM="true", DOCKERHUB="")
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert len(calls(stub, "cosign verify ")) == 2
+    assert len(calls(stub, "cosign verify-attestation")) == 2
+
+
 # --- the Rekor retry matcher covers every 5xx --------------------------------
 
 
