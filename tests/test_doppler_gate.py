@@ -58,8 +58,7 @@ def decide(tmp_path: Path, **env: str) -> tuple[int, str, str]:
 TRUSTED = [
     pytest.param({"EVENT": "push", "REF": "refs/heads/main", "DEFAULT_BRANCH": "main"}, id="push-default-branch"),
     pytest.param({"EVENT": "push", "REF": "refs/heads/master", "DEFAULT_BRANCH": "master"}, id="push-master-default"),
-    pytest.param({"EVENT": "push", "REF": "refs/tags/v1.2.3", "DEFAULT_BRANCH": "main"}, id="push-version-tag"),
-    pytest.param({"EVENT": "push", "REF": "refs/tags/v10.20.300", "DEFAULT_BRANCH": "main"}, id="push-multidigit-tag"),
+    # A version tag is not here: it is trusted only with a verified ancestry (see the ancestry section below).
     pytest.param(
         {"EVENT": "schedule", "REF": "refs/heads/main", "DEFAULT_BRANCH": ""}, id="schedule-without-repo-payload"
     ),
@@ -181,8 +180,16 @@ def test_an_inherited_nocasematch_does_not_make_a_tag_trusted(tmp_path, ref):
     assert code == 0 and mode == "none", out
 
 
-def test_an_inherited_nocasematch_still_trusts_a_real_release_tag(tmp_path):
-    code, mode, out = decide(tmp_path, BASHOPTS="nocasematch:nocaseglob", EVENT="push", REF="refs/tags/v1.2.3")
+def test_an_inherited_nocasematch_still_trusts_a_real_release_tag(tmp_path, repo):
+    work, main_sha, _, _ = repo
+    code, mode, out = decide(
+        tmp_path,
+        BASHOPTS="nocasematch:nocaseglob",
+        GITHUB_WORKSPACE=str(work),
+        GITHUB_SHA=main_sha,
+        EVENT="push",
+        REF="refs/tags/v1.2.3",
+    )
     assert code == 0 and mode == "oidc", out
 
 
@@ -205,7 +212,6 @@ def test_a_refused_tag_is_flagged_for_the_caller(tmp_path, event, label):
 @pytest.mark.parametrize(
     "env",
     [
-        {"EVENT": "push", "REF": "refs/tags/v1.2.3"},
         {"EVENT": "push", "REF": "refs/heads/main"},
         {"EVENT": "push", "REF": "refs/heads/feature"},
         {"EVENT": "push", "REF": "refs/heads/v1.2.3"},
@@ -215,7 +221,7 @@ def test_a_refused_tag_is_flagged_for_the_caller(tmp_path, event, label):
         {"EVENT": "pull_request_target", "REF": "refs/heads/main"},
         {"EVENT": "push", "REF": "refs/tags/v1.2.3-rc.1", "TRUSTED_ONLY": "false"},
     ],
-    ids=["release-tag", "default", "other-branch", "branch-like-tag", "schedule", "pr", "fork-pr", "prt", "gate-off"],
+    ids=["default", "other-branch", "branch-like-tag", "schedule", "pr", "fork-pr", "prt", "gate-off"],
 )
 def test_every_other_case_is_not_flagged(tmp_path, env):
     code, written, out = decide_outputs(tmp_path, **env)
@@ -461,12 +467,53 @@ def test_the_ancestry_check_does_not_touch_the_gate_off_path(tmp_path, repo):
     assert code == 0 and written["mode"] == "oidc", out
 
 
-def test_a_tag_that_cannot_be_checked_keeps_the_name_rule_and_says_so(tmp_path):
-    """RESIDUAL (README): with no checkout or no history the job cannot show where the tag points."""
-    code, written, out = decide_outputs(
-        tmp_path, GITHUB_WORKSPACE=str(tmp_path / "nothing"), GITHUB_SHA="a" * 40, **TAG
+def test_a_multidigit_release_tag_on_the_default_branch_is_trusted(tmp_path, repo):
+    work, main_sha, _, _ = repo
+    env = {**TAG, "REF": "refs/tags/v10.20.300"}
+    code, written, out = decide_outputs(tmp_path, GITHUB_WORKSPACE=str(work), GITHUB_SHA=main_sha, **env)
+    assert code == 0 and written["mode"] == "oidc" and written["untrusted-tag"] == "false", out
+
+
+def assert_fails_closed(code, written, out):
+    """An unverifiable tag is untrusted: no secrets, flagged for the caller, and it says why."""
+    assert code == 0 and written["mode"] == "none" and written["untrusted-tag"] == "true", out
+    assert "::notice" in out and "could not be verified" in out, out
+
+
+def test_a_tag_that_cannot_be_checked_is_untrusted_and_says_so(tmp_path):
+    """Fail closed (#437): with no checkout or no history the job cannot show where the tag points."""
+    assert_fails_closed(
+        *decide_outputs(tmp_path, GITHUB_WORKSPACE=str(tmp_path / "nothing"), GITHUB_SHA="a" * 40, **TAG)
     )
-    assert code == 0 and written["mode"] == "oidc" and "::notice" in out and "not verified" in out, out
+
+
+@pytest.mark.parametrize(
+    "missing",
+    ["GITHUB_WORKSPACE", "GITHUB_SHA", "DEFAULT_BRANCH"],
+)
+def test_a_tag_with_a_missing_or_empty_input_is_untrusted(tmp_path, repo, missing):
+    work, main_sha, _, _ = repo
+    env = {"GITHUB_WORKSPACE": str(work), "GITHUB_SHA": main_sha, **TAG}
+    env[missing] = ""
+    assert_fails_closed(*decide_outputs(tmp_path, **env))
+
+
+def test_a_tag_whose_default_branch_ref_is_missing_is_untrusted(tmp_path, repo):
+    work, main_sha, _, _ = repo
+    env = {**TAG, "DEFAULT_BRANCH": "nonexistent"}
+    assert_fails_closed(*decide_outputs(tmp_path, GITHUB_WORKSPACE=str(work), GITHUB_SHA=main_sha, **env))
+
+
+def test_a_tag_whose_commit_is_unknown_to_the_workspace_is_untrusted(tmp_path, repo):
+    work, _, _, _ = repo
+    assert_fails_closed(*decide_outputs(tmp_path, GITHUB_WORKSPACE=str(work), GITHUB_SHA="b" * 40, **TAG))
+
+
+def test_the_gate_off_path_still_does_not_check_a_tag(tmp_path):
+    code, written, out = decide_outputs(
+        tmp_path, GITHUB_WORKSPACE=str(tmp_path / "nothing"), GITHUB_SHA="a" * 40, TRUSTED_ONLY="false", **TAG
+    )
+    assert code == 0 and written["mode"] == "oidc" and written["untrusted-tag"] == "false", out
 
 
 def test_an_unknown_tag_shape_is_still_refused_before_any_ancestry_check(tmp_path, repo):
@@ -477,17 +524,15 @@ def test_an_unknown_tag_shape_is_still_refused_before_any_ancestry_check(tmp_pat
     assert code == 0 and written["mode"] == "none" and written["untrusted-tag"] == "true"
 
 
-def test_a_shallow_workspace_cannot_verify_and_never_refuses(tmp_path, repo):
-    """Round 2: a shallow history can answer "not an ancestor" when ancestry is only unknown."""
+def test_a_shallow_workspace_cannot_verify_and_is_untrusted(tmp_path, repo):
+    """A shallow history can answer "not an ancestor" when ancestry is only unknown: untrusted either way."""
     work, main_sha, _, side_sha = repo
     (work / ".git" / "shallow").write_text(main_sha + "\n")
-    code, written, out = decide_outputs(tmp_path, GITHUB_WORKSPACE=str(work), GITHUB_SHA=side_sha, **TAG)
-    assert code == 0 and written["mode"] == "oidc" and written["untrusted-tag"] == "false", out
-    assert "not verified" in out
+    assert_fails_closed(*decide_outputs(tmp_path, GITHUB_WORKSPACE=str(work), GITHUB_SHA=side_sha, **TAG))
 
 
 @pytest.mark.parametrize("status", [2, 3, 128, 255])
-def test_a_git_error_from_the_ancestry_check_is_not_verified_and_never_refuses(tmp_path, repo, status):
+def test_a_git_error_from_the_ancestry_check_is_untrusted(tmp_path, repo, status):
     work, _, _, side_sha = repo
     shim = tmp_path / "shim"
     shim.mkdir()
@@ -499,11 +544,11 @@ def test_a_git_error_from_the_ancestry_check_is_not_verified_and_never_refuses(t
     code, written, out = decide_outputs(
         tmp_path, GITHUB_WORKSPACE=str(work), GITHUB_SHA=side_sha, PATH=f"{shim}:{os.environ['PATH']}", **TAG
     )
-    assert code == 0 and written["mode"] == "oidc" and "not verified" in out, out
+    assert_fails_closed(code, written, out)
 
 
-def test_only_a_clean_exit_one_refuses(tmp_path, repo):
-    """The negative case for the two tests above: the same shim returning 1 does refuse."""
+def test_only_a_clean_exit_one_is_a_clean_not_an_ancestor_answer(tmp_path, repo):
+    """The same shim returning 1 is a clean refusal, with no "could not be verified" notice."""
     work, _, _, side_sha = repo
     shim = tmp_path / "shim"
     shim.mkdir()
@@ -516,3 +561,21 @@ def test_only_a_clean_exit_one_refuses(tmp_path, repo):
         tmp_path, GITHUB_WORKSPACE=str(work), GITHUB_SHA=side_sha, PATH=f"{shim}:{os.environ['PATH']}", **TAG
     )
     assert code == 0 and written["mode"] == "none" and written["untrusted-tag"] == "true", out
+    assert "could not be verified" not in out, out
+
+
+def test_only_a_clean_exit_zero_trusts_a_tag(tmp_path, repo):
+    """The trusted verdict: the same shim returning 0 trusts the tag, with no notice."""
+    work, _, _, side_sha = repo
+    shim = tmp_path / "shim"
+    shim.mkdir()
+    real = subprocess.run(["which", "git"], capture_output=True, text=True, check=True).stdout.strip()
+    (shim / "git").write_text(
+        f'#!/bin/bash\nfor a in "$@"; do [ "$a" = merge-base ] && exit 0; done\nexec {real} "$@"\n'
+    )
+    (shim / "git").chmod(0o755)
+    code, written, out = decide_outputs(
+        tmp_path, GITHUB_WORKSPACE=str(work), GITHUB_SHA=side_sha, PATH=f"{shim}:{os.environ['PATH']}", **TAG
+    )
+    assert code == 0 and written["mode"] == "oidc" and written["untrusted-tag"] == "false", out
+    assert "could not be verified" not in out, out
