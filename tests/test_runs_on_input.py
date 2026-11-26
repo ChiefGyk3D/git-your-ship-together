@@ -1,4 +1,4 @@
-"""The `runs-on` input of security.yml, dast.yml, tofu-ci.yml, bash-ci.yml and python-ci.yml (self-hosted runner support).
+"""The `runs-on` input of security.yml, dast.yml, tofu-ci.yml, bash-ci.yml, python-ci.yml and container-release.yml (self-hosted runner support).
 
 `runs-on` takes a string, an array or an object, so the input is a JSON string and every job reads it with
 `fromJSON(inputs.runs-on)`. The default parses to the label the workflow used before the input existed, so a caller
@@ -26,10 +26,13 @@ DEFAULTS = {
     "tofu-ci.yml": "ubuntu-latest",
     "bash-ci.yml": "ubuntu-latest",
     "python-ci.yml": "ubuntu-latest",
+    "container-release.yml": "ubuntu-24.04",
 }
 EXPECTED = "${{ fromJSON(inputs.runs-on) }}"
 # matrix jobs take their runner from the matrix (the `runners` and `distro-runners` inputs), never from runs-on
 MATRIX_RUNS_ON = {
+    ("container-release.yml", "build"): "${{ matrix.runner }}",
+    ("container-release.yml", "build-local"): "${{ matrix.runner }}",
     ("bash-ci.yml", "test"): "${{ matrix.runner }}",
     ("bash-ci.yml", "distro"): "${{ matrix.runner }}",
     ("python-ci.yml", "test"): "${{ matrix.runner }}",
@@ -58,6 +61,16 @@ def test_the_input_default_parses_to_todays_label(name, label):
 def test_every_job_uses_the_input(name):
     for job_name, job in load(name)["jobs"].items():
         assert job["runs-on"] == MATRIX_RUNS_ON.get((name, job_name), EXPECTED), f"{name}:{job_name}"
+
+
+def test_container_build_jobs_keep_their_github_hosted_matrix_runners():
+    doc = load("container-release.yml")
+    for name in ("build", "build-local"):
+        assert doc["jobs"][name]["runs-on"] == "${{ matrix.runner }}"
+        assert doc["jobs"][name]["strategy"]["matrix"]["include"] == "${{ fromJSON(needs.plan.outputs.matrix) }}"
+    plan_script = next(step["run"] for step in doc["jobs"]["plan"]["steps"] if step.get("id") == "plan")
+    assert "linux/arm64) runner=ubuntu-24.04-arm ;;" in plan_script
+    assert "*) runner=ubuntu-24.04 ;;" in plan_script
 
 
 def test_bash_ci_matrix_jobs_keep_the_existing_runner_input():
@@ -142,6 +155,25 @@ JOB_SCHEDULING = {
             "shellcheck", "shfmt", "test", "distro", "config-lint", "workflow-lint", "fragment-check", "commit-claims"
         ],
     },
+    ("container-release.yml", "plan"): {},
+    ("container-release.yml", "dockerfile-lint"): {"if": "inputs.hadolint"},
+    ("container-release.yml", "build"): {
+        "if": "${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.publish == 'true' && "
+        "(needs.dockerfile-lint.result == 'success' || needs.dockerfile-lint.result == 'skipped') }}",
+        "needs": ["plan", "dockerfile-lint"],
+        "strategy": {"fail-fast": False, "matrix": {"include": "${{ fromJSON(needs.plan.outputs.matrix) }}"}},
+    },
+    ("container-release.yml", "build-local"): {
+        "if": "${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.publish != 'true' && "
+        "(needs.dockerfile-lint.result == 'success' || needs.dockerfile-lint.result == 'skipped') }}",
+        "needs": ["plan", "dockerfile-lint"],
+        "strategy": {"fail-fast": False, "matrix": {"include": "${{ fromJSON(needs.plan.outputs.matrix) }}"}},
+    },
+    ("container-release.yml", "merge"): {
+        "if": "needs.plan.outputs.publish == 'true' && github.event_name != 'pull_request'",
+        "needs": ["plan", "build"],
+        "concurrency": {"group": "container-release-${{ needs.plan.outputs.serialize }}", "cancel-in-progress": False},
+    },
     ("dast.yml", "scan"): {
         "env": {
             "ZAP_IMAGE": "ghcr.io/zaproxy/zaproxy:2.17.0@"
@@ -217,8 +249,12 @@ JOB_SCHEDULING = {
         "needs": ["fmt", "validate", "test-dirs", "test", "tflint", "trivy", "policy", "plan", "workflow-lint"],
     },
 }
-# Job keys that may exist at all; a strategy is allowed only at its exact known value.
-JOB_KEYS = {"name", "runs-on", "timeout-minutes", "permissions", "steps", "outputs", "if", "needs", "env", "strategy"}
+# Job keys that may exist at all; a strategy is allowed only at its exact known value. `container`, `services`,
+# `defaults`, `continue-on-error` may not. `concurrency` may exist only with the exact value in JOB_SCHEDULING.
+JOB_KEYS = {
+    "name", "runs-on", "timeout-minutes", "permissions", "steps", "outputs", "if", "needs", "env", "strategy",
+    "concurrency",
+}
 WORKFLOW_KEYS = {"name", True, "permissions", "jobs"}  # `on` parses to True
 
 
@@ -259,7 +295,7 @@ def guard_problems(doc: dict, file: str | None = None, action_script: str | None
             bad.append(f"{name}: the job has continue-on-error")
         if file is not None:
             expected = JOB_SCHEDULING[(file, name)]
-            for key in ("if", "needs", "env", "strategy"):
+            for key in ("if", "needs", "env", "strategy", "concurrency"):
                 if job.get(key) != expected.get(key):
                     bad.append(f"{name}: the job {key} differs from the known value")
         if names.index(GUARD) != 2:
