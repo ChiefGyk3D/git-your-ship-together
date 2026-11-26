@@ -13,9 +13,11 @@ import os
 import re
 import stat
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
+from test_runs_on_input import GUARD, GUARD_ENV, GUARD_SHA256, sha
 from test_workflows import WORKFLOWS, jobs, load, steps_of, triggers
 
 RELEASE = WORKFLOWS / "container-release.yml"
@@ -47,6 +49,7 @@ BUILD_UNGATED = {
     "Scan the image with Trivy",
     "Summarize a failed Trivy scan",  # prints rule ids and paths from the scan's SARIF; holds no push ability
     "Upload Trivy results to the Security tab",
+    GUARD,  # allowed only when it is byte-identical to the approved guard (approved_guard below)
 }
 BUILD_UNGATED_USES = (
     "step-security/harden-runner@",
@@ -61,8 +64,22 @@ MERGE_UNGATED = {
     "Resolve image names",
     "Image metadata",
     "Validate the signer identity",  # a pure check of an input; it has no push, signing or token ability
+    GUARD,  # allowed only when it is byte-identical to the approved guard (approved_guard below)
 }
 MERGE_UNGATED_USES = ("step-security/harden-runner@", "docker/setup-buildx-action@")
+
+
+def approved_guard(s: dict) -> bool:
+    """The self-hosted guard exactly as test_runs_on_input.py approves it: name, no `if`, shell, env, keys, run."""
+    return (
+        s.get("name") == GUARD
+        and "if" not in s
+        and set(s) == {"name", "timeout-minutes", "shell", "env", "run"}
+        and s.get("shell") == "bash"
+        and s.get("env") == GUARD_ENV
+        and isinstance(s.get("run"), str)
+        and sha(s["run"]) == GUARD_SHA256
+    )
 
 
 def step(job: str, name: str, doc: dict | None = None) -> dict:
@@ -121,6 +138,8 @@ def violations(doc: dict) -> list[str]:
             name, uses = s.get("name"), str(s.get("uses", ""))
             cond = s.get("if")
             if name in ungated or uses.startswith(ungated_uses):
+                if name == GUARD and not approved_guard(s):
+                    out.append(f"{label}: differs from the approved self-hosted guard")
                 if cond is not None and GATE in str(cond):
                     out.append(f"{label}: unexpectedly gated, update the allow-list")
                 continue
@@ -267,6 +286,48 @@ def test_a_new_ungated_step_in_the_merge_job_is_caught():
     d = load(RELEASE)
     d["jobs"]["build"]["steps"].append({"name": "Push something else", "run": "docker push x"})
     assert violations(d)
+
+
+def guard_of(doc: dict, job: str) -> dict:
+    return next(s for s in doc["jobs"][job]["steps"] if s.get("name") == GUARD)
+
+
+@pytest.mark.parametrize("job", ["build", "merge"])
+def test_a_step_named_like_the_guard_with_another_body_is_caught(job):
+    d = load(RELEASE)
+    guard_of(d, job)["run"] += "\ndocker push x\n"
+    assert any("approved self-hosted guard" in v for v in violations(d))
+
+
+@pytest.mark.parametrize("job", ["build", "merge"])
+@pytest.mark.parametrize("cond", ["always()", "github.event_name == 'push'", "${{ true }}"])
+def test_the_guard_with_an_if_is_caught(job, cond):
+    d = load(RELEASE)
+    guard_of(d, job)["if"] = cond
+    assert any("approved self-hosted guard" in v for v in violations(d))
+
+
+@pytest.mark.parametrize("job", ["build", "merge"])
+@pytest.mark.parametrize("key,value", [("shell", "sh"), ("env", {}), ("continue-on-error", True)])
+def test_the_guard_with_another_shell_env_or_key_is_caught(job, key, value):
+    d = load(RELEASE)
+    guard_of(d, job)[key] = value
+    assert any("approved self-hosted guard" in v for v in violations(d))
+
+
+@pytest.mark.parametrize("job", ["build", "merge"])
+def test_a_second_ungated_step_beside_the_guard_is_caught(job):
+    d = load(RELEASE)
+    d["jobs"][job]["steps"].insert(2, {"name": "Another check", "run": "echo hi"})
+    assert any("Another check" in v for v in violations(d))
+
+
+def test_removing_the_guard_from_the_allow_lists_fails_the_real_workflow(monkeypatch):
+    monkeypatch.setattr(sys.modules[__name__], "BUILD_UNGATED", BUILD_UNGATED - {GUARD})
+    monkeypatch.setattr(sys.modules[__name__], "MERGE_UNGATED", MERGE_UNGATED - {GUARD})
+    found = violations(load(RELEASE))
+    assert any(v.startswith("build: " + GUARD) for v in found)
+    assert any(v.startswith("merge: " + GUARD) for v in found)
 
 
 # --- one build per leg ------------------------------------------------------
