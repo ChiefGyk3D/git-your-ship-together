@@ -1082,3 +1082,94 @@ def test_the_templates_hold_a_seven_day_cooldown_on_every_ecosystem_the_audit_re
     answers = good_answers()
     answers[DEPENDABOT_PATH] = (200, encoded((REPO / "examples" / "dependabot-template.yml").read_text()))
     assert by_check(audit.audit_repo(REPO_NAME, fetcher(answers)))["dependabot-config"][0] == audit.PASS
+
+
+# --- hostile dependabot.yml files ---------------------------------------------------
+
+
+def dependabot_check_text(text: str | bytes) -> tuple[str, str]:
+    answers = good_answers()
+    raw = text.encode() if isinstance(text, str) else text
+    answers[DEPENDABOT_PATH] = (200, {"content": base64.b64encode(raw).decode(), "encoding": "base64"})
+    return by_check(audit.audit_repo(REPO_NAME, fetcher(answers)))["dependabot-config"]
+
+
+GOOD_ENTRY = "  - package-ecosystem: pip\n    directory: /\n    cooldown:\n      default-days: 7\n"
+
+
+def test_an_alias_a_billion_laughs_document_or_an_anchor_is_unknown_not_expanded():
+    laughs = "version: 2\nl0: &l0 [x, x, x, x, x, x, x, x, x, x]\n" + "".join(
+        f"l{i}: &l{i} [{', '.join([f'*l{i - 1}'] * 10)}]\n" for i in range(1, 10)
+    )
+    assert dependabot_check_text(laughs + "updates:\n" + GOOD_ENTRY)[0] == audit.UNKNOWN
+    anchored = "updates:\n  - &a\n    package-ecosystem: pip\n    cooldown:\n      default-days: 7\n"
+    assert dependabot_check_text(anchored)[0] == audit.UNKNOWN
+    merged = "updates:\n  - package-ecosystem: pip\n    cooldown:\n      <<: {default-days: 7}\n"
+    assert dependabot_check_text(merged)[0] == audit.UNKNOWN
+
+
+def test_a_duplicate_key_that_would_hide_a_short_cooldown_is_unknown():
+    text = "updates:\n  - package-ecosystem: pip\n    cooldown:\n      default-days: 1\n      default-days: 7\n"
+    assert dependabot_check_text(text)[0] == audit.UNKNOWN
+    assert (
+        dependabot_check_text("updates:\n  - package-ecosystem: pip\n    package-ecosystem: npm\n")[0] == audit.UNKNOWN
+    )
+
+
+def test_deep_nesting_and_an_oversized_file_are_unknown_not_a_crash():
+    deep = "updates:\n  - package-ecosystem: pip\n    x: " + "[" * 5000 + "]" * 5000 + "\n"
+    assert dependabot_check_text(deep)[0] == audit.UNKNOWN
+    nested_map = "updates:\n  - package-ecosystem: pip\n    x:\n" + "".join(
+        "  " * (3 + i) + f"k{i}:\n" for i in range(40)
+    )
+    assert dependabot_check_text(nested_map)[0] == audit.UNKNOWN
+    big = "version: 2\n# " + "a" * audit.MAX_DEPENDABOT_BYTES + "\nupdates:\n" + GOOD_ENTRY
+    assert dependabot_check_text(big)[0] == audit.UNKNOWN
+    just_under = "version: 2\nupdates:\n" + GOOD_ENTRY
+    assert len(just_under) < audit.MAX_DEPENDABOT_BYTES
+    assert dependabot_check_text(just_under)[0] == audit.PASS
+
+
+def test_bad_bytes_and_a_non_string_content_field_are_unknown():
+    assert dependabot_check_text(b"\xff\xfe\x00bad")[0] == audit.UNKNOWN
+    answers = good_answers()
+    answers[DEPENDABOT_PATH] = (200, {"content": 12345})
+    assert by_check(audit.audit_repo(REPO_NAME, fetcher(answers)))["dependabot-config"][0] == audit.UNKNOWN
+
+
+def test_foreign_values_in_the_label_are_one_clean_line_and_never_forge_a_line():
+    hostile = (
+        "updates:\n"
+        '  - package-ecosystem: pip\n    directory: "/a\\n::error::forged\\n\\u001b[31mred\\r  FAIL x"\n'
+        "    cooldown:\n      default-days: 1\n"
+        "  - package-ecosystem: [a, b]\n    directory: {k: v}\n    cooldown:\n      default-days: 1\n"
+        f'  - package-ecosystem: npm\n    directory: "{"d" * 500}"\n    cooldown:\n      default-days: 1\n'
+    )
+    status, detail = dependabot_check_text(hostile)
+    assert status == audit.FAIL
+    assert "\n" not in detail and "\r" not in detail and chr(27) not in detail and "::" not in detail
+    assert detail.count(audit.COMPLEX) >= 2
+    assert "d" * 150 not in detail and "[a, b]" not in detail and "k: v" not in detail
+    report = audit.render([audit.Result(REPO_NAME, "dependabot-config", status, detail)])
+    assert not any(line.lstrip().startswith("::") for line in report.splitlines())
+    assert len(report.splitlines()) == 3  # blank line, repo name, the one result line
+
+
+def test_render_neutralizes_newlines_controls_and_workflow_commands_in_any_field():
+    nasty = audit.Result(
+        "o/r\n::set-output name=x::1", "chk" + chr(27) + "[2J", audit.FAIL, "a\n::error::b\r\nFAIL forged" + chr(7)
+    )
+    report = audit.render([nasty])
+    assert len(report.splitlines()) == 3
+    assert "::" not in report and chr(27) not in report and chr(7) not in report and "\r" not in report
+
+
+def test_a_cooldown_check_that_raises_is_unknown_and_the_audit_goes_on(monkeypatch):
+    def boom(_config):
+        raise RecursionError
+
+    monkeypatch.setattr(audit, "cooldown_problems", boom)
+    results = audit.audit_repo(REPO_NAME, fetcher(good_answers()))
+    assert by_check(results)["dependabot-config"][0] == audit.UNKNOWN
+    assert "dependabot-ecosystem" in by_check(results)
+    assert audit.exit_code(results, allow_unknown=False) == 2

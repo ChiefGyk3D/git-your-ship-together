@@ -551,6 +551,79 @@ MIN_COOLDOWN_DAYS = 7
 COOLDOWN_KEYS = ("default-days", "semver-major-days", "semver-minor-days", "semver-patch-days")
 
 
+# Largest dependabot.yml read, and the deepest nesting accepted. The file comes from another repository, so it
+# is semi-trusted input: bounded before and during the parse, and never echoed raw into the report.
+MAX_DEPENDABOT_BYTES = 64 * 1024
+MAX_YAML_DEPTH = 20
+MAX_FIELD_CHARS = 100
+COMPLEX = "<complex>"
+
+
+class UnsafeYaml(Exception):
+    """A dependabot.yml that is refused rather than parsed: an alias, anchor, duplicate key, merge key or depth."""
+
+
+def _safe_loader():
+    import yaml
+
+    class Loader(yaml.SafeLoader):
+        depth = 0
+
+        def compose_node(self, parent, index):
+            if self.check_event(yaml.AliasEvent):
+                raise UnsafeYaml("alias")
+            if self.peek_event().anchor is not None:
+                raise UnsafeYaml("anchor")
+            self.depth += 1
+            try:
+                if self.depth > MAX_YAML_DEPTH:
+                    raise UnsafeYaml("nesting")
+                return super().compose_node(parent, index)
+            finally:
+                self.depth -= 1
+
+        def construct_mapping(self, node, deep=False):
+            seen = set()
+            for key_node, _ in node.value:
+                if key_node.tag == "tag:yaml.org,2002:merge":
+                    raise UnsafeYaml("merge key")
+                key = self.construct_object(key_node, deep=True)
+                try:
+                    duplicate = key in seen
+                    seen.add(key)
+                except TypeError:
+                    raise UnsafeYaml("unhashable key") from None
+                if duplicate:
+                    raise UnsafeYaml("duplicate key")
+            return super().construct_mapping(node, deep=deep)
+
+    return Loader
+
+
+def load_dependabot(raw: bytes) -> object:
+    """Parse a fetched dependabot.yml; raise UnsafeYaml (or a parser error) for anything not plainly benign."""
+    import yaml
+
+    if len(raw) > MAX_DEPENDABOT_BYTES:
+        raise UnsafeYaml("too large")
+    return yaml.load(raw.decode(), Loader=_safe_loader())  # noqa: S506 - a SafeLoader subclass
+
+
+def shown(value: object) -> str:
+    """A value taken from a fetched file, made safe to print: str only, one line, no controls, no `::`."""
+    if type(value) is not str:
+        return COMPLEX
+    text = "".join(ch if ch.isprintable() else " " for ch in value)
+    text = " ".join(text.split()).replace("::", ": :")
+    return text if len(text) <= MAX_FIELD_CHARS else COMPLEX
+
+
+def one_line(text: str, limit: int = 1000) -> str:
+    """Report text with no newline, control character or workflow command in it."""
+    text = " ".join("".join(ch if ch.isprintable() else " " for ch in str(text)).split()).replace("::", ": :")
+    return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
 def cooldown_problems(config: object) -> list[str]:
     """What is wrong with the cooldown of each update entry in a parsed dependabot.yml.
 
@@ -563,13 +636,11 @@ def cooldown_problems(config: object) -> list[str]:
         return ["dependabot.yml has no update entries"]
     problems = []
     for index, entry in enumerate(updates):
-        label = "an update entry"
-        if isinstance(entry, dict):
-            where = entry.get("directory") or entry.get("directories") or "/"
-            label = f"{entry.get('package-ecosystem', 'an entry')} in {where}"
-        else:
-            problems.append(f"{label} (#{index + 1}) is not a mapping")
+        if not isinstance(entry, dict):
+            problems.append(f"update entry #{index + 1} is not a mapping")
             continue
+        where = entry.get("directory") if "directory" in entry else entry.get("directories", "/")
+        label = f"{shown(entry.get('package-ecosystem'))} in {shown(where)}"
         cooldown = entry.get("cooldown")
         if not isinstance(cooldown, dict):
             problems.append(f"{label} has no cooldown")
@@ -594,14 +665,13 @@ def check_dependabot(repo: str, fetch: Fetcher) -> Result:
     if code != 200 or not isinstance(file, dict) or "content" not in file:
         return Result(repo, "dependabot-config", UNKNOWN, unreadable(code, file))
     try:
-        import yaml
+        import yaml  # noqa: F401
     except ImportError:
         sys.exit("reading dependabot.yml needs PyYAML: pip install -r requirements-dev.txt")
     try:
-        config = yaml.safe_load(base64.b64decode(file["content"]).decode())
-    except (ValueError, yaml.YAMLError):
-        return Result(repo, "dependabot-config", UNKNOWN, "dependabot.yml could not be parsed")
-    problems = cooldown_problems(config)
+        problems = cooldown_problems(load_dependabot(base64.b64decode(file["content"])))
+    except Exception as err:  # a hostile or broken file is "could not tell", never a pass and never a crash
+        return Result(repo, "dependabot-config", UNKNOWN, f"dependabot.yml was not read: {type(err).__name__}")
     if problems:
         return Result(
             repo,
@@ -854,14 +924,14 @@ def read_repo_list(path: Path) -> list[str]:
 
 
 def render(results: list[Result]) -> str:
-    width = max(len(r.check) for r in results)
+    width = max(len(one_line(r.check)) for r in results)
     lines = []
     current = None
     for r in results:
         if r.repo != current:
             current = r.repo
-            lines.append(f"\n{current}")
-        lines.append(f"  {r.status:<7} {r.check:<{width}}  {r.detail}")
+            lines.append(f"\n{one_line(current)}")
+        lines.append(f"  {one_line(r.status):<7} {one_line(r.check):<{width}}  {one_line(r.detail)}")
     return "\n".join(lines)
 
 
