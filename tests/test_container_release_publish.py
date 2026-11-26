@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import stat
 import subprocess
 from pathlib import Path
@@ -1608,3 +1609,56 @@ def test_the_restore_states_the_window_it_cannot_close():
 def test_the_restore_window_residual_is_documented_in_the_wiki():
     wiki = (RELEASE.parents[2] / "docs/wiki/Workflow-container-release.md").read_text()
     assert "compare-and-swap" in wiki and "cannot be closed" in wiki
+
+
+# --- the classifier reads the stderr file and fails closed (issue #452) -------
+
+
+def grep_wrapper(tmp_path: Path, stub: Path, codes: str) -> None:
+    """A grep first on PATH. The classifier's calls get the listed exit codes in order
+    (then the real grep); the cosign stub's own bookkeeping grep is never counted."""
+    real = shutil.which("grep")
+    text = (
+        "#!/bin/bash\n"
+        'case "$*" in *"^cosign"*) exec ' + real + ' "$@";; esac\n'
+        'n=$(( $(cat "$STUB/grep.n" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$STUB/grep.n"\n'
+        "i=0\n"
+        f"for code in {codes}; do\n"
+        '  i=$((i + 1)); [ "$i" -eq "$n" ] && exit "$code"\n'
+        "done\n"
+        "exec " + real + ' "$@"\n'
+    )
+    path = tmp_path / "bin" / "grep"
+    path.write_text(text)
+    path.chmod(path.stat().st_mode | stat.S_IEXEC)
+
+
+KINDS = [("verify", "true", "false"), ("verify-attestation", "false", "true")]
+
+
+@pytest.mark.parametrize(("kind", "sign", "sbom"), KINDS)
+def test_a_nul_byte_in_stderr_is_never_retried(tmp_path, stub, kind, sign, sbom):
+    script_err(stub, kind, "default", 1, "")
+    (stub / f"{kind}.default.err").write_bytes(b"Error: 503\x00\n")
+    done = run_step(tmp_path, VERIFY, stub, SIGN=sign, SBOM=sbom, DOCKERHUB="")
+    assert done.returncode == 1
+    assert len(calls(stub, f"cosign {kind}")) == 1
+
+
+# The classifier's greps run in this order: byte guard, fatal matcher, transient matcher.
+@pytest.mark.parametrize(("kind", "sign", "sbom"), KINDS)
+@pytest.mark.parametrize("codes", ["2 1", "1 2", "1 1 2"], ids=["byte-guard", "fatal-matcher", "transient-matcher"])
+def test_a_classifier_error_is_never_a_retry(tmp_path, stub, kind, sign, sbom, codes):
+    script_err(stub, kind, "default", 1, "Error: 503")
+    grep_wrapper(tmp_path, stub, codes)
+    done = run_step(tmp_path, VERIFY, stub, SIGN=sign, SBOM=sbom, DOCKERHUB="")
+    assert done.returncode == 1
+    assert len(calls(stub, f"cosign {kind}")) == 1
+
+
+def test_the_grep_wrapper_does_not_disturb_a_real_retry(tmp_path, stub):
+    script_err(stub, "verify", "1", 1, "Error: 503 Service Unavailable")
+    grep_wrapper(tmp_path, stub, "1 1")
+    done = run_step(tmp_path, VERIFY, stub, SIGN="true", SBOM="false", DOCKERHUB="")
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert len(calls(stub, "cosign verify ")) == 2
