@@ -119,6 +119,17 @@ GUARD_ENV = {
 VALIDATOR = "Validate the egress policy inputs"
 HARDEN = "step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43"  # v2.22.3
 HARDEN_WITH = {"egress-policy", "allowed-endpoints", "disable-telemetry", "disable-sudo"}
+# The POLICY_ variables each workflow's validator declares. A job's validator env must be exactly these.
+VALIDATOR_VARS = {
+    "security.yml": ("EGRESS_POLICY", "EGRESS_POLICY_SECRETLESS", "SEMGREP_EGRESS_POLICY"),
+    "dast.yml": ("EGRESS_POLICY", "EGRESS_POLICY_SECRETLESS"),
+    "tofu-ci.yml": ("EGRESS_POLICY", "EGRESS_POLICY_SECRETLESS"),
+    "bash-ci.yml": ("DISTRO_EGRESS_POLICY", "EGRESS_POLICY", "EGRESS_POLICY_SECRETLESS"),
+    "python-ci.yml": ("DISTRO_EGRESS_POLICY", "EGRESS_POLICY", "EGRESS_POLICY_SECRETLESS"),
+    "container-release.yml": ("EGRESS_POLICY", "EGRESS_POLICY_SECRETLESS"),
+}
+# (file, job) whose harden-runner deliberately omits disable-sudo: its caller install command may need sudo
+SUDO_EXCEPTIONS = {("bash-ci.yml", "test")}
 CHECK_ACTION = REPO / ".github" / "actions" / "egress-policy-check" / "action.yml"
 # Everything that can decide whether a job runs, and the environment it starts with, as the jobs have it today:
 # an allowlist, so a new `if`, `needs`, `strategy` or env key is a change this test makes the author look at.
@@ -258,11 +269,13 @@ JOB_KEYS = {
 WORKFLOW_KEYS = {"name", True, "permissions", "jobs"}  # `on` parses to True
 
 
-# Immutable pins: SHA-256 of the exact script text. The equality with the composite action alone would pass a
-# backdoor written into the action and every inline copy together. Change a constant only deliberately, when the
-# validator or the guard legitimately changes, after reading the diff of the script itself.
-VALIDATOR_SHA256 = "3d1b25b484795c2d26e5e997ccc1f102e1273b68f13e7fad8590490ce0453c72"
-GUARD_SHA256 = "6c68af57a121dab2f3b9fda0f7baebb7407b1e429e26cd6bd255edda4654260c"
+# Review tripwires, not immutable security pins: SHA-256 of the exact script text. The equality with the composite
+# action alone would pass a backdoor written into the action and every inline copy together, so a digest makes that
+# edit visible in review. It does not stop a coordinated edit by itself: a script and its digest changed in one pull
+# request are stopped only by CODEOWNERS review of this file and of the workflows. Change a constant only deliberately,
+# when the validator or the guard legitimately changes, after reading the diff of the script itself.
+VALIDATOR_SHA256 = "3d1b25b484795c2d26e5e997ccc1f102e1273b68f13e7fad8590490ce0453c72"  # review tripwire, not a pin
+GUARD_SHA256 = "6c68af57a121dab2f3b9fda0f7baebb7407b1e429e26cd6bd255edda4654260c"  # review tripwire, not a pin
 PIN_HINT = "update the SHA-256 constant in tests/test_runs_on_input.py deliberately if this script legitimately changed"
 
 
@@ -275,9 +288,10 @@ def check_script() -> str:
 
 
 def guard_problems(doc: dict, file: str | None = None, action_script: str | None = None) -> list[str]:
-    """Jobs without an operative guard. Allowlist based: the two steps before the guard are pinned exactly, the
-    guard's own keys and environment are pinned exactly, and nothing at step, job or workflow level may add an
-    environment variable, a shell default, a condition or a matrix that is not already there."""
+    """Jobs without an operative guard. Allowlist based: the guard is the first step, the validator second and
+    harden-runner third, each pinned exactly; the guard's own keys and environment are pinned exactly, and nothing
+    at step, job or workflow level may add an environment variable, a shell default, a condition or a matrix that
+    is not already there."""
     bad = []
     if set(doc) - WORKFLOW_KEYS:
         bad.append(f"workflow: unexpected keys {sorted(map(str, set(doc) - WORKFLOW_KEYS))}")
@@ -298,26 +312,32 @@ def guard_problems(doc: dict, file: str | None = None, action_script: str | None
             for key in ("if", "needs", "env", "strategy", "concurrency"):
                 if job.get(key) != expected.get(key):
                     bad.append(f"{name}: the job {key} differs from the known value")
-        if names.index(GUARD) != 2:
-            bad.append(f"{name}: the guard is not the third step")
+        if names.index(GUARD) != 0:
+            bad.append(f"{name}: the guard is not the first step")
             continue
-        first, second, step = steps[0], steps[1], steps[2]
+        if len(steps) < 3:
+            bad.append(f"{name}: fewer than three steps")
+            continue
+        step, first, second = steps[0], steps[1], steps[2]
+        expected_env = {
+            "POLICY_" + v: "${{ inputs." + v.lower().replace("_", "-") + " }}" for v in VALIDATOR_VARS.get(file, ())
+        }
         if (
             first.get("name") != VALIDATOR
             or first.get("run") != (action_script if action_script is not None else check_script())
             or set(first) != {"name", "timeout-minutes", "shell", "working-directory", "env", "run"}
             or first["shell"] != "bash"
-            or any(
-                k != "POLICY_" + k[7:] or v != "${{ inputs." + k[7:].lower().replace("_", "-") + " }}"
-                for k, v in first["env"].items()
-            )
+            or first.get("env") != expected_env
         ):
             bad.append(f"{name}: the policy validator is not the exact expected step")
+        sudo_exception = (file, name) in SUDO_EXCEPTIONS
+        harden_keys = HARDEN_WITH - {"disable-sudo"} if sudo_exception else HARDEN_WITH
+        harden_with = second.get("with") or {}
         if (
             second.get("uses") != HARDEN
             or set(second) != {"uses", "with"}
-            or not set(second["with"]) <= HARDEN_WITH
-            or not {"egress-policy", "allowed-endpoints", "disable-telemetry"} <= set(second["with"])
+            or set(harden_with) != harden_keys
+            or (not sudo_exception and harden_with.get("disable-sudo") is not True)
         ):
             bad.append(f"{name}: harden-runner is not the exact pinned step")
         if sha(first.get("run", "")) != VALIDATOR_SHA256:
@@ -396,25 +416,57 @@ def mutations(doc: dict, victim: str):
             else:
                 d["env"] = {var: value}
             yield f"{where} env {var}", d
-    # steps before the guard: the validator and harden-runner are pinned exactly
+    # the guard is the first step, the validator second and harden-runner third: each is pinned exactly
     d, job, steps = fresh()
-    steps[0]["run"] = "echo attacker-controlled"
+    steps[1]["run"] = "echo attacker-controlled"
     yield "validator replaced", d
     d, job, steps = fresh()
-    steps[0]["run"] = steps[0]["run"] + "\ntrue"
+    steps[1]["run"] = steps[1]["run"] + "\ntrue"
     yield "validator extended", d
     d, job, steps = fresh()
-    steps[1]["uses"] = "attacker/harden-runner-backdoor@main"
+    steps[2]["uses"] = "attacker/harden-runner-backdoor@main"
     yield "harden-runner replaced", d
     d, job, steps = fresh()
-    steps[1]["uses"] = steps[1]["uses"].replace("@46b0", "@0000")
+    steps[2]["uses"] = steps[2]["uses"].replace("@46b0", "@0000")
     yield "harden-runner repinned", d
     d, job, steps = fresh()
-    steps.insert(2, {"name": "extra", "run": "echo before the guard"})
+    steps.insert(0, {"name": "extra", "run": "echo before the guard"})
     yield "extra step before the guard", d
     d, job, steps = fresh()
     steps.insert(0, {"name": "extra", "run": "echo first"})
     yield "extra first step", d
+    d, job, steps = fresh()
+    steps.insert(1, {"name": "extra", "run": "echo between the guard and the validator"})
+    yield "extra step between the guard and the validator", d
+    d, job, steps = fresh()
+    steps.insert(2, {"name": "extra", "run": "echo between the validator and harden-runner"})
+    yield "extra step between the validator and harden-runner", d
+    d, job, steps = fresh()
+    steps[:] = [steps[1], steps[2], steps[0]] + steps[3:]
+    yield "guard moved back to third", d
+    d, job, steps = fresh()
+    steps[:] = [steps[0], steps[2], steps[1]] + steps[3:]
+    yield "harden-runner before the validator", d
+    # the validator's environment is exactly the expected mapping: one variable or all of them missing is caught
+    d, job, steps = fresh()
+    env = steps[1]["env"]
+    del env[next(iter(env))]
+    yield "validator env variable deleted", d
+    d, job, steps = fresh()
+    steps[1]["env"] = {}
+    yield "validator env emptied", d
+    d, job, steps = fresh()
+    del steps[1]["env"]
+    yield "validator env removed", d
+    # harden-runner keeps disable-sudo: true (the one documented exception has no such key to remove)
+    d, job, steps = fresh()
+    if "disable-sudo" in steps[2]["with"]:
+        del steps[2]["with"]["disable-sudo"]
+        yield "harden-runner disable-sudo removed", d
+    d, job, steps = fresh()
+    if "disable-sudo" in steps[2]["with"]:
+        steps[2]["with"]["disable-sudo"] = False
+        yield "harden-runner disable-sudo false", d
     # scheduling: the job may not be skipped or emptied
     d, job, steps = fresh()
     job["if"] = False
@@ -543,7 +595,7 @@ def test_a_synchronized_backdoor_in_the_action_and_every_copy_is_caught(name):
     for victim in doc["jobs"]:
         mutated = copy.deepcopy(doc)
         for job in mutated["jobs"].values():
-            job["steps"][0]["run"] = bad_action
+            job["steps"][1]["run"] = bad_action
         problems = guard_problems(mutated, name, action_script=bad_action)
         assert any("pinned SHA-256" in x and "validator" in x for x in problems), victim
         mutated = copy.deepcopy(doc)
