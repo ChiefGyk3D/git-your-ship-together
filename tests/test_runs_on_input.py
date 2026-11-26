@@ -97,8 +97,48 @@ def test_python_ci_egress_follows_the_label_for_non_matrix_jobs(name):
         text = json.dumps(job)
         if n in MATRIX_JOBS_PYCI:
             assert "matrix.runner" in text and "inputs.runs-on" not in text, n
+        elif n in ID_TOKEN_JOBS_PYCI:
+            assert id_token_job_problems(job) == [], n
         else:
             assert "contains(fromJSON(" in text and "fromJSON(inputs.runs-on)" in text, n
+
+
+ID_TOKEN_JOBS_PYCI = {"coverage"}
+ORIGINAL_EGRESS_POLICY = "${{ inputs.egress-policy == 'audit' && 'audit' || 'block' }}"
+ORIGINAL_DISABLE_TELEMETRY = "${{ (inputs.egress-policy == 'audit' && 'audit' || 'block') == 'block' }}"
+
+
+def id_token_job_problems(job):
+    """Why an id-token job's harden-runner step is not the original egress expression."""
+    problems = []
+    steps = [s for s in job["steps"] if "harden-runner" in s.get("uses", "")]
+    if not steps:
+        problems.append("no harden-runner step")
+    for s in steps:
+        if s["with"]["egress-policy"] != ORIGINAL_EGRESS_POLICY:
+            problems.append("egress-policy changed")
+        if s["with"]["disable-telemetry"] != ORIGINAL_DISABLE_TELEMETRY:
+            problems.append("disable-telemetry changed")
+    if "contains(fromJSON(" in json.dumps(job):
+        problems.append("runner check present")
+    if job["runs-on"] != EXPECTED:
+        problems.append("runs-on changed")
+    return problems
+
+
+def test_python_ci_id_token_job_runner_check_is_flagged():
+    """Mutation: re-adding the hosted-label check to the coverage job must be flagged."""
+    job = copy.deepcopy(load("python-ci.yml")["jobs"]["coverage"])
+    assert job["permissions"].get("id-token") == "write"
+    assert id_token_job_problems(job) == []
+    step = next(s for s in job["steps"] if "harden-runner" in s.get("uses", ""))
+    step["with"]["egress-policy"] = step["with"]["egress-policy"].replace(
+        "inputs.egress-policy == 'audit'",
+        "inputs.egress-policy == 'audit' && contains(fromJSON('[\"ubuntu-latest\"]'), fromJSON(inputs.runs-on))",
+    )
+    assert "egress-policy changed" in id_token_job_problems(job)
+    assert "runner check present" in id_token_job_problems(job)
+
 
 @pytest.mark.parametrize("name", sorted(DEFAULTS))
 def test_the_header_documents_harden_runner_on_self_hosted_runners(name):
