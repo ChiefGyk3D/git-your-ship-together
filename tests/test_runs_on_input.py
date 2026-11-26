@@ -650,11 +650,17 @@ def test_the_pins_match_the_files_today():
 
 
 # ---- Bash 3.2 compatibility of the inlined scripts (GitHub macOS runners run `shell: bash` as Bash 3.2) ----
-BASH4_ONLY = (",,", "^^", "declare -A", "mapfile", "readarray", "[[ -v", "${!", "&>>", "|&", "coproc")
+BASH4_ONLY = (",,", "^^", ";;&", ";&", "declare -A", "mapfile", "readarray", "[[ -v", "${!", "&>>", "|&", "coproc")
 
 
 def bash4_constructs(script: str) -> list[str]:
-    return [token for token in BASH4_ONLY if token in script]
+    found = []
+    for token in BASH4_ONLY:
+        if token in script:
+            found.append(token)
+            if token == ";;&":
+                script = script.replace(";;&", "")  # so ";&" is not double-counted
+    return found
 
 
 def every_guard_and_validator_script():
@@ -678,6 +684,20 @@ def test_a_bash4_only_construct_in_the_guard_is_flagged(token):
     assert bash4_constructs(script) == []
     assert bash4_constructs(script + "\n" + token + "\n") == [token]
     assert bash4_constructs(script.replace('lower "$RUNNER_ENV"', 'x=${RUNNER_ENV,,}', 1)) == [",,"]
+
+
+def test_the_case_terminators_are_checked_longest_first_and_each_is_flagged():
+    # ";;&" contains ";&" as a substring, so ";;&" is listed (and checked) before ";&".
+    assert BASH4_ONLY.index(";;&") < BASH4_ONLY.index(";&")
+    base = "case x in a) echo a ;; esac\n"
+    assert bash4_constructs(base) == []
+    assert bash4_constructs("case x in a) echo a ;;& b) echo b ;; esac\n") == [";;&"]
+    assert bash4_constructs("case x in a) echo a ;& b) echo b ;; esac\n") == [";&"]
+
+
+# Note on lower(): the guard lowercases with `tr`, which matches Bash 4 ${x,,} for ASCII
+# values. That is all a GitHub repository name, event name, runner environment or boolean
+# can contain. For exotic non-ASCII input it can differ, and it fails closed.
 
 
 # ---- duplicate mapping keys: PyYAML keeps the last one silently ----
