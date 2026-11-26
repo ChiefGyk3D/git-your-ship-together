@@ -1,4 +1,5 @@
-"""The `runs-on` input of security.yml, dast.yml, tofu-ci.yml, bash-ci.yml, python-ci.yml and container-release.yml (self-hosted runner support).
+"""The `runs-on` input of security.yml, dast.yml, tofu-ci.yml, bash-ci.yml, python-ci.yml and
+container-release.yml (self-hosted runner support).
 
 `runs-on` takes a string, an array or an object, so the input is a JSON string and every job reads it with
 `fromJSON(inputs.runs-on)`. The default parses to the label the workflow used before the input existed, so a caller
@@ -173,7 +174,18 @@ SUDO_EXCEPTIONS = {("bash-ci.yml", "test")}
 CHECK_ACTION = REPO / ".github" / "actions" / "egress-policy-check" / "action.yml"
 # Everything that can decide whether a job runs, and the environment it starts with, as the jobs have it today:
 # an allowlist, so a new `if`, `needs`, `strategy` or env key is a change this test makes the author look at.
-PYCI_TEST_NEEDS = ["lint", "typecheck", "workflow-lint", "test", "distro", "coverage", "smoke", "docker", "fragment-check", "commit-claims"]
+PYCI_TEST_NEEDS = [
+    "lint",
+    "typecheck",
+    "workflow-lint",
+    "test",
+    "distro",
+    "coverage",
+    "smoke",
+    "docker",
+    "fragment-check",
+    "commit-claims",
+]
 MATRIX_JOBS_PYCI = {"test", "distro"}
 JOB_SCHEDULING = {
     ("bash-ci.yml", "shellcheck"): {},
@@ -203,7 +215,14 @@ JOB_SCHEDULING = {
     ("bash-ci.yml", "ci-green"): {
         "if": "always()",
         "needs": [
-            "shellcheck", "shfmt", "test", "distro", "config-lint", "workflow-lint", "fragment-check", "commit-claims"
+            "shellcheck",
+            "shfmt",
+            "test",
+            "distro",
+            "config-lint",
+            "workflow-lint",
+            "fragment-check",
+            "commit-claims",
         ],
     },
     ("container-release.yml", "plan"): {},
@@ -303,7 +322,16 @@ JOB_SCHEDULING = {
 # Job keys that may exist at all; a strategy is allowed only at its exact known value. `container`, `services`,
 # `defaults`, `continue-on-error` may not. `concurrency` may exist only with the exact value in JOB_SCHEDULING.
 JOB_KEYS = {
-    "name", "runs-on", "timeout-minutes", "permissions", "steps", "outputs", "if", "needs", "env", "strategy",
+    "name",
+    "runs-on",
+    "timeout-minutes",
+    "permissions",
+    "steps",
+    "outputs",
+    "if",
+    "needs",
+    "env",
+    "strategy",
     "concurrency",
 }
 WORKFLOW_KEYS = {"name", True, "permissions", "jobs"}  # `on` parses to True
@@ -525,7 +553,6 @@ def mutations(doc: dict, victim: str):
     yield "container", d
 
 
-
 @pytest.mark.parametrize("name", sorted(DEFAULTS))
 def test_every_way_of_neutering_the_guard_is_caught_in_every_job(name):
     doc = load(name)
@@ -683,7 +710,7 @@ def test_a_bash4_only_construct_in_the_guard_is_flagged(token):
     script = guard_script(load("security.yml"))
     assert bash4_constructs(script) == []
     assert bash4_constructs(script + "\n" + token + "\n") == [token]
-    assert bash4_constructs(script.replace('lower "$RUNNER_ENV"', 'x=${RUNNER_ENV,,}', 1)) == [",,"]
+    assert bash4_constructs(script.replace('lower "$RUNNER_ENV"', "x=${RUNNER_ENV,,}", 1)) == [",,"]
 
 
 def test_the_case_terminators_are_checked_longest_first_and_each_is_flagged():
