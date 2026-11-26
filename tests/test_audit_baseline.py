@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import base64
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -148,13 +149,38 @@ def good_answers() -> dict[str, tuple[int, dict | list]]:
     }
 
 
+def completed(path: str, body):
+    """A file answer the way the Contents API sends it: fixtures that give only `content` get type, path and size.
+
+    An answer that names any of those keys itself is left exactly as written, so a hostile fixture stays hostile.
+    """
+    if (
+        isinstance(body, dict)
+        and type(body.get("content")) is str
+        and not {"type", "path", "size"} & set(body)
+        and "/contents/" in path
+    ):
+        try:
+            size = len(base64.b64decode(body["content"].replace("\n", ""), validate=True))
+        except ValueError:
+            return body
+        return {**body, "type": "file", "path": path.split("/contents/", 1)[1], "size": size}
+    return body
+
+
 def fetcher(answers: dict) -> audit.Fetcher:
     def fetch(path: str):
         if path not in answers:
             raise AssertionError(f"unexpected API call {path}")
-        return answers[path]
+        code, body = answers[path]
+        return code, completed(path, body)
 
     return fetch
+
+
+def raw_fetcher(answers: dict) -> audit.Fetcher:
+    """Answers exactly as given, for a fixture that must stay hostile (a missing key stays missing)."""
+    return lambda path: answers[path]
 
 
 def by_check(results: list) -> dict[str, tuple[str, str]]:
@@ -1413,7 +1439,8 @@ class _Resp:
         return False
 
     def read(self, size=-1):
-        return self.body
+        body, self.body = self.body[:size] if size >= 0 else self.body, self.body[size:] if size >= 0 else b""
+        return body
 
 
 def _fetch_with(monkeypatch, *outcomes):
@@ -1497,7 +1524,8 @@ class _BadBody:
     def read(self, size=-1):
         if isinstance(self.result, BaseException):
             raise self.result
-        return self.result
+        out, self.result = self.result[:size], self.result[size:]
+        return out
 
     def close(self):
         pass
@@ -1634,3 +1662,240 @@ def test_the_known_ecosystem_list_is_the_documented_set():
     assert audit.KNOWN_ECOSYSTEMS == documented
     status, detail = dependabot_check_text("version: 2\nupdates:\n" + GOOD_ENTRY.replace("pip", "deno"))
     assert status == audit.PASS and "note" not in detail
+
+
+# --- round 5: every file read is strict, requests are bounded in time, messages are typed ----
+
+
+def _completed_answers(answers: dict) -> dict:
+    return {path: (code, completed(path, body)) for path, (code, body) in answers.items()}
+
+
+def _relative(api_path: str) -> str:
+    return api_path.split("/contents/", 1)[1]
+
+
+def _site(name: str):
+    """(answers, api path of the file under test, the checks that read it)."""
+    base = f"/repos/{REPO_NAME}/contents/"
+    if name == "workflow":
+        return good_answers(), base + ".github/workflows/ci.yml", ["workflows-pinned"]
+    if name == "hook":
+        return good_answers(), base + ".githooks/pre-commit", ["pre-commit-hook"]
+    if name == "lock":
+        return ecosystem_answers("uv", UV_LOCK), base + "requirements.txt", ["dependabot-ecosystem"]
+    return (
+        ecosystem_answers("uv", UV_LOCK),
+        base + ".github/dependabot.yml",
+        ["dependabot-ecosystem", "dependabot-config"],
+    )
+
+
+def _hostile(kind: str, rel: str) -> dict:
+    good = base64.b64encode(b"name: x\n").decode()
+    whole = {"type": "file", "path": rel, "encoding": "base64", "size": 8, "content": good}
+    return {
+        "non-utf8": {**whole, "content": "//4=", "size": 2},
+        "non-str content": {**whole, "content": 7},
+        "missing type": {k: v for k, v in whole.items() if k != "type"},
+        "missing path": {k: v for k, v in whole.items() if k != "path"},
+        "missing size": {k: v for k, v in whole.items() if k != "size"},
+        "missing content": {k: v for k, v in whole.items() if k != "content"},
+        "symlink": {**whole, "type": "symlink"},
+        "wrong path": {**whole, "path": "elsewhere/" + rel},
+        "bad base64": {**whole, "content": "***"},
+    }[kind]
+
+
+HOSTILE_KINDS = [
+    "non-utf8",
+    "non-str content",
+    "missing type",
+    "missing path",
+    "missing size",
+    "missing content",
+    "symlink",
+    "wrong path",
+    "bad base64",
+]
+
+
+@pytest.mark.parametrize("site", ["workflow", "hook", "lock", "dependabot"])
+@pytest.mark.parametrize("kind", HOSTILE_KINDS)
+def test_every_file_read_site_survives_a_hostile_contents_answer(site, kind):
+    answers, api_path, checks = _site(site)
+    answers = _completed_answers(answers)
+    answers[api_path] = (200, _hostile(kind, _relative(api_path)))
+    results = by_check(audit.audit_repo(REPO_NAME, raw_fetcher(answers)))  # must not raise
+    for check in checks:
+        status, detail = results[check]
+        if site == "hook" and kind == "non-utf8":
+            assert status == audit.FAIL, "the hook is compared as bytes; wrong bytes are drift, not a crash"
+        else:
+            assert status == audit.UNKNOWN, (check, detail)
+
+
+def test_the_strict_decoder_gives_text_only_for_a_whole_plain_utf8_file():
+    ok = dep_file("a: 1\n")
+    assert audit.contents_text(ok, ".github/dependabot.yml") == "a: 1\n"
+    assert audit.contents_text(ok, "other.yml") is None
+    for bad in (None, [], "text", 7, {**ok, "content": None}, dep_file(b"\xff\xfe")):
+        assert audit.contents_text(bad, ".github/dependabot.yml") is None
+
+
+def test_a_workflow_listing_with_hostile_entries_does_not_raise():
+    answers = good_answers()
+    answers[f"/repos/{REPO_NAME}/contents/.github/workflows"] = (200, [None, 7, {"name": 5}, {"name": "ci.yml"}])
+    assert by_check(audit.audit_repo(REPO_NAME, fetcher(answers)))["workflows-pinned"][0] == audit.PASS
+
+
+# the clock
+
+
+class _FakeClock:
+    def __init__(self):
+        self.now = 1000.0
+
+    def __call__(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+
+class _Drip:
+    """A body that yields one byte per read and lets 20 fake seconds pass each time."""
+
+    def __init__(self, clock):
+        self.clock = clock
+        self.reads = 0
+
+    def read(self, size=-1):
+        self.reads += 1
+        self.clock.now += 20
+        return b"x"
+
+
+def test_a_slow_drip_body_trips_the_request_deadline(monkeypatch):
+    clock = _FakeClock()
+    monkeypatch.setattr(audit, "_clock", clock)
+    drip = _Drip(clock)
+    with pytest.raises(audit._DeadlineExceeded):
+        audit._read_capped(drip, audit.MAX_BODY, clock() + audit.REQUEST_DEADLINE)
+    assert drip.reads <= 4, "bounded by the deadline, not by the 4 MiB cap"
+    assert audit._read_capped(_BadBody(b"ok"), 10, clock() + 60) == b"ok", "a prompt body is untouched"
+
+
+def test_a_slow_drip_through_the_fetcher_is_a_transport_error_after_bounded_work(monkeypatch):
+    clock = _FakeClock()
+    monkeypatch.setattr(audit, "_clock", clock)
+    drips = []
+
+    class Resp(_Resp):
+        def __init__(self):
+            self.drip = _Drip(clock)
+            drips.append(self.drip)
+
+        def read(self, size=-1):
+            return self.drip.read(size)
+
+    monkeypatch.setattr(audit, "_OPENER", _Opener(Resp(), Resp(), Resp()))
+    monkeypatch.setattr(audit, "_sleep", clock.sleep)
+    code, body = audit.github_fetcher("tok")("/repos/o/r")
+    assert code == 599 and body["message"].startswith("transport error")
+    assert sum(d.reads for d in drips) <= 3 * 4
+
+
+def test_retry_waits_count_against_the_repository_deadline(monkeypatch):
+    clock = _FakeClock()
+    monkeypatch.setattr(audit, "_clock", clock)
+    opener = _Opener(TimeoutError(), TimeoutError(), TimeoutError())
+    monkeypatch.setattr(audit, "_OPENER", opener)
+    monkeypatch.setattr(audit, "_sleep", clock.sleep)
+    monkeypatch.setitem(audit._limits, "repo", clock() + 2.5)
+    try:
+        code, body = audit.github_fetcher("tok")("/repos/o/r")
+    finally:
+        audit._limits["repo"] = None
+    assert code == 599 and body == {"message": "transport error: deadline exceeded"}
+    assert opener.calls == 2, "the 2 second wait would pass the deadline, so the third try never starts"
+
+
+def test_a_repository_past_its_deadline_stops_calling_the_api(monkeypatch):
+    clock = _FakeClock()
+    monkeypatch.setattr(audit, "_clock", clock)
+    calls = []
+
+    class Slow:
+        def open(self, req, timeout=None):
+            calls.append(req.full_url)
+            clock.now += 30
+            return _Resp(b"{}")
+
+    monkeypatch.setattr(audit, "_OPENER", Slow())
+    monkeypatch.setattr(audit, "load_register", lambda: [])
+    results = audit.audit_repo(REPO_NAME, audit.github_fetcher("tok"), register=[])
+    assert 4 <= len(calls) <= 7, calls  # 180 s of 30 s calls, then every later check is UNKNOWN unasked
+    assert any(r.status == audit.UNKNOWN and "deadline" in r.detail for r in results)
+    assert audit._limits["repo"] is None, "the repository deadline is cleared afterwards"
+
+
+def test_the_audit_deadline_makes_the_remaining_repositories_unknown(monkeypatch, capsys):
+    clock = _FakeClock()
+    monkeypatch.setattr(audit, "_clock", clock)
+    monkeypatch.setattr(audit, "github_fetcher", lambda token: fetcher(good_answers()))
+    monkeypatch.setattr(audit, "load_register", lambda: [])
+    monkeypatch.setenv("GITHUB_TOKEN", "t")
+    code = audit.main([REPO_NAME, "--deadline-minutes", "0"])
+    out = capsys.readouterr().out
+    assert code == 2 and "audit deadline passed" in out
+    assert audit._limits["audit"] is None
+
+
+def test_the_default_deadlines_are_the_documented_ones():
+    assert (audit.REQUEST_DEADLINE, audit.REPO_DEADLINE, audit.AUDIT_DEADLINE) == (60.0, 180.0, 2700.0)
+
+
+# error message typing
+
+
+@pytest.mark.parametrize("message", [7, [1, 2], {"a": 1}, None, True, 0, False, 1.5])
+def test_a_non_string_error_message_is_a_fixed_text_and_never_a_crash(monkeypatch, message):
+    body = json.dumps({"message": message}).encode()
+    (code, answer), _, _ = _fetch_with(monkeypatch, _error_with(403, body))
+    assert answer == {"message": audit.MALFORMED_ERROR}
+    assert audit.unreadable(code, answer) == f"HTTP 403: {audit.MALFORMED_ERROR}"
+    assert audit.unreadable(403, {"message": message}) == f"HTTP 403: {audit.MALFORMED_ERROR}"
+
+
+def test_a_string_error_message_still_reads_and_a_missing_one_is_empty():
+    assert audit.unreadable(404, {"message": "Not Found"}) == "HTTP 404: Not Found"
+    assert audit.unreadable(404, {}) == "HTTP 404"
+    assert audit.unreadable(404, [1]) == "HTTP 404"
+
+
+def test_a_retry_wait_that_would_pass_the_repository_deadline_is_refused_even_with_the_clock_still(monkeypatch):
+    clock = _FakeClock()
+    monkeypatch.setattr(audit, "_clock", clock)
+    opener = _Opener(TimeoutError(), TimeoutError(), TimeoutError())
+    monkeypatch.setattr(audit, "_OPENER", opener)
+    monkeypatch.setattr(audit, "_sleep", lambda seconds: None)  # time does not pass: only the wait check can stop it
+    monkeypatch.setitem(audit._limits, "repo", clock() + 1.5)
+    try:
+        code, body = audit.github_fetcher("tok")("/repos/o/r")
+    finally:
+        audit._limits["repo"] = None
+    assert code == 599 and body == {"message": "transport error: deadline exceeded"} and opener.calls == 2
+
+
+def test_a_request_made_after_the_deadline_has_passed_is_not_sent(monkeypatch):
+    clock = _FakeClock()
+    monkeypatch.setattr(audit, "_clock", clock)
+    opener = _Opener(_Resp())
+    monkeypatch.setattr(audit, "_OPENER", opener)
+    monkeypatch.setitem(audit._limits, "audit", clock() - 1)
+    try:
+        code, body = audit.github_fetcher("tok")("/repos/o/r")
+    finally:
+        audit._limits["audit"] = None
+    assert code == 599 and opener.calls == 0

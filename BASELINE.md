@@ -211,7 +211,16 @@ list cannot fail a good repository. Every update entry needs exactly one of `dir
 or a malformed value fails. An HTTP error body is read through a 64 KiB cap
 and any failure reading it is a fixed message naming only the exception class.
 `Retry-After` is read as ASCII seconds or an HTTP date, anything else uses the
-normal wait. The contents answer must carry an integer
+normal wait. Every file the audit reads through the Contents API (workflows, the
+shared hook, the requirements locks, `dependabot.yml`) goes through one strict
+decoder: a regular file at the requested path, base64, an integer `size` that
+equals the strictly decoded length, and UTF-8 text. Anything else is UNKNOWN,
+never an exception. An error body whose `message` is not a string reads as
+`malformed HTTP error`. Time is bounded by wall clock, not only by the socket
+timeout: 60 seconds per request (body read included), 180 seconds per
+repository (retries and their waits included), and 45 minutes for the run
+(`--deadline-minutes` changes it); past a deadline the remaining calls are not
+made and the checks report UNKNOWN. The contents answer must carry an integer
 `size` equal to the strictly decoded length. A transport failure (DNS, TLS,
 reset, timeout) is UNKNOWN, not a crash; timeouts, 429 and 500, 502, 503 and
 504 are tried up to three times with short waits and a `Retry-After` capped at

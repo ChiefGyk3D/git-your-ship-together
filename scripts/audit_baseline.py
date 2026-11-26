@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import binascii
 import datetime as dt
 import email.utils
 import http.client
@@ -103,6 +104,7 @@ _sleep = time.sleep
 
 _now = lambda: dt.datetime.now(dt.UTC)  # noqa: E731 - replaced by tests
 MAX_ERROR_BODY = 64 * 1024
+MALFORMED_ERROR = "malformed HTTP error"
 MAX_BODY = 4 * 1024 * 1024
 
 
@@ -110,26 +112,58 @@ class _BodyTooLarge(ValueError):
     pass
 
 
-def _read_capped(stream: object, cap: int) -> bytes:
-    """At most `cap` bytes of a response body; one byte more than that is an error, not a truncation."""
-    raw = stream.read(cap + 1)
-    if len(raw) > cap:
-        raise _BodyTooLarge
-    return raw
+# Wall-clock limits. The socket timeout bounds one wait, not the request: a peer that sends a byte every
+# 29 seconds would otherwise hold the whole sequential audit open. All three are checked against `_clock`.
+REQUEST_DEADLINE = 60.0  # one request, body read included
+REPO_DEADLINE = 180.0  # every check of one repository, retries and their waits included
+AUDIT_DEADLINE = 45 * 60.0  # the whole run; later repositories report UNKNOWN
+_clock = time.monotonic
+_limits: dict[str, float | None] = {"repo": None, "audit": None}  # absolute `_clock` times
 
 
-def _error_body(err: urllib.error.HTTPError, token: str) -> dict | list:
+class _DeadlineExceeded(TimeoutError):
+    pass
+
+
+def _limit(request_seconds: float = REQUEST_DEADLINE) -> float:
+    """The earliest of the request, repository and audit deadlines, as an absolute `_clock` time."""
+    return min([_clock() + request_seconds, *(v for v in _limits.values() if v is not None)])
+
+
+def _read_capped(stream: object, cap: int, limit: float | None = None) -> bytes:
+    """At most `cap` bytes of a response body, read in chunks against a wall-clock limit.
+
+    One byte more than the cap is an error, not a truncation, and so is a body that is still arriving at the limit.
+    """
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        if limit is not None and _clock() > limit:
+            raise _DeadlineExceeded
+        chunk = stream.read(min(8192, cap + 1 - total))
+        if not chunk:
+            return b"".join(chunks)
+        chunks.append(chunk)
+        total += len(chunk)
+        if total > cap:
+            raise _BodyTooLarge
+
+
+def _error_body(err: urllib.error.HTTPError, token: str, limit: float | None = None) -> dict | list:
     """An HTTP error's body, or a fixed message naming only the class of whatever went wrong reading it."""
     try:
-        raw = _read_capped(err, MAX_ERROR_BODY)
+        raw = _read_capped(err, MAX_ERROR_BODY, limit)
         try:
             body = json.loads(raw) if raw else {}
         except json.JSONDecodeError:
             body = {"message": raw.decode("utf-8")[:200]}
     except (OSError, http.client.HTTPException, UnicodeError, ValueError) as bad:
         return {"message": f"HTTP error body unreadable: {type(bad).__name__}"}
-    if token and isinstance(body, dict) and isinstance(body.get("message"), str):
-        body["message"] = body["message"].replace(token, "***")  # a server that echoes the token
+    if isinstance(body, dict) and "message" in body:
+        if type(body["message"]) is not str:
+            body["message"] = MALFORMED_ERROR
+        elif token:
+            body["message"] = body["message"].replace(token, "***")  # a server that echoes the token
     return body
 
 
@@ -160,6 +194,15 @@ def _retry_wait(attempt: int, headers: object) -> float:
     return min(wait, RETRY_AFTER_CAP)
 
 
+def _wait(seconds: float) -> bool:
+    """Sleep before a retry, unless that would run past the repository or audit deadline (then False)."""
+    ends = [v for v in _limits.values() if v is not None]
+    if ends and _clock() + seconds >= min(ends):
+        return False
+    _sleep(seconds)
+    return True
+
+
 def _is_timeout(err: BaseException) -> bool:
     return isinstance(err, TimeoutError) or (
         isinstance(err, urllib.error.URLError) and isinstance(err.reason, TimeoutError)
@@ -167,7 +210,7 @@ def _is_timeout(err: BaseException) -> bool:
 
 
 def github_fetcher(token: str) -> Fetcher:
-    def once(path: str) -> tuple[int, dict | list, object]:
+    def once(path: str, limit: float) -> tuple[int, dict | list, object]:
         req = urllib.request.Request(
             API + path,
             headers={
@@ -176,28 +219,33 @@ def github_fetcher(token: str) -> Fetcher:
                 "X-GitHub-Api-Version": "2022-11-28",
             },
         )
-        with _OPENER.open(req, timeout=30) as resp:
-            raw = _read_capped(resp, MAX_BODY)
+        with _OPENER.open(req, timeout=max(1.0, min(30.0, limit - _clock()))) as resp:
+            raw = _read_capped(resp, MAX_BODY, limit)
             return resp.status, (json.loads(raw) if raw else {}), resp.headers
 
     def fetch(path: str) -> tuple[int, dict | list]:
         for attempt in range(FETCH_ATTEMPTS):
             last = attempt == FETCH_ATTEMPTS - 1
+            limit = _limit()
+            if _clock() >= min(v for v in (_limits["repo"], _limits["audit"], limit) if v is not None):
+                return 599, {"message": "transport error: deadline exceeded"}
             try:
-                code, body, _ = once(path)
+                code, body, _ = once(path, limit)
                 return code, body
             except urllib.error.HTTPError as err:
                 if 300 <= err.code < 400:  # a refused redirect: say so, never echo what the other side sent
                     return err.code, {"message": "redirect refused"}
                 if err.code in RETRYABLE_STATUS and not last:
-                    _sleep(_retry_wait(attempt, err.headers))
+                    if not _wait(_retry_wait(attempt, err.headers)):
+                        return 599, {"message": "transport error: deadline exceeded"}
                     continue
-                return err.code, _error_body(err, token)
+                return err.code, _error_body(err, token, limit)
             except (OSError, http.client.HTTPException, ValueError) as err:
                 # DNS, TLS, reset, timeout, or a 200 that is not JSON. The exception text can hold the
                 # request, so only its class is reported, as a status no real answer uses.
                 if _is_timeout(err) and not last:
-                    _sleep(_retry_wait(attempt, None))
+                    if not _wait(_retry_wait(attempt, None)):
+                        return 599, {"message": "transport error: deadline exceeded"}
                     continue
                 return 599, {"message": f"transport error: {type(err).__name__}"}
         return 599, {"message": "transport error"}  # unreachable; keeps the type checker honest
@@ -218,6 +266,8 @@ def find_token() -> str:
 
 def unreadable(code: int, body: dict | list) -> str:
     message = body.get("message", "") if isinstance(body, dict) else ""
+    if type(message) is not str:
+        message = MALFORMED_ERROR
     return f"HTTP {code}{': ' + message if message else ''}"
 
 
@@ -517,13 +567,21 @@ def check_workflows(repo: str, fetch: Fetcher) -> tuple[list[Result], bool, set[
     exceptions: set[str] = set()
     gates: set[str] = set()
     for entry in listing:
-        name = entry.get("name", "")
-        if not name.endswith((".yml", ".yaml")):
+        name = entry.get("name", "") if isinstance(entry, dict) else ""
+        if type(name) is not str or not name.endswith((".yml", ".yaml")):
             continue
         code, file = fetch(f"/repos/{repo}/contents/.github/workflows/{name}")
-        if code != 200 or not isinstance(file, dict) or "content" not in file:
-            return [Result(repo, "workflows-pinned", UNKNOWN, f"{name}: {unreadable(code, file)}")], False, set(), set()
-        text = base64.b64decode(file["content"]).decode()
+        if code != 200:
+            return (
+                [Result(repo, "workflows-pinned", UNKNOWN, f"{shown(name)}: {unreadable(code, file)}")],
+                False,
+                set(),
+                set(),
+            )
+        text = contents_text(file, f".github/workflows/{name}")
+        if text is None:
+            detail = f"{shown(name)}: the contents answer is not a plain base64 UTF-8 file"
+            return [Result(repo, "workflows-pinned", UNKNOWN, detail)], False, set(), set()
         if REUSABLE_PREFIX in text:
             callers += 1
         gates |= expected_gates(text)
@@ -847,11 +905,23 @@ def plain_file_bytes(file: object, path: str) -> bytes | None:
     return raw if len(raw) == size else None
 
 
+def contents_text(file: object, path: str) -> str | None:
+    """The UTF-8 text of a Contents API answer that is the regular file `path`, whole; None for anything else.
+
+    Every file the audit reads goes through this: a hostile or broken answer is "could not read", never an exception.
+    """
+    try:
+        raw = plain_file_bytes(file, path)
+        return None if raw is None else raw.decode("utf-8")
+    except (ValueError, TypeError, UnicodeError, binascii.Error):
+        return None
+
+
 def check_dependabot(repo: str, fetch: Fetcher) -> Result:
     code, file = fetch(f"/repos/{repo}/contents/.github/dependabot.yml")
     if code == 404:
         return Result(repo, "dependabot-config", FAIL, "no .github/dependabot.yml")
-    if code != 200 or not isinstance(file, dict) or "content" not in file:
+    if code != 200:
         return Result(repo, "dependabot-config", UNKNOWN, unreadable(code, file))
     raw = plain_file_bytes(file, ".github/dependabot.yml")
     if raw is None:
@@ -883,12 +953,11 @@ def check_pre_commit_hook(repo: str, fetch: Fetcher) -> Result:
     code, file = fetch(f"/repos/{repo}/contents/.githooks/pre-commit")
     if code == 404:
         return Result(repo, "pre-commit-hook", FAIL, "no .githooks/pre-commit")
-    if code != 200 or not isinstance(file, dict) or not isinstance(file.get("content"), str):
+    if code != 200:
         return Result(repo, "pre-commit-hook", UNKNOWN, unreadable(code, file))
-    try:
-        content = base64.b64decode(file["content"])
-    except (ValueError, TypeError):
-        return Result(repo, "pre-commit-hook", UNKNOWN, "the hook content is not valid base64")
+    content = plain_file_bytes(file, ".githooks/pre-commit")
+    if content is None:
+        return Result(repo, "pre-commit-hook", UNKNOWN, "the contents answer is not a plain base64 file")
     if content != PRE_COMMIT_HOOK.read_bytes():
         return Result(repo, "pre-commit-hook", FAIL, ".githooks/pre-commit does not match the shared hook")
     return Result(repo, "pre-commit-hook", PASS, "present and byte-identical to the shared hook")
@@ -935,9 +1004,12 @@ def check_dependabot_ecosystem(repo: str, fetch: Fetcher) -> Result:
         code, file = fetch(f"/repos/{repo}/contents/{lock}")
         if code == 404:
             continue
-        if code != 200 or not isinstance(file, dict) or "content" not in file:
+        if code != 200:
             return Result(repo, name, UNKNOWN, f"{lock}: {unreadable(code, file)}")
-        if universal_uv_lock(base64.b64decode(file["content"]).decode()):
+        text = contents_text(file, lock)
+        if text is None:
+            return Result(repo, name, UNKNOWN, f"{lock}: the contents answer is not a plain base64 UTF-8 file")
+        if universal_uv_lock(text):
             locks.append(lock)
     if not locks:
         return Result(repo, name, PASS, "no uv --universal lock; nothing to match")
@@ -946,9 +1018,14 @@ def check_dependabot_ecosystem(repo: str, fetch: Fetcher) -> Result:
         return Result(
             repo, name, FAIL, f"{locks[0]} is a uv --universal lock and there is no dependabot.yml to update it"
         )
-    if code != 200 or not isinstance(file, dict) or "content" not in file:
+    if code != 200:
         return Result(repo, name, UNKNOWN, unreadable(code, file))
-    if pip_updated_roots(base64.b64decode(file["content"]).decode()):
+    text = contents_text(file, ".github/dependabot.yml")
+    if text is None:
+        return Result(
+            repo, name, UNKNOWN, ".github/dependabot.yml: the contents answer is not a plain base64 UTF-8 file"
+        )
+    if pip_updated_roots(text):
         return Result(
             repo,
             name,
@@ -1079,6 +1156,19 @@ def audit_repo(
     orgs: dict[str, dict] | None = None,
 ) -> list[Result]:
     """Every repository check. `orgs` collects the organizations seen and the owners read for them."""
+    _limits["repo"] = _clock() + REPO_DEADLINE
+    try:
+        return _audit_repo(repo, fetch, register, orgs)
+    finally:
+        _limits["repo"] = None
+
+
+def _audit_repo(
+    repo: str,
+    fetch: Fetcher,
+    register: list[dict] | None = None,
+    orgs: dict[str, dict] | None = None,
+) -> list[Result]:
     owner = repo.split("/", 1)[0]
     code, body = fetch(f"/repos/{repo}")
     if code != 200 or not isinstance(body, dict):
@@ -1181,6 +1271,12 @@ def main(argv: list[str] | None = None) -> int:
         metavar="OWNER=ENVVAR",
         help="read OWNER's repositories (and the organization, if it is one) with the token in ENVVAR; repeatable",
     )
+    parser.add_argument(
+        "--deadline-minutes",
+        type=float,
+        default=AUDIT_DEADLINE / 60,
+        help="stop starting new repositories after this many minutes; the rest report UNKNOWN (default: 45)",
+    )
     parser.add_argument("--today", type=dt.date.fromisoformat, help="the date --expiring counts from (default: today)")
     parser.add_argument("--list", default=str(Path(__file__).resolve().parent.parent / "baseline" / "repos.txt"))
     args = parser.parse_args(argv)
@@ -1195,8 +1291,12 @@ def main(argv: list[str] | None = None) -> int:
     results: list[Result] = []
     orgs: dict[str, dict] = {}
     by_org: dict[str, list[Result]] = {}
+    _limits["audit"] = _clock() + max(0.0, args.deadline_minutes) * 60
     for repo in repos:
         owner = repo.split("/", 1)[0]
+        if _clock() >= _limits["audit"]:
+            results.append(Result(repo, "repository", UNKNOWN, "the audit deadline passed before this repository"))
+            continue
         fetch = default or fetcher_for(owner, tokens or {})
         if fetch is None:
             results.append(Result(repo, "repository", UNKNOWN, no_token_reason(owner, tokens or {})))
@@ -1210,6 +1310,7 @@ def main(argv: list[str] | None = None) -> int:
             results.append(Result(f"{org} (organization)", "org-checks", UNKNOWN, no_token_reason(org, tokens or {})))
             continue
         results.extend(audit_org(org, fetch, cache, by_org.get(org, [])))
+    _limits["audit"] = None
     print(render(results))
     fails = sum(r.status == FAIL for r in results)
     unknowns = sum(r.status == UNKNOWN for r in results)
