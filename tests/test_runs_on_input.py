@@ -1,4 +1,4 @@
-"""The `runs-on` input of security.yml, dast.yml and tofu-ci.yml (slice 1 of self-hosted runner support).
+"""The `runs-on` input of security.yml, dast.yml, tofu-ci.yml, bash-ci.yml and python-ci.yml (self-hosted runner support).
 
 `runs-on` takes a string, an array or an object, so the input is a JSON string and every job reads it with
 `fromJSON(inputs.runs-on)`. The default parses to the label the workflow used before the input existed, so a caller
@@ -25,9 +25,16 @@ DEFAULTS = {
     "dast.yml": "ubuntu-24.04",
     "tofu-ci.yml": "ubuntu-latest",
     "bash-ci.yml": "ubuntu-latest",
+    "python-ci.yml": "ubuntu-latest",
 }
-MATRIX_JOBS = {("bash-ci.yml", "test"), ("bash-ci.yml", "distro")}
 EXPECTED = "${{ fromJSON(inputs.runs-on) }}"
+# matrix jobs take their runner from the matrix (the `runners` and `distro-runners` inputs), never from runs-on
+MATRIX_RUNS_ON = {
+    ("bash-ci.yml", "test"): "${{ matrix.runner }}",
+    ("bash-ci.yml", "distro"): "${{ matrix.runner }}",
+    ("python-ci.yml", "test"): "${{ matrix.runner }}",
+    ("python-ci.yml", "distro"): "${{ matrix.runner }}",
+}
 
 
 def load(name: str) -> dict:
@@ -50,8 +57,7 @@ def test_the_input_default_parses_to_todays_label(name, label):
 @pytest.mark.parametrize("name", sorted(DEFAULTS))
 def test_every_job_uses_the_input(name):
     for job_name, job in load(name)["jobs"].items():
-        if (name, job_name) not in MATRIX_JOBS:
-            assert job["runs-on"] == EXPECTED, f"{name}:{job_name}"
+        assert job["runs-on"] == MATRIX_RUNS_ON.get((name, job_name), EXPECTED), f"{name}:{job_name}"
 
 
 def test_bash_ci_matrix_jobs_keep_the_existing_runner_input():
@@ -61,6 +67,25 @@ def test_bash_ci_matrix_jobs_keep_the_existing_runner_input():
     assert jobs["test"]["strategy"]["matrix"]["runner"] == "${{ fromJSON(inputs.runners) }}"
     assert jobs["distro"]["strategy"]["matrix"]["runner"] == "${{ fromJSON(inputs.distro-runners) }}"
 
+
+def test_python_ci_matrix_jobs_keep_their_matrix_runner():
+    doc = load("python-ci.yml")
+    matrix_jobs = {n for n, j in doc["jobs"].items() if "matrix" in (j.get("strategy") or {})}
+    assert matrix_jobs == {"test", "distro"}
+    for n in matrix_jobs:
+        assert doc["jobs"][n]["runs-on"] == "${{ matrix.runner }}", n
+        assert "inputs.runs-on" not in json.dumps(doc["jobs"][n]), n
+
+
+@pytest.mark.parametrize("name", ["python-ci.yml"])
+def test_python_ci_egress_follows_the_label_for_non_matrix_jobs(name):
+    doc = load(name)
+    for n, job in doc["jobs"].items():
+        text = json.dumps(job)
+        if n in MATRIX_JOBS_PYCI:
+            assert "matrix.runner" in text and "inputs.runs-on" not in text, n
+        else:
+            assert "contains(fromJSON(" in text and "fromJSON(inputs.runs-on)" in text, n
 
 @pytest.mark.parametrize("name", sorted(DEFAULTS))
 def test_the_header_documents_harden_runner_on_self_hosted_runners(name):
@@ -84,6 +109,8 @@ HARDEN_WITH = {"egress-policy", "allowed-endpoints", "disable-telemetry", "disab
 CHECK_ACTION = REPO / ".github" / "actions" / "egress-policy-check" / "action.yml"
 # Everything that can decide whether a job runs, and the environment it starts with, as the jobs have it today:
 # an allowlist, so a new `if`, `needs`, `strategy` or env key is a change this test makes the author look at.
+PYCI_TEST_NEEDS = ["lint", "typecheck", "workflow-lint", "test", "distro", "coverage", "smoke", "docker", "fragment-check", "commit-claims"]
+MATRIX_JOBS_PYCI = {"test", "distro"}
 JOB_SCHEDULING = {
     ("bash-ci.yml", "shellcheck"): {},
     ("bash-ci.yml", "shfmt"): {"if": "inputs.shfmt"},
@@ -126,6 +153,36 @@ JOB_SCHEDULING = {
         "(github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)",
         "needs": "scan",
     },
+    ("python-ci.yml", "ci-green"): {"if": "always()", "needs": PYCI_TEST_NEEDS},
+    ("python-ci.yml", "commit-claims"): {
+        "if": "github.event_name == 'pull_request' && inputs.commit-claims-command != ''"
+    },
+    ("python-ci.yml", "coverage"): {"if": "inputs.codecov && github.event_name != 'pull_request'", "needs": "test"},
+    ("python-ci.yml", "distro"): {
+        "if": "inputs.distros != '[]'",
+        "strategy": {
+            "fail-fast": False,
+            "matrix": {"image": "${{ fromJSON(inputs.distros) }}", "runner": "${{ fromJSON(inputs.distro-runners) }}"},
+        },
+    },
+    ("python-ci.yml", "docker"): {"if": "inputs.docker-build"},
+    ("python-ci.yml", "fragment-check"): {
+        "if": "github.event_name == 'pull_request' && inputs.fragment-check-command != ''"
+    },
+    ("python-ci.yml", "lint"): {},
+    ("python-ci.yml", "smoke"): {"if": "inputs.smoke-command != ''"},
+    ("python-ci.yml", "test"): {
+        "strategy": {
+            "fail-fast": False,
+            "matrix": {
+                "python-version": "${{ fromJSON(startsWith(github.event_name, 'pull_request') && "
+                "inputs.pr-python-versions != '' && inputs.pr-python-versions || inputs.python-versions) }}",
+                "runner": "${{ fromJSON(inputs.runners) }}",
+            },
+        }
+    },
+    ("python-ci.yml", "typecheck"): {"if": "inputs.typecheck-command != ''"},
+    ("python-ci.yml", "workflow-lint"): {"if": "inputs.workflow-lint"},
     ("security.yml", "advanced-security-check"): {},
     ("security.yml", "codeql"): {"if": "inputs.codeql && inputs.advanced-security != 'false'"},
     ("security.yml", "dependency-audit"): {"if": "inputs.pip-audit-requirements != '' || inputs.audit-command != ''"},
@@ -194,8 +251,10 @@ def guard_problems(doc: dict, file: str | None = None, action_script: str | None
         if names.count(GUARD) != 1:
             bad.append(f"{name}: guard missing")
             continue
-        if set(job) - JOB_KEYS:
-            bad.append(f"{name}: unexpected job keys {sorted(set(job) - JOB_KEYS)}")
+        # `strategy` is allowed only where the known schedule has one (python-ci's matrix jobs)
+        extra = {"strategy"} if file is not None and "strategy" in JOB_SCHEDULING[(file, name)] else set()
+        if set(job) - JOB_KEYS - extra:
+            bad.append(f"{name}: unexpected job keys {sorted(set(job) - JOB_KEYS - extra)}")
         if job.get("continue-on-error") not in (None, False):
             bad.append(f"{name}: the job has continue-on-error")
         if file is not None:
@@ -336,6 +395,7 @@ def mutations(doc: dict, victim: str):
     d, job, steps = fresh()
     job["container"] = "alpine"
     yield "container", d
+
 
 
 @pytest.mark.parametrize("name", sorted(DEFAULTS))
