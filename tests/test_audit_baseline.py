@@ -1843,12 +1843,23 @@ def test_a_repository_past_its_deadline_stops_calling_the_api(monkeypatch):
 def test_the_audit_deadline_makes_the_remaining_repositories_unknown(monkeypatch, capsys):
     clock = _FakeClock()
     monkeypatch.setattr(audit, "_clock", clock)
-    monkeypatch.setattr(audit, "github_fetcher", lambda token: fetcher(good_answers()))
+    inner = fetcher(good_answers())
+
+    def slow_fetcher(token):
+        def fetch(path):
+            if "second" in path:
+                raise AssertionError("the second repository must not be asked about")
+            clock.now += 7200  # two hours pass during the first repository
+            return inner(path)
+
+        return fetch
+
+    monkeypatch.setattr(audit, "github_fetcher", slow_fetcher)
     monkeypatch.setattr(audit, "load_register", lambda: [])
     monkeypatch.setenv("GITHUB_TOKEN", "t")
-    code = audit.main([REPO_NAME, "--deadline-minutes", "0"])
+    code = audit.main([REPO_NAME, f"{OWNER}/second", "--deadline-minutes", "1"])
     out = capsys.readouterr().out
-    assert code == 2 and "audit deadline passed" in out
+    assert code == 2 and "audit deadline passed" in out and f"{OWNER}/second" in out
     assert audit._limits["audit"] is None
 
 
@@ -1899,3 +1910,265 @@ def test_a_request_made_after_the_deadline_has_passed_is_not_sent(monkeypatch):
     finally:
         audit._limits["audit"] = None
     assert code == 599 and opener.calls == 0
+
+
+# --- round 6: a real interrupting deadline, per-repository isolation, structural roots -----
+
+
+def _drip_server(stop, status=200):
+    import http.server
+    import socketserver
+    import threading
+    import time
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(status)
+            self.send_header("Content-Length", "8192")
+            self.end_headers()
+            try:
+                for _ in range(60):  # a byte every 0.2 s: far under any socket timeout, never the whole body
+                    if stop.is_set():
+                        return
+                    self.wfile.write(b"x")
+                    self.wfile.flush()
+                    time.sleep(0.2)
+            except OSError:
+                pass
+
+        def log_message(self, *args):
+            pass
+
+    class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
+        daemon_threads = True
+
+    server = Server(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, thread
+
+
+def test_a_real_slow_drip_server_is_cut_off_at_the_request_deadline(monkeypatch):
+    import threading
+    import time
+
+    stop = threading.Event()
+    server, thread = _drip_server(stop)
+    monkeypatch.setattr(audit, "API", f"http://127.0.0.1:{server.server_address[1]}")
+    monkeypatch.setattr(audit, "REQUEST_DEADLINE", 1.0)
+    monkeypatch.setattr(audit, "FETCH_ATTEMPTS", 1)
+    try:
+        started = time.monotonic()
+        code, body = audit.github_fetcher("tok")("/repos/o/r")
+        elapsed = time.monotonic() - started
+    finally:
+        stop.set()
+        server.shutdown()
+        server.server_close()
+        thread.join()
+    assert code == 599 and body["message"].startswith("transport error"), (code, body)
+    assert elapsed < 4, f"a read that drips for 12 s was cut off after {elapsed:.1f} s"
+
+
+def test_a_real_slow_drip_error_body_is_cut_off_at_the_request_deadline_too(monkeypatch):
+    import threading
+    import time
+
+    stop = threading.Event()
+    server, thread = _drip_server(stop, status=403)
+    monkeypatch.setattr(audit, "API", f"http://127.0.0.1:{server.server_address[1]}")
+    monkeypatch.setattr(audit, "REQUEST_DEADLINE", 1.0)
+    monkeypatch.setattr(audit, "FETCH_ATTEMPTS", 1)
+    try:
+        started = time.monotonic()
+        code, body = audit.github_fetcher("tok")("/repos/o/r")
+        elapsed = time.monotonic() - started
+    finally:
+        stop.set()
+        server.shutdown()
+        server.server_close()
+        thread.join()
+    assert code == 403 and body == {"message": "HTTP error body unreadable: _DeadlineExceeded"}, (code, body)
+    assert elapsed < 4, f"an error body that drips for 12 s was cut off after {elapsed:.1f} s"
+
+
+def test_the_per_repository_loop_survives_audit_repo_itself_raising(monkeypatch, capsys):
+    real = audit.audit_repo
+
+    def flaky(repo, *args, **kwargs):
+        if repo.endswith("/broken"):
+            raise RuntimeError("secret-text")
+        return real(repo, *args, **kwargs)
+
+    monkeypatch.setattr(audit, "audit_repo", flaky)
+    monkeypatch.setattr(audit, "github_fetcher", lambda token: fetcher(good_answers()))
+    monkeypatch.setattr(audit, "load_register", lambda: [])
+    monkeypatch.setenv("GITHUB_TOKEN", "t")
+    assert audit.main([f"{OWNER}/broken", REPO_NAME]) == 2
+    out = capsys.readouterr().out
+    assert "RuntimeError" in out and "secret-text" not in out and "  PASS    dependabot-config" in out
+
+
+def test_the_alarm_interrupts_a_blocked_call_and_restores_the_handler_and_timer():
+    import signal
+    import time
+
+    before = signal.getsignal(signal.SIGALRM)
+    started = time.monotonic()
+    with pytest.raises(audit._DeadlineExceeded):
+        with audit._alarm(0.2):
+            time.sleep(5)
+    assert time.monotonic() - started < 2
+    assert signal.getsignal(signal.SIGALRM) is before
+    assert signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
+    with audit._alarm(5):  # a block that finishes in time is untouched, and the timer is cleared
+        pass
+    assert signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
+
+
+def test_without_sigalrm_the_alarm_is_a_no_op_and_the_chunk_checks_remain(monkeypatch):
+    import types
+
+    monkeypatch.setattr(audit, "signal", types.SimpleNamespace())
+    ran = []
+    with audit._alarm(0.001):
+        ran.append(True)
+    assert ran == [True]
+
+
+# isolation: one repository, or one check, never takes the fleet down
+
+EXCEPTIONS = [RecursionError, MemoryError, OverflowError, RuntimeError, AttributeError, TypeError]
+
+
+@pytest.mark.parametrize("exc", EXCEPTIONS)
+def test_a_check_that_raises_is_unknown_by_class_name_and_the_others_still_report(monkeypatch, exc):
+    def boom(*args, **kwargs):
+        raise exc("secret-text-from-the-exception")
+
+    monkeypatch.setattr(audit, "check_tag_ruleset", boom)
+    results = audit.audit_repo(REPO_NAME, fetcher(good_answers()))
+    by = by_check(results)
+    assert by["tag-ruleset"][0] == audit.UNKNOWN and exc.__name__ in by["tag-ruleset"][1]
+    assert "secret-text" not in audit.render(results)
+    assert by["dependabot-config"][0] == audit.PASS and by["pre-commit-hook"][0] == audit.PASS
+
+
+@pytest.mark.parametrize("exc", EXCEPTIONS)
+def test_a_repository_that_raises_is_unknown_and_the_next_one_is_still_audited(monkeypatch, capsys, exc):
+    other = f"{OWNER}/broken"
+    inner = fetcher(good_answers())
+
+    def make(token):
+        def fetch(path):
+            if path.startswith(f"/repos/{other}"):
+                raise exc("secret-text-from-the-exception")
+            return inner(path)
+
+        return fetch
+
+    monkeypatch.setattr(audit, "github_fetcher", make)
+    monkeypatch.setattr(audit, "load_register", lambda: [])
+    monkeypatch.setenv("GITHUB_TOKEN", "t")
+    code = audit.main([other, REPO_NAME])
+    out = capsys.readouterr().out
+    assert code == 2
+    assert exc.__name__ in out and "secret-text" not in out
+    assert f"\n{REPO_NAME}\n" in out and "  PASS    dependabot-config" in out
+    assert audit._limits["repo"] is None
+
+
+def test_audit_repo_lets_keyboard_interrupt_and_system_exit_through(monkeypatch):
+    for exc in (KeyboardInterrupt, SystemExit):
+
+        def boom(*args, _exc=exc, **kwargs):
+            raise _exc
+
+        monkeypatch.setattr(audit, "check_tag_ruleset", boom)
+        with pytest.raises(exc):
+            audit.audit_repo(REPO_NAME, fetcher(good_answers()))
+        assert audit._limits["repo"] is None
+
+
+HOSTILE_VALUES = [None, 7, "text", [], [None], [7, "x", None], {}, {"x": 7}, {"owner": 7}, [{"name": 7}], True]
+
+
+def test_no_malformed_answer_to_any_call_raises_out_of_the_audit():
+    base = good_answers()
+    for path in base:
+        for value in HOSTILE_VALUES:
+            answers = dict(base)
+            answers[path] = (200, value)
+            results = audit.audit_repo(REPO_NAME, fetcher(answers))  # must not raise
+            assert results and all(isinstance(r, audit.Result) for r in results), (path, value)
+
+
+@pytest.mark.parametrize("owner", [7, None, ["x"], "Organization", {"type": 7}, {"type": ["Organization"]}])
+def test_a_malformed_owner_object_does_not_abort_the_repository(owner):
+    answers = good_answers()
+    code, body = answers[f"/repos/{REPO_NAME}"]
+    answers[f"/repos/{REPO_NAME}"] = (code, {**body, "owner": owner})
+    results = by_check(audit.audit_repo(REPO_NAME, fetcher(answers)))
+    assert results["dependabot-config"][0] == audit.PASS and "repository" not in results, "the checks still ran"
+
+
+# the ecosystem check reads the structure
+
+
+def _eco(text: str) -> tuple[str, str]:
+    answers = ecosystem_answers("uv", UV_LOCK)
+    answers[DEPENDABOT_PATH] = (200, dep_file(text))
+    return by_check(audit.audit_repo(REPO_NAME, fetcher(answers)))["dependabot-ecosystem"]
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        "  - package-ecosystem: pip\n    directories: [/]\n",
+        "  - package-ecosystem: pip\n    directories:\n      - /docs\n      - /\n",
+        "  - {package-ecosystem: pip, directory: /}\n",
+        "  - {package-ecosystem: pip, directories: ['/', /x]}\n",
+        "  - package-ecosystem: pip\n    directory: >-\n      /\n",
+        '  - package-ecosystem: "pip"\n    directory: "/"\n',
+        "  - package-ecosystem: pip\n",
+    ],
+)
+def test_a_pip_entry_covering_the_root_fails_however_it_is_written(entry):
+    status, detail = _eco("version: 2\nupdates:\n" + entry)
+    assert status == audit.FAIL, detail
+    assert "uv" in detail
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        "  - package-ecosystem: pip\n    directory: /docs\n",
+        "  - package-ecosystem: pip\n    directories: [/docs, /x]\n",
+        "  - package-ecosystem: uv\n    directories: [/]\n",
+        "  - {package-ecosystem: npm, directory: /}\n",
+    ],
+)
+def test_a_pip_entry_elsewhere_or_another_ecosystem_for_the_root_passes(entry):
+    assert _eco("version: 2\nupdates:\n" + entry)[0] == audit.PASS
+
+
+def test_an_unparseable_dependabot_yml_makes_the_ecosystem_check_unknown_never_pass():
+    for text in ("updates: &a\n  - *a\n", "updates: [unclosed\n", "a: 1\na: 2\n"):
+        status, detail = _eco(text)
+        assert status == audit.UNKNOWN and "was not read" in detail, (text, detail)
+
+
+# the deadline option
+
+
+@pytest.mark.parametrize("value", ["nan", "inf", "-inf", "0", "-5", "0.5", "721", "1e999", "1e308", "abc", ""])
+def test_a_bad_deadline_option_is_refused(value, capsys):
+    with pytest.raises(SystemExit) as stop:
+        audit.main([REPO_NAME, "--deadline-minutes", value])
+    assert stop.value.code == 2
+    assert "deadline-minutes" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("value, minutes", [("1", 1.0), ("45", 45.0), ("720", 720.0), ("2.5", 2.5)])
+def test_a_good_deadline_option_is_accepted(value, minutes):
+    assert audit._deadline_minutes(value) == minutes

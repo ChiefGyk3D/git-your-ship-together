@@ -215,11 +215,24 @@ normal wait. Every file the audit reads through the Contents API (workflows, the
 shared hook, the requirements locks, `dependabot.yml`) goes through one strict
 decoder: a regular file at the requested path, base64, an integer `size` that
 equals the strictly decoded length, and UTF-8 text. Anything else is UNKNOWN,
-never an exception. An error body whose `message` is not a string reads as
-`malformed HTTP error`. Time is bounded by wall clock, not only by the socket
-timeout: 60 seconds per request (body read included), 180 seconds per
+never an exception. An unexpected exception inside one check is UNKNOWN for
+that check alone (the report names only the exception class, never its text),
+and one inside a repository's audit is UNKNOWN for that repository, so the
+next repository is still audited; `KeyboardInterrupt` and `SystemExit` still
+stop the run. The ecosystem check reads `dependabot.yml` through the same
+strict loader as the cooldown check and looks at both `directory` and
+`directories`, so a flow list, a multiline list or a flow mapping cannot hide
+a `pip` entry for `/`; a file that cannot be parsed is UNKNOWN. An error body whose `message` is not a string reads as
+`malformed HTTP error`. Time is bounded by real wall clock, not only by the socket
+timeout: each request (connect, headers and body) runs under a POSIX interval
+timer (`SIGALRM`, as `scripts/check_pr_title.py` does for its regular
+expression) that interrupts a read even when a peer keeps dripping bytes. That
+needs Linux (or another POSIX system) and the main thread, which the audit
+uses; where `SIGALRM` is missing the per-chunk clock check is the only bound.
+The limits: 60 seconds per request (body read included), 180 seconds per
 repository (retries and their waits included), and 45 minutes for the run
-(`--deadline-minutes` changes it); past a deadline the remaining calls are not
+(`--deadline-minutes` changes it; it must be a finite number from 1 to 720);
+past a deadline the remaining calls are not
 made and the checks report UNKNOWN. The contents answer must carry an integer
 `size` equal to the strictly decoded length. A transport failure (DNS, TLS,
 reset, timeout) is UNKNOWN, not a crash; timeouts, 429 and 500, 502, 503 and
