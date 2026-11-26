@@ -1,0 +1,57 @@
+# Dependabot for a new repository: every ecosystem holds a new release for seven days before proposing it.
+#
+# Copy this to .github/dependabot.yml and delete the entries for ecosystems the repository does not use.
+# Change `directory` to where the manifest lives (docker takes the folder of the Dockerfile). Do not shorten
+# `cooldown`: the owner rule is "pin every dependency and hold a new release at least 7 days before merging
+# it", a malicious release is usually pulled within days, and the weekly audit (`dependabot-config`) fails a
+# repository whose dependabot.yml has an ecosystem with no cooldown or one under 7 days.
+#
+# The cooldown applies to version updates only; Dependabot security updates ignore it, so a security fix is
+# never delayed. A caller of the GYST reusable workflows can start from examples/dependabot-gyst.yml instead,
+# which adds the `gyst` group so a GYST release moves every workflow in one pull request.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ["*"]
+    labels: [dependencies, github-actions]
+
+  # Use `uv` instead of `pip` when requirements.txt is a `uv pip compile --universal` lock
+  # (the `dependabot-ecosystem` audit check fails a pip entry for that).
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    labels: [dependencies, python]
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    labels: [dependencies, docker]
+
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    labels: [dependencies, javascript]
+
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    labels: [dependencies, go]

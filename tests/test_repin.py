@@ -733,7 +733,7 @@ def test_the_exit_code_table_names_11_and_the_flag():
 # --- the Dependabot template ------------------------------------------------
 
 
-def test_the_dependabot_template_groups_gyst_refs_with_a_short_cooldown():
+def test_the_dependabot_template_groups_gyst_refs_with_the_seven_day_cooldown():
     doc = yaml.safe_load(EXAMPLE.read_text())
     assert doc["version"] == 2
     entries = [u for u in doc["updates"] if u["package-ecosystem"] == "github-actions"]
@@ -742,7 +742,7 @@ def test_the_dependabot_template_groups_gyst_refs_with_a_short_cooldown():
     assert entry["directory"] == "/"
     group = entry["groups"]["gyst"]
     assert SRC in group["patterns"]
-    assert 1 <= entry["cooldown"]["default-days"] <= 3, "a short cooldown"
+    assert entry["cooldown"]["default-days"] >= 7, "the owner rule: hold a release at least 7 days"
     # the group for every other action must leave the GYST refs to the gyst group
     others = entry["groups"]["actions"]
     assert others["patterns"] == ["*"] and SRC in others["exclude-patterns"]
