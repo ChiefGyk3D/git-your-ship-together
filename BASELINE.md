@@ -190,6 +190,66 @@ header. A repository whose root `requirements.txt` or `requirements-dev.txt`
 carries that header, with a `pip` entry for `/` in `dependabot.yml` or no
 `dependabot.yml` at all, fails.
 
+**Dependabot holds a new release for seven days.** The owner rule is to pin
+every dependency and hold a new release at least 7 days before merging it, in
+case it was compromised, and the `cooldown` of `dependabot.yml` is how that is
+enforced. `dependabot-config` reads the value, not just the key: it fails when
+the file is missing, when an update entry for any ecosystem has no `cooldown`,
+when `default-days` is absent or under 7, or when a `semver-*-days` override
+is under 7. The cooldown applies to version updates only, so it never delays a
+Dependabot security update. The file must also say `version: 2`, and every
+update entry needs a `package-ecosystem` of the right shape (lower-case name,
+not checked against GitHub's list, which grows). The contents answer must be
+a whole regular file at that path, so a symlink, submodule or truncated read
+is UNKNOWN. A cooldown may not exempt anything: a non-empty `exclude` fails, and
+`include` must be absent or exactly `["*"]`. The same ecosystem and directory
+twice in one file fails, because GitHub rejects it. An ecosystem name outside
+the `KNOWN_ECOSYSTEMS` constant in `scripts/audit_baseline.py` (add a name there
+when GitHub adds one) is a note beside the PASS, never a failure, so a stale
+list cannot fail a good repository. Every update entry needs exactly one of `directory` (a non-empty path) or
+`directories` (a non-empty list of distinct, non-empty paths); neither, both,
+or a malformed value fails. An HTTP error body is read through a 64 KiB cap
+and any failure reading it is a fixed message naming only the exception class.
+`Retry-After` is read as ASCII seconds or an HTTP date, anything else uses the
+normal wait. Every file the audit reads through the Contents API (workflows, the
+shared hook, the requirements locks, `dependabot.yml`) goes through one strict
+decoder: a regular file at the requested path, base64, an integer `size` that
+equals the strictly decoded length, and UTF-8 text. Anything else is UNKNOWN,
+never an exception. An unexpected exception inside one check is UNKNOWN for
+that check alone (the report names only the exception class, never its text),
+and one inside a repository's audit is UNKNOWN for that repository, so the
+next repository is still audited; `KeyboardInterrupt` and `SystemExit` still
+stop the run. The ecosystem check reads `dependabot.yml` through the same
+strict loader as the cooldown check and looks at both `directory` and
+`directories`, so a flow list, a multiline list or a flow mapping cannot hide
+a `pip` entry for `/`; a file that cannot be parsed is UNKNOWN. An error body whose `message` is not a string reads as
+`malformed HTTP error`. Time is bounded by real wall clock, not only by the socket
+timeout: each request (connect, headers and body) runs under a POSIX interval
+timer (`SIGALRM`, as `scripts/check_pr_title.py` does for its regular
+expression) that interrupts a read even when a peer keeps dripping bytes. That
+needs Linux (or another POSIX system) and the main thread, which the audit
+uses. The timer is borrowed politely: the previous handler and the previous
+timer (its remaining time and interval) are put back, and an earlier deadline
+that is still ahead stays the one that fires, so a host's own `SIGALRM`
+deadline and nested uses survive. Off the main thread there is no safe way to
+interrupt a read, so `github_fetcher` refuses to start a request there and
+answers `request deadline unavailable off the main thread` (UNKNOWN), never an
+unbounded request. Where `SIGALRM` is missing altogether the per-chunk clock
+check is the only bound. `main()` clears the audit and repository limits in a
+`finally`, so an interrupted run leaves no stale deadline behind for the next
+library call.
+The limits: 60 seconds per request (body read included), 180 seconds per
+repository (retries and their waits included), and 45 minutes for the run
+(`--deadline-minutes` changes it; it must be a finite number from 1 to 720);
+past a deadline the remaining calls are not
+made and the checks report UNKNOWN. The contents answer must carry an integer
+`size` equal to the strictly decoded length. A transport failure (DNS, TLS,
+reset, timeout) is UNKNOWN, not a crash; timeouts, 429 and 500, 502, 503 and
+504 are tried up to three times with short waits and a `Retry-After` capped at
+ten seconds. The audit's API calls refuse every redirect, so the token never
+follows one to another host. `examples/dependabot-template.yml` is the starting
+point (GitHub Actions, pip, docker, npm and gomod).
+
 Checked: `workflows-pinned`, `uses-shared-workflows`, `dependabot-config`,
 `dependabot-ecosystem`. The
 harden-runner, permissions and injection rules are properties of the shared

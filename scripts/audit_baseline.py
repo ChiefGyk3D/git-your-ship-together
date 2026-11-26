@@ -30,12 +30,19 @@ from __future__ import annotations
 
 import argparse
 import base64
+import binascii
+import contextlib
 import datetime as dt
+import email.utils
+import http.client
 import json
+import math
 import os
 import re
+import signal
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
@@ -81,8 +88,196 @@ class Result:
     detail: str
 
 
+class _NoRedirects(urllib.request.HTTPRedirectHandler):
+    """Refuse every redirect: the request carries the token, and no API answer here needs one followed."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirects)
+
+
+FETCH_ATTEMPTS = 3
+RETRY_WAITS = (1.0, 2.0)  # between attempts; a Retry-After header may lengthen one, never past the cap
+RETRY_AFTER_CAP = 10.0
+RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+_sleep = time.sleep
+
+
+_now = lambda: dt.datetime.now(dt.UTC)  # noqa: E731 - replaced by tests
+MAX_ERROR_BODY = 64 * 1024
+MALFORMED_ERROR = "malformed HTTP error"
+MAX_BODY = 4 * 1024 * 1024
+
+
+class _BodyTooLarge(ValueError):
+    pass
+
+
+# Wall-clock limits. The socket timeout bounds one wait, not the request: a peer that sends a byte every
+# 29 seconds would otherwise hold the whole sequential audit open. All three are checked against `_clock`.
+REQUEST_DEADLINE = 60.0  # one request, body read included
+REPO_DEADLINE = 180.0  # every check of one repository, retries and their waits included
+AUDIT_DEADLINE = 45 * 60.0  # the whole run; later repositories report UNKNOWN
+_clock = time.monotonic
+_limits: dict[str, float | None] = {"repo": None, "audit": None}  # absolute `_clock` times
+
+
+class _DeadlineExceeded(TimeoutError):
+    pass
+
+
+def _alarm_unavailable() -> bool:
+    """True when SIGALRM exists but this is not the main thread: a signal timer cannot be used here."""
+    import threading
+
+    return hasattr(signal, "setitimer") and threading.current_thread() is not threading.main_thread()
+
+
+@contextlib.contextmanager
+def _alarm(seconds: float):
+    """Interrupt whatever is running in this block after `seconds` of real time, as `_DeadlineExceeded`.
+
+    The socket timeout bounds one wait and the chunk check bounds one chunk; neither stops a read that keeps
+    receiving a byte now and then, or a slow DNS lookup or connect. A POSIX interval timer does, the same way
+    scripts/check_pr_title.py stops a catastrophic regular expression.
+
+    It borrows a process-wide timer, so it is a good neighbor: the previous handler and the previous timer (its
+    remaining time less what this block used, and its interval) are put back on exit, and while an earlier
+    deadline is still ahead of this one it is the one that fires (through its own handler if it had one), so a
+    nested block or a host's own SIGALRM deadline is never lost. Without SIGALRM the block runs under the chunk
+    checks alone. Off the main thread it raises RuntimeError: `github_fetcher` checks `_alarm_unavailable` first
+    and answers UNKNOWN, so no request runs there unbounded.
+    """
+    if not hasattr(signal, "setitimer"):
+        yield
+        return
+    if _alarm_unavailable():
+        raise RuntimeError("request deadline unavailable off the main thread")
+    started = time.monotonic()
+    mine = started + max(0.001, seconds)
+    holder: dict[str, object] = {}
+
+    def expired(signum: int, frame: object) -> None:
+        previous = holder["handler"]
+        if time.monotonic() < mine - 0.001 and callable(previous):
+            previous(signum, frame)  # the earlier deadline's own handler; then our own timer carries on
+            signal.setitimer(signal.ITIMER_REAL, max(0.001, mine - time.monotonic()))
+            return
+        raise _DeadlineExceeded
+
+    blocked = {signal.SIGALRM}
+    old_mask = signal.pthread_sigmask(signal.SIG_BLOCK, blocked)
+    try:
+        holder["handler"] = signal.signal(signal.SIGALRM, expired)
+        before, interval = signal.getitimer(signal.ITIMER_REAL)
+        signal.setitimer(signal.ITIMER_REAL, min(max(0.001, seconds), before) if before > 0 else max(0.001, seconds))
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, old_mask)
+    try:
+        yield
+    finally:
+        signal.pthread_sigmask(signal.SIG_BLOCK, blocked)
+        try:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, lambda *_: None)  # a signal that arrived while masked lands here, not there
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, old_mask)
+        signal.getsignal(signal.SIGALRM)  # a call boundary: the pending handler runs now
+        signal.signal(signal.SIGALRM, holder["handler"])
+        if before > 0:
+            left = before - (time.monotonic() - started)
+            signal.setitimer(signal.ITIMER_REAL, max(0.001, left), interval)
+
+
+def _limit(request_seconds: float | None = None) -> float:
+    """The earliest of the request, repository and audit deadlines, as an absolute `_clock` time."""
+    seconds = REQUEST_DEADLINE if request_seconds is None else request_seconds
+    return min([_clock() + seconds, *(v for v in _limits.values() if v is not None)])
+
+
+def _read_capped(stream: object, cap: int, limit: float | None = None) -> bytes:
+    """At most `cap` bytes of a response body, read in chunks against a wall-clock limit.
+
+    One byte more than the cap is an error, not a truncation, and so is a body that is still arriving at the limit.
+    """
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        if limit is not None and _clock() > limit:
+            raise _DeadlineExceeded
+        chunk = stream.read(min(8192, cap + 1 - total))
+        if not chunk:
+            return b"".join(chunks)
+        chunks.append(chunk)
+        total += len(chunk)
+        if total > cap:
+            raise _BodyTooLarge
+
+
+def _error_body(err: urllib.error.HTTPError, token: str, limit: float | None = None) -> dict | list:
+    """An HTTP error's body, or a fixed message naming only the class of whatever went wrong reading it."""
+    try:
+        raw = _read_capped(err, MAX_ERROR_BODY, limit)
+        try:
+            body = json.loads(raw) if raw else {}
+        except json.JSONDecodeError:
+            body = {"message": raw.decode("utf-8")[:200]}
+    except (OSError, http.client.HTTPException, UnicodeError, ValueError) as bad:
+        return {"message": f"HTTP error body unreadable: {type(bad).__name__}"}
+    if isinstance(body, dict) and "message" in body:
+        if type(body["message"]) is not str:
+            body["message"] = MALFORMED_ERROR
+        elif token:
+            body["message"] = body["message"].replace(token, "***")  # a server that echoes the token
+    return body
+
+
+def _retry_after(value: object) -> float | None:
+    """Seconds a Retry-After header asks for: ASCII delta-seconds or an HTTP date; None when it is neither."""
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    if re.fullmatch(r"[0-9]{1,6}", value):
+        return float(int(value))
+    try:
+        when = email.utils.parsedate_to_datetime(value)
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=dt.UTC)
+        return max(0.0, (when - _now()).total_seconds())
+    except Exception:  # any malformed date: the normal backoff applies
+        return None
+
+
+def _retry_wait(attempt: int, headers: object) -> float:
+    wait = RETRY_WAITS[min(attempt, len(RETRY_WAITS) - 1)]
+    try:
+        asked = _retry_after(headers.get("Retry-After")) if headers is not None else None
+    except Exception:
+        asked = None
+    if asked is not None:
+        wait = max(wait, asked)
+    return min(wait, RETRY_AFTER_CAP)
+
+
+def _wait(seconds: float) -> bool:
+    """Sleep before a retry, unless that would run past the repository or audit deadline (then False)."""
+    ends = [v for v in _limits.values() if v is not None]
+    if ends and _clock() + seconds >= min(ends):
+        return False
+    _sleep(seconds)
+    return True
+
+
+def _is_timeout(err: BaseException) -> bool:
+    return isinstance(err, TimeoutError) or (
+        isinstance(err, urllib.error.URLError) and isinstance(err.reason, TimeoutError)
+    )
+
+
 def github_fetcher(token: str) -> Fetcher:
-    def fetch(path: str) -> tuple[int, dict | list]:
+    def once(path: str, limit: float) -> tuple[int, dict | list, object]:
         req = urllib.request.Request(
             API + path,
             headers={
@@ -91,16 +286,40 @@ def github_fetcher(token: str) -> Fetcher:
                 "X-GitHub-Api-Version": "2022-11-28",
             },
         )
-        try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                raw = resp.read()
-                return resp.status, (json.loads(raw) if raw else {})
-        except urllib.error.HTTPError as err:
-            raw = err.read()
+        with _alarm(limit - _clock()):
+            with _OPENER.open(req, timeout=max(1.0, min(30.0, limit - _clock()))) as resp:
+                raw = _read_capped(resp, MAX_BODY, limit)
+                return resp.status, (json.loads(raw) if raw else {}), resp.headers
+
+    def fetch(path: str) -> tuple[int, dict | list]:
+        for attempt in range(FETCH_ATTEMPTS):
+            last = attempt == FETCH_ATTEMPTS - 1
+            if _alarm_unavailable():
+                return 599, {"message": "request deadline unavailable off the main thread"}
+            limit = _limit()
+            if _clock() >= min(v for v in (_limits["repo"], _limits["audit"], limit) if v is not None):
+                return 599, {"message": "transport error: deadline exceeded"}
             try:
-                return err.code, json.loads(raw) if raw else {}
-            except json.JSONDecodeError:
-                return err.code, {"message": raw.decode(errors="replace")[:200]}
+                code, body, _ = once(path, limit)
+                return code, body
+            except urllib.error.HTTPError as err:
+                if 300 <= err.code < 400:  # a refused redirect: say so, never echo what the other side sent
+                    return err.code, {"message": "redirect refused"}
+                if err.code in RETRYABLE_STATUS and not last:
+                    if not _wait(_retry_wait(attempt, err.headers)):
+                        return 599, {"message": "transport error: deadline exceeded"}
+                    continue
+                with _alarm(limit - _clock()):
+                    return err.code, _error_body(err, token, limit)
+            except (OSError, http.client.HTTPException, ValueError) as err:
+                # DNS, TLS, reset, timeout, or a 200 that is not JSON. The exception text can hold the
+                # request, so only its class is reported, as a status no real answer uses.
+                if _is_timeout(err) and not last:
+                    if not _wait(_retry_wait(attempt, None)):
+                        return 599, {"message": "transport error: deadline exceeded"}
+                    continue
+                return 599, {"message": f"transport error: {type(err).__name__}"}
+        return 599, {"message": "transport error"}  # unreachable; keeps the type checker honest
 
     return fetch
 
@@ -118,6 +337,8 @@ def find_token() -> str:
 
 def unreadable(code: int, body: dict | list) -> str:
     message = body.get("message", "") if isinstance(body, dict) else ""
+    if type(message) is not str:
+        message = MALFORMED_ERROR
     return f"HTTP {code}{': ' + message if message else ''}"
 
 
@@ -417,13 +638,21 @@ def check_workflows(repo: str, fetch: Fetcher) -> tuple[list[Result], bool, set[
     exceptions: set[str] = set()
     gates: set[str] = set()
     for entry in listing:
-        name = entry.get("name", "")
-        if not name.endswith((".yml", ".yaml")):
+        name = entry.get("name", "") if isinstance(entry, dict) else ""
+        if type(name) is not str or not name.endswith((".yml", ".yaml")):
             continue
         code, file = fetch(f"/repos/{repo}/contents/.github/workflows/{name}")
-        if code != 200 or not isinstance(file, dict) or "content" not in file:
-            return [Result(repo, "workflows-pinned", UNKNOWN, f"{name}: {unreadable(code, file)}")], False, set(), set()
-        text = base64.b64decode(file["content"]).decode()
+        if code != 200:
+            return (
+                [Result(repo, "workflows-pinned", UNKNOWN, f"{shown(name)}: {unreadable(code, file)}")],
+                False,
+                set(),
+                set(),
+            )
+        text = contents_text(file, f".github/workflows/{name}")
+        if text is None:
+            detail = f"{shown(name)}: the contents answer is not a plain base64 UTF-8 file"
+            return [Result(repo, "workflows-pinned", UNKNOWN, detail)], False, set(), set()
         if REUSABLE_PREFIX in text:
             callers += 1
         gates |= expected_gates(text)
@@ -546,28 +775,260 @@ def format_expiring(entries: list[dict]) -> list[str]:
     return lines
 
 
+# The owner rule: a new release is held at least this many days before it is proposed.
+MIN_COOLDOWN_DAYS = 7
+# GitHub's list of ecosystems grows, so a name is checked for shape, not against a copy of that list.
+ECOSYSTEM_NAME = re.compile(r"[a-z][a-z0-9-]{0,39}")
+# The ecosystems Dependabot documents, for a note only: a name outside this set is reported beside a PASS and
+# never fails, so a stale copy cannot fail a good repository. Add a name here when GitHub adds one.
+KNOWN_ECOSYSTEMS = frozenset(
+    "bazel bun bundler cargo composer conda devcontainers docker docker-compose dotnet-sdk elm github-actions "
+    "gitsubmodule gomod gradle helm julia maven mix npm nuget opentofu pip pub rust-toolchain swift terraform uv "
+    "vcpkg deno nix pre-commit sbt".split()
+)
+COOLDOWN_KEYS = ("default-days", "semver-major-days", "semver-minor-days", "semver-patch-days")
+
+
+# Largest dependabot.yml read, and the deepest nesting accepted. The file comes from another repository, so it
+# is semi-trusted input: bounded before and during the parse, and never echoed raw into the report.
+MAX_DEPENDABOT_BYTES = 64 * 1024
+MAX_YAML_DEPTH = 20
+MAX_FIELD_CHARS = 100
+COMPLEX = "<complex>"
+
+
+class UnsafeYaml(Exception):
+    """A dependabot.yml that is refused rather than parsed: an alias, anchor, duplicate key, merge key or depth."""
+
+
+def _safe_loader():
+    import yaml
+
+    class Loader(yaml.SafeLoader):
+        depth = 0
+
+        def compose_node(self, parent, index):
+            if self.check_event(yaml.AliasEvent):
+                raise UnsafeYaml("alias")
+            if self.peek_event().anchor is not None:
+                raise UnsafeYaml("anchor")
+            self.depth += 1
+            try:
+                if self.depth > MAX_YAML_DEPTH:
+                    raise UnsafeYaml("nesting")
+                return super().compose_node(parent, index)
+            finally:
+                self.depth -= 1
+
+        def construct_mapping(self, node, deep=False):
+            seen = set()
+            for key_node, _ in node.value:
+                if key_node.tag == "tag:yaml.org,2002:merge":
+                    raise UnsafeYaml("merge key")
+                key = self.construct_object(key_node, deep=True)
+                try:
+                    duplicate = key in seen
+                    seen.add(key)
+                except TypeError:
+                    raise UnsafeYaml("unhashable key") from None
+                if duplicate:
+                    raise UnsafeYaml("duplicate key")
+            return super().construct_mapping(node, deep=deep)
+
+    return Loader
+
+
+def load_dependabot(raw: bytes) -> object:
+    """Parse a fetched dependabot.yml; raise UnsafeYaml (or a parser error) for anything not plainly benign."""
+    import yaml
+
+    if len(raw) > MAX_DEPENDABOT_BYTES:
+        raise UnsafeYaml("too large")
+    return yaml.load(raw.decode(), Loader=_safe_loader())  # noqa: S506 - a SafeLoader subclass
+
+
+def shown(value: object) -> str:
+    """A value taken from a fetched file, made safe to print: str only, one line, no controls, no `::`."""
+    if type(value) is not str:
+        return COMPLEX
+    text = "".join(ch if ch.isprintable() else " " for ch in value)
+    text = " ".join(text.split()).replace("::", ": :")
+    return text if len(text) <= MAX_FIELD_CHARS else COMPLEX
+
+
+def one_line(text: str, limit: int = 1000) -> str:
+    """Report text with no newline, control character or workflow command in it."""
+    text = " ".join("".join(ch if ch.isprintable() else " " for ch in str(text)).split()).replace("::", ": :")
+    return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
+def cooldown_problems(config: object) -> list[str]:
+    """What is wrong with the cooldown of each update entry in a parsed dependabot.yml.
+
+    An entry needs `default-days` of at least MIN_COOLDOWN_DAYS, and a
+    `semver-*-days` override may not undercut it either: an override replaces
+    the default for that kind of bump, so a short one is a short cooldown.
+    """
+    updates = config.get("updates") if isinstance(config, dict) else None
+    if not isinstance(updates, list) or not updates:
+        return ["dependabot.yml has no update entries"]
+    problems = []
+    seen: set[tuple[str, str]] = set()
+    version = config.get("version")
+    if type(version) is not int or version != 2:
+        problems.append("dependabot.yml does not say `version: 2`")
+    for index, entry in enumerate(updates):
+        if not isinstance(entry, dict):
+            problems.append(f"update entry #{index + 1} is not a mapping")
+            continue
+        ecosystem = entry.get("package-ecosystem")
+        if type(ecosystem) is not str or not ECOSYSTEM_NAME.fullmatch(ecosystem):
+            problems.append(f"update entry #{index + 1} has no valid package-ecosystem")
+            continue
+        where = entry.get("directory") if "directory" in entry else entry.get("directories", "/")
+        label = f"{ecosystem} in {shown(where)}"
+        cooldown = entry.get("cooldown")
+        if not isinstance(cooldown, dict):
+            problems.append(f"{label} has no cooldown")
+            continue
+        for key in COOLDOWN_KEYS:
+            if key not in cooldown:
+                continue
+            value = cooldown[key]
+            if isinstance(value, bool) or not isinstance(value, int):
+                problems.append(f"{label}: cooldown {key} is not a whole number of days")
+            elif value < MIN_COOLDOWN_DAYS:
+                problems.append(f"{label}: cooldown {key} is {value}, under {MIN_COOLDOWN_DAYS}")
+        if "default-days" not in cooldown:
+            problems.append(f"{label}: cooldown has no default-days")
+        if "exclude" in cooldown:
+            exclude = cooldown["exclude"]
+            if not _list_of_str(exclude):
+                problems.append(f"{label}: cooldown exclude is not a list of names")
+            elif exclude:
+                problems.append(f"{label}: cooldown exclude exempts dependencies from the cooldown")
+        if "include" in cooldown:
+            include = cooldown["include"]
+            if not _list_of_str(include):
+                problems.append(f"{label}: cooldown include is not a list of names")
+            elif include != ["*"]:
+                problems.append(
+                    f'{label}: cooldown include limits the cooldown to some dependencies; use ["*"] or omit it'
+                )
+        targets = _locations(entry)
+        if targets is None:
+            problems.append(f"{label}: needs exactly one of directory (a path) or directories (a list of paths)")
+            targets = []
+        for target in targets:
+            if (ecosystem, target) in seen:
+                problems.append(f"{ecosystem} in {shown(target)} is configured twice; GitHub rejects that")
+            seen.add((ecosystem, target))
+    return problems
+
+
+def _locations(entry: dict) -> list[str] | None:
+    """The paths one update entry covers, or None unless it has exactly one valid directory or directories."""
+    if ("directory" in entry) == ("directories" in entry):
+        return None
+    if "directory" in entry:
+        path = entry["directory"]
+        return [path] if type(path) is str and path.strip() else None
+    paths = entry["directories"]
+    if not _list_of_str(paths) or not paths or any(not p.strip() for p in paths) or len(set(paths)) != len(paths):
+        return None
+    return list(paths)
+
+
+def _list_of_str(value: object) -> bool:
+    return type(value) is list and all(type(item) is str for item in value)
+
+
+def unlisted_ecosystems(config: object) -> list[str]:
+    """Ecosystem names that are well-formed but not in KNOWN_ECOSYSTEMS: a note, never a failure."""
+    updates = config.get("updates") if isinstance(config, dict) else None
+    names = {
+        entry["package-ecosystem"]
+        for entry in updates or []
+        if isinstance(entry, dict)
+        and type(entry.get("package-ecosystem")) is str
+        and ECOSYSTEM_NAME.fullmatch(entry["package-ecosystem"])
+    }
+    return sorted(names - KNOWN_ECOSYSTEMS)
+
+
+def plain_file_bytes(file: object, path: str) -> bytes | None:
+    """The bytes of a Contents API answer that is the regular file asked for, whole; None for anything else.
+
+    Not a symlink, submodule or directory; strict base64 (no ignored characters); and the decoded length
+    equals the `size` the API reported, so a truncated read is refused. The caller parses these same bytes.
+    """
+    if not isinstance(file, dict):
+        return None
+    if file.get("type") != "file" or file.get("encoding") != "base64" or file.get("path") != path:
+        return None
+    content, size = file.get("content"), file.get("size")
+    if type(content) is not str or type(size) is not int:
+        return None
+    try:
+        raw = base64.b64decode(content.replace("\n", ""), validate=True)
+    except ValueError:
+        return None
+    return raw if len(raw) == size else None
+
+
+def contents_text(file: object, path: str) -> str | None:
+    """The UTF-8 text of a Contents API answer that is the regular file `path`, whole; None for anything else.
+
+    Every file the audit reads goes through this: a hostile or broken answer is "could not read", never an exception.
+    """
+    try:
+        raw = plain_file_bytes(file, path)
+        return None if raw is None else raw.decode("utf-8")
+    except (ValueError, TypeError, UnicodeError, binascii.Error):
+        return None
+
+
 def check_dependabot(repo: str, fetch: Fetcher) -> Result:
     code, file = fetch(f"/repos/{repo}/contents/.github/dependabot.yml")
     if code == 404:
         return Result(repo, "dependabot-config", FAIL, "no .github/dependabot.yml")
-    if code != 200 or not isinstance(file, dict) or "content" not in file:
+    if code != 200:
         return Result(repo, "dependabot-config", UNKNOWN, unreadable(code, file))
-    text = base64.b64decode(file["content"]).decode()
-    if "cooldown" not in text:
-        return Result(repo, "dependabot-config", FAIL, "dependabot.yml has no cooldown")
-    return Result(repo, "dependabot-config", PASS, "present, with a cooldown")
+    raw = plain_file_bytes(file, ".github/dependabot.yml")
+    if raw is None:
+        return Result(repo, "dependabot-config", UNKNOWN, "the contents answer is not a plain base64 file")
+    try:
+        import yaml  # noqa: F401
+    except ImportError:
+        sys.exit("reading dependabot.yml needs PyYAML: pip install -r requirements-dev.txt")
+    try:
+        config = load_dependabot(raw)
+        problems = cooldown_problems(config)
+    except Exception as err:  # a hostile or broken file is "could not tell", never a pass and never a crash
+        return Result(repo, "dependabot-config", UNKNOWN, f"dependabot.yml was not read: {type(err).__name__}")
+    if problems:
+        return Result(
+            repo,
+            "dependabot-config",
+            FAIL,
+            "; ".join(problems) + f"; every ecosystem needs cooldown default-days of {MIN_COOLDOWN_DAYS} or more "
+            "(examples/dependabot-template.yml)",
+        )
+    detail = f"every ecosystem holds a release at least {MIN_COOLDOWN_DAYS} days"
+    if unlisted := unlisted_ecosystems(config):
+        detail += f"; note: {', '.join(unlisted)} not in the known ecosystem list (KNOWN_ECOSYSTEMS)"
+    return Result(repo, "dependabot-config", PASS, detail)
 
 
 def check_pre_commit_hook(repo: str, fetch: Fetcher) -> Result:
     code, file = fetch(f"/repos/{repo}/contents/.githooks/pre-commit")
     if code == 404:
         return Result(repo, "pre-commit-hook", FAIL, "no .githooks/pre-commit")
-    if code != 200 or not isinstance(file, dict) or not isinstance(file.get("content"), str):
+    if code != 200:
         return Result(repo, "pre-commit-hook", UNKNOWN, unreadable(code, file))
-    try:
-        content = base64.b64decode(file["content"])
-    except (ValueError, TypeError):
-        return Result(repo, "pre-commit-hook", UNKNOWN, "the hook content is not valid base64")
+    content = plain_file_bytes(file, ".githooks/pre-commit")
+    if content is None:
+        return Result(repo, "pre-commit-hook", UNKNOWN, "the contents answer is not a plain base64 file")
     if content != PRE_COMMIT_HOOK.read_bytes():
         return Result(repo, "pre-commit-hook", FAIL, ".githooks/pre-commit does not match the shared hook")
     return Result(repo, "pre-commit-hook", PASS, "present and byte-identical to the shared hook")
@@ -584,24 +1045,21 @@ def universal_uv_lock(text: str) -> bool:
     return "autogenerated by uv" in head and "--universal" in head
 
 
-def pip_updated_roots(text: str) -> bool:
-    """Whether dependabot.yml has a `pip` update entry for the repository root."""
-    items: list[list[str]] = []
-    indent = None
-    for line in text.splitlines():
-        match = re.match(r"^(\s*)-\s", line)
-        if match and (indent is None or len(match.group(1)) == indent):
-            indent = len(match.group(1))
-            items.append([])
-        if items:
-            items[-1].append(line)
-    for item in items:
-        values = {}
-        for line in item:
-            found = re.match(r"^\s*(?:-\s+)?(package-ecosystem|directory):\s*(.*?)\s*$", line)
-            if found:
-                values[found.group(1)] = re.sub(r"\s+#.*$", "", found.group(2)).strip("\"'")
-        if values.get("package-ecosystem") == "pip" and values.get("directory", "/") == "/":
+def pip_updated_roots(config: object) -> bool:
+    """Whether a parsed dependabot.yml has a `pip` update entry covering the repository root.
+
+    Both `directory` and `directories` are read from the structure, so a flow list, a multiline list or a flow
+    mapping cannot hide the root. An entry naming neither covers `/`, as Dependabot treats it.
+    """
+    updates = config.get("updates") if isinstance(config, dict) else None
+    for entry in updates if isinstance(updates, list) else []:
+        if not isinstance(entry, dict) or entry.get("package-ecosystem") != "pip":
+            continue
+        if "directories" in entry:
+            places = entry["directories"] if isinstance(entry["directories"], list) else []
+        else:
+            places = [entry.get("directory", "/")]
+        if any(place == "/" for place in places if type(place) is str):
             return True
     return False
 
@@ -614,9 +1072,12 @@ def check_dependabot_ecosystem(repo: str, fetch: Fetcher) -> Result:
         code, file = fetch(f"/repos/{repo}/contents/{lock}")
         if code == 404:
             continue
-        if code != 200 or not isinstance(file, dict) or "content" not in file:
+        if code != 200:
             return Result(repo, name, UNKNOWN, f"{lock}: {unreadable(code, file)}")
-        if universal_uv_lock(base64.b64decode(file["content"]).decode()):
+        text = contents_text(file, lock)
+        if text is None:
+            return Result(repo, name, UNKNOWN, f"{lock}: the contents answer is not a plain base64 UTF-8 file")
+        if universal_uv_lock(text):
             locks.append(lock)
     if not locks:
         return Result(repo, name, PASS, "no uv --universal lock; nothing to match")
@@ -625,9 +1086,18 @@ def check_dependabot_ecosystem(repo: str, fetch: Fetcher) -> Result:
         return Result(
             repo, name, FAIL, f"{locks[0]} is a uv --universal lock and there is no dependabot.yml to update it"
         )
-    if code != 200 or not isinstance(file, dict) or "content" not in file:
+    if code != 200:
         return Result(repo, name, UNKNOWN, unreadable(code, file))
-    if pip_updated_roots(base64.b64decode(file["content"]).decode()):
+    text = contents_text(file, ".github/dependabot.yml")
+    if text is None:
+        return Result(
+            repo, name, UNKNOWN, ".github/dependabot.yml: the contents answer is not a plain base64 UTF-8 file"
+        )
+    try:
+        updated = pip_updated_roots(load_dependabot(text.encode()))
+    except Exception as err:  # an unreadable file is "could not tell", never a pass
+        return Result(repo, name, UNKNOWN, f".github/dependabot.yml was not read: {type(err).__name__}")
+    if updated:
         return Result(
             repo,
             name,
@@ -758,31 +1228,82 @@ def audit_repo(
     orgs: dict[str, dict] | None = None,
 ) -> list[Result]:
     """Every repository check. `orgs` collects the organizations seen and the owners read for them."""
+    _limits["repo"] = _clock() + REPO_DEADLINE
+    try:
+        return _audit_repo(repo, fetch, register, orgs)
+    except Exception as err:  # noqa: BLE001 - one repository never takes the fleet down; KeyboardInterrupt passes
+        return [
+            Result(repo, "repository", UNKNOWN, f"the audit raised {type(err).__name__}; the repository was skipped")
+        ]
+    finally:
+        _limits["repo"] = None
+
+
+def _guarded(repo: str, name: str, call: Callable[[], object]) -> list[Result]:
+    """One check's results; an unexpected exception is UNKNOWN for that check alone, naming only its class."""
+    try:
+        out = call()
+        return list(out) if isinstance(out, list) else [out]  # type: ignore[list-item]
+    except Exception as err:  # noqa: BLE001 - last resort; KeyboardInterrupt and SystemExit still pass
+        return [Result(repo, name, UNKNOWN, f"the check raised {type(err).__name__}; the answer could not be read")]
+
+
+def _audit_repo(
+    repo: str,
+    fetch: Fetcher,
+    register: list[dict] | None = None,
+    orgs: dict[str, dict] | None = None,
+) -> list[Result]:
     owner = repo.split("/", 1)[0]
     code, body = fetch(f"/repos/{repo}")
     if code != 200 or not isinstance(body, dict):
         return [Result(repo, "repository", UNKNOWN, unreadable(code, body))]
-    is_org = (body.get("owner") or {}).get("type") == "Organization"
+    owner_info = body.get("owner")
+    is_org = isinstance(owner_info, dict) and owner_info.get("type") == "Organization"
     if is_org and orgs is not None:
         orgs.setdefault(owner, {})
-    default_branch = body.get("default_branch") or "main"
+    default_branch = body.get("default_branch") if type(body.get("default_branch")) is str else "main"
     # The workflows first: which gates branch protection must require is read from them.
-    workflow_results, reads_doppler, exceptions, gates = check_workflows(repo, fetch)
-    results = [check_collaborators(repo, fetch, owner, is_org, orgs.get(owner) if orgs is not None else None)]
-    results += check_branch_protection(repo, fetch, default_branch, required_checks_for(repo, gates))
-    results += check_security_features(repo, body)
-    results.append(check_private_vulnerability_reporting(repo, fetch))
-    results.append(check_workflow_token(repo, fetch))
-    results.append(check_fork_pr_approval(repo, fetch))
-    results.append(check_actions_allowlist(repo, fetch))
-    results.append(check_auto_merge(repo, body))
-    results.append(check_tag_ruleset(repo, fetch))
+    try:
+        workflow_results, reads_doppler, exceptions, gates = check_workflows(repo, fetch)
+    except Exception as err:  # noqa: BLE001
+        detail = f"the check raised {type(err).__name__}; the answer could not be read"
+        workflow_results, reads_doppler, exceptions, gates = (
+            [Result(repo, "workflows-pinned", UNKNOWN, detail)],
+            False,
+            set(),
+            set(),
+        )
+    cache = orgs.get(owner) if orgs is not None else None
+    results = _guarded(repo, "collaborators", lambda: check_collaborators(repo, fetch, owner, is_org, cache))
+    results += _guarded(
+        repo,
+        "branch-protection",
+        lambda: check_branch_protection(repo, fetch, default_branch, required_checks_for(repo, gates)),
+    )
+    results += _guarded(repo, "security-features", lambda: check_security_features(repo, body))
+    for name, call in (
+        ("private-vulnerability-reporting", lambda: check_private_vulnerability_reporting(repo, fetch)),
+        ("workflow-token-read-only", lambda: check_workflow_token(repo, fetch)),
+        ("fork-pr-approval", lambda: check_fork_pr_approval(repo, fetch)),
+        ("actions-allowlist", lambda: check_actions_allowlist(repo, fetch)),
+        ("auto-merge-enabled", lambda: check_auto_merge(repo, body)),
+        ("tag-ruleset", lambda: check_tag_ruleset(repo, fetch)),
+    ):
+        results += _guarded(repo, name, call)
     results += workflow_results
-    results.append(check_risk_exceptions(repo, exceptions, register if register is not None else load_register()))
-    results.append(check_dependabot(repo, fetch))
-    results.append(check_dependabot_ecosystem(repo, fetch))
-    results.append(check_doppler_variable(repo, fetch, reads_doppler))
-    results.append(check_pre_commit_hook(repo, fetch))
+    results += _guarded(
+        repo,
+        "risk-exceptions",
+        lambda: check_risk_exceptions(repo, exceptions, register if register is not None else load_register()),
+    )
+    for name, call in (
+        ("dependabot-config", lambda: check_dependabot(repo, fetch)),
+        ("dependabot-ecosystem", lambda: check_dependabot_ecosystem(repo, fetch)),
+        ("doppler-identity", lambda: check_doppler_variable(repo, fetch, reads_doppler)),
+        ("pre-commit-hook", lambda: check_pre_commit_hook(repo, fetch)),
+    ):
+        results += _guarded(repo, name, call)
     return results
 
 
@@ -799,14 +1320,14 @@ def read_repo_list(path: Path) -> list[str]:
 
 
 def render(results: list[Result]) -> str:
-    width = max(len(r.check) for r in results)
+    width = max(len(one_line(r.check)) for r in results)
     lines = []
     current = None
     for r in results:
         if r.repo != current:
             current = r.repo
-            lines.append(f"\n{current}")
-        lines.append(f"  {r.status:<7} {r.check:<{width}}  {r.detail}")
+            lines.append(f"\n{one_line(current)}")
+        lines.append(f"  {one_line(r.status):<7} {one_line(r.check):<{width}}  {one_line(r.detail)}")
     return "\n".join(lines)
 
 
@@ -843,6 +1364,16 @@ def no_token_reason(owner: str, tokens: dict[str, str]) -> str:
     return f"${var} is empty: the token for {owner} was not minted (is the App installed on {owner}?)"
 
 
+def _deadline_minutes(text: str) -> float:
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a number: {text!r}") from None
+    if not math.isfinite(value) or not 1 <= value <= 720:
+        raise argparse.ArgumentTypeError("must be a finite number of minutes from 1 to 720")
+    return value
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("repos", nargs="*", help="owner/name; default: every line of baseline/repos.txt")
@@ -860,6 +1391,12 @@ def main(argv: list[str] | None = None) -> int:
         metavar="OWNER=ENVVAR",
         help="read OWNER's repositories (and the organization, if it is one) with the token in ENVVAR; repeatable",
     )
+    parser.add_argument(
+        "--deadline-minutes",
+        type=_deadline_minutes,
+        default=AUDIT_DEADLINE / 60,
+        help="stop starting new repositories after this many minutes, 1 to 720; the rest report UNKNOWN (default: 45)",
+    )
     parser.add_argument("--today", type=dt.date.fromisoformat, help="the date --expiring counts from (default: today)")
     parser.add_argument("--list", default=str(Path(__file__).resolve().parent.parent / "baseline" / "repos.txt"))
     args = parser.parse_args(argv)
@@ -874,27 +1411,45 @@ def main(argv: list[str] | None = None) -> int:
     results: list[Result] = []
     orgs: dict[str, dict] = {}
     by_org: dict[str, list[Result]] = {}
-    for repo in repos:
-        owner = repo.split("/", 1)[0]
-        fetch = default or fetcher_for(owner, tokens or {})
-        if fetch is None:
-            results.append(Result(repo, "repository", UNKNOWN, no_token_reason(owner, tokens or {})))
-            continue
-        found = audit_repo(repo, fetch, register, orgs)
-        results.extend(found)
-        by_org.setdefault(owner, []).extend(found)
-    for org, cache in orgs.items():
-        fetch = default or fetcher_for(org, tokens or {})
-        if fetch is None:
-            results.append(Result(f"{org} (organization)", "org-checks", UNKNOWN, no_token_reason(org, tokens or {})))
-            continue
-        results.extend(audit_org(org, fetch, cache, by_org.get(org, [])))
-    print(render(results))
-    fails = sum(r.status == FAIL for r in results)
-    unknowns = sum(r.status == UNKNOWN for r in results)
-    scope = f"{len(repos)} repositories and {len(orgs)} organization(s)"
-    print(f"\n{len(results)} checks over {scope}: {fails} FAIL, {unknowns} UNKNOWN")
-    return exit_code(results, args.allow_unknown)
+    try:
+        _limits["audit"] = _clock() + args.deadline_minutes * 60
+        for repo in repos:
+            owner = repo.split("/", 1)[0]
+            if _clock() >= _limits["audit"]:
+                results.append(Result(repo, "repository", UNKNOWN, "the audit deadline passed before this repository"))
+                continue
+            fetch = default or fetcher_for(owner, tokens or {})
+            if fetch is None:
+                results.append(Result(repo, "repository", UNKNOWN, no_token_reason(owner, tokens or {})))
+                continue
+            try:
+                found = audit_repo(repo, fetch, register, orgs)
+            except Exception as err:  # noqa: BLE001 - belt and braces beside audit_repo's own boundary
+                found = [Result(repo, "repository", UNKNOWN, f"the audit raised {type(err).__name__}")]
+            results.extend(found)
+            by_org.setdefault(owner, []).extend(found)
+        for org, cache in orgs.items():
+            fetch = default or fetcher_for(org, tokens or {})
+            if fetch is None:
+                results.append(
+                    Result(f"{org} (organization)", "org-checks", UNKNOWN, no_token_reason(org, tokens or {}))
+                )
+                continue
+            try:
+                results.extend(audit_org(org, fetch, cache, by_org.get(org, [])))
+            except Exception as err:  # noqa: BLE001
+                results.append(
+                    Result(f"{org} (organization)", "org-checks", UNKNOWN, f"the audit raised {type(err).__name__}")
+                )
+        print(render(results))
+        fails = sum(r.status == FAIL for r in results)
+        unknowns = sum(r.status == UNKNOWN for r in results)
+        scope = f"{len(repos)} repositories and {len(orgs)} organization(s)"
+        print(f"\n{len(results)} checks over {scope}: {fails} FAIL, {unknowns} UNKNOWN")
+        return exit_code(results, args.allow_unknown)
+    finally:
+        _limits["audit"] = None
+        _limits["repo"] = None
 
 
 if __name__ == "__main__":
