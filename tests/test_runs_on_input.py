@@ -356,8 +356,8 @@ def check_script() -> str:
 
 
 def guard_problems(doc: dict, file: str | None = None, action_script: str | None = None) -> list[str]:
-    """Jobs without an operative guard. Allowlist based: the guard is the first step, the validator second and
-    harden-runner third, each pinned exactly; the guard's own keys and environment are pinned exactly, and nothing
+    """Jobs without an operative guard. Allowlist based: the guard is the third step, the validator and
+    harden-runner before it pinned exactly; the guard's own keys and environment are pinned exactly, and nothing
     at step, job or workflow level may add an environment variable, a shell default, a condition or a matrix that
     is not already there."""
     bad = []
@@ -380,13 +380,13 @@ def guard_problems(doc: dict, file: str | None = None, action_script: str | None
             for key in ("if", "needs", "env", "strategy", "concurrency"):
                 if job.get(key) != expected.get(key):
                     bad.append(f"{name}: the job {key} differs from the known value")
-        if names.index(GUARD) != 0:
-            bad.append(f"{name}: the guard is not the first step")
+        if names.index(GUARD) != 2:
+            bad.append(f"{name}: the guard is not the third step")
             continue
         if len(steps) < 3:
             bad.append(f"{name}: fewer than three steps")
             continue
-        step, first, second = steps[0], steps[1], steps[2]
+        first, second, step = steps[0], steps[1], steps[2]
         expected_env = {
             "POLICY_" + v: "${{ inputs." + v.lower().replace("_", "-") + " }}" for v in VALIDATOR_VARS.get(file, ())
         }
@@ -438,7 +438,7 @@ def guard_script(doc: dict) -> str:
 
 
 @pytest.mark.parametrize("name", sorted(DEFAULTS))
-def test_every_job_has_the_guard_early_and_identical(name):
+def test_every_job_has_the_guard_third_and_identical(name):
     doc = load(name)
     assert guard_problems(doc, name) == []
     scripts = {j["steps"][[s.get("name") for s in j["steps"]].index(GUARD)]["run"] for j in doc["jobs"].values()}
@@ -484,56 +484,56 @@ def mutations(doc: dict, victim: str):
             else:
                 d["env"] = {var: value}
             yield f"{where} env {var}", d
-    # the guard is the first step, the validator second and harden-runner third: each is pinned exactly
+    # the validator and harden-runner come first and the guard is the third step: each is pinned exactly
     d, job, steps = fresh()
-    steps[1]["run"] = "echo attacker-controlled"
+    steps[0]["run"] = "echo attacker-controlled"
     yield "validator replaced", d
     d, job, steps = fresh()
-    steps[1]["run"] = steps[1]["run"] + "\ntrue"
+    steps[0]["run"] = steps[0]["run"] + "\ntrue"
     yield "validator extended", d
     d, job, steps = fresh()
-    steps[2]["uses"] = "attacker/harden-runner-backdoor@main"
+    steps[1]["uses"] = "attacker/harden-runner-backdoor@main"
     yield "harden-runner replaced", d
     d, job, steps = fresh()
-    steps[2]["uses"] = steps[2]["uses"].replace("@46b0", "@0000")
+    steps[1]["uses"] = steps[1]["uses"].replace("@46b0", "@0000")
     yield "harden-runner repinned", d
     d, job, steps = fresh()
-    steps.insert(0, {"name": "extra", "run": "echo before the guard"})
-    yield "extra step before the guard", d
-    d, job, steps = fresh()
-    steps.insert(0, {"name": "extra", "run": "echo first"})
+    steps.insert(0, {"name": "extra", "run": "echo before the validator"})
     yield "extra first step", d
     d, job, steps = fresh()
-    steps.insert(1, {"name": "extra", "run": "echo between the guard and the validator"})
-    yield "extra step between the guard and the validator", d
-    d, job, steps = fresh()
-    steps.insert(2, {"name": "extra", "run": "echo between the validator and harden-runner"})
+    steps.insert(1, {"name": "extra", "run": "echo between the validator and harden-runner"})
     yield "extra step between the validator and harden-runner", d
     d, job, steps = fresh()
-    steps[:] = [steps[1], steps[2], steps[0]] + steps[3:]
-    yield "guard moved back to third", d
+    steps.insert(2, {"name": "extra", "run": "echo between harden-runner and the guard"})
+    yield "extra step between harden-runner and the guard", d
+    d, job, steps = fresh()
+    steps[:] = [steps[2], steps[0], steps[1]] + steps[3:]
+    yield "guard moved to first", d
     d, job, steps = fresh()
     steps[:] = [steps[0], steps[2], steps[1]] + steps[3:]
+    yield "guard before harden-runner", d
+    d, job, steps = fresh()
+    steps[:] = [steps[1], steps[0]] + steps[2:]
     yield "harden-runner before the validator", d
     # the validator's environment is exactly the expected mapping: one variable or all of them missing is caught
     d, job, steps = fresh()
-    env = steps[1]["env"]
+    env = steps[0]["env"]
     del env[next(iter(env))]
     yield "validator env variable deleted", d
     d, job, steps = fresh()
-    steps[1]["env"] = {}
+    steps[0]["env"] = {}
     yield "validator env emptied", d
     d, job, steps = fresh()
-    del steps[1]["env"]
+    del steps[0]["env"]
     yield "validator env removed", d
     # harden-runner keeps disable-sudo: true (the one documented exception has no such key to remove)
     d, job, steps = fresh()
-    if "disable-sudo" in steps[2]["with"]:
-        del steps[2]["with"]["disable-sudo"]
+    if "disable-sudo" in steps[1]["with"]:
+        del steps[1]["with"]["disable-sudo"]
         yield "harden-runner disable-sudo removed", d
     d, job, steps = fresh()
-    if "disable-sudo" in steps[2]["with"]:
-        steps[2]["with"]["disable-sudo"] = False
+    if "disable-sudo" in steps[1]["with"]:
+        steps[1]["with"]["disable-sudo"] = False
         yield "harden-runner disable-sudo false", d
     # scheduling: the job may not be skipped or emptied
     d, job, steps = fresh()
@@ -662,7 +662,7 @@ def test_a_synchronized_backdoor_in_the_action_and_every_copy_is_caught(name):
     for victim in doc["jobs"]:
         mutated = copy.deepcopy(doc)
         for job in mutated["jobs"].values():
-            job["steps"][1]["run"] = bad_action
+            job["steps"][0]["run"] = bad_action
         problems = guard_problems(mutated, name, action_script=bad_action)
         assert any("pinned SHA-256" in x and "validator" in x for x in problems), victim
         mutated = copy.deepcopy(doc)

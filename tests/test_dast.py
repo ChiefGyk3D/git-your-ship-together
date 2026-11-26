@@ -140,8 +140,8 @@ def test_the_upload_job_holds_the_one_write_and_runs_none_of_the_callers_code():
         [],
         ["Validate the egress policy inputs"],
         [guard_name],
-        [guard_name, "Validate the egress policy inputs"],
-    ), "the upload job runs no shell but the self-hosted guard and the policy check, in that order"
+        ["Validate the egress policy inputs", guard_name],
+    ), "the upload job runs no shell but the policy check and the self-hosted guard"
     for s in shells:
         if s["name"] == guard_name:
             others = [
