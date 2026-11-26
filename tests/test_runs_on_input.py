@@ -20,7 +20,13 @@ import yaml
 REPO = Path(__file__).resolve().parent.parent
 WORKFLOWS = REPO / ".github" / "workflows"
 # workflow file -> the label every job used before the input existed
-DEFAULTS = {"security.yml": "ubuntu-latest", "dast.yml": "ubuntu-24.04", "tofu-ci.yml": "ubuntu-latest"}
+DEFAULTS = {
+    "security.yml": "ubuntu-latest",
+    "dast.yml": "ubuntu-24.04",
+    "tofu-ci.yml": "ubuntu-latest",
+    "bash-ci.yml": "ubuntu-latest",
+}
+MATRIX_JOBS = {("bash-ci.yml", "test"), ("bash-ci.yml", "distro")}
 EXPECTED = "${{ fromJSON(inputs.runs-on) }}"
 
 
@@ -44,7 +50,16 @@ def test_the_input_default_parses_to_todays_label(name, label):
 @pytest.mark.parametrize("name", sorted(DEFAULTS))
 def test_every_job_uses_the_input(name):
     for job_name, job in load(name)["jobs"].items():
-        assert job["runs-on"] == EXPECTED, f"{name}:{job_name}"
+        if (name, job_name) not in MATRIX_JOBS:
+            assert job["runs-on"] == EXPECTED, f"{name}:{job_name}"
+
+
+def test_bash_ci_matrix_jobs_keep_the_existing_runner_input():
+    jobs = load("bash-ci.yml")["jobs"]
+    assert jobs["test"]["runs-on"] == "${{ matrix.runner }}"
+    assert jobs["distro"]["runs-on"] == "${{ matrix.runner }}"
+    assert jobs["test"]["strategy"]["matrix"]["runner"] == "${{ fromJSON(inputs.runners) }}"
+    assert jobs["distro"]["strategy"]["matrix"]["runner"] == "${{ fromJSON(inputs.distro-runners) }}"
 
 
 @pytest.mark.parametrize("name", sorted(DEFAULTS))
@@ -70,6 +85,36 @@ CHECK_ACTION = REPO / ".github" / "actions" / "egress-policy-check" / "action.ym
 # Everything that can decide whether a job runs, and the environment it starts with, as the jobs have it today:
 # an allowlist, so a new `if`, `needs`, `strategy` or env key is a change this test makes the author look at.
 JOB_SCHEDULING = {
+    ("bash-ci.yml", "shellcheck"): {},
+    ("bash-ci.yml", "shfmt"): {"if": "inputs.shfmt"},
+    ("bash-ci.yml", "test"): {
+        "if": "inputs.test-command != ''",
+        "strategy": {"fail-fast": False, "matrix": {"runner": "${{ fromJSON(inputs.runners) }}"}},
+    },
+    ("bash-ci.yml", "distro"): {
+        "if": "inputs.distros != '[]' && inputs.test-command != ''",
+        "strategy": {
+            "fail-fast": False,
+            "matrix": {
+                "image": "${{ fromJSON(inputs.distros) }}",
+                "runner": "${{ fromJSON(inputs.distro-runners) }}",
+            },
+        },
+    },
+    ("bash-ci.yml", "config-lint"): {"if": "inputs.config-lint-command != ''"},
+    ("bash-ci.yml", "workflow-lint"): {"if": "inputs.workflow-lint"},
+    ("bash-ci.yml", "fragment-check"): {
+        "if": "github.event_name == 'pull_request' && inputs.fragment-check-command != ''"
+    },
+    ("bash-ci.yml", "commit-claims"): {
+        "if": "github.event_name == 'pull_request' && inputs.commit-claims-command != ''"
+    },
+    ("bash-ci.yml", "ci-green"): {
+        "if": "always()",
+        "needs": [
+            "shellcheck", "shfmt", "test", "distro", "config-lint", "workflow-lint", "fragment-check", "commit-claims"
+        ],
+    },
     ("dast.yml", "scan"): {
         "env": {
             "ZAP_IMAGE": "ghcr.io/zaproxy/zaproxy:2.17.0@"
