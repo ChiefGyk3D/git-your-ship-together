@@ -678,3 +678,36 @@ def test_a_bash4_only_construct_in_the_guard_is_flagged(token):
     assert bash4_constructs(script) == []
     assert bash4_constructs(script + "\n" + token + "\n") == [token]
     assert bash4_constructs(script.replace('lower "$RUNNER_ENV"', 'x=${RUNNER_ENV,,}', 1)) == [",,"]
+
+
+# ---- duplicate mapping keys: PyYAML keeps the last one silently ----
+class StrictLoader(yaml.SafeLoader):
+    pass
+
+
+def _no_duplicate_keys(loader, node, deep=False):
+    seen = set()
+    for key_node, _ in node.value:
+        key = loader.construct_object(key_node, deep=True)
+        if key in seen:
+            raise yaml.constructor.ConstructorError(None, None, f"duplicate key {key!r}", key_node.start_mark)
+        seen.add(key)
+    return yaml.SafeLoader.construct_mapping(loader, node, deep)
+
+
+StrictLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _no_duplicate_keys)
+
+
+@pytest.mark.parametrize("name", sorted(DEFAULTS))
+def test_no_workflow_has_a_duplicate_mapping_key(name):
+    yaml.load((WORKFLOWS / name).read_text(), Loader=StrictLoader)
+
+
+@pytest.mark.parametrize("name", sorted(DEFAULTS))
+def test_a_duplicated_key_is_flagged(name):
+    text = (WORKFLOWS / name).read_text()
+    marker = "          disable-sudo: true\n"
+    assert marker in text
+    mutated = text.replace(marker, marker + marker, 1)
+    with pytest.raises(yaml.constructor.ConstructorError, match="duplicate key"):
+        yaml.load(mutated, Loader=StrictLoader)
