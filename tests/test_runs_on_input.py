@@ -315,7 +315,7 @@ WORKFLOW_KEYS = {"name", True, "permissions", "jobs"}  # `on` parses to True
 # request are stopped only by CODEOWNERS review of this file and of the workflows. Change a constant only deliberately,
 # when the validator or the guard legitimately changes, after reading the diff of the script itself.
 VALIDATOR_SHA256 = "3d1b25b484795c2d26e5e997ccc1f102e1273b68f13e7fad8590490ce0453c72"  # review tripwire, not a pin
-GUARD_SHA256 = "6c68af57a121dab2f3b9fda0f7baebb7407b1e429e26cd6bd255edda4654260c"  # review tripwire, not a pin
+GUARD_SHA256 = "6d1587f9bda84a487bec47ee347a97499dde635309e0ee0eaab823c5ccacc9bb"  # review tripwire, not a pin
 PIN_HINT = "update the SHA-256 constant in tests/test_runs_on_input.py deliberately if this script legitimately changed"
 
 
@@ -647,3 +647,34 @@ def test_a_synchronized_backdoor_in_the_action_and_every_copy_is_caught(name):
 def test_the_pins_match_the_files_today():
     assert sha(check_script()) == VALIDATOR_SHA256, PIN_HINT
     assert sha(guard_script(load("security.yml"))) == GUARD_SHA256, PIN_HINT
+
+
+# ---- Bash 3.2 compatibility of the inlined scripts (GitHub macOS runners run `shell: bash` as Bash 3.2) ----
+BASH4_ONLY = (",,", "^^", "declare -A", "mapfile", "readarray", "[[ -v", "${!", "&>>", "|&", "coproc")
+
+
+def bash4_constructs(script: str) -> list[str]:
+    return [token for token in BASH4_ONLY if token in script]
+
+
+def every_guard_and_validator_script():
+    for name in DEFAULTS:
+        for job_name, job in load(name)["jobs"].items():
+            for step in job["steps"]:
+                if step.get("name") in (GUARD, VALIDATOR):
+                    yield f"{name}:{job_name}:{step['name']}", step["run"]
+    yield "action:validator", check_script()
+
+
+def test_guard_and_validator_scripts_use_no_bash4_only_construct():
+    scripts = list(every_guard_and_validator_script())
+    assert len(scripts) >= 90
+    assert [(label, bash4_constructs(s)) for label, s in scripts if bash4_constructs(s)] == []
+
+
+@pytest.mark.parametrize("token", BASH4_ONLY)
+def test_a_bash4_only_construct_in_the_guard_is_flagged(token):
+    script = guard_script(load("security.yml"))
+    assert bash4_constructs(script) == []
+    assert bash4_constructs(script + "\n" + token + "\n") == [token]
+    assert bash4_constructs(script.replace('lower "$RUNNER_ENV"', 'x=${RUNNER_ENV,,}', 1)) == [",,"]

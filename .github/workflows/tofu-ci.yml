@@ -220,12 +220,22 @@ jobs:
           ALLOW_SELF_HOSTED: ${{ inputs.allow-self-hosted }}
         run: |
           set -u
-          [ "${RUNNER_ENV,,}" = github-hosted ] && exit 0
+          # Bash 3.2 compatible (macOS runners): lowercase through tr, keeping a trailing newline with a sentinel.
+          lower() {
+            LOWER=$(printf '%sx' "$1" | tr '[:upper:]' '[:lower:]')
+            LOWER=${LOWER%x}
+          }
+          lower "$RUNNER_ENV"
+          [ "$LOWER" = github-hosted ] && exit 0
           # Allowlist: only events whose code the repository's own writers control.
-          case "${EVENT_NAME,,}" in
+          lower "$EVENT_NAME"
+          case "$LOWER" in
             push | schedule | workflow_dispatch | release) ;;
             pull_request)
-              if [ -z "$HEAD_REPO" ] || [ -z "$THIS_REPO" ] || [ "${HEAD_REPO,,}" != "${THIS_REPO,,}" ]; then
+              lower "$HEAD_REPO"
+              head_repo=$LOWER
+              lower "$THIS_REPO"
+              if [ -z "$HEAD_REPO" ] || [ -z "$THIS_REPO" ] || [ "$head_repo" != "$LOWER" ]; then
                 echo "::error title=self-hosted runner::a self-hosted runner never runs a pull request from a fork or from a repository it cannot name"
                 exit 1
               fi
@@ -235,7 +245,8 @@ jobs:
               exit 1
               ;;
           esac
-          if [ "${ALLOW_SELF_HOSTED,,}" != true ]; then
+          lower "$ALLOW_SELF_HOSTED"
+          if [ "$LOWER" != true ]; then
             echo "::error title=self-hosted runner::a self-hosted runner needs allow-self-hosted: true, which attests that it is ephemeral, one job per VM, and isolated from secrets and the network"
             exit 1
           fi
@@ -415,12 +426,22 @@ jobs:
           ALLOW_SELF_HOSTED: ${{ inputs.allow-self-hosted }}
         run: |
           set -u
-          [ "${RUNNER_ENV,,}" = github-hosted ] && exit 0
+          # Bash 3.2 compatible (macOS runners): lowercase through tr, keeping a trailing newline with a sentinel.
+          lower() {
+            LOWER=$(printf '%sx' "$1" | tr '[:upper:]' '[:lower:]')
+            LOWER=${LOWER%x}
+          }
+          lower "$RUNNER_ENV"
+          [ "$LOWER" = github-hosted ] && exit 0
           # Allowlist: only events whose code the repository's own writers control.
-          case "${EVENT_NAME,,}" in
+          lower "$EVENT_NAME"
+          case "$LOWER" in
             push | schedule | workflow_dispatch | release) ;;
             pull_request)
-              if [ -z "$HEAD_REPO" ] || [ -z "$THIS_REPO" ] || [ "${HEAD_REPO,,}" != "${THIS_REPO,,}" ]; then
+              lower "$HEAD_REPO"
+              head_repo=$LOWER
+              lower "$THIS_REPO"
+              if [ -z "$HEAD_REPO" ] || [ -z "$THIS_REPO" ] || [ "$head_repo" != "$LOWER" ]; then
                 echo "::error title=self-hosted runner::a self-hosted runner never runs a pull request from a fork or from a repository it cannot name"
                 exit 1
               fi
@@ -430,7 +451,8 @@ jobs:
               exit 1
               ;;
           esac
-          if [ "${ALLOW_SELF_HOSTED,,}" != true ]; then
+          lower "$ALLOW_SELF_HOSTED"
+          if [ "$LOWER" != true ]; then
             echo "::error title=self-hosted runner::a self-hosted runner needs allow-self-hosted: true, which attests that it is ephemeral, one job per VM, and isolated from secrets and the network"
             exit 1
           fi
@@ -618,12 +640,22 @@ jobs:
           ALLOW_SELF_HOSTED: ${{ inputs.allow-self-hosted }}
         run: |
           set -u
-          [ "${RUNNER_ENV,,}" = github-hosted ] && exit 0
+          # Bash 3.2 compatible (macOS runners): lowercase through tr, keeping a trailing newline with a sentinel.
+          lower() {
+            LOWER=$(printf '%sx' "$1" | tr '[:upper:]' '[:lower:]')
+            LOWER=${LOWER%x}
+          }
+          lower "$RUNNER_ENV"
+          [ "$LOWER" = github-hosted ] && exit 0
           # Allowlist: only events whose code the repository's own writers control.
-          case "${EVENT_NAME,,}" in
+          lower "$EVENT_NAME"
+          case "$LOWER" in
             push | schedule | workflow_dispatch | release) ;;
             pull_request)
-              if [ -z "$HEAD_REPO" ] || [ -z "$THIS_REPO" ] || [ "${HEAD_REPO,,}" != "${THIS_REPO,,}" ]; then
+              lower "$HEAD_REPO"
+              head_repo=$LOWER
+              lower "$THIS_REPO"
+              if [ -z "$HEAD_REPO" ] || [ -z "$THIS_REPO" ] || [ "$head_repo" != "$LOWER" ]; then
                 echo "::error title=self-hosted runner::a self-hosted runner never runs a pull request from a fork or from a repository it cannot name"
                 exit 1
               fi
@@ -633,7 +665,8 @@ jobs:
               exit 1
               ;;
           esac
-          if [ "${ALLOW_SELF_HOSTED,,}" != true ]; then
+          lower "$ALLOW_SELF_HOSTED"
+          if [ "$LOWER" != true ]; then
             echo "::error title=self-hosted runner::a self-hosted runner needs allow-self-hosted: true, which attests that it is ephemeral, one job per VM, and isolated from secrets and the network"
             exit 1
           fi
@@ -733,12 +766,22 @@ jobs:
           ALLOW_SELF_HOSTED: ${{ inputs.allow-self-hosted }}
         run: |
           set -u
-          [ "${RUNNER_ENV,,}" = github-hosted ] && exit 0
+          # Bash 3.2 compatible (macOS runners): lowercase through tr, keeping a trailing newline with a sentinel.
+          lower() {
+            LOWER=$(printf '%sx' "$1" | tr '[:upper:]' '[:lower:]')
+            LOWER=${LOWER%x}
+          }
+          lower "$RUNNER_ENV"
+          [ "$LOWER" = github-hosted ] && exit 0
           # Allowlist: only events whose code the repository's own writers control.
-          case "${EVENT_NAME,,}" in
+          lower "$EVENT_NAME"
+          case "$LOWER" in
             push | schedule | workflow_dispatch | release) ;;
             pull_request)
-              if [ -z "$HEAD_REPO" ] || [ -z "$THIS_REPO" ] || [ "${HEAD_REPO,,}" != "${THIS_REPO,,}" ]; then
+              lower "$HEAD_REPO"
+              head_repo=$LOWER
+              lower "$THIS_REPO"
+              if [ -z "$HEAD_REPO" ] || [ -z "$THIS_REPO" ] || [ "$head_repo" != "$LOWER" ]; then
                 echo "::error title=self-hosted runner::a self-hosted runner never runs a pull request from a fork or from a repository it cannot name"
                 exit 1
               fi
@@ -748,7 +791,8 @@ jobs:
               exit 1
               ;;
           esac
-          if [ "${ALLOW_SELF_HOSTED,,}" != true ]; then
+          lower "$ALLOW_SELF_HOSTED"
+          if [ "$LOWER" != true ]; then
             echo "::error title=self-hosted runner::a self-hosted runner needs allow-self-hosted: true, which attests that it is ephemeral, one job per VM, and isolated from secrets and the network"
             exit 1
           fi
@@ -929,12 +973,22 @@ jobs:
           ALLOW_SELF_HOSTED: ${{ inputs.allow-self-hosted }}
         run: |
           set -u
-          [ "${RUNNER_ENV,,}" = github-hosted ] && exit 0
+          # Bash 3.2 compatible (macOS runners): lowercase through tr, keeping a trailing newline with a sentinel.
+          lower() {
+            LOWER=$(printf '%sx' "$1" | tr '[:upper:]' '[:lower:]')
+            LOWER=${LOWER%x}
+          }
+          lower "$RUNNER_ENV"
+          [ "$LOWER" = github-hosted ] && exit 0
           # Allowlist: only events whose code the repository's own writers control.
-          case "${EVENT_NAME,,}" in
+          lower "$EVENT_NAME"
+          case "$LOWER" in
             push | schedule | workflow_dispatch | release) ;;
             pull_request)
-              if [ -z "$HEAD_REPO" ] || [ -z "$THIS_REPO" ] || [ "${HEAD_REPO,,}" != "${THIS_REPO,,}" ]; then
+              lower "$HEAD_REPO"
+              head_repo=$LOWER
+              lower "$THIS_REPO"
+              if [ -z "$HEAD_REPO" ] || [ -z "$THIS_REPO" ] || [ "$head_repo" != "$LOWER" ]; then
                 echo "::error title=self-hosted runner::a self-hosted runner never runs a pull request from a fork or from a repository it cannot name"
                 exit 1
               fi
@@ -944,7 +998,8 @@ jobs:
               exit 1
               ;;
           esac
-          if [ "${ALLOW_SELF_HOSTED,,}" != true ]; then
+          lower "$ALLOW_SELF_HOSTED"
+          if [ "$LOWER" != true ]; then
             echo "::error title=self-hosted runner::a self-hosted runner needs allow-self-hosted: true, which attests that it is ephemeral, one job per VM, and isolated from secrets and the network"
             exit 1
           fi
@@ -1116,12 +1171,22 @@ jobs:
           ALLOW_SELF_HOSTED: ${{ inputs.allow-self-hosted }}
         run: |
           set -u
-          [ "${RUNNER_ENV,,}" = github-hosted ] && exit 0
+          # Bash 3.2 compatible (macOS runners): lowercase through tr, keeping a trailing newline with a sentinel.
+          lower() {
+            LOWER=$(printf '%sx' "$1" | tr '[:upper:]' '[:lower:]')
+            LOWER=${LOWER%x}
+          }
+          lower "$RUNNER_ENV"
+          [ "$LOWER" = github-hosted ] && exit 0
           # Allowlist: only events whose code the repository's own writers control.
-          case "${EVENT_NAME,,}" in
+          lower "$EVENT_NAME"
+          case "$LOWER" in
             push | schedule | workflow_dispatch | release) ;;
             pull_request)
-              if [ -z "$HEAD_REPO" ] || [ -z "$THIS_REPO" ] || [ "${HEAD_REPO,,}" != "${THIS_REPO,,}" ]; then
+              lower "$HEAD_REPO"
+              head_repo=$LOWER
+              lower "$THIS_REPO"
+              if [ -z "$HEAD_REPO" ] || [ -z "$THIS_REPO" ] || [ "$head_repo" != "$LOWER" ]; then
                 echo "::error title=self-hosted runner::a self-hosted runner never runs a pull request from a fork or from a repository it cannot name"
                 exit 1
               fi
@@ -1131,7 +1196,8 @@ jobs:
               exit 1
               ;;
           esac
-          if [ "${ALLOW_SELF_HOSTED,,}" != true ]; then
+          lower "$ALLOW_SELF_HOSTED"
+          if [ "$LOWER" != true ]; then
             echo "::error title=self-hosted runner::a self-hosted runner needs allow-self-hosted: true, which attests that it is ephemeral, one job per VM, and isolated from secrets and the network"
             exit 1
           fi
@@ -1205,12 +1271,22 @@ jobs:
           ALLOW_SELF_HOSTED: ${{ inputs.allow-self-hosted }}
         run: |
           set -u
-          [ "${RUNNER_ENV,,}" = github-hosted ] && exit 0
+          # Bash 3.2 compatible (macOS runners): lowercase through tr, keeping a trailing newline with a sentinel.
+          lower() {
+            LOWER=$(printf '%sx' "$1" | tr '[:upper:]' '[:lower:]')
+            LOWER=${LOWER%x}
+          }
+          lower "$RUNNER_ENV"
+          [ "$LOWER" = github-hosted ] && exit 0
           # Allowlist: only events whose code the repository's own writers control.
-          case "${EVENT_NAME,,}" in
+          lower "$EVENT_NAME"
+          case "$LOWER" in
             push | schedule | workflow_dispatch | release) ;;
             pull_request)
-              if [ -z "$HEAD_REPO" ] || [ -z "$THIS_REPO" ] || [ "${HEAD_REPO,,}" != "${THIS_REPO,,}" ]; then
+              lower "$HEAD_REPO"
+              head_repo=$LOWER
+              lower "$THIS_REPO"
+              if [ -z "$HEAD_REPO" ] || [ -z "$THIS_REPO" ] || [ "$head_repo" != "$LOWER" ]; then
                 echo "::error title=self-hosted runner::a self-hosted runner never runs a pull request from a fork or from a repository it cannot name"
                 exit 1
               fi
@@ -1220,7 +1296,8 @@ jobs:
               exit 1
               ;;
           esac
-          if [ "${ALLOW_SELF_HOSTED,,}" != true ]; then
+          lower "$ALLOW_SELF_HOSTED"
+          if [ "$LOWER" != true ]; then
             echo "::error title=self-hosted runner::a self-hosted runner needs allow-self-hosted: true, which attests that it is ephemeral, one job per VM, and isolated from secrets and the network"
             exit 1
           fi
@@ -1400,12 +1477,22 @@ jobs:
           ALLOW_SELF_HOSTED: ${{ inputs.allow-self-hosted }}
         run: |
           set -u
-          [ "${RUNNER_ENV,,}" = github-hosted ] && exit 0
+          # Bash 3.2 compatible (macOS runners): lowercase through tr, keeping a trailing newline with a sentinel.
+          lower() {
+            LOWER=$(printf '%sx' "$1" | tr '[:upper:]' '[:lower:]')
+            LOWER=${LOWER%x}
+          }
+          lower "$RUNNER_ENV"
+          [ "$LOWER" = github-hosted ] && exit 0
           # Allowlist: only events whose code the repository's own writers control.
-          case "${EVENT_NAME,,}" in
+          lower "$EVENT_NAME"
+          case "$LOWER" in
             push | schedule | workflow_dispatch | release) ;;
             pull_request)
-              if [ -z "$HEAD_REPO" ] || [ -z "$THIS_REPO" ] || [ "${HEAD_REPO,,}" != "${THIS_REPO,,}" ]; then
+              lower "$HEAD_REPO"
+              head_repo=$LOWER
+              lower "$THIS_REPO"
+              if [ -z "$HEAD_REPO" ] || [ -z "$THIS_REPO" ] || [ "$head_repo" != "$LOWER" ]; then
                 echo "::error title=self-hosted runner::a self-hosted runner never runs a pull request from a fork or from a repository it cannot name"
                 exit 1
               fi
@@ -1415,7 +1502,8 @@ jobs:
               exit 1
               ;;
           esac
-          if [ "${ALLOW_SELF_HOSTED,,}" != true ]; then
+          lower "$ALLOW_SELF_HOSTED"
+          if [ "$LOWER" != true ]; then
             echo "::error title=self-hosted runner::a self-hosted runner needs allow-self-hosted: true, which attests that it is ephemeral, one job per VM, and isolated from secrets and the network"
             exit 1
           fi
@@ -1727,12 +1815,22 @@ jobs:
           ALLOW_SELF_HOSTED: ${{ inputs.allow-self-hosted }}
         run: |
           set -u
-          [ "${RUNNER_ENV,,}" = github-hosted ] && exit 0
+          # Bash 3.2 compatible (macOS runners): lowercase through tr, keeping a trailing newline with a sentinel.
+          lower() {
+            LOWER=$(printf '%sx' "$1" | tr '[:upper:]' '[:lower:]')
+            LOWER=${LOWER%x}
+          }
+          lower "$RUNNER_ENV"
+          [ "$LOWER" = github-hosted ] && exit 0
           # Allowlist: only events whose code the repository's own writers control.
-          case "${EVENT_NAME,,}" in
+          lower "$EVENT_NAME"
+          case "$LOWER" in
             push | schedule | workflow_dispatch | release) ;;
             pull_request)
-              if [ -z "$HEAD_REPO" ] || [ -z "$THIS_REPO" ] || [ "${HEAD_REPO,,}" != "${THIS_REPO,,}" ]; then
+              lower "$HEAD_REPO"
+              head_repo=$LOWER
+              lower "$THIS_REPO"
+              if [ -z "$HEAD_REPO" ] || [ -z "$THIS_REPO" ] || [ "$head_repo" != "$LOWER" ]; then
                 echo "::error title=self-hosted runner::a self-hosted runner never runs a pull request from a fork or from a repository it cannot name"
                 exit 1
               fi
@@ -1742,7 +1840,8 @@ jobs:
               exit 1
               ;;
           esac
-          if [ "${ALLOW_SELF_HOSTED,,}" != true ]; then
+          lower "$ALLOW_SELF_HOSTED"
+          if [ "$LOWER" != true ]; then
             echo "::error title=self-hosted runner::a self-hosted runner needs allow-self-hosted: true, which attests that it is ephemeral, one job per VM, and isolated from secrets and the network"
             exit 1
           fi
@@ -1818,12 +1917,22 @@ jobs:
           ALLOW_SELF_HOSTED: ${{ inputs.allow-self-hosted }}
         run: |
           set -u
-          [ "${RUNNER_ENV,,}" = github-hosted ] && exit 0
+          # Bash 3.2 compatible (macOS runners): lowercase through tr, keeping a trailing newline with a sentinel.
+          lower() {
+            LOWER=$(printf '%sx' "$1" | tr '[:upper:]' '[:lower:]')
+            LOWER=${LOWER%x}
+          }
+          lower "$RUNNER_ENV"
+          [ "$LOWER" = github-hosted ] && exit 0
           # Allowlist: only events whose code the repository's own writers control.
-          case "${EVENT_NAME,,}" in
+          lower "$EVENT_NAME"
+          case "$LOWER" in
             push | schedule | workflow_dispatch | release) ;;
             pull_request)
-              if [ -z "$HEAD_REPO" ] || [ -z "$THIS_REPO" ] || [ "${HEAD_REPO,,}" != "${THIS_REPO,,}" ]; then
+              lower "$HEAD_REPO"
+              head_repo=$LOWER
+              lower "$THIS_REPO"
+              if [ -z "$HEAD_REPO" ] || [ -z "$THIS_REPO" ] || [ "$head_repo" != "$LOWER" ]; then
                 echo "::error title=self-hosted runner::a self-hosted runner never runs a pull request from a fork or from a repository it cannot name"
                 exit 1
               fi
@@ -1833,7 +1942,8 @@ jobs:
               exit 1
               ;;
           esac
-          if [ "${ALLOW_SELF_HOSTED,,}" != true ]; then
+          lower "$ALLOW_SELF_HOSTED"
+          if [ "$LOWER" != true ]; then
             echo "::error title=self-hosted runner::a self-hosted runner needs allow-self-hosted: true, which attests that it is ephemeral, one job per VM, and isolated from secrets and the network"
             exit 1
           fi
