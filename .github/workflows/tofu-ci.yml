@@ -43,8 +43,8 @@
 # docs/security/exceptions/EX-0001-harden-runner-block-westus2.md, so an array,
 # an object or a self-hosted runner always gets the `block` value.
 #
-# Trust domain: a job on a self-hosted runner fails in its step right after
-# harden-runner unless `allow-self-hosted` is true, the caller's attestation
+# Trust domain: a job on a self-hosted runner fails in its first step, the guard, before
+# harden-runner runs, unless `allow-self-hosted` is true, the caller's attestation
 # that the runner is ephemeral, one job per VM, and isolated from secrets and the
 # network. Even then a self-hosted runner takes only push,
 # schedule, workflow_dispatch, release and same-repository pull_request events
@@ -209,37 +209,6 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: Validate the egress policy inputs
-        timeout-minutes: 1
-        shell: bash
-        working-directory: ${{ github.workspace }}
-        env:
-          POLICY_EGRESS_POLICY: ${{ inputs.egress-policy }}
-          POLICY_EGRESS_POLICY_SECRETLESS: ${{ inputs.egress-policy-secretless }}
-        run: |
-          set -u
-          bad=0
-          check() {
-            if [ "$2" = set ] && [ "$3" != audit ] && [ "$3" != block ]; then
-              echo "::error title=egress policy::the $1 input must be exactly 'audit' or 'block' (its value is ${#3} characters long)"
-              bad=1
-            fi
-          }
-          check egress-policy "${POLICY_EGRESS_POLICY+set}" "${POLICY_EGRESS_POLICY-}"
-          check egress-policy-secretless "${POLICY_EGRESS_POLICY_SECRETLESS+set}" "${POLICY_EGRESS_POLICY_SECRETLESS-}"
-          check distro-egress-policy "${POLICY_DISTRO_EGRESS_POLICY+set}" "${POLICY_DISTRO_EGRESS_POLICY-}"
-          check semgrep-egress-policy "${POLICY_SEMGREP_EGRESS_POLICY+set}" "${POLICY_SEMGREP_EGRESS_POLICY-}"
-          exit "$bad"
-
-      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
-        with:
-          egress-policy: ${{ (inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted' && contains(fromJSON('["ubuntu-latest","ubuntu-22.04","ubuntu-24.04","ubuntu-26.04","ubuntu-22.04-arm","ubuntu-24.04-arm","ubuntu-26.04-arm","ubuntu-slim","windows-latest","windows-2022","windows-2025","windows-2025-vs2026","windows-11-arm","windows-11-vs2026-arm","macos-latest","macos-14","macos-15","macos-15-intel","macos-26","macos-26-intel"]'), fromJSON(inputs.runs-on))) && 'audit' || 'block' }}
-          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
-          disable-sudo: true
-          # The agent may only stop reporting to StepSecurity in block mode.
-          disable-telemetry: ${{ ((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted' && contains(fromJSON('["ubuntu-latest","ubuntu-22.04","ubuntu-24.04","ubuntu-26.04","ubuntu-22.04-arm","ubuntu-24.04-arm","ubuntu-26.04-arm","ubuntu-slim","windows-latest","windows-2022","windows-2025","windows-2025-vs2026","windows-11-arm","windows-11-vs2026-arm","macos-latest","macos-14","macos-15","macos-15-intel","macos-26","macos-26-intel"]'), fromJSON(inputs.runs-on))) && 'audit' || 'block') == 'block' }}
-
-
       - name: Refuse an untrusted self-hosted runner
         timeout-minutes: 1
         shell: bash
@@ -270,6 +239,37 @@ jobs:
             echo "::error title=self-hosted runner::a self-hosted runner needs allow-self-hosted: true, which attests that it is ephemeral, one job per VM, and isolated from secrets and the network"
             exit 1
           fi
+
+
+      - name: Validate the egress policy inputs
+        timeout-minutes: 1
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        env:
+          POLICY_EGRESS_POLICY: ${{ inputs.egress-policy }}
+          POLICY_EGRESS_POLICY_SECRETLESS: ${{ inputs.egress-policy-secretless }}
+        run: |
+          set -u
+          bad=0
+          check() {
+            if [ "$2" = set ] && [ "$3" != audit ] && [ "$3" != block ]; then
+              echo "::error title=egress policy::the $1 input must be exactly 'audit' or 'block' (its value is ${#3} characters long)"
+              bad=1
+            fi
+          }
+          check egress-policy "${POLICY_EGRESS_POLICY+set}" "${POLICY_EGRESS_POLICY-}"
+          check egress-policy-secretless "${POLICY_EGRESS_POLICY_SECRETLESS+set}" "${POLICY_EGRESS_POLICY_SECRETLESS-}"
+          check distro-egress-policy "${POLICY_DISTRO_EGRESS_POLICY+set}" "${POLICY_DISTRO_EGRESS_POLICY-}"
+          check semgrep-egress-policy "${POLICY_SEMGREP_EGRESS_POLICY+set}" "${POLICY_SEMGREP_EGRESS_POLICY-}"
+          exit "$bad"
+
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: ${{ (inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted' && contains(fromJSON('["ubuntu-latest","ubuntu-22.04","ubuntu-24.04","ubuntu-26.04","ubuntu-22.04-arm","ubuntu-24.04-arm","ubuntu-26.04-arm","ubuntu-slim","windows-latest","windows-2022","windows-2025","windows-2025-vs2026","windows-11-arm","windows-11-vs2026-arm","macos-latest","macos-14","macos-15","macos-15-intel","macos-26","macos-26-intel"]'), fromJSON(inputs.runs-on))) && 'audit' || 'block' }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
+          disable-sudo: true
+          # The agent may only stop reporting to StepSecurity in block mode.
+          disable-telemetry: ${{ ((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted' && contains(fromJSON('["ubuntu-latest","ubuntu-22.04","ubuntu-24.04","ubuntu-26.04","ubuntu-22.04-arm","ubuntu-24.04-arm","ubuntu-26.04-arm","ubuntu-slim","windows-latest","windows-2022","windows-2025","windows-2025-vs2026","windows-11-arm","windows-11-vs2026-arm","macos-latest","macos-14","macos-15","macos-15-intel","macos-26","macos-26-intel"]'), fromJSON(inputs.runs-on))) && 'audit' || 'block') == 'block' }}
 
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -404,37 +404,6 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: Validate the egress policy inputs
-        timeout-minutes: 1
-        shell: bash
-        working-directory: ${{ github.workspace }}
-        env:
-          POLICY_EGRESS_POLICY: ${{ inputs.egress-policy }}
-          POLICY_EGRESS_POLICY_SECRETLESS: ${{ inputs.egress-policy-secretless }}
-        run: |
-          set -u
-          bad=0
-          check() {
-            if [ "$2" = set ] && [ "$3" != audit ] && [ "$3" != block ]; then
-              echo "::error title=egress policy::the $1 input must be exactly 'audit' or 'block' (its value is ${#3} characters long)"
-              bad=1
-            fi
-          }
-          check egress-policy "${POLICY_EGRESS_POLICY+set}" "${POLICY_EGRESS_POLICY-}"
-          check egress-policy-secretless "${POLICY_EGRESS_POLICY_SECRETLESS+set}" "${POLICY_EGRESS_POLICY_SECRETLESS-}"
-          check distro-egress-policy "${POLICY_DISTRO_EGRESS_POLICY+set}" "${POLICY_DISTRO_EGRESS_POLICY-}"
-          check semgrep-egress-policy "${POLICY_SEMGREP_EGRESS_POLICY+set}" "${POLICY_SEMGREP_EGRESS_POLICY-}"
-          exit "$bad"
-
-      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
-        with:
-          egress-policy: ${{ (inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted' && contains(fromJSON('["ubuntu-latest","ubuntu-22.04","ubuntu-24.04","ubuntu-26.04","ubuntu-22.04-arm","ubuntu-24.04-arm","ubuntu-26.04-arm","ubuntu-slim","windows-latest","windows-2022","windows-2025","windows-2025-vs2026","windows-11-arm","windows-11-vs2026-arm","macos-latest","macos-14","macos-15","macos-15-intel","macos-26","macos-26-intel"]'), fromJSON(inputs.runs-on))) && 'audit' || 'block' }}
-          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
-          disable-sudo: true
-          # The agent may only stop reporting to StepSecurity in block mode.
-          disable-telemetry: ${{ ((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted' && contains(fromJSON('["ubuntu-latest","ubuntu-22.04","ubuntu-24.04","ubuntu-26.04","ubuntu-22.04-arm","ubuntu-24.04-arm","ubuntu-26.04-arm","ubuntu-slim","windows-latest","windows-2022","windows-2025","windows-2025-vs2026","windows-11-arm","windows-11-vs2026-arm","macos-latest","macos-14","macos-15","macos-15-intel","macos-26","macos-26-intel"]'), fromJSON(inputs.runs-on))) && 'audit' || 'block') == 'block' }}
-
-
       - name: Refuse an untrusted self-hosted runner
         timeout-minutes: 1
         shell: bash
@@ -465,6 +434,37 @@ jobs:
             echo "::error title=self-hosted runner::a self-hosted runner needs allow-self-hosted: true, which attests that it is ephemeral, one job per VM, and isolated from secrets and the network"
             exit 1
           fi
+
+
+      - name: Validate the egress policy inputs
+        timeout-minutes: 1
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        env:
+          POLICY_EGRESS_POLICY: ${{ inputs.egress-policy }}
+          POLICY_EGRESS_POLICY_SECRETLESS: ${{ inputs.egress-policy-secretless }}
+        run: |
+          set -u
+          bad=0
+          check() {
+            if [ "$2" = set ] && [ "$3" != audit ] && [ "$3" != block ]; then
+              echo "::error title=egress policy::the $1 input must be exactly 'audit' or 'block' (its value is ${#3} characters long)"
+              bad=1
+            fi
+          }
+          check egress-policy "${POLICY_EGRESS_POLICY+set}" "${POLICY_EGRESS_POLICY-}"
+          check egress-policy-secretless "${POLICY_EGRESS_POLICY_SECRETLESS+set}" "${POLICY_EGRESS_POLICY_SECRETLESS-}"
+          check distro-egress-policy "${POLICY_DISTRO_EGRESS_POLICY+set}" "${POLICY_DISTRO_EGRESS_POLICY-}"
+          check semgrep-egress-policy "${POLICY_SEMGREP_EGRESS_POLICY+set}" "${POLICY_SEMGREP_EGRESS_POLICY-}"
+          exit "$bad"
+
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: ${{ (inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted' && contains(fromJSON('["ubuntu-latest","ubuntu-22.04","ubuntu-24.04","ubuntu-26.04","ubuntu-22.04-arm","ubuntu-24.04-arm","ubuntu-26.04-arm","ubuntu-slim","windows-latest","windows-2022","windows-2025","windows-2025-vs2026","windows-11-arm","windows-11-vs2026-arm","macos-latest","macos-14","macos-15","macos-15-intel","macos-26","macos-26-intel"]'), fromJSON(inputs.runs-on))) && 'audit' || 'block' }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
+          disable-sudo: true
+          # The agent may only stop reporting to StepSecurity in block mode.
+          disable-telemetry: ${{ ((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted' && contains(fromJSON('["ubuntu-latest","ubuntu-22.04","ubuntu-24.04","ubuntu-26.04","ubuntu-22.04-arm","ubuntu-24.04-arm","ubuntu-26.04-arm","ubuntu-slim","windows-latest","windows-2022","windows-2025","windows-2025-vs2026","windows-11-arm","windows-11-vs2026-arm","macos-latest","macos-14","macos-15","macos-15-intel","macos-26","macos-26-intel"]'), fromJSON(inputs.runs-on))) && 'audit' || 'block') == 'block' }}
 
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -607,37 +607,6 @@ jobs:
     outputs:
       legs: ${{ steps.plan.outputs.legs }}
     steps:
-      - name: Validate the egress policy inputs
-        timeout-minutes: 1
-        shell: bash
-        working-directory: ${{ github.workspace }}
-        env:
-          POLICY_EGRESS_POLICY: ${{ inputs.egress-policy }}
-          POLICY_EGRESS_POLICY_SECRETLESS: ${{ inputs.egress-policy-secretless }}
-        run: |
-          set -u
-          bad=0
-          check() {
-            if [ "$2" = set ] && [ "$3" != audit ] && [ "$3" != block ]; then
-              echo "::error title=egress policy::the $1 input must be exactly 'audit' or 'block' (its value is ${#3} characters long)"
-              bad=1
-            fi
-          }
-          check egress-policy "${POLICY_EGRESS_POLICY+set}" "${POLICY_EGRESS_POLICY-}"
-          check egress-policy-secretless "${POLICY_EGRESS_POLICY_SECRETLESS+set}" "${POLICY_EGRESS_POLICY_SECRETLESS-}"
-          check distro-egress-policy "${POLICY_DISTRO_EGRESS_POLICY+set}" "${POLICY_DISTRO_EGRESS_POLICY-}"
-          check semgrep-egress-policy "${POLICY_SEMGREP_EGRESS_POLICY+set}" "${POLICY_SEMGREP_EGRESS_POLICY-}"
-          exit "$bad"
-
-      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
-        with:
-          egress-policy: ${{ (inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted' && contains(fromJSON('["ubuntu-latest","ubuntu-22.04","ubuntu-24.04","ubuntu-26.04","ubuntu-22.04-arm","ubuntu-24.04-arm","ubuntu-26.04-arm","ubuntu-slim","windows-latest","windows-2022","windows-2025","windows-2025-vs2026","windows-11-arm","windows-11-vs2026-arm","macos-latest","macos-14","macos-15","macos-15-intel","macos-26","macos-26-intel"]'), fromJSON(inputs.runs-on))) && 'audit' || 'block' }}
-          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
-          disable-sudo: true
-          # The agent may only stop reporting to StepSecurity in block mode.
-          disable-telemetry: ${{ ((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted' && contains(fromJSON('["ubuntu-latest","ubuntu-22.04","ubuntu-24.04","ubuntu-26.04","ubuntu-22.04-arm","ubuntu-24.04-arm","ubuntu-26.04-arm","ubuntu-slim","windows-latest","windows-2022","windows-2025","windows-2025-vs2026","windows-11-arm","windows-11-vs2026-arm","macos-latest","macos-14","macos-15","macos-15-intel","macos-26","macos-26-intel"]'), fromJSON(inputs.runs-on))) && 'audit' || 'block') == 'block' }}
-
-
       - name: Refuse an untrusted self-hosted runner
         timeout-minutes: 1
         shell: bash
@@ -668,6 +637,37 @@ jobs:
             echo "::error title=self-hosted runner::a self-hosted runner needs allow-self-hosted: true, which attests that it is ephemeral, one job per VM, and isolated from secrets and the network"
             exit 1
           fi
+
+
+      - name: Validate the egress policy inputs
+        timeout-minutes: 1
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        env:
+          POLICY_EGRESS_POLICY: ${{ inputs.egress-policy }}
+          POLICY_EGRESS_POLICY_SECRETLESS: ${{ inputs.egress-policy-secretless }}
+        run: |
+          set -u
+          bad=0
+          check() {
+            if [ "$2" = set ] && [ "$3" != audit ] && [ "$3" != block ]; then
+              echo "::error title=egress policy::the $1 input must be exactly 'audit' or 'block' (its value is ${#3} characters long)"
+              bad=1
+            fi
+          }
+          check egress-policy "${POLICY_EGRESS_POLICY+set}" "${POLICY_EGRESS_POLICY-}"
+          check egress-policy-secretless "${POLICY_EGRESS_POLICY_SECRETLESS+set}" "${POLICY_EGRESS_POLICY_SECRETLESS-}"
+          check distro-egress-policy "${POLICY_DISTRO_EGRESS_POLICY+set}" "${POLICY_DISTRO_EGRESS_POLICY-}"
+          check semgrep-egress-policy "${POLICY_SEMGREP_EGRESS_POLICY+set}" "${POLICY_SEMGREP_EGRESS_POLICY-}"
+          exit "$bad"
+
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: ${{ (inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted' && contains(fromJSON('["ubuntu-latest","ubuntu-22.04","ubuntu-24.04","ubuntu-26.04","ubuntu-22.04-arm","ubuntu-24.04-arm","ubuntu-26.04-arm","ubuntu-slim","windows-latest","windows-2022","windows-2025","windows-2025-vs2026","windows-11-arm","windows-11-vs2026-arm","macos-latest","macos-14","macos-15","macos-15-intel","macos-26","macos-26-intel"]'), fromJSON(inputs.runs-on))) && 'audit' || 'block' }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
+          disable-sudo: true
+          # The agent may only stop reporting to StepSecurity in block mode.
+          disable-telemetry: ${{ ((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted' && contains(fromJSON('["ubuntu-latest","ubuntu-22.04","ubuntu-24.04","ubuntu-26.04","ubuntu-22.04-arm","ubuntu-24.04-arm","ubuntu-26.04-arm","ubuntu-slim","windows-latest","windows-2022","windows-2025","windows-2025-vs2026","windows-11-arm","windows-11-vs2026-arm","macos-latest","macos-14","macos-15","macos-15-intel","macos-26","macos-26-intel"]'), fromJSON(inputs.runs-on))) && 'audit' || 'block') == 'block' }}
 
 
       - name: List the legs
@@ -722,37 +722,6 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: Validate the egress policy inputs
-        timeout-minutes: 1
-        shell: bash
-        working-directory: ${{ github.workspace }}
-        env:
-          POLICY_EGRESS_POLICY: ${{ inputs.egress-policy }}
-          POLICY_EGRESS_POLICY_SECRETLESS: ${{ inputs.egress-policy-secretless }}
-        run: |
-          set -u
-          bad=0
-          check() {
-            if [ "$2" = set ] && [ "$3" != audit ] && [ "$3" != block ]; then
-              echo "::error title=egress policy::the $1 input must be exactly 'audit' or 'block' (its value is ${#3} characters long)"
-              bad=1
-            fi
-          }
-          check egress-policy "${POLICY_EGRESS_POLICY+set}" "${POLICY_EGRESS_POLICY-}"
-          check egress-policy-secretless "${POLICY_EGRESS_POLICY_SECRETLESS+set}" "${POLICY_EGRESS_POLICY_SECRETLESS-}"
-          check distro-egress-policy "${POLICY_DISTRO_EGRESS_POLICY+set}" "${POLICY_DISTRO_EGRESS_POLICY-}"
-          check semgrep-egress-policy "${POLICY_SEMGREP_EGRESS_POLICY+set}" "${POLICY_SEMGREP_EGRESS_POLICY-}"
-          exit "$bad"
-
-      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
-        with:
-          egress-policy: ${{ (inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted' && contains(fromJSON('["ubuntu-latest","ubuntu-22.04","ubuntu-24.04","ubuntu-26.04","ubuntu-22.04-arm","ubuntu-24.04-arm","ubuntu-26.04-arm","ubuntu-slim","windows-latest","windows-2022","windows-2025","windows-2025-vs2026","windows-11-arm","windows-11-vs2026-arm","macos-latest","macos-14","macos-15","macos-15-intel","macos-26","macos-26-intel"]'), fromJSON(inputs.runs-on))) && 'audit' || 'block' }}
-          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
-          disable-sudo: true
-          # The agent may only stop reporting to StepSecurity in block mode.
-          disable-telemetry: ${{ ((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted' && contains(fromJSON('["ubuntu-latest","ubuntu-22.04","ubuntu-24.04","ubuntu-26.04","ubuntu-22.04-arm","ubuntu-24.04-arm","ubuntu-26.04-arm","ubuntu-slim","windows-latest","windows-2022","windows-2025","windows-2025-vs2026","windows-11-arm","windows-11-vs2026-arm","macos-latest","macos-14","macos-15","macos-15-intel","macos-26","macos-26-intel"]'), fromJSON(inputs.runs-on))) && 'audit' || 'block') == 'block' }}
-
-
       - name: Refuse an untrusted self-hosted runner
         timeout-minutes: 1
         shell: bash
@@ -783,6 +752,37 @@ jobs:
             echo "::error title=self-hosted runner::a self-hosted runner needs allow-self-hosted: true, which attests that it is ephemeral, one job per VM, and isolated from secrets and the network"
             exit 1
           fi
+
+
+      - name: Validate the egress policy inputs
+        timeout-minutes: 1
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        env:
+          POLICY_EGRESS_POLICY: ${{ inputs.egress-policy }}
+          POLICY_EGRESS_POLICY_SECRETLESS: ${{ inputs.egress-policy-secretless }}
+        run: |
+          set -u
+          bad=0
+          check() {
+            if [ "$2" = set ] && [ "$3" != audit ] && [ "$3" != block ]; then
+              echo "::error title=egress policy::the $1 input must be exactly 'audit' or 'block' (its value is ${#3} characters long)"
+              bad=1
+            fi
+          }
+          check egress-policy "${POLICY_EGRESS_POLICY+set}" "${POLICY_EGRESS_POLICY-}"
+          check egress-policy-secretless "${POLICY_EGRESS_POLICY_SECRETLESS+set}" "${POLICY_EGRESS_POLICY_SECRETLESS-}"
+          check distro-egress-policy "${POLICY_DISTRO_EGRESS_POLICY+set}" "${POLICY_DISTRO_EGRESS_POLICY-}"
+          check semgrep-egress-policy "${POLICY_SEMGREP_EGRESS_POLICY+set}" "${POLICY_SEMGREP_EGRESS_POLICY-}"
+          exit "$bad"
+
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: ${{ (inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted' && contains(fromJSON('["ubuntu-latest","ubuntu-22.04","ubuntu-24.04","ubuntu-26.04","ubuntu-22.04-arm","ubuntu-24.04-arm","ubuntu-26.04-arm","ubuntu-slim","windows-latest","windows-2022","windows-2025","windows-2025-vs2026","windows-11-arm","windows-11-vs2026-arm","macos-latest","macos-14","macos-15","macos-15-intel","macos-26","macos-26-intel"]'), fromJSON(inputs.runs-on))) && 'audit' || 'block' }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
+          disable-sudo: true
+          # The agent may only stop reporting to StepSecurity in block mode.
+          disable-telemetry: ${{ ((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted' && contains(fromJSON('["ubuntu-latest","ubuntu-22.04","ubuntu-24.04","ubuntu-26.04","ubuntu-22.04-arm","ubuntu-24.04-arm","ubuntu-26.04-arm","ubuntu-slim","windows-latest","windows-2022","windows-2025","windows-2025-vs2026","windows-11-arm","windows-11-vs2026-arm","macos-latest","macos-14","macos-15","macos-15-intel","macos-26","macos-26-intel"]'), fromJSON(inputs.runs-on))) && 'audit' || 'block') == 'block' }}
 
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -918,37 +918,6 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: Validate the egress policy inputs
-        timeout-minutes: 1
-        shell: bash
-        working-directory: ${{ github.workspace }}
-        env:
-          POLICY_EGRESS_POLICY: ${{ inputs.egress-policy }}
-          POLICY_EGRESS_POLICY_SECRETLESS: ${{ inputs.egress-policy-secretless }}
-        run: |
-          set -u
-          bad=0
-          check() {
-            if [ "$2" = set ] && [ "$3" != audit ] && [ "$3" != block ]; then
-              echo "::error title=egress policy::the $1 input must be exactly 'audit' or 'block' (its value is ${#3} characters long)"
-              bad=1
-            fi
-          }
-          check egress-policy "${POLICY_EGRESS_POLICY+set}" "${POLICY_EGRESS_POLICY-}"
-          check egress-policy-secretless "${POLICY_EGRESS_POLICY_SECRETLESS+set}" "${POLICY_EGRESS_POLICY_SECRETLESS-}"
-          check distro-egress-policy "${POLICY_DISTRO_EGRESS_POLICY+set}" "${POLICY_DISTRO_EGRESS_POLICY-}"
-          check semgrep-egress-policy "${POLICY_SEMGREP_EGRESS_POLICY+set}" "${POLICY_SEMGREP_EGRESS_POLICY-}"
-          exit "$bad"
-
-      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
-        with:
-          egress-policy: ${{ (inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted' && contains(fromJSON('["ubuntu-latest","ubuntu-22.04","ubuntu-24.04","ubuntu-26.04","ubuntu-22.04-arm","ubuntu-24.04-arm","ubuntu-26.04-arm","ubuntu-slim","windows-latest","windows-2022","windows-2025","windows-2025-vs2026","windows-11-arm","windows-11-vs2026-arm","macos-latest","macos-14","macos-15","macos-15-intel","macos-26","macos-26-intel"]'), fromJSON(inputs.runs-on))) && 'audit' || 'block' }}
-          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
-          disable-sudo: true
-          # The agent may only stop reporting to StepSecurity in block mode.
-          disable-telemetry: ${{ ((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted' && contains(fromJSON('["ubuntu-latest","ubuntu-22.04","ubuntu-24.04","ubuntu-26.04","ubuntu-22.04-arm","ubuntu-24.04-arm","ubuntu-26.04-arm","ubuntu-slim","windows-latest","windows-2022","windows-2025","windows-2025-vs2026","windows-11-arm","windows-11-vs2026-arm","macos-latest","macos-14","macos-15","macos-15-intel","macos-26","macos-26-intel"]'), fromJSON(inputs.runs-on))) && 'audit' || 'block') == 'block' }}
-
-
       - name: Refuse an untrusted self-hosted runner
         timeout-minutes: 1
         shell: bash
@@ -979,6 +948,37 @@ jobs:
             echo "::error title=self-hosted runner::a self-hosted runner needs allow-self-hosted: true, which attests that it is ephemeral, one job per VM, and isolated from secrets and the network"
             exit 1
           fi
+
+
+      - name: Validate the egress policy inputs
+        timeout-minutes: 1
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        env:
+          POLICY_EGRESS_POLICY: ${{ inputs.egress-policy }}
+          POLICY_EGRESS_POLICY_SECRETLESS: ${{ inputs.egress-policy-secretless }}
+        run: |
+          set -u
+          bad=0
+          check() {
+            if [ "$2" = set ] && [ "$3" != audit ] && [ "$3" != block ]; then
+              echo "::error title=egress policy::the $1 input must be exactly 'audit' or 'block' (its value is ${#3} characters long)"
+              bad=1
+            fi
+          }
+          check egress-policy "${POLICY_EGRESS_POLICY+set}" "${POLICY_EGRESS_POLICY-}"
+          check egress-policy-secretless "${POLICY_EGRESS_POLICY_SECRETLESS+set}" "${POLICY_EGRESS_POLICY_SECRETLESS-}"
+          check distro-egress-policy "${POLICY_DISTRO_EGRESS_POLICY+set}" "${POLICY_DISTRO_EGRESS_POLICY-}"
+          check semgrep-egress-policy "${POLICY_SEMGREP_EGRESS_POLICY+set}" "${POLICY_SEMGREP_EGRESS_POLICY-}"
+          exit "$bad"
+
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: ${{ (inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted' && contains(fromJSON('["ubuntu-latest","ubuntu-22.04","ubuntu-24.04","ubuntu-26.04","ubuntu-22.04-arm","ubuntu-24.04-arm","ubuntu-26.04-arm","ubuntu-slim","windows-latest","windows-2022","windows-2025","windows-2025-vs2026","windows-11-arm","windows-11-vs2026-arm","macos-latest","macos-14","macos-15","macos-15-intel","macos-26","macos-26-intel"]'), fromJSON(inputs.runs-on))) && 'audit' || 'block' }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
+          disable-sudo: true
+          # The agent may only stop reporting to StepSecurity in block mode.
+          disable-telemetry: ${{ ((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted' && contains(fromJSON('["ubuntu-latest","ubuntu-22.04","ubuntu-24.04","ubuntu-26.04","ubuntu-22.04-arm","ubuntu-24.04-arm","ubuntu-26.04-arm","ubuntu-slim","windows-latest","windows-2022","windows-2025","windows-2025-vs2026","windows-11-arm","windows-11-vs2026-arm","macos-latest","macos-14","macos-15","macos-15-intel","macos-26","macos-26-intel"]'), fromJSON(inputs.runs-on))) && 'audit' || 'block') == 'block' }}
 
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1105,37 +1105,6 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: Validate the egress policy inputs
-        timeout-minutes: 1
-        shell: bash
-        working-directory: ${{ github.workspace }}
-        env:
-          POLICY_EGRESS_POLICY: ${{ inputs.egress-policy }}
-          POLICY_EGRESS_POLICY_SECRETLESS: ${{ inputs.egress-policy-secretless }}
-        run: |
-          set -u
-          bad=0
-          check() {
-            if [ "$2" = set ] && [ "$3" != audit ] && [ "$3" != block ]; then
-              echo "::error title=egress policy::the $1 input must be exactly 'audit' or 'block' (its value is ${#3} characters long)"
-              bad=1
-            fi
-          }
-          check egress-policy "${POLICY_EGRESS_POLICY+set}" "${POLICY_EGRESS_POLICY-}"
-          check egress-policy-secretless "${POLICY_EGRESS_POLICY_SECRETLESS+set}" "${POLICY_EGRESS_POLICY_SECRETLESS-}"
-          check distro-egress-policy "${POLICY_DISTRO_EGRESS_POLICY+set}" "${POLICY_DISTRO_EGRESS_POLICY-}"
-          check semgrep-egress-policy "${POLICY_SEMGREP_EGRESS_POLICY+set}" "${POLICY_SEMGREP_EGRESS_POLICY-}"
-          exit "$bad"
-
-      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
-        with:
-          egress-policy: ${{ (inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted' && contains(fromJSON('["ubuntu-latest","ubuntu-22.04","ubuntu-24.04","ubuntu-26.04","ubuntu-22.04-arm","ubuntu-24.04-arm","ubuntu-26.04-arm","ubuntu-slim","windows-latest","windows-2022","windows-2025","windows-2025-vs2026","windows-11-arm","windows-11-vs2026-arm","macos-latest","macos-14","macos-15","macos-15-intel","macos-26","macos-26-intel"]'), fromJSON(inputs.runs-on))) && 'audit' || 'block' }}
-          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
-          disable-sudo: true
-          # The agent may only stop reporting to StepSecurity in block mode.
-          disable-telemetry: ${{ ((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted' && contains(fromJSON('["ubuntu-latest","ubuntu-22.04","ubuntu-24.04","ubuntu-26.04","ubuntu-22.04-arm","ubuntu-24.04-arm","ubuntu-26.04-arm","ubuntu-slim","windows-latest","windows-2022","windows-2025","windows-2025-vs2026","windows-11-arm","windows-11-vs2026-arm","macos-latest","macos-14","macos-15","macos-15-intel","macos-26","macos-26-intel"]'), fromJSON(inputs.runs-on))) && 'audit' || 'block') == 'block' }}
-
-
       - name: Refuse an untrusted self-hosted runner
         timeout-minutes: 1
         shell: bash
@@ -1166,6 +1135,37 @@ jobs:
             echo "::error title=self-hosted runner::a self-hosted runner needs allow-self-hosted: true, which attests that it is ephemeral, one job per VM, and isolated from secrets and the network"
             exit 1
           fi
+
+
+      - name: Validate the egress policy inputs
+        timeout-minutes: 1
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        env:
+          POLICY_EGRESS_POLICY: ${{ inputs.egress-policy }}
+          POLICY_EGRESS_POLICY_SECRETLESS: ${{ inputs.egress-policy-secretless }}
+        run: |
+          set -u
+          bad=0
+          check() {
+            if [ "$2" = set ] && [ "$3" != audit ] && [ "$3" != block ]; then
+              echo "::error title=egress policy::the $1 input must be exactly 'audit' or 'block' (its value is ${#3} characters long)"
+              bad=1
+            fi
+          }
+          check egress-policy "${POLICY_EGRESS_POLICY+set}" "${POLICY_EGRESS_POLICY-}"
+          check egress-policy-secretless "${POLICY_EGRESS_POLICY_SECRETLESS+set}" "${POLICY_EGRESS_POLICY_SECRETLESS-}"
+          check distro-egress-policy "${POLICY_DISTRO_EGRESS_POLICY+set}" "${POLICY_DISTRO_EGRESS_POLICY-}"
+          check semgrep-egress-policy "${POLICY_SEMGREP_EGRESS_POLICY+set}" "${POLICY_SEMGREP_EGRESS_POLICY-}"
+          exit "$bad"
+
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: ${{ (inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted' && contains(fromJSON('["ubuntu-latest","ubuntu-22.04","ubuntu-24.04","ubuntu-26.04","ubuntu-22.04-arm","ubuntu-24.04-arm","ubuntu-26.04-arm","ubuntu-slim","windows-latest","windows-2022","windows-2025","windows-2025-vs2026","windows-11-arm","windows-11-vs2026-arm","macos-latest","macos-14","macos-15","macos-15-intel","macos-26","macos-26-intel"]'), fromJSON(inputs.runs-on))) && 'audit' || 'block' }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
+          disable-sudo: true
+          # The agent may only stop reporting to StepSecurity in block mode.
+          disable-telemetry: ${{ ((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted' && contains(fromJSON('["ubuntu-latest","ubuntu-22.04","ubuntu-24.04","ubuntu-26.04","ubuntu-22.04-arm","ubuntu-24.04-arm","ubuntu-26.04-arm","ubuntu-slim","windows-latest","windows-2022","windows-2025","windows-2025-vs2026","windows-11-arm","windows-11-vs2026-arm","macos-latest","macos-14","macos-15","macos-15-intel","macos-26","macos-26-intel"]'), fromJSON(inputs.runs-on))) && 'audit' || 'block') == 'block' }}
 
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1194,37 +1194,6 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: Validate the egress policy inputs
-        timeout-minutes: 1
-        shell: bash
-        working-directory: ${{ github.workspace }}
-        env:
-          POLICY_EGRESS_POLICY: ${{ inputs.egress-policy }}
-          POLICY_EGRESS_POLICY_SECRETLESS: ${{ inputs.egress-policy-secretless }}
-        run: |
-          set -u
-          bad=0
-          check() {
-            if [ "$2" = set ] && [ "$3" != audit ] && [ "$3" != block ]; then
-              echo "::error title=egress policy::the $1 input must be exactly 'audit' or 'block' (its value is ${#3} characters long)"
-              bad=1
-            fi
-          }
-          check egress-policy "${POLICY_EGRESS_POLICY+set}" "${POLICY_EGRESS_POLICY-}"
-          check egress-policy-secretless "${POLICY_EGRESS_POLICY_SECRETLESS+set}" "${POLICY_EGRESS_POLICY_SECRETLESS-}"
-          check distro-egress-policy "${POLICY_DISTRO_EGRESS_POLICY+set}" "${POLICY_DISTRO_EGRESS_POLICY-}"
-          check semgrep-egress-policy "${POLICY_SEMGREP_EGRESS_POLICY+set}" "${POLICY_SEMGREP_EGRESS_POLICY-}"
-          exit "$bad"
-
-      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
-        with:
-          egress-policy: ${{ (inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted' && contains(fromJSON('["ubuntu-latest","ubuntu-22.04","ubuntu-24.04","ubuntu-26.04","ubuntu-22.04-arm","ubuntu-24.04-arm","ubuntu-26.04-arm","ubuntu-slim","windows-latest","windows-2022","windows-2025","windows-2025-vs2026","windows-11-arm","windows-11-vs2026-arm","macos-latest","macos-14","macos-15","macos-15-intel","macos-26","macos-26-intel"]'), fromJSON(inputs.runs-on))) && 'audit' || 'block' }}
-          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
-          disable-sudo: true
-          # The agent may only stop reporting to StepSecurity in block mode.
-          disable-telemetry: ${{ ((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted' && contains(fromJSON('["ubuntu-latest","ubuntu-22.04","ubuntu-24.04","ubuntu-26.04","ubuntu-22.04-arm","ubuntu-24.04-arm","ubuntu-26.04-arm","ubuntu-slim","windows-latest","windows-2022","windows-2025","windows-2025-vs2026","windows-11-arm","windows-11-vs2026-arm","macos-latest","macos-14","macos-15","macos-15-intel","macos-26","macos-26-intel"]'), fromJSON(inputs.runs-on))) && 'audit' || 'block') == 'block' }}
-
-
       - name: Refuse an untrusted self-hosted runner
         timeout-minutes: 1
         shell: bash
@@ -1255,6 +1224,37 @@ jobs:
             echo "::error title=self-hosted runner::a self-hosted runner needs allow-self-hosted: true, which attests that it is ephemeral, one job per VM, and isolated from secrets and the network"
             exit 1
           fi
+
+
+      - name: Validate the egress policy inputs
+        timeout-minutes: 1
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        env:
+          POLICY_EGRESS_POLICY: ${{ inputs.egress-policy }}
+          POLICY_EGRESS_POLICY_SECRETLESS: ${{ inputs.egress-policy-secretless }}
+        run: |
+          set -u
+          bad=0
+          check() {
+            if [ "$2" = set ] && [ "$3" != audit ] && [ "$3" != block ]; then
+              echo "::error title=egress policy::the $1 input must be exactly 'audit' or 'block' (its value is ${#3} characters long)"
+              bad=1
+            fi
+          }
+          check egress-policy "${POLICY_EGRESS_POLICY+set}" "${POLICY_EGRESS_POLICY-}"
+          check egress-policy-secretless "${POLICY_EGRESS_POLICY_SECRETLESS+set}" "${POLICY_EGRESS_POLICY_SECRETLESS-}"
+          check distro-egress-policy "${POLICY_DISTRO_EGRESS_POLICY+set}" "${POLICY_DISTRO_EGRESS_POLICY-}"
+          check semgrep-egress-policy "${POLICY_SEMGREP_EGRESS_POLICY+set}" "${POLICY_SEMGREP_EGRESS_POLICY-}"
+          exit "$bad"
+
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: ${{ (inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted' && contains(fromJSON('["ubuntu-latest","ubuntu-22.04","ubuntu-24.04","ubuntu-26.04","ubuntu-22.04-arm","ubuntu-24.04-arm","ubuntu-26.04-arm","ubuntu-slim","windows-latest","windows-2022","windows-2025","windows-2025-vs2026","windows-11-arm","windows-11-vs2026-arm","macos-latest","macos-14","macos-15","macos-15-intel","macos-26","macos-26-intel"]'), fromJSON(inputs.runs-on))) && 'audit' || 'block' }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
+          disable-sudo: true
+          # The agent may only stop reporting to StepSecurity in block mode.
+          disable-telemetry: ${{ ((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted' && contains(fromJSON('["ubuntu-latest","ubuntu-22.04","ubuntu-24.04","ubuntu-26.04","ubuntu-22.04-arm","ubuntu-24.04-arm","ubuntu-26.04-arm","ubuntu-slim","windows-latest","windows-2022","windows-2025","windows-2025-vs2026","windows-11-arm","windows-11-vs2026-arm","macos-latest","macos-14","macos-15","macos-15-intel","macos-26","macos-26-intel"]'), fromJSON(inputs.runs-on))) && 'audit' || 'block') == 'block' }}
 
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1389,37 +1389,6 @@ jobs:
       contents: read
       id-token: write  # Doppler OIDC
     steps:
-      - name: Validate the egress policy inputs
-        timeout-minutes: 1
-        shell: bash
-        working-directory: ${{ github.workspace }}
-        env:
-          POLICY_EGRESS_POLICY: ${{ inputs.egress-policy }}
-          POLICY_EGRESS_POLICY_SECRETLESS: ${{ inputs.egress-policy-secretless }}
-        run: |
-          set -u
-          bad=0
-          check() {
-            if [ "$2" = set ] && [ "$3" != audit ] && [ "$3" != block ]; then
-              echo "::error title=egress policy::the $1 input must be exactly 'audit' or 'block' (its value is ${#3} characters long)"
-              bad=1
-            fi
-          }
-          check egress-policy "${POLICY_EGRESS_POLICY+set}" "${POLICY_EGRESS_POLICY-}"
-          check egress-policy-secretless "${POLICY_EGRESS_POLICY_SECRETLESS+set}" "${POLICY_EGRESS_POLICY_SECRETLESS-}"
-          check distro-egress-policy "${POLICY_DISTRO_EGRESS_POLICY+set}" "${POLICY_DISTRO_EGRESS_POLICY-}"
-          check semgrep-egress-policy "${POLICY_SEMGREP_EGRESS_POLICY+set}" "${POLICY_SEMGREP_EGRESS_POLICY-}"
-          exit "$bad"
-
-      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
-        with:
-          egress-policy: ${{ inputs.egress-policy == 'audit' && 'audit' || 'block' }}
-          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
-          disable-sudo: true
-          # The agent may only stop reporting to StepSecurity in block mode.
-          disable-telemetry: ${{ (inputs.egress-policy == 'audit' && 'audit' || 'block') == 'block' }}
-
-
       - name: Refuse an untrusted self-hosted runner
         timeout-minutes: 1
         shell: bash
@@ -1450,6 +1419,37 @@ jobs:
             echo "::error title=self-hosted runner::a self-hosted runner needs allow-self-hosted: true, which attests that it is ephemeral, one job per VM, and isolated from secrets and the network"
             exit 1
           fi
+
+
+      - name: Validate the egress policy inputs
+        timeout-minutes: 1
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        env:
+          POLICY_EGRESS_POLICY: ${{ inputs.egress-policy }}
+          POLICY_EGRESS_POLICY_SECRETLESS: ${{ inputs.egress-policy-secretless }}
+        run: |
+          set -u
+          bad=0
+          check() {
+            if [ "$2" = set ] && [ "$3" != audit ] && [ "$3" != block ]; then
+              echo "::error title=egress policy::the $1 input must be exactly 'audit' or 'block' (its value is ${#3} characters long)"
+              bad=1
+            fi
+          }
+          check egress-policy "${POLICY_EGRESS_POLICY+set}" "${POLICY_EGRESS_POLICY-}"
+          check egress-policy-secretless "${POLICY_EGRESS_POLICY_SECRETLESS+set}" "${POLICY_EGRESS_POLICY_SECRETLESS-}"
+          check distro-egress-policy "${POLICY_DISTRO_EGRESS_POLICY+set}" "${POLICY_DISTRO_EGRESS_POLICY-}"
+          check semgrep-egress-policy "${POLICY_SEMGREP_EGRESS_POLICY+set}" "${POLICY_SEMGREP_EGRESS_POLICY-}"
+          exit "$bad"
+
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: ${{ inputs.egress-policy == 'audit' && 'audit' || 'block' }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
+          disable-sudo: true
+          # The agent may only stop reporting to StepSecurity in block mode.
+          disable-telemetry: ${{ (inputs.egress-policy == 'audit' && 'audit' || 'block') == 'block' }}
 
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1716,37 +1716,6 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: Validate the egress policy inputs
-        timeout-minutes: 1
-        shell: bash
-        working-directory: ${{ github.workspace }}
-        env:
-          POLICY_EGRESS_POLICY: ${{ inputs.egress-policy }}
-          POLICY_EGRESS_POLICY_SECRETLESS: ${{ inputs.egress-policy-secretless }}
-        run: |
-          set -u
-          bad=0
-          check() {
-            if [ "$2" = set ] && [ "$3" != audit ] && [ "$3" != block ]; then
-              echo "::error title=egress policy::the $1 input must be exactly 'audit' or 'block' (its value is ${#3} characters long)"
-              bad=1
-            fi
-          }
-          check egress-policy "${POLICY_EGRESS_POLICY+set}" "${POLICY_EGRESS_POLICY-}"
-          check egress-policy-secretless "${POLICY_EGRESS_POLICY_SECRETLESS+set}" "${POLICY_EGRESS_POLICY_SECRETLESS-}"
-          check distro-egress-policy "${POLICY_DISTRO_EGRESS_POLICY+set}" "${POLICY_DISTRO_EGRESS_POLICY-}"
-          check semgrep-egress-policy "${POLICY_SEMGREP_EGRESS_POLICY+set}" "${POLICY_SEMGREP_EGRESS_POLICY-}"
-          exit "$bad"
-
-      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
-        with:
-          egress-policy: ${{ (inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted' && contains(fromJSON('["ubuntu-latest","ubuntu-22.04","ubuntu-24.04","ubuntu-26.04","ubuntu-22.04-arm","ubuntu-24.04-arm","ubuntu-26.04-arm","ubuntu-slim","windows-latest","windows-2022","windows-2025","windows-2025-vs2026","windows-11-arm","windows-11-vs2026-arm","macos-latest","macos-14","macos-15","macos-15-intel","macos-26","macos-26-intel"]'), fromJSON(inputs.runs-on))) && 'audit' || 'block' }}
-          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
-          disable-sudo: true
-          # The agent may only stop reporting to StepSecurity in block mode.
-          disable-telemetry: ${{ ((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted' && contains(fromJSON('["ubuntu-latest","ubuntu-22.04","ubuntu-24.04","ubuntu-26.04","ubuntu-22.04-arm","ubuntu-24.04-arm","ubuntu-26.04-arm","ubuntu-slim","windows-latest","windows-2022","windows-2025","windows-2025-vs2026","windows-11-arm","windows-11-vs2026-arm","macos-latest","macos-14","macos-15","macos-15-intel","macos-26","macos-26-intel"]'), fromJSON(inputs.runs-on))) && 'audit' || 'block') == 'block' }}
-
-
       - name: Refuse an untrusted self-hosted runner
         timeout-minutes: 1
         shell: bash
@@ -1777,6 +1746,37 @@ jobs:
             echo "::error title=self-hosted runner::a self-hosted runner needs allow-self-hosted: true, which attests that it is ephemeral, one job per VM, and isolated from secrets and the network"
             exit 1
           fi
+
+
+      - name: Validate the egress policy inputs
+        timeout-minutes: 1
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        env:
+          POLICY_EGRESS_POLICY: ${{ inputs.egress-policy }}
+          POLICY_EGRESS_POLICY_SECRETLESS: ${{ inputs.egress-policy-secretless }}
+        run: |
+          set -u
+          bad=0
+          check() {
+            if [ "$2" = set ] && [ "$3" != audit ] && [ "$3" != block ]; then
+              echo "::error title=egress policy::the $1 input must be exactly 'audit' or 'block' (its value is ${#3} characters long)"
+              bad=1
+            fi
+          }
+          check egress-policy "${POLICY_EGRESS_POLICY+set}" "${POLICY_EGRESS_POLICY-}"
+          check egress-policy-secretless "${POLICY_EGRESS_POLICY_SECRETLESS+set}" "${POLICY_EGRESS_POLICY_SECRETLESS-}"
+          check distro-egress-policy "${POLICY_DISTRO_EGRESS_POLICY+set}" "${POLICY_DISTRO_EGRESS_POLICY-}"
+          check semgrep-egress-policy "${POLICY_SEMGREP_EGRESS_POLICY+set}" "${POLICY_SEMGREP_EGRESS_POLICY-}"
+          exit "$bad"
+
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: ${{ (inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted' && contains(fromJSON('["ubuntu-latest","ubuntu-22.04","ubuntu-24.04","ubuntu-26.04","ubuntu-22.04-arm","ubuntu-24.04-arm","ubuntu-26.04-arm","ubuntu-slim","windows-latest","windows-2022","windows-2025","windows-2025-vs2026","windows-11-arm","windows-11-vs2026-arm","macos-latest","macos-14","macos-15","macos-15-intel","macos-26","macos-26-intel"]'), fromJSON(inputs.runs-on))) && 'audit' || 'block' }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
+          disable-sudo: true
+          # The agent may only stop reporting to StepSecurity in block mode.
+          disable-telemetry: ${{ ((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted' && contains(fromJSON('["ubuntu-latest","ubuntu-22.04","ubuntu-24.04","ubuntu-26.04","ubuntu-22.04-arm","ubuntu-24.04-arm","ubuntu-26.04-arm","ubuntu-slim","windows-latest","windows-2022","windows-2025","windows-2025-vs2026","windows-11-arm","windows-11-vs2026-arm","macos-latest","macos-14","macos-15","macos-15-intel","macos-26","macos-26-intel"]'), fromJSON(inputs.runs-on))) && 'audit' || 'block') == 'block' }}
 
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1807,37 +1807,6 @@ jobs:
     timeout-minutes: 5
     permissions: {}
     steps:
-      - name: Validate the egress policy inputs
-        timeout-minutes: 1
-        shell: bash
-        working-directory: ${{ github.workspace }}
-        env:
-          POLICY_EGRESS_POLICY: ${{ inputs.egress-policy }}
-          POLICY_EGRESS_POLICY_SECRETLESS: ${{ inputs.egress-policy-secretless }}
-        run: |
-          set -u
-          bad=0
-          check() {
-            if [ "$2" = set ] && [ "$3" != audit ] && [ "$3" != block ]; then
-              echo "::error title=egress policy::the $1 input must be exactly 'audit' or 'block' (its value is ${#3} characters long)"
-              bad=1
-            fi
-          }
-          check egress-policy "${POLICY_EGRESS_POLICY+set}" "${POLICY_EGRESS_POLICY-}"
-          check egress-policy-secretless "${POLICY_EGRESS_POLICY_SECRETLESS+set}" "${POLICY_EGRESS_POLICY_SECRETLESS-}"
-          check distro-egress-policy "${POLICY_DISTRO_EGRESS_POLICY+set}" "${POLICY_DISTRO_EGRESS_POLICY-}"
-          check semgrep-egress-policy "${POLICY_SEMGREP_EGRESS_POLICY+set}" "${POLICY_SEMGREP_EGRESS_POLICY-}"
-          exit "$bad"
-
-      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
-        with:
-          egress-policy: ${{ (inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted' && contains(fromJSON('["ubuntu-latest","ubuntu-22.04","ubuntu-24.04","ubuntu-26.04","ubuntu-22.04-arm","ubuntu-24.04-arm","ubuntu-26.04-arm","ubuntu-slim","windows-latest","windows-2022","windows-2025","windows-2025-vs2026","windows-11-arm","windows-11-vs2026-arm","macos-latest","macos-14","macos-15","macos-15-intel","macos-26","macos-26-intel"]'), fromJSON(inputs.runs-on))) && 'audit' || 'block' }}
-          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
-          disable-sudo: true
-          # The agent may only stop reporting to StepSecurity in block mode.
-          disable-telemetry: ${{ ((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted' && contains(fromJSON('["ubuntu-latest","ubuntu-22.04","ubuntu-24.04","ubuntu-26.04","ubuntu-22.04-arm","ubuntu-24.04-arm","ubuntu-26.04-arm","ubuntu-slim","windows-latest","windows-2022","windows-2025","windows-2025-vs2026","windows-11-arm","windows-11-vs2026-arm","macos-latest","macos-14","macos-15","macos-15-intel","macos-26","macos-26-intel"]'), fromJSON(inputs.runs-on))) && 'audit' || 'block') == 'block' }}
-
-
       - name: Refuse an untrusted self-hosted runner
         timeout-minutes: 1
         shell: bash
@@ -1868,6 +1837,37 @@ jobs:
             echo "::error title=self-hosted runner::a self-hosted runner needs allow-self-hosted: true, which attests that it is ephemeral, one job per VM, and isolated from secrets and the network"
             exit 1
           fi
+
+
+      - name: Validate the egress policy inputs
+        timeout-minutes: 1
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        env:
+          POLICY_EGRESS_POLICY: ${{ inputs.egress-policy }}
+          POLICY_EGRESS_POLICY_SECRETLESS: ${{ inputs.egress-policy-secretless }}
+        run: |
+          set -u
+          bad=0
+          check() {
+            if [ "$2" = set ] && [ "$3" != audit ] && [ "$3" != block ]; then
+              echo "::error title=egress policy::the $1 input must be exactly 'audit' or 'block' (its value is ${#3} characters long)"
+              bad=1
+            fi
+          }
+          check egress-policy "${POLICY_EGRESS_POLICY+set}" "${POLICY_EGRESS_POLICY-}"
+          check egress-policy-secretless "${POLICY_EGRESS_POLICY_SECRETLESS+set}" "${POLICY_EGRESS_POLICY_SECRETLESS-}"
+          check distro-egress-policy "${POLICY_DISTRO_EGRESS_POLICY+set}" "${POLICY_DISTRO_EGRESS_POLICY-}"
+          check semgrep-egress-policy "${POLICY_SEMGREP_EGRESS_POLICY+set}" "${POLICY_SEMGREP_EGRESS_POLICY-}"
+          exit "$bad"
+
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: ${{ (inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted' && contains(fromJSON('["ubuntu-latest","ubuntu-22.04","ubuntu-24.04","ubuntu-26.04","ubuntu-22.04-arm","ubuntu-24.04-arm","ubuntu-26.04-arm","ubuntu-slim","windows-latest","windows-2022","windows-2025","windows-2025-vs2026","windows-11-arm","windows-11-vs2026-arm","macos-latest","macos-14","macos-15","macos-15-intel","macos-26","macos-26-intel"]'), fromJSON(inputs.runs-on))) && 'audit' || 'block' }}
+          allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
+          disable-sudo: true
+          # The agent may only stop reporting to StepSecurity in block mode.
+          disable-telemetry: ${{ ((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted' && contains(fromJSON('["ubuntu-latest","ubuntu-22.04","ubuntu-24.04","ubuntu-26.04","ubuntu-22.04-arm","ubuntu-24.04-arm","ubuntu-26.04-arm","ubuntu-slim","windows-latest","windows-2022","windows-2025","windows-2025-vs2026","windows-11-arm","windows-11-vs2026-arm","macos-latest","macos-14","macos-15","macos-15-intel","macos-26","macos-26-intel"]'), fromJSON(inputs.runs-on))) && 'audit' || 'block') == 'block' }}
 
 
       - name: Every job passed or was deliberately skipped

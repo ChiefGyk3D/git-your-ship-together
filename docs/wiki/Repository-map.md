@@ -36,7 +36,7 @@ Every reusable workflow follows the same pattern, which is what makes the
 
 - `permissions: contents: read` at the top, widened per job.
 - Every job: a timeout, its own `permissions:` block, and
-  [harden-runner](Egress-control.md) as the **first** step.
+  [harden-runner](Egress-control.md) as the **third** step, after the self-hosted guard and the policy check.
 - Inputs for every command, passed to the shell through environment variables.
 - `egress-policy` / `allowed-endpoints` / `extra-allowed-endpoints` inputs.
 - Doppler credentials fetched only when the workflow genuinely needs them, and

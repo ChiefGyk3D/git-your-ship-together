@@ -153,7 +153,7 @@ Applied throughout, and each one is a test:
   pass through `env:`. That includes every command a caller supplies.
 - **Every job has a timeout**, and every checkout sets
   `persist-credentials: false`.
-- **Every job starts with harden-runner.** The input defaults to `audit`,
+- **Every job starts with the self-hosted guard, then the policy check, then harden-runner.** The input defaults to `audit`,
   which logs every outbound connection; every caller in `baseline/repos.txt`
   runs `block`, which allows only the measured list each workflow carries as
   its default. See [Egress](#egress).
@@ -3137,7 +3137,7 @@ plan. On a Developer plan, use path 2 and skip the identity step below.
 
 ## Egress
 
-Every job starts with harden-runner. In `audit` mode it logs each outbound
+Every job runs the self-hosted guard first, then the policy check, then harden-runner. In `audit` mode it logs each outbound
 connection; in `block` mode it refuses any host not on `allowed-endpoints`.
 The three Python workflows carry a measured list as that input's default:
 every host their jobs reached across the calling repositories in a day of

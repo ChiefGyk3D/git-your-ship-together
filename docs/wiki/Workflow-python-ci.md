@@ -86,6 +86,15 @@ row, and a test checks that the example grants every permission the workflow dec
 
 <!-- inputs -->
 
+## Choosing the runner
+
+`runs-on` is a JSON string that every job reads through `fromJSON(inputs.runs-on)`, because `runs-on` takes a string, an
+array or an object: `'"ubuntu-latest"'` (the default), `'["self-hosted","linux"]'` or `'{"group":"my-group","labels":["linux"]}'`.
+Invalid JSON fails the job at expression time. `allow-self-hosted` (default `false`) is the caller's attestation that a
+self-hosted runner is ephemeral, one job per VM, and isolated from secrets and the network. Without it, the first step of every
+job fails on any runner that is not GitHub-hosted. With it, a self-hosted runner still takes only `push`, `schedule`,
+`workflow_dispatch`, `release` and same-repository `pull_request` events. The `test` and `distro` jobs keep their runner matrices (`runners` and `distro-runners`) and ignore `runs-on`.
+
 ## What it refuses to do
 
 It never gives the test job a token, never uploads coverage from a pull request, never pushes the image it builds, and never

@@ -8,7 +8,7 @@ it is what turns "we pin our actions" from a habit into a build failure.
 
 | Kind | Question it answers | Where |
 |---|---|---|
-| **Structural** | Does the YAML have the right *shape*? (pins, permissions, harden-runner first, no unsafe interpolation...) | `tests/` (pytest) |
+| **Structural** | Does the YAML have the right *shape*? (pins, permissions, the self-hosted guard first and harden-runner third, no unsafe interpolation...) | `tests/` (pytest) |
 | **Dogfooding** | Does the workflow actually *run* against a real project? | `fixture/` plus `ci.yml`, `security-self.yml`, `dependabot-auto-merge-self.yml` |
 
 You need both. A structural test can pass on a workflow that fails at startup; a green run proves little about
@@ -48,7 +48,7 @@ lock.
 | `tests/test_python_support.py` | `.github/python-support.json` is the one list of supported CPython versions with their security-support end dates; the `python-ci.yml` default matrix, `scripts/new-repo.sh` and the README equal it; every `python-version` input default is listed; no listed version is past its end date, judged against an injected clock |
 | `tests/test_tool_locks.py` | No workflow runs an unhashed `pip install`; `security.yml`'s inline pip-audit and Semgrep locks equal `.github/requirements/*.txt`; the Snyk install refuses a lock without hashes |
 | `tests/test_advanced_security.py` | `advanced-security`: the validation job rejects every invalid value (run under bash), always runs, and is a loud failure, not a gate (no job has `needs`); conditions skip only on `false`; uploads gated, scans not; the summary note |
-| `tests/test_runs_on_input.py` | The `runs-on` input of `security.yml` and `dast.yml`: the default parses to today's label, every job reads it, and every job has the self-hosted trust-domain guard right after harden-runner (the guard script runs under bash against hostile and edge values; removing it from any job is caught) |
+| `tests/test_runs_on_input.py` | The `runs-on` input of `security.yml`, `dast.yml`, `tofu-ci.yml`, `bash-ci.yml`, `python-ci.yml` and `container-release.yml`: the default parses to today's label, every job reads it, and every job has the self-hosted trust-domain guard as its first step, the policy check second and harden-runner third, with the validator env and the harden-runner `with` pinned exactly (the guard script runs under bash against hostile and edge values; removing it from any job is caught) |
 | `tests/test_security_jobs.py` | Semgrep defaults and content-driven config; the gitleaks job as a pinned binary with its canary |
 | `tests/test_gitleaks_scope.py` | The `gitleaks-scope` input (default `pr-commits`): a decision table over event and input value, fail closed on any other value, no expression in `run:`, and (network) the pinned binary on a pull request range; the `gitleaks-hash-manifest-paths` input: the generated overlay, every unusable path refused, and (network) the pinned binary allowing a SHA-256 only for the listed file and the one rule, never another rule or path, layered on the base commit's config |
 | `tests/test_security_caller_gate.py` | The README security caller ends in a `gate` job over `ci-gate.yml` (`if: always()`, no token); a failed, cancelled or skipped scan is a red gate; the audit derives `gate / CI green` from a `ci-gate.yml` call and nothing from `security.yml` alone |
