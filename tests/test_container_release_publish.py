@@ -559,6 +559,27 @@ def test_a_transient_only_error_still_retries_and_succeeds(tmp_path, stub):
     assert len(calls(stub, "cosign verify-attestation")) == 2
 
 
+LOOKALIKE = "Error: signature mіsmatch\nregistry: 503"
+
+
+@pytest.mark.parametrize("kind", ["verify", "verify-attestation"])
+def test_non_ascii_stderr_is_fatal_even_beside_transient_text(tmp_path, stub, kind):
+    script_err(stub, kind, "default", 1, LOOKALIKE)
+    sign, sbom = ("true", "false") if kind == "verify" else ("false", "true")
+    done = run_step(tmp_path, VERIFY, stub, SIGN=sign, SBOM=sbom, DOCKERHUB="")
+    assert done.returncode == 1
+    assert len(calls(stub, f"cosign {kind}")) == 1
+
+
+def test_ascii_not_found_still_retries_after_the_non_ascii_guard(tmp_path, stub):
+    script_err(stub, "verify", "1", 1, "Error: no signatures found")
+    script_err(stub, "verify-attestation", "1", 1, "Error: 503 Service Unavailable")
+    done = run_step(tmp_path, VERIFY, stub, SIGN="true", SBOM="true", DOCKERHUB="")
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert len(calls(stub, "cosign verify ")) == 2
+    assert len(calls(stub, "cosign verify-attestation")) == 2
+
+
 # --- the Rekor retry matcher covers every 5xx --------------------------------
 
 

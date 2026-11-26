@@ -2091,7 +2091,8 @@ jobs:
           if [ -n "$DOCKERHUB" ]; then images+=("$DOCKERHUB"); fi
           # A registry can serve a just-written signature late. One bounded
           # retry: 4 attempts in all, waiting 5, 10 and 20 seconds (35 seconds
-          # at most, far inside the job timeout). Only "not visible yet" is
+          # per verification command, at most 140 seconds across the signature
+          # and SBOM checks on both registries, far inside the job timeout). Only "not visible yet" is
           # retried: no signatures found, no attestations found, and a
           # transient registry error (HTTP 408, 425, 429 and every 5xx, a
           # timeout, a reset connection). Every attempt carries the same
@@ -2105,6 +2106,10 @@ jobs:
             grep -Eqi 'no matching (signatures|attestations)|mismatch|does not match|doesn.t match|expected .* got|none of the expected identities|invalid signature|signature (verification )?failed|certificate|x509|identity|issuer|workflow[- ](repository|sha)' <<< "$1"
           }
           not_visible_yet() {
+            # Any byte outside printable ASCII (plus tab and newline) could
+            # hide fatal wording behind a lookalike character: not retryable.
+            # grep reads line by line, so the newline needs no allowance.
+            if LC_ALL=C grep -q "[^[:print:]"$'\t'"]" <<< "$1"; then return 1; fi
             if verify_fatal "$1"; then return 1; fi
             grep -Eqi 'no signatures found|no attestations found|(^|[ :[(])(408|425|429|5[0-9]{2})( |]|\)|$)|context deadline exceeded|i/o timeout|timed out|connection reset|connection refused|temporarily unavailable|unexpected EOF|TLS handshake timeout' <<< "$1"
           }
