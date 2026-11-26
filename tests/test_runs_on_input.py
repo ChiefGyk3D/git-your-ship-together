@@ -1,4 +1,4 @@
-"""The `runs-on` input of security.yml and dast.yml (slice 1 of self-hosted runner support).
+"""The `runs-on` input of security.yml, dast.yml and tofu-ci.yml (slice 1 of self-hosted runner support).
 
 `runs-on` takes a string, an array or an object, so the input is a JSON string and every job reads it with
 `fromJSON(inputs.runs-on)`. The default parses to the label the workflow used before the input existed, so a caller
@@ -20,7 +20,7 @@ import yaml
 REPO = Path(__file__).resolve().parent.parent
 WORKFLOWS = REPO / ".github" / "workflows"
 # workflow file -> the label every job used before the input existed
-DEFAULTS = {"security.yml": "ubuntu-latest", "dast.yml": "ubuntu-24.04"}
+DEFAULTS = {"security.yml": "ubuntu-latest", "dast.yml": "ubuntu-24.04", "tofu-ci.yml": "ubuntu-latest"}
 EXPECTED = "${{ fromJSON(inputs.runs-on) }}"
 
 
@@ -97,9 +97,26 @@ JOB_SCHEDULING = {
         "if": "inputs.snyk && github.event_name != 'pull_request' && "
         "(inputs.snyk-on == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')"
     },
+    ("tofu-ci.yml", "fmt"): {},
+    ("tofu-ci.yml", "validate"): {},
+    ("tofu-ci.yml", "test-dirs"): {"if": "inputs.test"},
+    ("tofu-ci.yml", "test"): {
+        "if": "inputs.test",
+        "needs": "test-dirs",
+        "strategy": {"fail-fast": False, "matrix": {"leg": "${{ fromJSON(needs.test-dirs.outputs.legs) }}"}},
+    },
+    ("tofu-ci.yml", "tflint"): {"if": "inputs.tflint"},
+    ("tofu-ci.yml", "trivy"): {"if": "inputs.trivy"},
+    ("tofu-ci.yml", "policy"): {"if": "inputs.policy-directories != ''"},
+    ("tofu-ci.yml", "plan"): {"if": "inputs.plan-command != '' && github.event_name != 'pull_request'"},
+    ("tofu-ci.yml", "workflow-lint"): {"if": "inputs.workflow-lint"},
+    ("tofu-ci.yml", "ci-green"): {
+        "if": "always()",
+        "needs": ["fmt", "validate", "test-dirs", "test", "tflint", "trivy", "policy", "plan", "workflow-lint"],
+    },
 }
-# Job keys that may exist at all; `strategy`, `container`, `services`, `defaults`, `continue-on-error` may not.
-JOB_KEYS = {"name", "runs-on", "timeout-minutes", "permissions", "steps", "outputs", "if", "needs", "env"}
+# Job keys that may exist at all; a strategy is allowed only at its exact known value.
+JOB_KEYS = {"name", "runs-on", "timeout-minutes", "permissions", "steps", "outputs", "if", "needs", "env", "strategy"}
 WORKFLOW_KEYS = {"name", True, "permissions", "jobs"}  # `on` parses to True
 
 
@@ -138,7 +155,7 @@ def guard_problems(doc: dict, file: str | None = None, action_script: str | None
             bad.append(f"{name}: the job has continue-on-error")
         if file is not None:
             expected = JOB_SCHEDULING[(file, name)]
-            for key in ("if", "needs", "env"):
+            for key in ("if", "needs", "env", "strategy"):
                 if job.get(key) != expected.get(key):
                     bad.append(f"{name}: the job {key} differs from the known value")
         if names.index(GUARD) != 2:
