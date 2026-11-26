@@ -1,4 +1,5 @@
-"""The `runs-on` input of security.yml and dast.yml (slice 1 of self-hosted runner support).
+"""The `runs-on` input of security.yml, dast.yml, tofu-ci.yml, bash-ci.yml, python-ci.yml and
+container-release.yml (self-hosted runner support).
 
 `runs-on` takes a string, an array or an object, so the input is a JSON string and every job reads it with
 `fromJSON(inputs.runs-on)`. The default parses to the label the workflow used before the input existed, so a caller
@@ -20,8 +21,24 @@ import yaml
 REPO = Path(__file__).resolve().parent.parent
 WORKFLOWS = REPO / ".github" / "workflows"
 # workflow file -> the label every job used before the input existed
-DEFAULTS = {"security.yml": "ubuntu-latest", "dast.yml": "ubuntu-24.04"}
+DEFAULTS = {
+    "security.yml": "ubuntu-latest",
+    "dast.yml": "ubuntu-24.04",
+    "tofu-ci.yml": "ubuntu-latest",
+    "bash-ci.yml": "ubuntu-latest",
+    "python-ci.yml": "ubuntu-latest",
+    "container-release.yml": "ubuntu-24.04",
+}
 EXPECTED = "${{ fromJSON(inputs.runs-on) }}"
+# matrix jobs take their runner from the matrix (the `runners` and `distro-runners` inputs), never from runs-on
+MATRIX_RUNS_ON = {
+    ("container-release.yml", "build"): "${{ matrix.runner }}",
+    ("container-release.yml", "build-local"): "${{ matrix.runner }}",
+    ("bash-ci.yml", "test"): "${{ matrix.runner }}",
+    ("bash-ci.yml", "distro"): "${{ matrix.runner }}",
+    ("python-ci.yml", "test"): "${{ matrix.runner }}",
+    ("python-ci.yml", "distro"): "${{ matrix.runner }}",
+}
 
 
 def load(name: str) -> dict:
@@ -44,7 +61,84 @@ def test_the_input_default_parses_to_todays_label(name, label):
 @pytest.mark.parametrize("name", sorted(DEFAULTS))
 def test_every_job_uses_the_input(name):
     for job_name, job in load(name)["jobs"].items():
-        assert job["runs-on"] == EXPECTED, f"{name}:{job_name}"
+        assert job["runs-on"] == MATRIX_RUNS_ON.get((name, job_name), EXPECTED), f"{name}:{job_name}"
+
+
+def test_container_build_jobs_keep_their_github_hosted_matrix_runners():
+    doc = load("container-release.yml")
+    for name in ("build", "build-local"):
+        assert doc["jobs"][name]["runs-on"] == "${{ matrix.runner }}"
+        assert doc["jobs"][name]["strategy"]["matrix"]["include"] == "${{ fromJSON(needs.plan.outputs.matrix) }}"
+    plan_script = next(step["run"] for step in doc["jobs"]["plan"]["steps"] if step.get("id") == "plan")
+    assert "linux/arm64) runner=ubuntu-24.04-arm ;;" in plan_script
+    assert "*) runner=ubuntu-24.04 ;;" in plan_script
+
+
+def test_bash_ci_matrix_jobs_keep_the_existing_runner_input():
+    jobs = load("bash-ci.yml")["jobs"]
+    assert jobs["test"]["runs-on"] == "${{ matrix.runner }}"
+    assert jobs["distro"]["runs-on"] == "${{ matrix.runner }}"
+    assert jobs["test"]["strategy"]["matrix"]["runner"] == "${{ fromJSON(inputs.runners) }}"
+    assert jobs["distro"]["strategy"]["matrix"]["runner"] == "${{ fromJSON(inputs.distro-runners) }}"
+
+
+def test_python_ci_matrix_jobs_keep_their_matrix_runner():
+    doc = load("python-ci.yml")
+    matrix_jobs = {n for n, j in doc["jobs"].items() if "matrix" in (j.get("strategy") or {})}
+    assert matrix_jobs == {"test", "distro"}
+    for n in matrix_jobs:
+        assert doc["jobs"][n]["runs-on"] == "${{ matrix.runner }}", n
+        assert "inputs.runs-on" not in json.dumps(doc["jobs"][n]), n
+
+
+@pytest.mark.parametrize("name", ["python-ci.yml"])
+def test_python_ci_egress_follows_the_label_for_non_matrix_jobs(name):
+    doc = load(name)
+    for n, job in doc["jobs"].items():
+        text = json.dumps(job)
+        if n in MATRIX_JOBS_PYCI:
+            assert "matrix.runner" in text and "inputs.runs-on" not in text, n
+        elif n in ID_TOKEN_JOBS_PYCI:
+            assert id_token_job_problems(job) == [], n
+        else:
+            assert "contains(fromJSON(" in text and "fromJSON(inputs.runs-on)" in text, n
+
+
+ID_TOKEN_JOBS_PYCI = {"coverage"}
+ORIGINAL_EGRESS_POLICY = "${{ inputs.egress-policy == 'audit' && 'audit' || 'block' }}"
+ORIGINAL_DISABLE_TELEMETRY = "${{ (inputs.egress-policy == 'audit' && 'audit' || 'block') == 'block' }}"
+
+
+def id_token_job_problems(job):
+    """Why an id-token job's harden-runner step is not the original egress expression."""
+    problems = []
+    steps = [s for s in job["steps"] if "harden-runner" in s.get("uses", "")]
+    if not steps:
+        problems.append("no harden-runner step")
+    for s in steps:
+        if s["with"]["egress-policy"] != ORIGINAL_EGRESS_POLICY:
+            problems.append("egress-policy changed")
+        if s["with"]["disable-telemetry"] != ORIGINAL_DISABLE_TELEMETRY:
+            problems.append("disable-telemetry changed")
+    if "contains(fromJSON(" in json.dumps(job):
+        problems.append("runner check present")
+    if job["runs-on"] != EXPECTED:
+        problems.append("runs-on changed")
+    return problems
+
+
+def test_python_ci_id_token_job_runner_check_is_flagged():
+    """Mutation: re-adding the hosted-label check to the coverage job must be flagged."""
+    job = copy.deepcopy(load("python-ci.yml")["jobs"]["coverage"])
+    assert job["permissions"].get("id-token") == "write"
+    assert id_token_job_problems(job) == []
+    step = next(s for s in job["steps"] if "harden-runner" in s.get("uses", ""))
+    step["with"]["egress-policy"] = step["with"]["egress-policy"].replace(
+        "inputs.egress-policy == 'audit'",
+        "inputs.egress-policy == 'audit' && contains(fromJSON('[\"ubuntu-latest\"]'), fromJSON(inputs.runs-on))",
+    )
+    assert "egress-policy changed" in id_token_job_problems(job)
+    assert "runner check present" in id_token_job_problems(job)
 
 
 @pytest.mark.parametrize("name", sorted(DEFAULTS))
@@ -66,10 +160,90 @@ GUARD_ENV = {
 VALIDATOR = "Validate the egress policy inputs"
 HARDEN = "step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43"  # v2.22.3
 HARDEN_WITH = {"egress-policy", "allowed-endpoints", "disable-telemetry", "disable-sudo"}
+# The POLICY_ variables each workflow's validator declares. A job's validator env must be exactly these.
+VALIDATOR_VARS = {
+    "security.yml": ("EGRESS_POLICY", "EGRESS_POLICY_SECRETLESS", "SEMGREP_EGRESS_POLICY"),
+    "dast.yml": ("EGRESS_POLICY", "EGRESS_POLICY_SECRETLESS"),
+    "tofu-ci.yml": ("EGRESS_POLICY", "EGRESS_POLICY_SECRETLESS"),
+    "bash-ci.yml": ("DISTRO_EGRESS_POLICY", "EGRESS_POLICY", "EGRESS_POLICY_SECRETLESS"),
+    "python-ci.yml": ("DISTRO_EGRESS_POLICY", "EGRESS_POLICY", "EGRESS_POLICY_SECRETLESS"),
+    "container-release.yml": ("EGRESS_POLICY", "EGRESS_POLICY_SECRETLESS"),
+}
+# (file, job) whose harden-runner deliberately omits disable-sudo: its caller install command may need sudo
+SUDO_EXCEPTIONS = {("bash-ci.yml", "test")}
 CHECK_ACTION = REPO / ".github" / "actions" / "egress-policy-check" / "action.yml"
 # Everything that can decide whether a job runs, and the environment it starts with, as the jobs have it today:
 # an allowlist, so a new `if`, `needs`, `strategy` or env key is a change this test makes the author look at.
+PYCI_TEST_NEEDS = [
+    "lint",
+    "typecheck",
+    "workflow-lint",
+    "test",
+    "distro",
+    "coverage",
+    "smoke",
+    "docker",
+    "fragment-check",
+    "commit-claims",
+]
+MATRIX_JOBS_PYCI = {"test", "distro"}
 JOB_SCHEDULING = {
+    ("bash-ci.yml", "shellcheck"): {},
+    ("bash-ci.yml", "shfmt"): {"if": "inputs.shfmt"},
+    ("bash-ci.yml", "test"): {
+        "if": "inputs.test-command != ''",
+        "strategy": {"fail-fast": False, "matrix": {"runner": "${{ fromJSON(inputs.runners) }}"}},
+    },
+    ("bash-ci.yml", "distro"): {
+        "if": "inputs.distros != '[]' && inputs.test-command != ''",
+        "strategy": {
+            "fail-fast": False,
+            "matrix": {
+                "image": "${{ fromJSON(inputs.distros) }}",
+                "runner": "${{ fromJSON(inputs.distro-runners) }}",
+            },
+        },
+    },
+    ("bash-ci.yml", "config-lint"): {"if": "inputs.config-lint-command != ''"},
+    ("bash-ci.yml", "workflow-lint"): {"if": "inputs.workflow-lint"},
+    ("bash-ci.yml", "fragment-check"): {
+        "if": "github.event_name == 'pull_request' && inputs.fragment-check-command != ''"
+    },
+    ("bash-ci.yml", "commit-claims"): {
+        "if": "github.event_name == 'pull_request' && inputs.commit-claims-command != ''"
+    },
+    ("bash-ci.yml", "ci-green"): {
+        "if": "always()",
+        "needs": [
+            "shellcheck",
+            "shfmt",
+            "test",
+            "distro",
+            "config-lint",
+            "workflow-lint",
+            "fragment-check",
+            "commit-claims",
+        ],
+    },
+    ("container-release.yml", "plan"): {},
+    ("container-release.yml", "dockerfile-lint"): {"if": "inputs.hadolint"},
+    ("container-release.yml", "build"): {
+        "if": "${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.publish == 'true' && "
+        "(needs.dockerfile-lint.result == 'success' || needs.dockerfile-lint.result == 'skipped') }}",
+        "needs": ["plan", "dockerfile-lint"],
+        "strategy": {"fail-fast": False, "matrix": {"include": "${{ fromJSON(needs.plan.outputs.matrix) }}"}},
+    },
+    ("container-release.yml", "build-local"): {
+        "if": "${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.publish != 'true' && "
+        "(needs.dockerfile-lint.result == 'success' || needs.dockerfile-lint.result == 'skipped') }}",
+        "needs": ["plan", "dockerfile-lint"],
+        "strategy": {"fail-fast": False, "matrix": {"include": "${{ fromJSON(needs.plan.outputs.matrix) }}"}},
+    },
+    ("container-release.yml", "merge"): {
+        "if": "needs.plan.outputs.publish == 'true' && github.event_name != 'pull_request'",
+        "needs": ["plan", "build"],
+        "concurrency": {"group": "container-release-${{ needs.plan.outputs.serialize }}", "cancel-in-progress": False},
+    },
     ("dast.yml", "scan"): {
         "env": {
             "ZAP_IMAGE": "ghcr.io/zaproxy/zaproxy:2.17.0@"
@@ -81,6 +255,36 @@ JOB_SCHEDULING = {
         "(github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)",
         "needs": "scan",
     },
+    ("python-ci.yml", "ci-green"): {"if": "always()", "needs": PYCI_TEST_NEEDS},
+    ("python-ci.yml", "commit-claims"): {
+        "if": "github.event_name == 'pull_request' && inputs.commit-claims-command != ''"
+    },
+    ("python-ci.yml", "coverage"): {"if": "inputs.codecov && github.event_name != 'pull_request'", "needs": "test"},
+    ("python-ci.yml", "distro"): {
+        "if": "inputs.distros != '[]'",
+        "strategy": {
+            "fail-fast": False,
+            "matrix": {"image": "${{ fromJSON(inputs.distros) }}", "runner": "${{ fromJSON(inputs.distro-runners) }}"},
+        },
+    },
+    ("python-ci.yml", "docker"): {"if": "inputs.docker-build"},
+    ("python-ci.yml", "fragment-check"): {
+        "if": "github.event_name == 'pull_request' && inputs.fragment-check-command != ''"
+    },
+    ("python-ci.yml", "lint"): {},
+    ("python-ci.yml", "smoke"): {"if": "inputs.smoke-command != ''"},
+    ("python-ci.yml", "test"): {
+        "strategy": {
+            "fail-fast": False,
+            "matrix": {
+                "python-version": "${{ fromJSON(startsWith(github.event_name, 'pull_request') && "
+                "inputs.pr-python-versions != '' && inputs.pr-python-versions || inputs.python-versions) }}",
+                "runner": "${{ fromJSON(inputs.runners) }}",
+            },
+        }
+    },
+    ("python-ci.yml", "typecheck"): {"if": "inputs.typecheck-command != ''"},
+    ("python-ci.yml", "workflow-lint"): {"if": "inputs.workflow-lint"},
     ("security.yml", "advanced-security-check"): {},
     ("security.yml", "codeql"): {"if": "inputs.codeql && inputs.advanced-security != 'false'"},
     ("security.yml", "dependency-audit"): {"if": "inputs.pip-audit-requirements != '' || inputs.audit-command != ''"},
@@ -97,17 +301,49 @@ JOB_SCHEDULING = {
         "if": "inputs.snyk && github.event_name != 'pull_request' && "
         "(inputs.snyk-on == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')"
     },
+    ("tofu-ci.yml", "fmt"): {},
+    ("tofu-ci.yml", "validate"): {},
+    ("tofu-ci.yml", "test-dirs"): {"if": "inputs.test"},
+    ("tofu-ci.yml", "test"): {
+        "if": "inputs.test",
+        "needs": "test-dirs",
+        "strategy": {"fail-fast": False, "matrix": {"leg": "${{ fromJSON(needs.test-dirs.outputs.legs) }}"}},
+    },
+    ("tofu-ci.yml", "tflint"): {"if": "inputs.tflint"},
+    ("tofu-ci.yml", "trivy"): {"if": "inputs.trivy"},
+    ("tofu-ci.yml", "policy"): {"if": "inputs.policy-directories != ''"},
+    ("tofu-ci.yml", "plan"): {"if": "inputs.plan-command != '' && github.event_name != 'pull_request'"},
+    ("tofu-ci.yml", "workflow-lint"): {"if": "inputs.workflow-lint"},
+    ("tofu-ci.yml", "ci-green"): {
+        "if": "always()",
+        "needs": ["fmt", "validate", "test-dirs", "test", "tflint", "trivy", "policy", "plan", "workflow-lint"],
+    },
 }
-# Job keys that may exist at all; `strategy`, `container`, `services`, `defaults`, `continue-on-error` may not.
-JOB_KEYS = {"name", "runs-on", "timeout-minutes", "permissions", "steps", "outputs", "if", "needs", "env"}
+# Job keys that may exist at all; a strategy is allowed only at its exact known value. `container`, `services`,
+# `defaults`, `continue-on-error` may not. `concurrency` may exist only with the exact value in JOB_SCHEDULING.
+JOB_KEYS = {
+    "name",
+    "runs-on",
+    "timeout-minutes",
+    "permissions",
+    "steps",
+    "outputs",
+    "if",
+    "needs",
+    "env",
+    "strategy",
+    "concurrency",
+}
 WORKFLOW_KEYS = {"name", True, "permissions", "jobs"}  # `on` parses to True
 
 
-# Immutable pins: SHA-256 of the exact script text. The equality with the composite action alone would pass a
-# backdoor written into the action and every inline copy together. Change a constant only deliberately, when the
-# validator or the guard legitimately changes, after reading the diff of the script itself.
-VALIDATOR_SHA256 = "3d1b25b484795c2d26e5e997ccc1f102e1273b68f13e7fad8590490ce0453c72"
-GUARD_SHA256 = "6c68af57a121dab2f3b9fda0f7baebb7407b1e429e26cd6bd255edda4654260c"
+# Review tripwires, not immutable security pins: SHA-256 of the exact script text. The equality with the composite
+# action alone would pass a backdoor written into the action and every inline copy together, so a digest makes that
+# edit visible in review. It does not stop a coordinated edit by itself: a script and its digest changed in one pull
+# request are stopped only by CODEOWNERS review of this file and of the workflows. Change a constant only deliberately,
+# when the validator or the guard legitimately changes, after reading the diff of the script itself.
+VALIDATOR_SHA256 = "3d1b25b484795c2d26e5e997ccc1f102e1273b68f13e7fad8590490ce0453c72"  # review tripwire, not a pin
+GUARD_SHA256 = "6d1587f9bda84a487bec47ee347a97499dde635309e0ee0eaab823c5ccacc9bb"  # review tripwire, not a pin
 PIN_HINT = "update the SHA-256 constant in tests/test_runs_on_input.py deliberately if this script legitimately changed"
 
 
@@ -120,9 +356,10 @@ def check_script() -> str:
 
 
 def guard_problems(doc: dict, file: str | None = None, action_script: str | None = None) -> list[str]:
-    """Jobs without an operative guard. Allowlist based: the two steps before the guard are pinned exactly, the
-    guard's own keys and environment are pinned exactly, and nothing at step, job or workflow level may add an
-    environment variable, a shell default, a condition or a matrix that is not already there."""
+    """Jobs without an operative guard. Allowlist based: the guard is the third step, the validator and
+    harden-runner before it pinned exactly; the guard's own keys and environment are pinned exactly, and nothing
+    at step, job or workflow level may add an environment variable, a shell default, a condition or a matrix that
+    is not already there."""
     bad = []
     if set(doc) - WORKFLOW_KEYS:
         bad.append(f"workflow: unexpected keys {sorted(map(str, set(doc) - WORKFLOW_KEYS))}")
@@ -132,35 +369,43 @@ def guard_problems(doc: dict, file: str | None = None, action_script: str | None
         if names.count(GUARD) != 1:
             bad.append(f"{name}: guard missing")
             continue
-        if set(job) - JOB_KEYS:
-            bad.append(f"{name}: unexpected job keys {sorted(set(job) - JOB_KEYS)}")
+        # `strategy` is allowed only where the known schedule has one (python-ci's matrix jobs)
+        extra = {"strategy"} if file is not None and "strategy" in JOB_SCHEDULING[(file, name)] else set()
+        if set(job) - JOB_KEYS - extra:
+            bad.append(f"{name}: unexpected job keys {sorted(set(job) - JOB_KEYS - extra)}")
         if job.get("continue-on-error") not in (None, False):
             bad.append(f"{name}: the job has continue-on-error")
         if file is not None:
             expected = JOB_SCHEDULING[(file, name)]
-            for key in ("if", "needs", "env"):
+            for key in ("if", "needs", "env", "strategy", "concurrency"):
                 if job.get(key) != expected.get(key):
                     bad.append(f"{name}: the job {key} differs from the known value")
         if names.index(GUARD) != 2:
             bad.append(f"{name}: the guard is not the third step")
             continue
+        if len(steps) < 3:
+            bad.append(f"{name}: fewer than three steps")
+            continue
         first, second, step = steps[0], steps[1], steps[2]
+        expected_env = {
+            "POLICY_" + v: "${{ inputs." + v.lower().replace("_", "-") + " }}" for v in VALIDATOR_VARS.get(file, ())
+        }
         if (
             first.get("name") != VALIDATOR
             or first.get("run") != (action_script if action_script is not None else check_script())
             or set(first) != {"name", "timeout-minutes", "shell", "working-directory", "env", "run"}
             or first["shell"] != "bash"
-            or any(
-                k != "POLICY_" + k[7:] or v != "${{ inputs." + k[7:].lower().replace("_", "-") + " }}"
-                for k, v in first["env"].items()
-            )
+            or first.get("env") != expected_env
         ):
             bad.append(f"{name}: the policy validator is not the exact expected step")
+        sudo_exception = (file, name) in SUDO_EXCEPTIONS
+        harden_keys = HARDEN_WITH - {"disable-sudo"} if sudo_exception else HARDEN_WITH
+        harden_with = second.get("with") or {}
         if (
             second.get("uses") != HARDEN
             or set(second) != {"uses", "with"}
-            or not set(second["with"]) <= HARDEN_WITH
-            or not {"egress-policy", "allowed-endpoints", "disable-telemetry"} <= set(second["with"])
+            or set(harden_with) != harden_keys
+            or (not sudo_exception and harden_with.get("disable-sudo") is not True)
         ):
             bad.append(f"{name}: harden-runner is not the exact pinned step")
         if sha(first.get("run", "")) != VALIDATOR_SHA256:
@@ -193,7 +438,7 @@ def guard_script(doc: dict) -> str:
 
 
 @pytest.mark.parametrize("name", sorted(DEFAULTS))
-def test_every_job_has_the_guard_early_and_identical(name):
+def test_every_job_has_the_guard_third_and_identical(name):
     doc = load(name)
     assert guard_problems(doc, name) == []
     scripts = {j["steps"][[s.get("name") for s in j["steps"]].index(GUARD)]["run"] for j in doc["jobs"].values()}
@@ -239,7 +484,7 @@ def mutations(doc: dict, victim: str):
             else:
                 d["env"] = {var: value}
             yield f"{where} env {var}", d
-    # steps before the guard: the validator and harden-runner are pinned exactly
+    # the validator and harden-runner come first and the guard is the third step: each is pinned exactly
     d, job, steps = fresh()
     steps[0]["run"] = "echo attacker-controlled"
     yield "validator replaced", d
@@ -253,11 +498,43 @@ def mutations(doc: dict, victim: str):
     steps[1]["uses"] = steps[1]["uses"].replace("@46b0", "@0000")
     yield "harden-runner repinned", d
     d, job, steps = fresh()
-    steps.insert(2, {"name": "extra", "run": "echo before the guard"})
-    yield "extra step before the guard", d
-    d, job, steps = fresh()
-    steps.insert(0, {"name": "extra", "run": "echo first"})
+    steps.insert(0, {"name": "extra", "run": "echo before the validator"})
     yield "extra first step", d
+    d, job, steps = fresh()
+    steps.insert(1, {"name": "extra", "run": "echo between the validator and harden-runner"})
+    yield "extra step between the validator and harden-runner", d
+    d, job, steps = fresh()
+    steps.insert(2, {"name": "extra", "run": "echo between harden-runner and the guard"})
+    yield "extra step between harden-runner and the guard", d
+    d, job, steps = fresh()
+    steps[:] = [steps[2], steps[0], steps[1]] + steps[3:]
+    yield "guard moved to first", d
+    d, job, steps = fresh()
+    steps[:] = [steps[0], steps[2], steps[1]] + steps[3:]
+    yield "guard before harden-runner", d
+    d, job, steps = fresh()
+    steps[:] = [steps[1], steps[0]] + steps[2:]
+    yield "harden-runner before the validator", d
+    # the validator's environment is exactly the expected mapping: one variable or all of them missing is caught
+    d, job, steps = fresh()
+    env = steps[0]["env"]
+    del env[next(iter(env))]
+    yield "validator env variable deleted", d
+    d, job, steps = fresh()
+    steps[0]["env"] = {}
+    yield "validator env emptied", d
+    d, job, steps = fresh()
+    del steps[0]["env"]
+    yield "validator env removed", d
+    # harden-runner keeps disable-sudo: true (the one documented exception has no such key to remove)
+    d, job, steps = fresh()
+    if "disable-sudo" in steps[1]["with"]:
+        del steps[1]["with"]["disable-sudo"]
+        yield "harden-runner disable-sudo removed", d
+    d, job, steps = fresh()
+    if "disable-sudo" in steps[1]["with"]:
+        steps[1]["with"]["disable-sudo"] = False
+        yield "harden-runner disable-sudo false", d
     # scheduling: the job may not be skipped or emptied
     d, job, steps = fresh()
     job["if"] = False
@@ -397,3 +674,87 @@ def test_a_synchronized_backdoor_in_the_action_and_every_copy_is_caught(name):
 def test_the_pins_match_the_files_today():
     assert sha(check_script()) == VALIDATOR_SHA256, PIN_HINT
     assert sha(guard_script(load("security.yml"))) == GUARD_SHA256, PIN_HINT
+
+
+# ---- Bash 3.2 compatibility of the inlined scripts (GitHub macOS runners run `shell: bash` as Bash 3.2) ----
+BASH4_ONLY = (",,", "^^", ";;&", ";&", "declare -A", "mapfile", "readarray", "[[ -v", "${!", "&>>", "|&", "coproc")
+
+
+def bash4_constructs(script: str) -> list[str]:
+    found = []
+    for token in BASH4_ONLY:
+        if token in script:
+            found.append(token)
+            if token == ";;&":
+                script = script.replace(";;&", "")  # so ";&" is not double-counted
+    return found
+
+
+def every_guard_and_validator_script():
+    for name in DEFAULTS:
+        for job_name, job in load(name)["jobs"].items():
+            for step in job["steps"]:
+                if step.get("name") in (GUARD, VALIDATOR):
+                    yield f"{name}:{job_name}:{step['name']}", step["run"]
+    yield "action:validator", check_script()
+
+
+def test_guard_and_validator_scripts_use_no_bash4_only_construct():
+    scripts = list(every_guard_and_validator_script())
+    assert len(scripts) >= 90
+    assert [(label, bash4_constructs(s)) for label, s in scripts if bash4_constructs(s)] == []
+
+
+@pytest.mark.parametrize("token", BASH4_ONLY)
+def test_a_bash4_only_construct_in_the_guard_is_flagged(token):
+    script = guard_script(load("security.yml"))
+    assert bash4_constructs(script) == []
+    assert bash4_constructs(script + "\n" + token + "\n") == [token]
+    assert bash4_constructs(script.replace('lower "$RUNNER_ENV"', "x=${RUNNER_ENV,,}", 1)) == [",,"]
+
+
+def test_the_case_terminators_are_checked_longest_first_and_each_is_flagged():
+    # ";;&" contains ";&" as a substring, so ";;&" is listed (and checked) before ";&".
+    assert BASH4_ONLY.index(";;&") < BASH4_ONLY.index(";&")
+    base = "case x in a) echo a ;; esac\n"
+    assert bash4_constructs(base) == []
+    assert bash4_constructs("case x in a) echo a ;;& b) echo b ;; esac\n") == [";;&"]
+    assert bash4_constructs("case x in a) echo a ;& b) echo b ;; esac\n") == [";&"]
+
+
+# Note on lower(): the guard lowercases with `tr`, which matches Bash 4 ${x,,} for ASCII
+# values. That is all a GitHub repository name, event name, runner environment or boolean
+# can contain. For exotic non-ASCII input it can differ, and it fails closed.
+
+
+# ---- duplicate mapping keys: PyYAML keeps the last one silently ----
+class StrictLoader(yaml.SafeLoader):
+    pass
+
+
+def _no_duplicate_keys(loader, node, deep=False):
+    seen = set()
+    for key_node, _ in node.value:
+        key = loader.construct_object(key_node, deep=True)
+        if key in seen:
+            raise yaml.constructor.ConstructorError(None, None, f"duplicate key {key!r}", key_node.start_mark)
+        seen.add(key)
+    return yaml.SafeLoader.construct_mapping(loader, node, deep)
+
+
+StrictLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _no_duplicate_keys)
+
+
+@pytest.mark.parametrize("name", sorted(DEFAULTS))
+def test_no_workflow_has_a_duplicate_mapping_key(name):
+    yaml.load((WORKFLOWS / name).read_text(), Loader=StrictLoader)
+
+
+@pytest.mark.parametrize("name", sorted(DEFAULTS))
+def test_a_duplicated_key_is_flagged(name):
+    text = (WORKFLOWS / name).read_text()
+    marker = "          disable-sudo: true\n"
+    assert marker in text
+    mutated = text.replace(marker, marker + marker, 1)
+    with pytest.raises(yaml.constructor.ConstructorError, match="duplicate key"):
+        yaml.load(mutated, Loader=StrictLoader)

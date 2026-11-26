@@ -53,6 +53,19 @@
 # The signing identity is this reusable workflow, not the caller: that is how
 # keyless signing attributes a job that runs in a reusable workflow, and it
 # means one identity to trust across every repository that calls it.
+#
+# Runner (`runs-on`): the plan, lint and merge jobs read the `runs-on` input, a
+# JSON string, through `fromJSON(inputs.runs-on)`. The default is
+# `'"ubuntu-24.04"'`, the label those jobs used before the input existed. The
+# per-platform `build` and `build-local` jobs keep using `matrix.runner` and stay
+# on GitHub-hosted runners. Invalid JSON fails before any step runs.
+#
+# Trust domain: a job on a self-hosted runner fails in its step right after
+# harden-runner unless `allow-self-hosted` is true and the event passes the same
+# allowlist used by the security workflow. The caller attests that the runner is
+# ephemeral, one job per VM, and isolated from secrets and the network. Verified
+# 2026-11-25: harden-runner is a no-op on a self-hosted runner without a
+# StepSecurity Enterprise subscription, so the guard does not rely on it.
 
 name: Container release (reusable)
 
@@ -238,6 +251,14 @@ on:
         description: Publish only from a `refs/tags/v*` ref. `false` also allows other refs, for a caller that publishes from a branch on purpose.
         type: boolean
         default: true
+      runs-on:
+        description: 'Runner for the non-matrix jobs, as a JSON string, because `runs-on` takes a string, an array or an object: `"ubuntu-24.04"`, `["self-hosted","linux"]` or `{"group":"my-group","labels":["linux"]}`. The default parses to the label these jobs always used. Invalid JSON fails the job at expression time. The per-platform build jobs keep using their GitHub-hosted matrix runners.'
+        type: string
+        default: '"ubuntu-24.04"'
+      allow-self-hosted:
+        description: 'Let these jobs run on a self-hosted runner (default false: on any runner that is not GitHub-hosted the job fails). Setting it true is the caller''s attestation that the runner is ephemeral, one job per VM, and isolated from secrets and the network. Even then a self-hosted runner takes only push, schedule, workflow_dispatch, release and same-repository pull_request events. Secret-bearing jobs belong on GitHub-hosted runners or a distinct ephemeral trusted pool.'
+        type: boolean
+        default: false
       timeout-minutes:
         description: Job timeout. Multi-arch builds that compile native code need a generous one.
         type: number
@@ -262,7 +283,7 @@ jobs:
   # build jobs need neither Doppler nor the Docker Hub logic.
   plan:
     name: Plan the build
-    runs-on: ubuntu-24.04
+    runs-on: ${{ fromJSON(inputs.runs-on) }}
     # normal: ~1 min (p50 0.2, p95 0.3; last ~30 green runs)
     timeout-minutes: 5
     permissions:
@@ -301,7 +322,50 @@ jobs:
           allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
           # The agent may only stop reporting to StepSecurity in block mode.
           disable-telemetry: ${{ (inputs.egress-policy == 'audit' && 'audit' || 'block') == 'block' }}
+          disable-sudo: true
 
+
+      - name: Refuse an untrusted self-hosted runner
+        timeout-minutes: 1
+        shell: bash
+        env:
+          RUNNER_ENV: ${{ runner.environment }}
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          THIS_REPO: ${{ github.repository }}
+          ALLOW_SELF_HOSTED: ${{ inputs.allow-self-hosted }}
+        run: |
+          set -u
+          # Bash 3.2 compatible (macOS runners): lowercase through tr, keeping a trailing newline with a sentinel.
+          lower() {
+            LOWER=$(printf '%sx' "$1" | tr '[:upper:]' '[:lower:]')
+            LOWER=${LOWER%x}
+          }
+          lower "$RUNNER_ENV"
+          [ "$LOWER" = github-hosted ] && exit 0
+          # Allowlist: only events whose code the repository's own writers control.
+          lower "$EVENT_NAME"
+          case "$LOWER" in
+            push | schedule | workflow_dispatch | release) ;;
+            pull_request)
+              lower "$HEAD_REPO"
+              head_repo=$LOWER
+              lower "$THIS_REPO"
+              if [ -z "$HEAD_REPO" ] || [ -z "$THIS_REPO" ] || [ "$head_repo" != "$LOWER" ]; then
+                echo "::error title=self-hosted runner::a self-hosted runner never runs a pull request from a fork or from a repository it cannot name"
+                exit 1
+              fi
+              ;;
+            *)
+              echo "::error title=self-hosted runner::a self-hosted runner runs only push, schedule, workflow_dispatch, release and same-repository pull_request events"
+              exit 1
+              ;;
+          esac
+          lower "$ALLOW_SELF_HOSTED"
+          if [ "$LOWER" != true ]; then
+            echo "::error title=self-hosted runner::a self-hosted runner needs allow-self-hosted: true, which attests that it is ephemeral, one job per VM, and isolated from secrets and the network"
+            exit 1
+          fi
 
       - name: Decide whether to publish
         id: publish
@@ -498,7 +562,7 @@ jobs:
   dockerfile-lint:
     name: Lint the Dockerfile (hadolint)
     if: inputs.hadolint
-    runs-on: ubuntu-24.04
+    runs-on: ${{ fromJSON(inputs.runs-on) }}
     # normal: ~1 min (p50 0.3, p95 0.6; last ~30 green runs)
     timeout-minutes: 10
     permissions:
@@ -528,12 +592,54 @@ jobs:
 
       - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
         with:
-          egress-policy: ${{ (inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block' }}
+          egress-policy: ${{ (inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted' && contains(fromJSON('["ubuntu-latest","ubuntu-22.04","ubuntu-24.04","ubuntu-26.04","ubuntu-22.04-arm","ubuntu-24.04-arm","ubuntu-26.04-arm","ubuntu-slim","windows-latest","windows-2022","windows-2025","windows-2025-vs2026","windows-11-arm","windows-11-vs2026-arm","macos-latest","macos-14","macos-15","macos-15-intel","macos-26","macos-26-intel"]'), fromJSON(inputs.runs-on))) && 'audit' || 'block' }}
           allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
           disable-sudo: true
           # The agent may only stop reporting to StepSecurity in block mode.
-          disable-telemetry: ${{ ((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted') && 'audit' || 'block') == 'block' }}
+          disable-telemetry: ${{ ((inputs.egress-policy-secretless == 'audit' && runner.environment == 'github-hosted' && contains(fromJSON('["ubuntu-latest","ubuntu-22.04","ubuntu-24.04","ubuntu-26.04","ubuntu-22.04-arm","ubuntu-24.04-arm","ubuntu-26.04-arm","ubuntu-slim","windows-latest","windows-2022","windows-2025","windows-2025-vs2026","windows-11-arm","windows-11-vs2026-arm","macos-latest","macos-14","macos-15","macos-15-intel","macos-26","macos-26-intel"]'), fromJSON(inputs.runs-on))) && 'audit' || 'block') == 'block' }}
 
+
+      - name: Refuse an untrusted self-hosted runner
+        timeout-minutes: 1
+        shell: bash
+        env:
+          RUNNER_ENV: ${{ runner.environment }}
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          THIS_REPO: ${{ github.repository }}
+          ALLOW_SELF_HOSTED: ${{ inputs.allow-self-hosted }}
+        run: |
+          set -u
+          # Bash 3.2 compatible (macOS runners): lowercase through tr, keeping a trailing newline with a sentinel.
+          lower() {
+            LOWER=$(printf '%sx' "$1" | tr '[:upper:]' '[:lower:]')
+            LOWER=${LOWER%x}
+          }
+          lower "$RUNNER_ENV"
+          [ "$LOWER" = github-hosted ] && exit 0
+          # Allowlist: only events whose code the repository's own writers control.
+          lower "$EVENT_NAME"
+          case "$LOWER" in
+            push | schedule | workflow_dispatch | release) ;;
+            pull_request)
+              lower "$HEAD_REPO"
+              head_repo=$LOWER
+              lower "$THIS_REPO"
+              if [ -z "$HEAD_REPO" ] || [ -z "$THIS_REPO" ] || [ "$head_repo" != "$LOWER" ]; then
+                echo "::error title=self-hosted runner::a self-hosted runner never runs a pull request from a fork or from a repository it cannot name"
+                exit 1
+              fi
+              ;;
+            *)
+              echo "::error title=self-hosted runner::a self-hosted runner runs only push, schedule, workflow_dispatch, release and same-repository pull_request events"
+              exit 1
+              ;;
+          esac
+          lower "$ALLOW_SELF_HOSTED"
+          if [ "$LOWER" != true ]; then
+            echo "::error title=self-hosted runner::a self-hosted runner needs allow-self-hosted: true, which attests that it is ephemeral, one job per VM, and isolated from secrets and the network"
+            exit 1
+          fi
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -721,7 +827,50 @@ jobs:
           allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
           # The agent may only stop reporting to StepSecurity in block mode.
           disable-telemetry: ${{ (inputs.egress-policy == 'audit' && 'audit' || 'block') == 'block' }}
+          disable-sudo: true
 
+
+      - name: Refuse an untrusted self-hosted runner
+        timeout-minutes: 1
+        shell: bash
+        env:
+          RUNNER_ENV: ${{ runner.environment }}
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          THIS_REPO: ${{ github.repository }}
+          ALLOW_SELF_HOSTED: ${{ inputs.allow-self-hosted }}
+        run: |
+          set -u
+          # Bash 3.2 compatible (macOS runners): lowercase through tr, keeping a trailing newline with a sentinel.
+          lower() {
+            LOWER=$(printf '%sx' "$1" | tr '[:upper:]' '[:lower:]')
+            LOWER=${LOWER%x}
+          }
+          lower "$RUNNER_ENV"
+          [ "$LOWER" = github-hosted ] && exit 0
+          # Allowlist: only events whose code the repository's own writers control.
+          lower "$EVENT_NAME"
+          case "$LOWER" in
+            push | schedule | workflow_dispatch | release) ;;
+            pull_request)
+              lower "$HEAD_REPO"
+              head_repo=$LOWER
+              lower "$THIS_REPO"
+              if [ -z "$HEAD_REPO" ] || [ -z "$THIS_REPO" ] || [ "$head_repo" != "$LOWER" ]; then
+                echo "::error title=self-hosted runner::a self-hosted runner never runs a pull request from a fork or from a repository it cannot name"
+                exit 1
+              fi
+              ;;
+            *)
+              echo "::error title=self-hosted runner::a self-hosted runner runs only push, schedule, workflow_dispatch, release and same-repository pull_request events"
+              exit 1
+              ;;
+          esac
+          lower "$ALLOW_SELF_HOSTED"
+          if [ "$LOWER" != true ]; then
+            echo "::error title=self-hosted runner::a self-hosted runner needs allow-self-hosted: true, which attests that it is ephemeral, one job per VM, and isolated from secrets and the network"
+            exit 1
+          fi
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1064,7 +1213,50 @@ jobs:
           allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
           # The agent may only stop reporting to StepSecurity in block mode.
           disable-telemetry: ${{ (inputs.egress-policy == 'audit' && 'audit' || 'block') == 'block' }}
+          disable-sudo: true
 
+
+      - name: Refuse an untrusted self-hosted runner
+        timeout-minutes: 1
+        shell: bash
+        env:
+          RUNNER_ENV: ${{ runner.environment }}
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          THIS_REPO: ${{ github.repository }}
+          ALLOW_SELF_HOSTED: ${{ inputs.allow-self-hosted }}
+        run: |
+          set -u
+          # Bash 3.2 compatible (macOS runners): lowercase through tr, keeping a trailing newline with a sentinel.
+          lower() {
+            LOWER=$(printf '%sx' "$1" | tr '[:upper:]' '[:lower:]')
+            LOWER=${LOWER%x}
+          }
+          lower "$RUNNER_ENV"
+          [ "$LOWER" = github-hosted ] && exit 0
+          # Allowlist: only events whose code the repository's own writers control.
+          lower "$EVENT_NAME"
+          case "$LOWER" in
+            push | schedule | workflow_dispatch | release) ;;
+            pull_request)
+              lower "$HEAD_REPO"
+              head_repo=$LOWER
+              lower "$THIS_REPO"
+              if [ -z "$HEAD_REPO" ] || [ -z "$THIS_REPO" ] || [ "$head_repo" != "$LOWER" ]; then
+                echo "::error title=self-hosted runner::a self-hosted runner never runs a pull request from a fork or from a repository it cannot name"
+                exit 1
+              fi
+              ;;
+            *)
+              echo "::error title=self-hosted runner::a self-hosted runner runs only push, schedule, workflow_dispatch, release and same-repository pull_request events"
+              exit 1
+              ;;
+          esac
+          lower "$ALLOW_SELF_HOSTED"
+          if [ "$LOWER" != true ]; then
+            echo "::error title=self-hosted runner::a self-hosted runner needs allow-self-hosted: true, which attests that it is ephemeral, one job per VM, and isolated from secrets and the network"
+            exit 1
+          fi
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1320,7 +1512,7 @@ jobs:
     concurrency:
       group: container-release-${{ needs.plan.outputs.serialize }}
       cancel-in-progress: false
-    runs-on: ubuntu-24.04
+    runs-on: ${{ fromJSON(inputs.runs-on) }}
     # normal: no fixture history
     timeout-minutes: 15
     permissions:
@@ -1360,9 +1552,52 @@ jobs:
           allowed-endpoints: ${{ inputs.allowed-endpoints }} ${{ inputs.extra-allowed-endpoints }} results-receiver.actions.githubusercontent.com:443
           # The agent may only stop reporting to StepSecurity in block mode.
           disable-telemetry: ${{ (inputs.egress-policy == 'audit' && 'audit' || 'block') == 'block' }}
+          disable-sudo: true
 
 
       # --- Doppler (same steps as .github/actions/doppler-secrets) ---------
+      - name: Refuse an untrusted self-hosted runner
+        timeout-minutes: 1
+        shell: bash
+        env:
+          RUNNER_ENV: ${{ runner.environment }}
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          THIS_REPO: ${{ github.repository }}
+          ALLOW_SELF_HOSTED: ${{ inputs.allow-self-hosted }}
+        run: |
+          set -u
+          # Bash 3.2 compatible (macOS runners): lowercase through tr, keeping a trailing newline with a sentinel.
+          lower() {
+            LOWER=$(printf '%sx' "$1" | tr '[:upper:]' '[:lower:]')
+            LOWER=${LOWER%x}
+          }
+          lower "$RUNNER_ENV"
+          [ "$LOWER" = github-hosted ] && exit 0
+          # Allowlist: only events whose code the repository's own writers control.
+          lower "$EVENT_NAME"
+          case "$LOWER" in
+            push | schedule | workflow_dispatch | release) ;;
+            pull_request)
+              lower "$HEAD_REPO"
+              head_repo=$LOWER
+              lower "$THIS_REPO"
+              if [ -z "$HEAD_REPO" ] || [ -z "$THIS_REPO" ] || [ "$head_repo" != "$LOWER" ]; then
+                echo "::error title=self-hosted runner::a self-hosted runner never runs a pull request from a fork or from a repository it cannot name"
+                exit 1
+              fi
+              ;;
+            *)
+              echo "::error title=self-hosted runner::a self-hosted runner runs only push, schedule, workflow_dispatch, release and same-repository pull_request events"
+              exit 1
+              ;;
+          esac
+          lower "$ALLOW_SELF_HOSTED"
+          if [ "$LOWER" != true ]; then
+            echo "::error title=self-hosted runner::a self-hosted runner needs allow-self-hosted: true, which attests that it is ephemeral, one job per VM, and isolated from secrets and the network"
+            exit 1
+          fi
+
       - name: Validate the signer identity
         timeout-minutes: 1
         env:
