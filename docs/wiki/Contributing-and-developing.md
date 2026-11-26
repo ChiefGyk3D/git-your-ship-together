@@ -31,7 +31,7 @@ python scripts/gen_wiki.py --check                       # the wiki generates cl
 ## Adding a reusable workflow: checklist
 
 1. Start from `contents: read` at the top; give **each job** its own `permissions:`, a `timeout-minutes`, and
-   the self-hosted guard as the **first step**, then harden-runner as the third (`disable-sudo: true`).
+   harden-runner as the **first step** (`disable-sudo: true`).
 2. Pin every action to a **commit SHA** with a `# vX.Y.Z` comment.
 3. Every checkout sets `persist-credentials: false`.
 4. Pass anything untrusted (and every caller-supplied command) through `env:`, never `${{ }}` in `run:`.

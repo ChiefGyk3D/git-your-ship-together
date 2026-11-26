@@ -59,7 +59,7 @@ before `plan-command` was set.
 `runs-on` is a JSON string that every job reads through `fromJSON(inputs.runs-on)`, because `runs-on` takes a string, an
 array or an object: `'"ubuntu-latest"'` (the default), `'["self-hosted","linux"]'` or `'{"group":"my-group","labels":["linux"]}'`.
 Invalid JSON fails the job at expression time. `allow-self-hosted` (default `false`) is the caller's attestation that a
-self-hosted runner is ephemeral, one job per VM, and isolated from secrets and the network. Without it, the first step of every
+self-hosted runner is ephemeral, one job per VM, and isolated from secrets and the network. Without it, a step right after harden-runner in every
 job fails on any runner that is not GitHub-hosted. With it, a self-hosted runner still takes only `push`, `schedule`,
 `workflow_dispatch`, `release` and same-repository `pull_request` events.
 

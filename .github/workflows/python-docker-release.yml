@@ -167,6 +167,14 @@ on:
         description: Appended to `allowed-endpoints`, for hosts only this repository reaches, such as an apt repository its Dockerfile adds. Same format.
         type: string
         default: ''
+      runs-on:
+        description: 'Runner for the non-matrix jobs, as a JSON string, because `runs-on` takes a string, an array or an object: `"ubuntu-24.04"`, `["self-hosted","linux"]` or `{"group":"my-group","labels":["linux"]}`. The default parses to the label these jobs always used. Invalid JSON fails the job at expression time. The per-platform build jobs keep using their GitHub-hosted matrix runners.'
+        type: string
+        default: '"ubuntu-24.04"'
+      allow-self-hosted:
+        description: 'Let these jobs run on a self-hosted runner (default false: on any runner that is not GitHub-hosted the job fails). Setting it true is the caller''s attestation that the runner is ephemeral, one job per VM, and isolated from secrets and the network. Even then a self-hosted runner takes only push, schedule, workflow_dispatch, release and same-repository pull_request events. Secret-bearing jobs belong on GitHub-hosted runners or a distinct ephemeral trusted pool.'
+        type: boolean
+        default: false
       doppler-project:
         description: Doppler project slug.
         type: string
@@ -255,6 +263,8 @@ jobs:
       egress-policy-secretless: ${{ inputs.egress-policy-secretless }}
       allowed-endpoints: ${{ inputs.allowed-endpoints }}
       extra-allowed-endpoints: ${{ inputs.extra-allowed-endpoints }}
+      runs-on: ${{ inputs.runs-on }}
+      allow-self-hosted: ${{ inputs.allow-self-hosted }}
       doppler-project: ${{ inputs.doppler-project }}
       doppler-config: ${{ inputs.doppler-config }}
       doppler-identity-id: ${{ inputs.doppler-identity-id }}

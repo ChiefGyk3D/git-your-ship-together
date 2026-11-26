@@ -199,7 +199,7 @@ in the hosted list of EX-0001, so every other runner gets `block`. On a self-hos
 a StepSecurity Enterprise subscription; without one it is a no-op, so `block` is not enforced there (verified against its
 README on 2026-11-25; the workflow header has the details).
 
-The first step of every job enforces the trust domain: on any runner that is not GitHub-hosted the job fails unless
+A step right after harden-runner in every job enforces the trust domain: on any runner that is not GitHub-hosted the job fails unless
 `allow-self-hosted: true`, which is the caller's attestation that the runner is ephemeral, one job per VM, and isolated from
 secrets and the network. Even then, a self-hosted runner takes only `push`, `schedule`, `workflow_dispatch`, `release` and
 same-repository `pull_request` events; `merge_group`, `workflow_run`, `issue_comment`, `pull_request_target`, a fork's pull
