@@ -70,15 +70,14 @@ run fetches; a `push` or `workflow_dispatch` fetches on the default branch or a 
 `doppler-trusted-refs-only` value is `true` or `false` in any casing; anything else (empty, a typo) stops the
 job and never means off.
 
-**Tags, and the residual risk.** The step trusts a tag by its name (`vN.N.N`), and when the job has a checkout
-with the default branch's remote ref and a complete (not shallow) history, it also requires the tagged commit to be in that
-history; a tag that a clean ancestry check shows not to be is refused and flagged `untrusted-tag`. A job with no checkout, a
-shallow clone (for example the default `actions/checkout` depth) or no `origin/<default branch>` ref cannot show
-it, and then only the name is checked (a notice says so). The action holds no credential to ask GitHub whether a
-tag is protected, so anyone who can push a `vN.N.N` tag can still reach a fetch from a job that cannot verify
-it. Close that with a tag protection ruleset on `v*` in the repository, and check out with `fetch-depth: 0`
-before the step if releases are cut from the default branch. A release cut from another branch is refused when
-the history is available.
+**Tags, and failing closed.** A tag is trusted only when it is named `vN.N.N` and the job has a checkout with the
+default branch's remote ref and a complete (not shallow) history that shows the tagged commit in that history. Every
+other outcome is untrusted, gets no secret and is flagged `untrusted-tag`: a clean "not an ancestor" answer, and also
+no checkout, a shallow clone (for example the default `actions/checkout` depth), no `origin/<default branch>` ref,
+a git error or any unexpected result (a notice says the tag could not be verified). **Behavior change:** a job that
+cuts releases must check out with `fetch-depth: 0` before the step, or set `doppler-trusted-refs-only` to `false` and
+accept the risk; earlier versions kept the name rule when the tag could not be verified. A tag protection ruleset on
+`v*` in the repository is still worth having.
 
 **`pull_request_target` is different.** It runs the workflow file from the base
 branch with access to secrets, and the step computes its fork check for
@@ -97,8 +96,8 @@ This repository's own tags are all that shape. A caller that releases from a
 pre-release tag does not fetch secrets on it; it fetches on the default branch
 or on a release tag.
 
-**A refused tag fails a job that asked for a secret.** When a tag is not a
-`vMAJOR.MINOR.PATCH` release tag, the decide step fetches nothing and reports
+**A refused tag fails a job that asked for a secret.** When the gate refuses a tag (an invalid shape, not an
+ancestor of the default branch, or ancestry that cannot be verified), the decide step fetches nothing and reports
 `untrusted-tag=true`. A job that was asked for a secret-backed feature then fails
 with an error naming the ref (`ref is not a vMAJOR.MINOR.PATCH release tag:
 Doppler secrets are not fetched`) instead of skipping it and staying green:

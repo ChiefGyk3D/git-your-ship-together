@@ -121,7 +121,7 @@ outputs:
     description: Which path was taken - `oidc`, `token`, or `none`.
     value: ${{ steps.mode.outputs.mode }}
   untrusted-tag:
-    description: "`true` when the ref is a tag that is not a vMAJOR.MINOR.PATCH release tag and so was refused secrets; a caller that asked for a secret-backed feature should fail on it."
+    description: "`true` whenever a tag was refused secrets by the trusted-ref gate: an invalid shape (not vMAJOR.MINOR.PATCH), not an ancestor of the default branch, or ancestry unverifiable (for example a shallow or missing checkout); a caller that asked for a secret-backed feature should fail on it."
     value: ${{ steps.mode.outputs.untrusted-tag }}
   secrets:
     description: >-
@@ -177,11 +177,13 @@ runs:
             if [ -n "$DEFAULT_BRANCH" ] && [ "$REF" = "refs/heads/$DEFAULT_BRANCH" ]; then
               trusted=true
             elif [[ "$REF" =~ ^refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-              trusted=true
-              # Best effort: refuse a tag only on a clean "not an ancestor" answer from a
-              # complete history. No checkout, a shallow clone, a missing remote ref or any
-              # git error cannot show where the tag points, so the name rule stands and a
-              # notice says the tag was not verified.
+              # Fail closed: a version tag is trusted only on one verdict, an exact "in" (a
+              # complete history that shows the tagged commit in the default branch). Every
+              # other outcome is untrusted: not an ancestor, no checkout, a shallow clone, a
+              # missing remote ref, any git error or exit status, or an empty or unexpected
+              # verdict. A notice says why an unverifiable tag got no secrets. With the gate
+              # off nothing is checked and the ref is not gated.
+              trusted=false
               if [ "$TRUSTED_ONLY" = "true" ]; then
                 verdict=unknown
                 if [ -n "$DEFAULT_BRANCH" ] && [ -n "${GITHUB_WORKSPACE:-}" ] && [ -n "${GITHUB_SHA:-}" ] \
@@ -196,9 +198,14 @@ runs:
                   esac
                 fi
                 case "$verdict" in
+                  in) trusted=true ;;
                   out) trusted=false ;;
-                  unknown) echo "::notice title=Doppler::tag $REF not verified against the default branch history (no checkout, incomplete history or git error); only its name was checked" ;;
+                  *)
+                    trusted=false
+                    echo "::notice title=Doppler::tag $REF could not be verified against the default branch history (no checkout, incomplete history or git error), so it is untrusted and gets no secrets; fetch full history (fetch-depth: 0) or set trusted-refs-only to false" ;;
                 esac
+              else
+                trusted=true
               fi
             fi ;;
           *) trusted=false ;;
