@@ -5,6 +5,10 @@ name what a caller sees after that.
 
 ## Unreleased
 
+### Added: a Dependabot template with the 7-day cooldown, and an audit that reads the value (issue #445)
+
+`examples/dependabot-template.yml` is a `dependabot.yml` for a new repository with GitHub Actions, pip, docker, npm and gomod entries, each with `cooldown: default-days: 7`. The weekly audit's `dependabot-config` check used to look for the word `cooldown`; it now parses the file and fails a repository whose update entry has no cooldown, no `default-days`, or a `default-days` or `semver-*-days` under 7 (the failure names the ecosystem and value). A cooldown never delays a Dependabot security update. `examples/dependabot-gyst.yml` moved from a 2-day to a 7-day cooldown to match, so a repository that copied it will now fail the audit until it re-copies the value.
+
 ### Fixed: failed Semgrep scans show safe finding locations (issue #435)
 
 A Semgrep finding now prints at most 100 compact lines to the job log and job summary after the scan. Each line contains only the rule id, file, start line and severity, with control characters escaped. Matched code, messages and snippets are never printed. A redacted JSON report containing only those four fields for at most 100 findings is retained for 5 days in the `semgrep-findings` artifact, including when the scan fails or Advanced Security is unavailable. The raw SARIF stays local to the job except for the existing code scanning upload when enabled. The scan still owns the job outcome, with no masked exit code.

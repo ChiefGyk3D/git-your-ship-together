@@ -992,3 +992,93 @@ def test_an_org_that_allows_all_actions_with_no_repository_audited_does_not_pass
     answers[f"/orgs/{ORG}/actions/permissions"] = (200, {"allowed_actions": "all"})
     status, _ = by_check(audit.audit_org(ORG, fetcher(answers), {}, []))["org-actions-policy"]
     assert status == audit.FAIL
+
+
+# --- the Dependabot cooldown value --------------------------------------------
+
+DEPENDABOT_PATH = f"/repos/{REPO_NAME}/contents/.github/dependabot.yml"
+
+
+def cooldown_entry(ecosystem: str, cooldown: str | None) -> str:
+    text = f"  - package-ecosystem: {ecosystem}\n    directory: /\n"
+    return text if cooldown is None else text + f"    cooldown:\n{cooldown}"
+
+
+def dependabot_check(*entries: str) -> tuple[str, str]:
+    answers = good_answers()
+    answers[DEPENDABOT_PATH] = (200, encoded("version: 2\nupdates:\n" + "".join(entries)))
+    return by_check(audit.audit_repo(REPO_NAME, fetcher(answers)))["dependabot-config"]
+
+
+def test_a_cooldown_of_seven_days_or_more_on_every_ecosystem_passes():
+    status, detail = dependabot_check(
+        cooldown_entry("github-actions", "      default-days: 7\n"),
+        cooldown_entry("npm", "      default-days: 30\n      semver-major-days: 14\n"),
+        cooldown_entry("gomod", "      default-days: 7\n"),
+    )
+    assert status == audit.PASS, detail
+    assert "7 days" in detail
+
+
+def test_a_cooldown_under_seven_days_fails_and_names_the_ecosystem_and_value():
+    status, detail = dependabot_check(
+        cooldown_entry("github-actions", "      default-days: 7\n"),
+        cooldown_entry("docker", "      default-days: 2\n"),
+    )
+    assert status == audit.FAIL
+    assert "docker" in detail and "default-days is 2" in detail and "github-actions" not in detail
+
+
+def test_one_ecosystem_without_a_cooldown_fails_even_when_another_has_one():
+    status, detail = dependabot_check(cooldown_entry("pip", "      default-days: 7\n"), cooldown_entry("npm", None))
+    assert status == audit.FAIL
+    assert "npm" in detail and "no cooldown" in detail
+
+
+def test_a_short_semver_override_or_a_missing_default_fails():
+    status, detail = dependabot_check(cooldown_entry("pip", "      default-days: 7\n      semver-patch-days: 1\n"))
+    assert status == audit.FAIL and "semver-patch-days is 1" in detail
+    status, detail = dependabot_check(cooldown_entry("pip", "      semver-major-days: 10\n"))
+    assert status == audit.FAIL and "no default-days" in detail
+
+
+def test_a_cooldown_that_is_not_a_whole_number_of_days_fails():
+    for value in ('"7"', "7.5", "true"):
+        status, detail = dependabot_check(cooldown_entry("pip", f"      default-days: {value}\n"))
+        assert status == audit.FAIL, value
+        assert "whole number" in detail
+
+
+def test_a_dependabot_yml_with_no_update_entries_or_unparseable_is_not_a_pass():
+    answers = good_answers()
+    answers[DEPENDABOT_PATH] = (200, encoded("version: 2\nupdates: []\n"))
+    assert by_check(audit.audit_repo(REPO_NAME, fetcher(answers)))["dependabot-config"][0] == audit.FAIL
+    answers[DEPENDABOT_PATH] = (200, encoded("updates: [unclosed\n"))
+    assert by_check(audit.audit_repo(REPO_NAME, fetcher(answers)))["dependabot-config"][0] == audit.UNKNOWN
+
+
+def test_a_failing_cooldown_gives_exit_code_one_through_the_report_convention():
+    results = audit.audit_repo(REPO_NAME, fetcher(_answers_with_cooldown(3)))
+    assert audit.exit_code(results, allow_unknown=False) == 1
+
+
+def _answers_with_cooldown(days: int) -> dict:
+    answers = good_answers()
+    answers[DEPENDABOT_PATH] = (
+        200,
+        encoded("version: 2\nupdates:\n" + cooldown_entry("pip", f"      default-days: {days}\n")),
+    )
+    return answers
+
+
+def test_the_templates_hold_a_seven_day_cooldown_on_every_ecosystem_the_audit_reads():
+    import yaml
+
+    for name in ("dependabot-template.yml", "dependabot-gyst.yml"):
+        text = (REPO / "examples" / name).read_text()
+        assert audit.cooldown_problems(yaml.safe_load(text)) == [], name
+    template = yaml.safe_load((REPO / "examples" / "dependabot-template.yml").read_text())
+    assert {u["package-ecosystem"] for u in template["updates"]} >= {"github-actions", "pip", "docker", "npm", "gomod"}
+    answers = good_answers()
+    answers[DEPENDABOT_PATH] = (200, encoded((REPO / "examples" / "dependabot-template.yml").read_text()))
+    assert by_check(audit.audit_repo(REPO_NAME, fetcher(answers)))["dependabot-config"][0] == audit.PASS

@@ -190,6 +190,16 @@ header. A repository whose root `requirements.txt` or `requirements-dev.txt`
 carries that header, with a `pip` entry for `/` in `dependabot.yml` or no
 `dependabot.yml` at all, fails.
 
+**Dependabot holds a new release for seven days.** The owner rule is to pin
+every dependency and hold a new release at least 7 days before merging it, in
+case it was compromised, and the `cooldown` of `dependabot.yml` is how that is
+enforced. `dependabot-config` reads the value, not just the key: it fails when
+the file is missing, when an update entry for any ecosystem has no `cooldown`,
+when `default-days` is absent or under 7, or when a `semver-*-days` override
+is under 7. The cooldown applies to version updates only, so it never delays a
+Dependabot security update. `examples/dependabot-template.yml` is the starting
+point (GitHub Actions, pip, docker, npm and gomod).
+
 Checked: `workflows-pinned`, `uses-shared-workflows`, `dependabot-config`,
 `dependabot-ecosystem`. The
 harden-runner, permissions and injection rules are properties of the shared

@@ -546,16 +546,71 @@ def format_expiring(entries: list[dict]) -> list[str]:
     return lines
 
 
+# The owner rule: a new release is held at least this many days before it is proposed.
+MIN_COOLDOWN_DAYS = 7
+COOLDOWN_KEYS = ("default-days", "semver-major-days", "semver-minor-days", "semver-patch-days")
+
+
+def cooldown_problems(config: object) -> list[str]:
+    """What is wrong with the cooldown of each update entry in a parsed dependabot.yml.
+
+    An entry needs `default-days` of at least MIN_COOLDOWN_DAYS, and a
+    `semver-*-days` override may not undercut it either: an override replaces
+    the default for that kind of bump, so a short one is a short cooldown.
+    """
+    updates = config.get("updates") if isinstance(config, dict) else None
+    if not isinstance(updates, list) or not updates:
+        return ["dependabot.yml has no update entries"]
+    problems = []
+    for index, entry in enumerate(updates):
+        label = "an update entry"
+        if isinstance(entry, dict):
+            where = entry.get("directory") or entry.get("directories") or "/"
+            label = f"{entry.get('package-ecosystem', 'an entry')} in {where}"
+        else:
+            problems.append(f"{label} (#{index + 1}) is not a mapping")
+            continue
+        cooldown = entry.get("cooldown")
+        if not isinstance(cooldown, dict):
+            problems.append(f"{label} has no cooldown")
+            continue
+        for key in COOLDOWN_KEYS:
+            if key not in cooldown:
+                continue
+            value = cooldown[key]
+            if isinstance(value, bool) or not isinstance(value, int):
+                problems.append(f"{label}: cooldown {key} is not a whole number of days")
+            elif value < MIN_COOLDOWN_DAYS:
+                problems.append(f"{label}: cooldown {key} is {value}, under {MIN_COOLDOWN_DAYS}")
+        if "default-days" not in cooldown:
+            problems.append(f"{label}: cooldown has no default-days")
+    return problems
+
+
 def check_dependabot(repo: str, fetch: Fetcher) -> Result:
     code, file = fetch(f"/repos/{repo}/contents/.github/dependabot.yml")
     if code == 404:
         return Result(repo, "dependabot-config", FAIL, "no .github/dependabot.yml")
     if code != 200 or not isinstance(file, dict) or "content" not in file:
         return Result(repo, "dependabot-config", UNKNOWN, unreadable(code, file))
-    text = base64.b64decode(file["content"]).decode()
-    if "cooldown" not in text:
-        return Result(repo, "dependabot-config", FAIL, "dependabot.yml has no cooldown")
-    return Result(repo, "dependabot-config", PASS, "present, with a cooldown")
+    try:
+        import yaml
+    except ImportError:
+        sys.exit("reading dependabot.yml needs PyYAML: pip install -r requirements-dev.txt")
+    try:
+        config = yaml.safe_load(base64.b64decode(file["content"]).decode())
+    except (ValueError, yaml.YAMLError):
+        return Result(repo, "dependabot-config", UNKNOWN, "dependabot.yml could not be parsed")
+    problems = cooldown_problems(config)
+    if problems:
+        return Result(
+            repo,
+            "dependabot-config",
+            FAIL,
+            "; ".join(problems) + f"; every ecosystem needs cooldown default-days of {MIN_COOLDOWN_DAYS} or more "
+            "(examples/dependabot-template.yml)",
+        )
+    return Result(repo, "dependabot-config", PASS, f"every ecosystem holds a release at least {MIN_COOLDOWN_DAYS} days")
 
 
 def check_pre_commit_hook(repo: str, fetch: Fetcher) -> Result:
