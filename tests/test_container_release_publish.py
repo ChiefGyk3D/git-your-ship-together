@@ -105,6 +105,7 @@ COSIGN_STUB = (
     'n=$(grep -c "^cosign $sub " "$STUB/calls")\n'
     'f="$STUB/$sub.$n"; [ -f "$f.rc" ] || f="$STUB/$sub.default"\n'
     '[ -f "$f.out" ] && cat "$f.out"\n'
+    '[ -f "$f.err" ] && cat "$f.err" >&2\n'
     '[ -f "$f.rc" ] && exit "$(cat "$f.rc")"\n'
     "exit 0\n"
 )
@@ -162,6 +163,12 @@ def make_stubs(tmp_path: Path) -> Path:
 def script(stub: Path, sub: str, n: str, rc: int, out: str = "") -> None:
     (stub / f"{sub}.{n}.rc").write_text(str(rc))
     (stub / f"{sub}.{n}.out").write_text(out + ("\n" if out else ""))
+
+
+def script_err(stub: Path, sub: str, n: str, rc: int, err: str) -> None:
+    """Like script(), but the message goes to stderr, where cosign prints its errors."""
+    (stub / f"{sub}.{n}.rc").write_text(str(rc))
+    (stub / f"{sub}.{n}.err").write_text(err + "\n")
 
 
 def calls(stub: Path, prefix: str) -> list[str]:
@@ -372,6 +379,93 @@ def test_a_failed_final_verify_fails_the_step_so_the_tags_never_move(tmp_path, s
     assert "if" not in step(PUBLISH) or "always()" not in str(step(PUBLISH)["if"]), (
         "publish must not run after a failure"
     )
+
+
+# --- the final verify retries only "not visible yet" (issue #452) -----------
+
+
+def test_a_signature_the_registry_serves_late_is_retried_then_verifies(tmp_path, stub):
+    script_err(stub, "verify", "1", 1, "Error: no signatures found")
+    script_err(stub, "verify", "2", 1, "Error: no signatures found")
+    done = run_step(tmp_path, VERIFY, stub, SIGN="true", SBOM="false", DOCKERHUB="")
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert len(calls(stub, "cosign verify ")) == 3
+    assert "signature verified" in done.stdout
+
+
+def test_an_attestation_the_registry_serves_late_is_retried(tmp_path, stub):
+    script_err(stub, "verify-attestation", "1", 1, "Error: no attestations found")
+    done = run_step(tmp_path, VERIFY, stub, SIGN="false", SBOM="true", DOCKERHUB="")
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert len(calls(stub, "cosign verify-attestation")) == 2
+
+
+def test_a_transient_registry_error_is_retried(tmp_path, stub):
+    script_err(stub, "verify", "1", 1, "Error: GET https://registry: unexpected status code 503")
+    done = run_step(tmp_path, VERIFY, stub, SIGN="true", SBOM="false", DOCKERHUB="")
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert len(calls(stub, "cosign verify ")) == 2
+
+
+def test_the_verify_retry_is_bounded_and_fails_closed(tmp_path, stub):
+    script_err(stub, "verify", "default", 1, "Error: no signatures found")
+    done = run_step(tmp_path, VERIFY, stub, SIGN="true", SBOM="false", DOCKERHUB="")
+    assert done.returncode != 0
+    assert len(calls(stub, "cosign verify ")) == 4, "4 attempts in all, never more"
+    assert "::error title=verify::the signature of ghcr.io/o/r" in done.stdout
+
+
+def test_the_attestation_verify_retry_is_bounded_and_fails_closed(tmp_path, stub):
+    script_err(stub, "verify-attestation", "default", 1, "Error: no attestations found")
+    done = run_step(tmp_path, VERIFY, stub, SIGN="false", SBOM="true", DOCKERHUB="")
+    assert done.returncode != 0
+    assert len(calls(stub, "cosign verify-attestation")) == 4
+    assert "::error title=verify::the SBOM attestation" in done.stdout
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Error: none of the expected identities matched what was in the certificate",
+        "Error: no matching signatures: signature not valid",
+        "Error: no matching attestations",
+        "Error: certificate-oidc-issuer mismatch",
+        "Error: signature verification failed",
+    ],
+)
+def test_a_verification_failure_is_never_retried(tmp_path, stub, message):
+    script_err(stub, "verify", "default", 1, message)
+    done = run_step(tmp_path, VERIFY, stub, SIGN="true", SBOM="false", DOCKERHUB="")
+    assert done.returncode != 0
+    assert len(calls(stub, "cosign verify ")) == 1
+
+
+def test_a_failed_attestation_verification_is_never_retried(tmp_path, stub):
+    script_err(stub, "verify-attestation", "default", 1, "Error: none of the expected identities matched")
+    done = run_step(tmp_path, VERIFY, stub, SIGN="false", SBOM="true", DOCKERHUB="")
+    assert done.returncode != 0
+    assert len(calls(stub, "cosign verify-attestation")) == 1
+
+
+def test_every_verify_attempt_carries_the_same_constraints(tmp_path, stub):
+    script_err(stub, "verify", "1", 1, "Error: no signatures found")
+    script_err(stub, "verify", "2", 1, "Error: no signatures found")
+    done = run_step(tmp_path, VERIFY, stub, SIGN="true", SBOM="false", DOCKERHUB="")
+    assert done.returncode == 0, done.stdout + done.stderr
+    lines = calls(stub, "cosign verify ")
+    assert len(lines) == 3 and len(set(lines)) == 1
+    assert f"--certificate-identity-regexp {IDENTITY}" in lines[0]
+    assert f"--certificate-github-workflow-sha {SHA}" in lines[0]
+
+
+def test_a_missing_docker_hub_signature_fails_after_ghcr_verified(tmp_path, stub):
+    script_err(stub, "verify", "2", 1, "Error: no signatures found")
+    script_err(stub, "verify", "3", 1, "Error: no signatures found")
+    script_err(stub, "verify", "4", 1, "Error: no signatures found")
+    script_err(stub, "verify", "5", 1, "Error: no signatures found")
+    done = run_step(tmp_path, VERIFY, stub, SIGN="true", SBOM="false")
+    assert done.returncode != 0
+    assert len(calls(stub, "cosign verify ")) == 5, "one ghcr call, then 4 bounded Docker Hub attempts"
 
 
 # --- the Rekor retry matcher covers every 5xx --------------------------------

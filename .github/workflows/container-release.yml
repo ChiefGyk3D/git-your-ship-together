@@ -2089,9 +2089,41 @@ jobs:
           fi
           images=("$GHCR")
           if [ -n "$DOCKERHUB" ]; then images+=("$DOCKERHUB"); fi
+          # A registry can serve a just-written signature late. One bounded
+          # retry: 4 attempts in all, waiting 5, 10 and 20 seconds (35 seconds
+          # at most, far inside the job timeout). Only "not visible yet" is
+          # retried: no signatures found, no attestations found, and a
+          # transient registry error (HTTP 408, 425, 429 and every 5xx, a
+          # timeout, a reset connection). Every attempt carries the same
+          # identity, issuer, repository and commit constraints. A signature
+          # that is found and does not verify, or any other error, fails on
+          # the first attempt, and the last attempt failing fails the step.
+          not_visible_yet() {
+            grep -Eqi 'no signatures found|no attestations found|(^|[ :[(])(408|425|429|5[0-9]{2})( |]|\)|$)|context deadline exceeded|i/o timeout|timed out|connection reset|connection refused|temporarily unavailable|unexpected EOF|TLS handshake timeout' <<< "$1"
+          }
+          verify_retry() {
+            local n=1 rc errf err delay
+            while :; do
+              rc=0
+              errf="$(mktemp)"
+              "$@" 2> "$errf" || rc=$?
+              err="$(< "$errf")"
+              rm -f "$errf"
+              if [ -n "$err" ]; then printf '%s\n' "$err" >&2; fi
+              if [ "$rc" -eq 0 ]; then return 0; fi
+              if not_visible_yet "$err" && [ "$n" -lt 4 ]; then
+                delay=$(( ${REGISTRY_BACKOFF_SECONDS:-5} * (1 << (n - 1)) ))
+                echo "::warning title=verify retry::attempt ${n} of 4 of '$1 $2' did not find the signature yet; retrying in ${delay}s" >&2
+                sleep "$delay"
+                n=$((n + 1))
+                continue
+              fi
+              return "$rc"
+            done
+          }
           for image in "${images[@]}"; do
             if [ "$SIGN" = "true" ]; then
-              if ! cosign verify "${image}@${DIGEST}" \
+              if ! verify_retry cosign verify "${image}@${DIGEST}" \
                 --certificate-identity-regexp "$IDENTITY_REGEXP" \
                 --certificate-oidc-issuer "$OIDC_ISSUER" \
                 --certificate-github-workflow-repository "$SOURCE_REPOSITORY" \
@@ -2102,7 +2134,7 @@ jobs:
               echo "signature verified: ${image}@${DIGEST}"
             fi
             if [ "$SBOM" = "true" ]; then
-              if ! cosign verify-attestation --type spdxjson "${image}@${DIGEST}" \
+              if ! verify_retry cosign verify-attestation --type spdxjson "${image}@${DIGEST}" \
                 --certificate-identity-regexp "$IDENTITY_REGEXP" \
                 --certificate-oidc-issuer "$OIDC_ISSUER" \
                 --certificate-github-workflow-repository "$SOURCE_REPOSITORY" \
