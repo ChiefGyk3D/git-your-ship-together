@@ -201,7 +201,16 @@ Dependabot security update. The file must also say `version: 2`, and every
 update entry needs a `package-ecosystem` of the right shape (lower-case name,
 not checked against GitHub's list, which grows). The contents answer must be
 a whole regular file at that path, so a symlink, submodule or truncated read
-is UNKNOWN. The audit's API calls refuse every redirect, so the token never
+is UNKNOWN. A cooldown may not exempt anything: a non-empty `exclude` fails, and
+`include` must be absent or exactly `["*"]`. The same ecosystem and directory
+twice in one file fails, because GitHub rejects it. An ecosystem name outside
+the `KNOWN_ECOSYSTEMS` constant in `scripts/audit_baseline.py` (add a name there
+when GitHub adds one) is a note beside the PASS, never a failure, so a stale
+list cannot fail a good repository. The contents answer must carry an integer
+`size` equal to the strictly decoded length. A transport failure (DNS, TLS,
+reset, timeout) is UNKNOWN, not a crash; timeouts, 429 and 500, 502, 503 and
+504 are tried up to three times with short waits and a `Retry-After` capped at
+ten seconds. The audit's API calls refuse every redirect, so the token never
 follows one to another host. `examples/dependabot-template.yml` is the starting
 point (GitHub Actions, pip, docker, npm and gomod).
 

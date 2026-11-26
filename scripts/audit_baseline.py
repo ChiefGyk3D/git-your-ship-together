@@ -31,11 +31,13 @@ from __future__ import annotations
 import argparse
 import base64
 import datetime as dt
+import http.client
 import json
 import os
 import re
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
@@ -91,8 +93,29 @@ class _NoRedirects(urllib.request.HTTPRedirectHandler):
 _OPENER = urllib.request.build_opener(_NoRedirects)
 
 
+FETCH_ATTEMPTS = 3
+RETRY_WAITS = (1.0, 2.0)  # between attempts; a Retry-After header may lengthen one, never past the cap
+RETRY_AFTER_CAP = 10.0
+RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+_sleep = time.sleep
+
+
+def _retry_wait(attempt: int, headers: object) -> float:
+    wait = RETRY_WAITS[min(attempt, len(RETRY_WAITS) - 1)]
+    value = getattr(headers, "get", lambda _name: None)("Retry-After")
+    if isinstance(value, str) and value.strip().isdigit():
+        wait = max(wait, float(value.strip()))
+    return min(wait, RETRY_AFTER_CAP)
+
+
+def _is_timeout(err: BaseException) -> bool:
+    return isinstance(err, TimeoutError) or (
+        isinstance(err, urllib.error.URLError) and isinstance(err.reason, TimeoutError)
+    )
+
+
 def github_fetcher(token: str) -> Fetcher:
-    def fetch(path: str) -> tuple[int, dict | list]:
+    def once(path: str) -> tuple[int, dict | list, object]:
         req = urllib.request.Request(
             API + path,
             headers={
@@ -101,18 +124,38 @@ def github_fetcher(token: str) -> Fetcher:
                 "X-GitHub-Api-Version": "2022-11-28",
             },
         )
-        try:
-            with _OPENER.open(req, timeout=30) as resp:
-                raw = resp.read()
-                return resp.status, (json.loads(raw) if raw else {})
-        except urllib.error.HTTPError as err:
-            if 300 <= err.code < 400:  # a refused redirect: say so, never echo what the other side sent
-                return err.code, {"message": "redirect refused"}
-            raw = err.read()
+        with _OPENER.open(req, timeout=30) as resp:
+            raw = resp.read()
+            return resp.status, (json.loads(raw) if raw else {}), resp.headers
+
+    def fetch(path: str) -> tuple[int, dict | list]:
+        for attempt in range(FETCH_ATTEMPTS):
+            last = attempt == FETCH_ATTEMPTS - 1
             try:
-                return err.code, json.loads(raw) if raw else {}
-            except json.JSONDecodeError:
-                return err.code, {"message": raw.decode(errors="replace")[:200]}
+                code, body, _ = once(path)
+                return code, body
+            except urllib.error.HTTPError as err:
+                if 300 <= err.code < 400:  # a refused redirect: say so, never echo what the other side sent
+                    return err.code, {"message": "redirect refused"}
+                if err.code in RETRYABLE_STATUS and not last:
+                    _sleep(_retry_wait(attempt, err.headers))
+                    continue
+                raw = err.read()
+                try:
+                    body = json.loads(raw) if raw else {}
+                except json.JSONDecodeError:
+                    body = {"message": raw.decode(errors="replace")[:200]}
+                if token and isinstance(body, dict) and isinstance(body.get("message"), str):
+                    body["message"] = body["message"].replace(token, "***")  # a server that echoes the token
+                return err.code, body
+            except (OSError, http.client.HTTPException, ValueError) as err:
+                # DNS, TLS, reset, timeout, or a 200 that is not JSON. The exception text can hold the
+                # request, so only its class is reported, as a status no real answer uses.
+                if _is_timeout(err) and not last:
+                    _sleep(_retry_wait(attempt, None))
+                    continue
+                return 599, {"message": f"transport error: {type(err).__name__}"}
+        return 599, {"message": "transport error"}  # unreachable; keeps the type checker honest
 
     return fetch
 
@@ -562,6 +605,13 @@ def format_expiring(entries: list[dict]) -> list[str]:
 MIN_COOLDOWN_DAYS = 7
 # GitHub's list of ecosystems grows, so a name is checked for shape, not against a copy of that list.
 ECOSYSTEM_NAME = re.compile(r"[a-z][a-z0-9-]{0,39}")
+# The ecosystems Dependabot documents, for a note only: a name outside this set is reported beside a PASS and
+# never fails, so a stale copy cannot fail a good repository. Add a name here when GitHub adds one.
+KNOWN_ECOSYSTEMS = frozenset(
+    "bazel bun bundler cargo composer conda devcontainers docker docker-compose dotnet-sdk elm github-actions "
+    "gitsubmodule gomod gradle helm julia maven mix npm nuget opentofu pip pub rust-toolchain swift terraform uv "
+    "vcpkg".split()
+)
 COOLDOWN_KEYS = ("default-days", "semver-major-days", "semver-minor-days", "semver-patch-days")
 
 
@@ -649,6 +699,7 @@ def cooldown_problems(config: object) -> list[str]:
     if not isinstance(updates, list) or not updates:
         return ["dependabot.yml has no update entries"]
     problems = []
+    seen: set[tuple[str, str]] = set()
     version = config.get("version")
     if type(version) is not int or version != 2:
         problems.append("dependabot.yml does not say `version: 2`")
@@ -676,25 +727,64 @@ def cooldown_problems(config: object) -> list[str]:
                 problems.append(f"{label}: cooldown {key} is {value}, under {MIN_COOLDOWN_DAYS}")
         if "default-days" not in cooldown:
             problems.append(f"{label}: cooldown has no default-days")
+        if "exclude" in cooldown:
+            exclude = cooldown["exclude"]
+            if not _list_of_str(exclude):
+                problems.append(f"{label}: cooldown exclude is not a list of names")
+            elif exclude:
+                problems.append(f"{label}: cooldown exclude exempts dependencies from the cooldown")
+        if "include" in cooldown:
+            include = cooldown["include"]
+            if not _list_of_str(include):
+                problems.append(f"{label}: cooldown include is not a list of names")
+            elif include != ["*"]:
+                problems.append(
+                    f'{label}: cooldown include limits the cooldown to some dependencies; use ["*"] or omit it'
+                )
+        targets = entry.get("directories") if "directories" in entry else [entry.get("directory", "/")]
+        for target in targets if isinstance(targets, list) else []:
+            if type(target) is str:
+                if (ecosystem, target) in seen:
+                    problems.append(f"{ecosystem} in {shown(target)} is configured twice; GitHub rejects that")
+                seen.add((ecosystem, target))
     return problems
 
 
-def is_plain_file(file: object, path: str) -> bool:
-    """Whether a Contents API answer is the regular file asked for, whole: not a symlink, submodule or truncated."""
+def _list_of_str(value: object) -> bool:
+    return type(value) is list and all(type(item) is str for item in value)
+
+
+def unlisted_ecosystems(config: object) -> list[str]:
+    """Ecosystem names that are well-formed but not in KNOWN_ECOSYSTEMS: a note, never a failure."""
+    updates = config.get("updates") if isinstance(config, dict) else None
+    names = {
+        entry["package-ecosystem"]
+        for entry in updates or []
+        if isinstance(entry, dict)
+        and type(entry.get("package-ecosystem")) is str
+        and ECOSYSTEM_NAME.fullmatch(entry["package-ecosystem"])
+    }
+    return sorted(names - KNOWN_ECOSYSTEMS)
+
+
+def plain_file_bytes(file: object, path: str) -> bytes | None:
+    """The bytes of a Contents API answer that is the regular file asked for, whole; None for anything else.
+
+    Not a symlink, submodule or directory; strict base64 (no ignored characters); and the decoded length
+    equals the `size` the API reported, so a truncated read is refused. The caller parses these same bytes.
+    """
     if not isinstance(file, dict):
-        return False
+        return None
     if file.get("type") != "file" or file.get("encoding") != "base64" or file.get("path") != path:
-        return False
-    content = file.get("content")
-    if type(content) is not str:
-        return False
-    size = file.get("size")
-    if type(size) is int:
-        try:
-            return len(base64.b64decode(content)) == size
-        except ValueError:
-            return False
-    return True
+        return None
+    content, size = file.get("content"), file.get("size")
+    if type(content) is not str or type(size) is not int:
+        return None
+    try:
+        raw = base64.b64decode(content.replace("\n", ""), validate=True)
+    except ValueError:
+        return None
+    return raw if len(raw) == size else None
 
 
 def check_dependabot(repo: str, fetch: Fetcher) -> Result:
@@ -703,14 +793,16 @@ def check_dependabot(repo: str, fetch: Fetcher) -> Result:
         return Result(repo, "dependabot-config", FAIL, "no .github/dependabot.yml")
     if code != 200 or not isinstance(file, dict) or "content" not in file:
         return Result(repo, "dependabot-config", UNKNOWN, unreadable(code, file))
-    if not is_plain_file(file, ".github/dependabot.yml"):
+    raw = plain_file_bytes(file, ".github/dependabot.yml")
+    if raw is None:
         return Result(repo, "dependabot-config", UNKNOWN, "the contents answer is not a plain base64 file")
     try:
         import yaml  # noqa: F401
     except ImportError:
         sys.exit("reading dependabot.yml needs PyYAML: pip install -r requirements-dev.txt")
     try:
-        problems = cooldown_problems(load_dependabot(base64.b64decode(file["content"])))
+        config = load_dependabot(raw)
+        problems = cooldown_problems(config)
     except Exception as err:  # a hostile or broken file is "could not tell", never a pass and never a crash
         return Result(repo, "dependabot-config", UNKNOWN, f"dependabot.yml was not read: {type(err).__name__}")
     if problems:
@@ -721,7 +813,10 @@ def check_dependabot(repo: str, fetch: Fetcher) -> Result:
             "; ".join(problems) + f"; every ecosystem needs cooldown default-days of {MIN_COOLDOWN_DAYS} or more "
             "(examples/dependabot-template.yml)",
         )
-    return Result(repo, "dependabot-config", PASS, f"every ecosystem holds a release at least {MIN_COOLDOWN_DAYS} days")
+    detail = f"every ecosystem holds a release at least {MIN_COOLDOWN_DAYS} days"
+    if unlisted := unlisted_ecosystems(config):
+        detail += f"; note: {', '.join(unlisted)} not in the known ecosystem list (KNOWN_ECOSYSTEMS)"
+    return Result(repo, "dependabot-config", PASS, detail)
 
 
 def check_pre_commit_hook(repo: str, fetch: Fetcher) -> Result:

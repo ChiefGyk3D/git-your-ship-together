@@ -1302,3 +1302,181 @@ def test_a_refused_redirect_reads_as_unknown_in_the_check():
     answers[DEPENDABOT_PATH] = (302, {"message": "redirect refused"})
     status, detail = by_check(audit.audit_repo(REPO_NAME, fetcher(answers)))["dependabot-config"]
     assert status == audit.UNKNOWN and "302" in detail
+
+
+# --- round 3: scope exemptions, transport errors, strict file, duplicates ------------
+
+
+def scoped(extra: str) -> str:
+    return "version: 2\nupdates:\n" + cooldown_entry("pip", "      default-days: 7\n" + extra)
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        '      exclude: ["*"]\n',
+        "      exclude: [left-pad]\n",
+        "      include: [one-dependency]\n",
+        "      include: []\n",
+        "      include: [1, 2]\n",
+        "      include: everything\n",
+        "      exclude: {a: b}\n",
+        "      exclude: nope\n",
+        '      include: ["*", extra]\n',
+    ],
+)
+def test_a_cooldown_that_exempts_or_narrows_its_scope_fails(extra):
+    status, detail = dependabot_check_text(scoped(extra))
+    assert status == audit.FAIL, detail
+    assert "exclude" in detail or "include" in detail
+
+
+@pytest.mark.parametrize("extra", ["", '      include: ["*"]\n', "      exclude: []\n"])
+def test_a_cooldown_with_the_full_scope_still_passes(extra):
+    assert dependabot_check_text(scoped(extra))[0] == audit.PASS
+
+
+def test_duplicate_ecosystem_and_directory_entries_fail_and_distinct_ones_pass():
+    one = "  - package-ecosystem: pip\n    directory: /{d}\n    cooldown:\n      default-days: 7\n"
+    status, detail = dependabot_check_text("version: 2\nupdates:\n" + one.format(d="") * 2)
+    assert status == audit.FAIL and "twice" in detail
+    assert dependabot_check_text("version: 2\nupdates:\n" + one.format(d="") + one.format(d="docs"))[0] == audit.PASS
+    both = "  - package-ecosystem: npm\n    directories: [/a, /a]\n    cooldown:\n      default-days: 7\n"
+    assert dependabot_check_text("version: 2\nupdates:\n" + both)[0] == audit.FAIL
+
+
+def test_an_ecosystem_outside_the_known_list_is_a_note_beside_a_pass_not_a_failure():
+    text = "version: 2\nupdates:\n" + GOOD_ENTRY.replace("pip", "brand-new")
+    status, detail = dependabot_check_text(text)
+    assert status == audit.PASS
+    assert "brand-new" in detail and "KNOWN_ECOSYSTEMS" in detail
+    assert "note" not in dependabot_check_text("version: 2\nupdates:\n" + GOOD_ENTRY)[1]
+    assert {"pip", "npm", "gomod", "docker", "github-actions", "uv"} <= audit.KNOWN_ECOSYSTEMS
+
+
+@pytest.mark.parametrize("size", ["missing", "7", True, 7.0, None])
+def test_a_contents_answer_without_an_integer_size_is_unknown(size):
+    file = dep_file("version: 2\nupdates:\n" + GOOD_ENTRY)
+    if size == "missing":
+        del file["size"]
+    elif isinstance(size, float):
+        file["size"] = float(file["size"])  # equal to the length, but not an int
+    elif size == "7":
+        file["size"] = str(file["size"])
+    else:
+        file["size"] = size
+    answers = good_answers()
+    answers[DEPENDABOT_PATH] = (200, file)
+    assert by_check(audit.audit_repo(REPO_NAME, fetcher(answers)))["dependabot-config"][0] == audit.UNKNOWN
+
+
+def test_base64_with_ignored_garbage_is_unknown_but_the_apis_own_line_wrapping_passes():
+    text = "version: 2\nupdates:\n" + GOOD_ENTRY
+    file = dep_file(text)
+    answers = good_answers()
+    answers[DEPENDABOT_PATH] = (200, {**file, "content": "!!!" + file["content"]})
+    assert by_check(audit.audit_repo(REPO_NAME, fetcher(answers)))["dependabot-config"][0] == audit.UNKNOWN
+    answers[DEPENDABOT_PATH] = (200, {**file, "content": base64.encodebytes(text.encode()).decode()})
+    assert by_check(audit.audit_repo(REPO_NAME, fetcher(answers)))["dependabot-config"][0] == audit.PASS
+
+
+# transport errors: a stubbed opener, no network
+
+
+class _Opener:
+    def __init__(self, *outcomes):
+        self.outcomes = list(outcomes)
+        self.calls = 0
+
+    def open(self, req, timeout=None):
+        self.calls += 1
+        outcome = self.outcomes.pop(0)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+
+class _Resp:
+    status = 200
+    headers = {}
+
+    def __init__(self, body=b"{}"):
+        self.body = body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def read(self):
+        return self.body
+
+
+def _fetch_with(monkeypatch, *outcomes):
+    opener = _Opener(*outcomes)
+    waits = []
+    monkeypatch.setattr(audit, "_OPENER", opener)
+    monkeypatch.setattr(audit, "_sleep", waits.append)
+    return audit.github_fetcher("tok-secret")("/repos/o/r/contents/x"), opener, waits
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        OSError("tok-secret leaked in text"),
+        ConnectionResetError("reset"),
+        ConnectionRefusedError("refused"),
+        TimeoutError("slow"),
+        __import__("urllib.error").error.URLError("dns failure for https://api.github.com"),
+        __import__("ssl").SSLError("tls"),
+        __import__("http.client").client.RemoteDisconnected("closed"),
+        ValueError("bad"),
+    ],
+)
+def test_a_transport_failure_is_a_sanitized_599_never_an_exception(monkeypatch, error):
+    (code, body), _, _ = _fetch_with(monkeypatch, *[error] * 3)
+    assert code == 599
+    assert body == {"message": f"transport error: {type(error).__name__}"}
+    assert "tok-secret" not in str(body) and "api.github.com" not in str(body)
+
+
+def test_a_transport_failure_reads_as_unknown_in_the_check_and_the_run_goes_on():
+    answers = good_answers()
+    answers[DEPENDABOT_PATH] = (599, {"message": "transport error: URLError"})
+    results = audit.audit_repo(REPO_NAME, fetcher(answers))
+    assert by_check(results)["dependabot-config"][0] == audit.UNKNOWN
+    assert "pre-commit-hook" in by_check(results)
+
+
+def test_a_timeout_is_retried_up_to_three_attempts_then_reported(monkeypatch):
+    (code, _), opener, waits = _fetch_with(monkeypatch, TimeoutError(), TimeoutError(), TimeoutError())
+    assert code == 599 and opener.calls == 3 and waits == [1.0, 2.0]
+
+
+def test_a_timeout_then_success_returns_the_answer(monkeypatch):
+    (code, body), opener, _ = _fetch_with(monkeypatch, TimeoutError(), _Resp(b'{"ok": true}'))
+    assert (code, body, opener.calls) == (200, {"ok": True}, 2)
+
+
+def _http_error(code, headers=None):
+    import io
+    import urllib.error
+
+    return urllib.error.HTTPError("u", code, "m", headers or {}, io.BytesIO(b'{"message": "busy tok-secret"}'))
+
+
+def test_429_and_5xx_are_retried_with_a_capped_retry_after_and_403_is_not(monkeypatch):
+    (code, _), opener, waits = _fetch_with(
+        monkeypatch, _http_error(429, {"Retry-After": "9999"}), _http_error(503), _Resp(b"{}")
+    )
+    assert code == 200 and opener.calls == 3
+    assert waits == [audit.RETRY_AFTER_CAP, 2.0]
+    (code, body), opener, waits = _fetch_with(monkeypatch, _http_error(403))
+    assert code == 403 and opener.calls == 1 and waits == []
+    assert "tok-secret" not in str(body), "a server that echoes the token is redacted"
+
+
+def test_a_non_retryable_transport_error_is_not_retried(monkeypatch):
+    (code, _), opener, waits = _fetch_with(monkeypatch, ConnectionResetError("reset"))
+    assert code == 599 and opener.calls == 1 and waits == []
