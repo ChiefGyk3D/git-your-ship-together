@@ -31,6 +31,7 @@ from __future__ import annotations
 import argparse
 import base64
 import datetime as dt
+import email.utils
 import http.client
 import json
 import os
@@ -100,11 +101,62 @@ RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 _sleep = time.sleep
 
 
+_now = lambda: dt.datetime.now(dt.UTC)  # noqa: E731 - replaced by tests
+MAX_ERROR_BODY = 64 * 1024
+MAX_BODY = 4 * 1024 * 1024
+
+
+class _BodyTooLarge(ValueError):
+    pass
+
+
+def _read_capped(stream: object, cap: int) -> bytes:
+    """At most `cap` bytes of a response body; one byte more than that is an error, not a truncation."""
+    raw = stream.read(cap + 1)
+    if len(raw) > cap:
+        raise _BodyTooLarge
+    return raw
+
+
+def _error_body(err: urllib.error.HTTPError, token: str) -> dict | list:
+    """An HTTP error's body, or a fixed message naming only the class of whatever went wrong reading it."""
+    try:
+        raw = _read_capped(err, MAX_ERROR_BODY)
+        try:
+            body = json.loads(raw) if raw else {}
+        except json.JSONDecodeError:
+            body = {"message": raw.decode("utf-8")[:200]}
+    except (OSError, http.client.HTTPException, UnicodeError, ValueError) as bad:
+        return {"message": f"HTTP error body unreadable: {type(bad).__name__}"}
+    if token and isinstance(body, dict) and isinstance(body.get("message"), str):
+        body["message"] = body["message"].replace(token, "***")  # a server that echoes the token
+    return body
+
+
+def _retry_after(value: object) -> float | None:
+    """Seconds a Retry-After header asks for: ASCII delta-seconds or an HTTP date; None when it is neither."""
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    if re.fullmatch(r"[0-9]{1,6}", value):
+        return float(int(value))
+    try:
+        when = email.utils.parsedate_to_datetime(value)
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=dt.UTC)
+        return max(0.0, (when - _now()).total_seconds())
+    except Exception:  # any malformed date: the normal backoff applies
+        return None
+
+
 def _retry_wait(attempt: int, headers: object) -> float:
     wait = RETRY_WAITS[min(attempt, len(RETRY_WAITS) - 1)]
-    value = getattr(headers, "get", lambda _name: None)("Retry-After")
-    if isinstance(value, str) and value.strip().isdigit():
-        wait = max(wait, float(value.strip()))
+    try:
+        asked = _retry_after(headers.get("Retry-After")) if headers is not None else None
+    except Exception:
+        asked = None
+    if asked is not None:
+        wait = max(wait, asked)
     return min(wait, RETRY_AFTER_CAP)
 
 
@@ -125,7 +177,7 @@ def github_fetcher(token: str) -> Fetcher:
             },
         )
         with _OPENER.open(req, timeout=30) as resp:
-            raw = resp.read()
+            raw = _read_capped(resp, MAX_BODY)
             return resp.status, (json.loads(raw) if raw else {}), resp.headers
 
     def fetch(path: str) -> tuple[int, dict | list]:
@@ -140,14 +192,7 @@ def github_fetcher(token: str) -> Fetcher:
                 if err.code in RETRYABLE_STATUS and not last:
                     _sleep(_retry_wait(attempt, err.headers))
                     continue
-                raw = err.read()
-                try:
-                    body = json.loads(raw) if raw else {}
-                except json.JSONDecodeError:
-                    body = {"message": raw.decode(errors="replace")[:200]}
-                if token and isinstance(body, dict) and isinstance(body.get("message"), str):
-                    body["message"] = body["message"].replace(token, "***")  # a server that echoes the token
-                return err.code, body
+                return err.code, _error_body(err, token)
             except (OSError, http.client.HTTPException, ValueError) as err:
                 # DNS, TLS, reset, timeout, or a 200 that is not JSON. The exception text can hold the
                 # request, so only its class is reported, as a status no real answer uses.
@@ -610,7 +655,7 @@ ECOSYSTEM_NAME = re.compile(r"[a-z][a-z0-9-]{0,39}")
 KNOWN_ECOSYSTEMS = frozenset(
     "bazel bun bundler cargo composer conda devcontainers docker docker-compose dotnet-sdk elm github-actions "
     "gitsubmodule gomod gradle helm julia maven mix npm nuget opentofu pip pub rust-toolchain swift terraform uv "
-    "vcpkg".split()
+    "vcpkg deno nix pre-commit sbt".split()
 )
 COOLDOWN_KEYS = ("default-days", "semver-major-days", "semver-minor-days", "semver-patch-days")
 
@@ -741,13 +786,28 @@ def cooldown_problems(config: object) -> list[str]:
                 problems.append(
                     f'{label}: cooldown include limits the cooldown to some dependencies; use ["*"] or omit it'
                 )
-        targets = entry.get("directories") if "directories" in entry else [entry.get("directory", "/")]
-        for target in targets if isinstance(targets, list) else []:
-            if type(target) is str:
-                if (ecosystem, target) in seen:
-                    problems.append(f"{ecosystem} in {shown(target)} is configured twice; GitHub rejects that")
-                seen.add((ecosystem, target))
+        targets = _locations(entry)
+        if targets is None:
+            problems.append(f"{label}: needs exactly one of directory (a path) or directories (a list of paths)")
+            targets = []
+        for target in targets:
+            if (ecosystem, target) in seen:
+                problems.append(f"{ecosystem} in {shown(target)} is configured twice; GitHub rejects that")
+            seen.add((ecosystem, target))
     return problems
+
+
+def _locations(entry: dict) -> list[str] | None:
+    """The paths one update entry covers, or None unless it has exactly one valid directory or directories."""
+    if ("directory" in entry) == ("directories" in entry):
+        return None
+    if "directory" in entry:
+        path = entry["directory"]
+        return [path] if type(path) is str and path.strip() else None
+    paths = entry["directories"]
+    if not _list_of_str(paths) or not paths or any(not p.strip() for p in paths) or len(set(paths)) != len(paths):
+        return None
+    return list(paths)
 
 
 def _list_of_str(value: object) -> bool:

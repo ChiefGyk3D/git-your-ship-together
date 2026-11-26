@@ -120,7 +120,10 @@ def good_answers() -> dict[str, tuple[int, dict | list]]:
         f"{r}/contents/.github/workflows/ci.yml": (200, encoded(CALLER)),
         f"{r}/contents/.github/dependabot.yml": (
             200,
-            dep_file("version: 2\nupdates:\n  - package-ecosystem: pip\n    cooldown:\n      default-days: 7\n"),
+            dep_file(
+                "version: 2\nupdates:\n  - package-ecosystem: pip\n    directory: /\n"
+                "    cooldown:\n      default-days: 7\n"
+            ),
         ),
         f"{r}/contents/.githooks/pre-commit": (
             200,
@@ -1409,7 +1412,7 @@ class _Resp:
     def __exit__(self, *exc):
         return False
 
-    def read(self):
+    def read(self, size=-1):
         return self.body
 
 
@@ -1480,3 +1483,154 @@ def test_429_and_5xx_are_retried_with_a_capped_retry_after_and_403_is_not(monkey
 def test_a_non_retryable_transport_error_is_not_retried(monkeypatch):
     (code, _), opener, waits = _fetch_with(monkeypatch, ConnectionResetError("reset"))
     assert code == 599 and opener.calls == 1 and waits == []
+
+
+# --- round 4: error bodies, locations, Retry-After, the ecosystem list ---------------
+
+
+class _BadBody:
+    """A file-like error body whose read() raises, or returns what it is told."""
+
+    def __init__(self, result):
+        self.result = result
+
+    def read(self, size=-1):
+        if isinstance(self.result, BaseException):
+            raise self.result
+        return self.result
+
+    def close(self):
+        pass
+
+
+def _error_with(code, result, headers=None):
+    import urllib.error
+
+    return urllib.error.HTTPError("https://api.github.com/x", code, "m", headers or {}, _BadBody(result))
+
+
+@pytest.mark.parametrize(
+    "result, name",
+    [
+        (OSError("tok-secret from the error body"), "OSError"),
+        (__import__("http.client").client.IncompleteRead(b"tok-secret"), "IncompleteRead"),
+        (b"\xff\xfe tok-secret", "UnicodeDecodeError"),
+        (b"{not json \xff", "UnicodeDecodeError"),
+        (b"x" * (64 * 1024 + 1), "_BodyTooLarge"),
+    ],
+)
+def test_an_unreadable_error_body_is_a_fixed_message_and_never_an_exception(monkeypatch, result, name):
+    (code, body), opener, _ = _fetch_with(monkeypatch, _error_with(403, result))
+    assert code == 403 and opener.calls == 1
+    assert body == {"message": f"HTTP error body unreadable: {name}"}
+    assert "tok-secret" not in str(body)
+
+
+def test_an_unreadable_body_after_retries_is_reported_and_the_audit_goes_on(monkeypatch):
+    errors = [_error_with(500, OSError("tok-secret"))] * 3
+    (code, body), opener, _ = _fetch_with(monkeypatch, *errors)
+    assert code == 500 and opener.calls == 3
+    assert body == {"message": "HTTP error body unreadable: OSError"} and "tok-secret" not in str(body)
+    answers = good_answers()
+    answers[DEPENDABOT_PATH] = (code, body)
+    results = audit.audit_repo(REPO_NAME, fetcher(answers))
+    assert by_check(results)["dependabot-config"][0] == audit.UNKNOWN
+    assert "tok-secret" not in audit.render(results)
+
+
+def test_a_success_body_over_the_cap_is_a_transport_error_not_a_parse(monkeypatch):
+    big = _Resp(b'{"a": "' + b"x" * audit.MAX_BODY + b'"}')
+    (code, body), _, _ = _fetch_with(monkeypatch, big)
+    assert code == 599 and body == {"message": "transport error: _BodyTooLarge"}
+
+
+def test_a_small_error_body_still_gives_its_message_with_the_token_redacted(monkeypatch):
+    (code, body), _, _ = _fetch_with(monkeypatch, _error_with(404, b'{"message": "Not Found tok-secret"}'))
+    assert code == 404 and body == {"message": "Not Found ***"}
+    (code, body), _, _ = _fetch_with(monkeypatch, _error_with(404, b"plain text tok-secret"))
+    assert body == {"message": "plain text ***"}
+
+
+LOCATION_ENTRY = "  - package-ecosystem: pip\n{loc}    cooldown:\n      default-days: 7\n"
+
+
+@pytest.mark.parametrize(
+    "loc",
+    [
+        "",
+        "    directory: null\n",
+        '    directory: ""\n',
+        '    directory: "   "\n',
+        "    directory: [/]\n",
+        "    directory: 5\n",
+        "    directories: []\n",
+        "    directories: null\n",
+        "    directories: /\n",
+        "    directories: [/, 5]\n",
+        '    directories: [/, ""]\n',
+        "    directories: [/a, /a]\n",
+        "    directories: {a: b}\n",
+        "    directory: /\n    directories: [/a]\n",
+    ],
+)
+def test_an_entry_without_exactly_one_valid_location_fails(loc):
+    status, detail = dependabot_check_text("version: 2\nupdates:\n" + LOCATION_ENTRY.format(loc=loc))
+    assert status == audit.FAIL, detail
+    assert "directory" in detail and "\n" not in detail
+
+
+@pytest.mark.parametrize("loc", ["    directory: /\n", "    directories: [/a, /b]\n", "    directories: ['/**/*']\n"])
+def test_a_valid_directory_or_directories_passes(loc):
+    assert dependabot_check_text("version: 2\nupdates:\n" + LOCATION_ENTRY.format(loc=loc))[0] == audit.PASS
+
+
+def test_the_same_location_across_entries_of_one_ecosystem_still_fails():
+    one = LOCATION_ENTRY.format(loc="    directories: [/a, /b]\n")
+    two = LOCATION_ENTRY.format(loc="    directory: /b\n")
+    assert dependabot_check_text("version: 2\nupdates:\n" + one + two)[0] == audit.FAIL
+
+
+class _Headers(dict):
+    pass
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        ("²", 1.0),
+        ("-5", 1.0),
+        ("99999999999", 1.0),
+        ("soon", 1.0),
+        ("", 1.0),
+        ("3", 3.0),
+        (" 4 ", 4.0),
+        ("9999", audit.RETRY_AFTER_CAP),
+        ("Thu, 26 Nov 2026 12:00:07 GMT", 7.0),
+        ("Thu, 26 Nov 2026 11:00:00 GMT", 1.0),
+        ("Thu, 26 Nov 2026 18:00:00 GMT", audit.RETRY_AFTER_CAP),
+        ("Thu, 99 Zzz 2026 99:99:99 GMT", 1.0),
+        ("26 Nov 2026 12:00:07", 7.0),
+    ],
+)
+def test_retry_after_is_parsed_strictly_and_capped(monkeypatch, value, expected):
+    import datetime
+
+    monkeypatch.setattr(audit, "_now", lambda: datetime.datetime(2026, 11, 26, 12, 0, 0, tzinfo=datetime.UTC))
+    assert audit._retry_wait(0, _Headers({"Retry-After": value})) == expected
+
+
+def test_a_hostile_retry_after_header_does_not_abort_the_fetch(monkeypatch):
+    (code, _), opener, waits = _fetch_with(monkeypatch, _error_with(429, b"{}", {"Retry-After": "²"}), _Resp(b"{}"))
+    assert code == 200 and opener.calls == 2 and waits == [1.0]
+
+
+def test_the_known_ecosystem_list_is_the_documented_set():
+    documented = {
+        "bazel", "bun", "bundler", "cargo", "composer", "conda", "deno", "devcontainers", "docker",
+        "docker-compose", "dotnet-sdk", "elm", "github-actions", "gitsubmodule", "gomod", "gradle", "helm",
+        "julia", "maven", "mix", "nix", "npm", "nuget", "opentofu", "pip", "pre-commit", "pub", "rust-toolchain",
+        "sbt", "swift", "terraform", "uv", "vcpkg",
+    }  # fmt: skip
+    assert audit.KNOWN_ECOSYSTEMS == documented
+    status, detail = dependabot_check_text("version: 2\nupdates:\n" + GOOD_ENTRY.replace("pip", "deno"))
+    assert status == audit.PASS and "note" not in detail

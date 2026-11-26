@@ -206,7 +206,12 @@ is UNKNOWN. A cooldown may not exempt anything: a non-empty `exclude` fails, and
 twice in one file fails, because GitHub rejects it. An ecosystem name outside
 the `KNOWN_ECOSYSTEMS` constant in `scripts/audit_baseline.py` (add a name there
 when GitHub adds one) is a note beside the PASS, never a failure, so a stale
-list cannot fail a good repository. The contents answer must carry an integer
+list cannot fail a good repository. Every update entry needs exactly one of `directory` (a non-empty path) or
+`directories` (a non-empty list of distinct, non-empty paths); neither, both,
+or a malformed value fails. An HTTP error body is read through a 64 KiB cap
+and any failure reading it is a fixed message naming only the exception class.
+`Retry-After` is read as ASCII seconds or an HTTP date, anything else uses the
+normal wait. The contents answer must carry an integer
 `size` equal to the strictly decoded length. A transport failure (DNS, TLS,
 reset, timeout) is UNKNOWN, not a crash; timeouts, 429 and 500, 502, 503 and
 504 are tried up to three times with short waits and a `Retry-After` capped at
