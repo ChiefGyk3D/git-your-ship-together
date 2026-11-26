@@ -4,7 +4,7 @@ The egress canary (a step that probed GitHub from the runner after harden-runner
 (#412): EX-0001 closed on 2026-11-02 and the step outlived it. `test_no_egress_canary_is_left` keeps it out.
 
 `egress-policy-check` is a composite action whose `run:` script is inlined, byte for byte, as the first step of
-every job that has a policy input (a reusable workflow cannot name the commit it runs from, so it cannot call the
+every job that has a policy input (the self-hosted guard comes before it where the job has one) (a reusable workflow cannot name the commit it runs from, so it cannot call the
 action by path; see docs/wiki/Design-rules.md). Its copies are held identical here.
 """
 
@@ -139,28 +139,38 @@ def test_the_policy_check_reports_every_bad_input_by_name():
 
 
 CHECK_NAME = "Validate the egress policy inputs"
+GUARD_NAME = "Refuse an untrusted self-hosted runner"
+
+
+def lead_index(job):
+    """Where the policy check sits: after the self-hosted guard in the workflows that have one, else first."""
+    names = [s.get("name") for s in job.get("steps") or []]
+    return 1 if names[:1] == [GUARD_NAME] else 0
 
 
 def workflow_jobs():
-    """Every job that has a harden-runner step, with its steps after the leading policy check (if it has one)."""
+    """Every job that has a harden-runner step, with its steps after the leading guard and policy check (if any)."""
     for path in WORKFLOWS:
         doc = yaml.safe_load(path.read_text())
         for name, job in doc["jobs"].items():
             raw = job.get("steps") or []
-            steps = raw[1:] if raw and raw[0].get("name") == CHECK_NAME else raw
+            start = lead_index(job)
+            if raw[start:start + 1] and raw[start].get("name") == CHECK_NAME:
+                start += 1
+            steps = raw[start:]
             if steps and str(steps[0].get("uses", "")).startswith("step-security/harden-runner@"):
                 yield path, name, job, steps
 
 
 def test_the_policy_check_is_the_first_step_of_every_job_that_has_it():
-    """It runs before anything consumes a policy, harden-runner included. No step may precede it."""
+    """It runs before anything consumes a policy, harden-runner included. Only the self-hosted guard may precede it."""
     seen = 0
     for path in WORKFLOWS:
         for name, job in yaml.safe_load(path.read_text())["jobs"].items():
             names = [s.get("name") for s in job.get("steps") or []]
             if CHECK_NAME in names:
                 seen += 1
-                assert names.index(CHECK_NAME) == 0, f"{path.name}:{name}: a step runs before the policy check"
+                assert names.index(CHECK_NAME) == lead_index(job), f"{path.name}:{name}: a step runs before the policy check"
                 assert names.count(CHECK_NAME) == 1
     assert seen > 60
 
@@ -169,7 +179,7 @@ def test_every_job_that_can_block_has_the_policy_check_except_the_hardcoded_audi
     for path, name, job, _steps in workflow_jobs():
         if path.name in ("ci.yml", "audit.yml", "main-verify.yml", "fleet-status.yml"):
             continue
-        assert job["steps"][0].get("name") == CHECK_NAME, f"{path.name}:{name}"
+        assert job["steps"][lead_index(job)].get("name") == CHECK_NAME, f"{path.name}:{name}"
 
 
 def test_something_was_collected():
@@ -308,8 +318,8 @@ def test_every_job_gets_the_policy_check_before_harden_runner(path, name, job, s
     hardcoded = policy == "block"  # audit.yml
     declared = declared_policy_inputs(path)
     if not hardcoded:
-        check = job["steps"][0]
-        assert check.get("name") == CHECK_NAME, f"{path.name}:{name}: the policy check must be the first step"
+        check = job["steps"][lead_index(job)]
+        assert check.get("name") == CHECK_NAME, f"{path.name}:{name}: the policy check must be the first step after the guard"
         assert check["run"] == check_script(), f"{path.name}:{name} policy check differs from the composite action"
         assert "if" not in check, "the check must run whatever the policy is"
         assert check["env"] == {"POLICY_" + n.upper().replace("-", "_"): f"${{{{ inputs.{n} }}}}" for n in declared}, (
@@ -750,8 +760,8 @@ def test_the_expressions_depend_on_the_policy_check_for_exactness():
             if harden is None or "inputs." not in str(harden["with"]["egress-policy"]):
                 continue
             jobs_with_expressions += 1
-            assert steps[0].get("name") == CHECK_NAME, f"{path.name}:{name}: an expression without the exact check"
-            assert steps.index(harden) > 0
+            assert steps[lead_index(job)].get("name") == CHECK_NAME, f"{path.name}:{name}: an expression without the exact check"
+            assert steps.index(harden) > steps.index(next(s for s in steps if s.get("name") == CHECK_NAME))
     assert jobs_with_expressions > 60
     # The expression alone is case-insensitive (the reason the check exists); the check is exact.
     expression = "${{ inputs.a == 'audit' && 'audit' || 'block' }}"
