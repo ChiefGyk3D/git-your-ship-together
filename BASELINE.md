@@ -228,7 +228,16 @@ timeout: each request (connect, headers and body) runs under a POSIX interval
 timer (`SIGALRM`, as `scripts/check_pr_title.py` does for its regular
 expression) that interrupts a read even when a peer keeps dripping bytes. That
 needs Linux (or another POSIX system) and the main thread, which the audit
-uses; where `SIGALRM` is missing the per-chunk clock check is the only bound.
+uses. The timer is borrowed politely: the previous handler and the previous
+timer (its remaining time and interval) are put back, and an earlier deadline
+that is still ahead stays the one that fires, so a host's own `SIGALRM`
+deadline and nested uses survive. Off the main thread there is no safe way to
+interrupt a read, so `github_fetcher` refuses to start a request there and
+answers `request deadline unavailable off the main thread` (UNKNOWN), never an
+unbounded request. Where `SIGALRM` is missing altogether the per-chunk clock
+check is the only bound. `main()` clears the audit and repository limits in a
+`finally`, so an interrupted run leaves no stale deadline behind for the next
+library call.
 The limits: 60 seconds per request (body read included), 180 seconds per
 repository (retries and their waits included), and 45 minutes for the run
 (`--deadline-minutes` changes it; it must be a finite number from 1 to 720);

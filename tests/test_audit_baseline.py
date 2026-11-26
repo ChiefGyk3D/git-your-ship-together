@@ -2009,7 +2009,7 @@ def test_the_per_repository_loop_survives_audit_repo_itself_raising(monkeypatch,
     assert "RuntimeError" in out and "secret-text" not in out and "  PASS    dependabot-config" in out
 
 
-def test_the_alarm_interrupts_a_blocked_call_and_restores_the_handler_and_timer():
+def test_the_alarm_interrupts_a_blocked_call_and_restores_the_handler():
     import signal
     import time
 
@@ -2020,10 +2020,6 @@ def test_the_alarm_interrupts_a_blocked_call_and_restores_the_handler_and_timer(
             time.sleep(5)
     assert time.monotonic() - started < 2
     assert signal.getsignal(signal.SIGALRM) is before
-    assert signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
-    with audit._alarm(5):  # a block that finishes in time is untouched, and the timer is cleared
-        pass
-    assert signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
 
 
 def test_without_sigalrm_the_alarm_is_a_no_op_and_the_chunk_checks_remain(monkeypatch):
@@ -2172,3 +2168,165 @@ def test_a_bad_deadline_option_is_refused(value, capsys):
 @pytest.mark.parametrize("value, minutes", [("1", 1.0), ("45", 45.0), ("720", 720.0), ("2.5", 2.5)])
 def test_a_good_deadline_option_is_accepted(value, minutes):
     assert audit._deadline_minutes(value) == minutes
+
+
+# --- round 7: a good neighbor to other timers, refusal off the main thread, a clean main() -----
+
+
+@pytest.fixture
+def clean_alarm():
+    """Leave SIGALRM and the real timer as found, whatever a test did."""
+    import signal
+
+    handler = signal.getsignal(signal.SIGALRM)
+    signal.setitimer(signal.ITIMER_REAL, 0)
+    yield
+    signal.setitimer(signal.ITIMER_REAL, 0)
+    signal.signal(signal.SIGALRM, handler)
+
+
+def test_a_preexisting_timer_survives_a_short_alarm_with_its_handler_and_interval(clean_alarm):
+    import signal
+
+    def theirs(signum, frame):
+        pass
+
+    signal.signal(signal.SIGALRM, theirs)
+    signal.setitimer(signal.ITIMER_REAL, 2.0, 0.5)
+    with audit._alarm(0.05):
+        pass
+    remaining, interval = signal.getitimer(signal.ITIMER_REAL)
+    assert 1.0 < remaining <= 2.0, "about two seconds minus what the block used"
+    assert interval == 0.5
+    assert signal.getsignal(signal.SIGALRM) is theirs
+
+
+def test_a_nested_alarm_leaves_the_outer_timer_active_and_the_outer_still_fires(clean_alarm):
+    import signal
+    import time
+
+    started = time.monotonic()
+    with pytest.raises(audit._DeadlineExceeded):
+        with audit._alarm(0.6):
+            with audit._alarm(0.05):
+                pass
+            remaining, _ = signal.getitimer(signal.ITIMER_REAL)
+            assert 0.0 < remaining <= 0.6, "the outer timer is still running"
+            time.sleep(5)
+    assert time.monotonic() - started < 3
+
+
+def test_the_earliest_deadline_wins_when_an_inner_alarm_asks_for_longer(clean_alarm):
+    import time
+
+    started = time.monotonic()
+    with pytest.raises(audit._DeadlineExceeded):
+        with audit._alarm(0.4):
+            with audit._alarm(30):
+                time.sleep(5)
+    assert time.monotonic() - started < 3
+
+
+def test_an_earlier_external_deadline_runs_its_own_handler_and_the_block_carries_on(clean_alarm):
+    import signal
+    import time
+
+    fired = []
+    signal.signal(signal.SIGALRM, lambda signum, frame: fired.append(signum))
+    signal.setitimer(signal.ITIMER_REAL, 0.1)
+    with audit._alarm(30):
+        time.sleep(0.5)  # their timer fires inside our block: their handler runs, ours does not raise
+    assert fired == [signal.SIGALRM]
+
+
+def test_with_no_previous_timer_the_timer_is_zero_after_a_block_and_after_an_interrupt(clean_alarm):
+    import signal
+    import time
+
+    with audit._alarm(5):
+        pass
+    assert signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
+    with pytest.raises(audit._DeadlineExceeded):
+        with audit._alarm(0.1):
+            time.sleep(2)
+    assert signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
+
+
+def test_the_alarm_refuses_off_the_main_thread_and_the_fetcher_answers_unknown_without_a_request(monkeypatch):
+    import threading
+
+    opener = _Opener(_Resp())
+    monkeypatch.setattr(audit, "_OPENER", opener)
+    out = {}
+
+    def run():
+        try:
+            with audit._alarm(1):
+                out["alarm"] = "ran"
+        except RuntimeError as err:
+            out["alarm"] = str(err)
+        out["fetch"] = audit.github_fetcher("tok")("/repos/o/r")
+
+    worker = threading.Thread(target=run)
+    worker.start()
+    worker.join()
+    assert out["alarm"] == "request deadline unavailable off the main thread"
+    assert out["fetch"] == (599, {"message": "request deadline unavailable off the main thread"})
+    assert opener.calls == 0
+
+
+def test_a_real_drip_server_called_from_a_thread_is_refused_at_once_not_after_twelve_seconds(monkeypatch):
+    import threading
+    import time
+
+    stop = threading.Event()
+    server, thread = _drip_server(stop)
+    monkeypatch.setattr(audit, "API", f"http://127.0.0.1:{server.server_address[1]}")
+    monkeypatch.setattr(audit, "REQUEST_DEADLINE", 1.0)
+    out = {}
+
+    def run():
+        out["start"] = time.monotonic()
+        out["result"] = audit.github_fetcher("tok")("/repos/o/r")
+        out["elapsed"] = time.monotonic() - out["start"]
+
+    worker = threading.Thread(target=run)
+    try:
+        worker.start()
+        worker.join()
+    finally:
+        stop.set()
+        server.shutdown()
+        server.server_close()
+        thread.join()
+    assert out["result"] == (599, {"message": "request deadline unavailable off the main thread"})
+    assert out["elapsed"] < 2
+    code, body = out["result"]
+    answers = good_answers()
+    answers[DEPENDABOT_PATH] = (code, body)
+    assert by_check(audit.audit_repo(REPO_NAME, fetcher(answers)))["dependabot-config"][0] == audit.UNKNOWN
+
+
+@pytest.mark.parametrize("exc", [KeyboardInterrupt, SystemExit])
+def test_main_clears_the_audit_and_repository_limits_when_interrupted(monkeypatch, exc):
+    def interrupted(repo, *args, **kwargs):
+        audit._limits["repo"] = 123.0
+        raise exc
+
+    monkeypatch.setattr(audit, "audit_repo", interrupted)
+    monkeypatch.setattr(audit, "github_fetcher", lambda token: fetcher(good_answers()))
+    monkeypatch.setattr(audit, "load_register", lambda: [])
+    monkeypatch.setenv("GITHUB_TOKEN", "t")
+    with pytest.raises(exc):
+        audit.main([REPO_NAME])
+    assert audit._limits == {"repo": None, "audit": None}
+
+
+def test_main_clears_the_limits_when_rendering_fails(monkeypatch):
+    monkeypatch.setattr(audit, "github_fetcher", lambda token: fetcher(good_answers()))
+    monkeypatch.setattr(audit, "load_register", lambda: [])
+    monkeypatch.setattr(audit, "render", lambda results: (_ for _ in ()).throw(KeyboardInterrupt))
+    monkeypatch.setenv("GITHUB_TOKEN", "t")
+    with pytest.raises(KeyboardInterrupt):
+        audit.main([REPO_NAME])
+    assert audit._limits == {"repo": None, "audit": None}

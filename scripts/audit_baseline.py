@@ -128,31 +128,67 @@ class _DeadlineExceeded(TimeoutError):
     pass
 
 
+def _alarm_unavailable() -> bool:
+    """True when SIGALRM exists but this is not the main thread: a signal timer cannot be used here."""
+    import threading
+
+    return hasattr(signal, "setitimer") and threading.current_thread() is not threading.main_thread()
+
+
 @contextlib.contextmanager
 def _alarm(seconds: float):
     """Interrupt whatever is running in this block after `seconds` of real time, as `_DeadlineExceeded`.
 
     The socket timeout bounds one wait and the chunk check bounds one chunk; neither stops a read that keeps
     receiving a byte now and then, or a slow DNS lookup or connect. A POSIX interval timer does, the same way
-    scripts/check_pr_title.py stops a catastrophic regular expression. It needs SIGALRM and the main thread (the
-    audit's own); where either is missing the block runs under the chunk checks alone.
-    """
-    import threading
+    scripts/check_pr_title.py stops a catastrophic regular expression.
 
-    if not hasattr(signal, "setitimer") or threading.current_thread() is not threading.main_thread():
+    It borrows a process-wide timer, so it is a good neighbor: the previous handler and the previous timer (its
+    remaining time less what this block used, and its interval) are put back on exit, and while an earlier
+    deadline is still ahead of this one it is the one that fires (through its own handler if it had one), so a
+    nested block or a host's own SIGALRM deadline is never lost. Without SIGALRM the block runs under the chunk
+    checks alone. Off the main thread it raises RuntimeError: `github_fetcher` checks `_alarm_unavailable` first
+    and answers UNKNOWN, so no request runs there unbounded.
+    """
+    if not hasattr(signal, "setitimer"):
         yield
         return
+    if _alarm_unavailable():
+        raise RuntimeError("request deadline unavailable off the main thread")
+    started = time.monotonic()
+    mine = started + max(0.001, seconds)
+    holder: dict[str, object] = {}
 
-    def expired(_signum: int, _frame: object) -> None:
+    def expired(signum: int, frame: object) -> None:
+        previous = holder["handler"]
+        if time.monotonic() < mine - 0.001 and callable(previous):
+            previous(signum, frame)  # the earlier deadline's own handler; then our own timer carries on
+            signal.setitimer(signal.ITIMER_REAL, max(0.001, mine - time.monotonic()))
+            return
         raise _DeadlineExceeded
 
-    previous = signal.signal(signal.SIGALRM, expired)
-    signal.setitimer(signal.ITIMER_REAL, max(0.001, seconds))
+    blocked = {signal.SIGALRM}
+    old_mask = signal.pthread_sigmask(signal.SIG_BLOCK, blocked)
+    try:
+        holder["handler"] = signal.signal(signal.SIGALRM, expired)
+        before, interval = signal.getitimer(signal.ITIMER_REAL)
+        signal.setitimer(signal.ITIMER_REAL, min(max(0.001, seconds), before) if before > 0 else max(0.001, seconds))
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, old_mask)
     try:
         yield
     finally:
-        signal.setitimer(signal.ITIMER_REAL, 0)
-        signal.signal(signal.SIGALRM, previous)
+        signal.pthread_sigmask(signal.SIG_BLOCK, blocked)
+        try:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, lambda *_: None)  # a signal that arrived while masked lands here, not there
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, old_mask)
+        signal.getsignal(signal.SIGALRM)  # a call boundary: the pending handler runs now
+        signal.signal(signal.SIGALRM, holder["handler"])
+        if before > 0:
+            left = before - (time.monotonic() - started)
+            signal.setitimer(signal.ITIMER_REAL, max(0.001, left), interval)
 
 
 def _limit(request_seconds: float | None = None) -> float:
@@ -258,6 +294,8 @@ def github_fetcher(token: str) -> Fetcher:
     def fetch(path: str) -> tuple[int, dict | list]:
         for attempt in range(FETCH_ATTEMPTS):
             last = attempt == FETCH_ATTEMPTS - 1
+            if _alarm_unavailable():
+                return 599, {"message": "request deadline unavailable off the main thread"}
             limit = _limit()
             if _clock() >= min(v for v in (_limits["repo"], _limits["audit"], limit) if v is not None):
                 return 599, {"message": "transport error: deadline exceeded"}
@@ -1373,40 +1411,45 @@ def main(argv: list[str] | None = None) -> int:
     results: list[Result] = []
     orgs: dict[str, dict] = {}
     by_org: dict[str, list[Result]] = {}
-    _limits["audit"] = _clock() + args.deadline_minutes * 60
-    for repo in repos:
-        owner = repo.split("/", 1)[0]
-        if _clock() >= _limits["audit"]:
-            results.append(Result(repo, "repository", UNKNOWN, "the audit deadline passed before this repository"))
-            continue
-        fetch = default or fetcher_for(owner, tokens or {})
-        if fetch is None:
-            results.append(Result(repo, "repository", UNKNOWN, no_token_reason(owner, tokens or {})))
-            continue
-        try:
-            found = audit_repo(repo, fetch, register, orgs)
-        except Exception as err:  # noqa: BLE001 - belt and braces beside audit_repo's own boundary
-            found = [Result(repo, "repository", UNKNOWN, f"the audit raised {type(err).__name__}")]
-        results.extend(found)
-        by_org.setdefault(owner, []).extend(found)
-    for org, cache in orgs.items():
-        fetch = default or fetcher_for(org, tokens or {})
-        if fetch is None:
-            results.append(Result(f"{org} (organization)", "org-checks", UNKNOWN, no_token_reason(org, tokens or {})))
-            continue
-        try:
-            results.extend(audit_org(org, fetch, cache, by_org.get(org, [])))
-        except Exception as err:  # noqa: BLE001
-            results.append(
-                Result(f"{org} (organization)", "org-checks", UNKNOWN, f"the audit raised {type(err).__name__}")
-            )
-    _limits["audit"] = None
-    print(render(results))
-    fails = sum(r.status == FAIL for r in results)
-    unknowns = sum(r.status == UNKNOWN for r in results)
-    scope = f"{len(repos)} repositories and {len(orgs)} organization(s)"
-    print(f"\n{len(results)} checks over {scope}: {fails} FAIL, {unknowns} UNKNOWN")
-    return exit_code(results, args.allow_unknown)
+    try:
+        _limits["audit"] = _clock() + args.deadline_minutes * 60
+        for repo in repos:
+            owner = repo.split("/", 1)[0]
+            if _clock() >= _limits["audit"]:
+                results.append(Result(repo, "repository", UNKNOWN, "the audit deadline passed before this repository"))
+                continue
+            fetch = default or fetcher_for(owner, tokens or {})
+            if fetch is None:
+                results.append(Result(repo, "repository", UNKNOWN, no_token_reason(owner, tokens or {})))
+                continue
+            try:
+                found = audit_repo(repo, fetch, register, orgs)
+            except Exception as err:  # noqa: BLE001 - belt and braces beside audit_repo's own boundary
+                found = [Result(repo, "repository", UNKNOWN, f"the audit raised {type(err).__name__}")]
+            results.extend(found)
+            by_org.setdefault(owner, []).extend(found)
+        for org, cache in orgs.items():
+            fetch = default or fetcher_for(org, tokens or {})
+            if fetch is None:
+                results.append(
+                    Result(f"{org} (organization)", "org-checks", UNKNOWN, no_token_reason(org, tokens or {}))
+                )
+                continue
+            try:
+                results.extend(audit_org(org, fetch, cache, by_org.get(org, [])))
+            except Exception as err:  # noqa: BLE001
+                results.append(
+                    Result(f"{org} (organization)", "org-checks", UNKNOWN, f"the audit raised {type(err).__name__}")
+                )
+        print(render(results))
+        fails = sum(r.status == FAIL for r in results)
+        unknowns = sum(r.status == UNKNOWN for r in results)
+        scope = f"{len(repos)} repositories and {len(orgs)} organization(s)"
+        print(f"\n{len(results)} checks over {scope}: {fails} FAIL, {unknowns} UNKNOWN")
+        return exit_code(results, args.allow_unknown)
+    finally:
+        _limits["audit"] = None
+        _limits["repo"] = None
 
 
 if __name__ == "__main__":
