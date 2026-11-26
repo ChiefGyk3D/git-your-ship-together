@@ -2089,9 +2089,64 @@ jobs:
           fi
           images=("$GHCR")
           if [ -n "$DOCKERHUB" ]; then images+=("$DOCKERHUB"); fi
+          # A registry can serve a just-written signature late. One bounded
+          # retry: 4 attempts in all, waiting 5, 10 and 20 seconds (35 seconds
+          # per verification command, at most 140 seconds across the signature
+          # and SBOM checks on both registries, far inside the job timeout). Only "not visible yet" is
+          # retried: no signatures found, no attestations found, and a
+          # transient registry error (HTTP 408, 425, 429 and every 5xx, a
+          # timeout, a reset connection). Every attempt carries the same
+          # identity, issuer, repository and commit constraints. A signature
+          # that is found and does not verify, or any other error, fails on
+          # the first attempt, and the last attempt failing fails the step.
+          # Fatal text is classified first: a stderr that carries any
+          # verification-failure pattern is never retried, even when it also
+          # carries "not visible yet" or transient text.
+          # The matchers read the stderr FILE, not a shell variable: a variable
+          # silently drops NUL bytes. Each grep status is read explicitly:
+          # 0 = match, 1 = no match, anything else = the classifier failed,
+          # which is never a retry.
+          verify_fatal() {
+            grep -Eqi 'no matching (signatures|attestations)|mismatch|does not match|doesn.t match|expected .* got|none of the expected identities|invalid signature|signature (verification )?failed|certificate|x509|identity|issuer|workflow[- ](repository|sha)' "$1"
+          }
+          not_visible_yet() {
+            local guard_rc=0 fatal_rc=0 transient_rc=0
+            # Any byte outside printable ASCII (plus tab and newline) could
+            # hide fatal wording behind a lookalike character: not retryable.
+            # grep reads line by line, so the newline needs no allowance.
+            LC_ALL=C grep -aq "[^[:print:]"$'\t'"]" "$1" || guard_rc=$?
+            if [ "$guard_rc" -ne 1 ]; then return 1; fi
+            verify_fatal "$1" || fatal_rc=$?
+            if [ "$fatal_rc" -ne 1 ]; then return 1; fi
+            grep -Eqi 'no signatures found|no attestations found|(^|[ :[(])(408|425|429|5[0-9]{2})( |]|\)|$)|context deadline exceeded|i/o timeout|timed out|connection reset|connection refused|temporarily unavailable|unexpected EOF|TLS handshake timeout' "$1" || transient_rc=$?
+            [ "$transient_rc" -eq 0 ]
+          }
+          verify_retry() {
+            local n=1 rc errf delay visible_rc
+            while :; do
+              rc=0
+              errf="$(mktemp)"
+              "$@" 2> "$errf" || rc=$?
+              visible_rc=1
+              if [ "$rc" -ne 0 ]; then
+                not_visible_yet "$errf" && visible_rc=0
+              fi
+              cat "$errf" >&2
+              rm -f "$errf"
+              if [ "$rc" -eq 0 ]; then return 0; fi
+              if [ "$visible_rc" -eq 0 ] && [ "$n" -lt 4 ]; then
+                delay=$(( ${REGISTRY_BACKOFF_SECONDS:-5} * (1 << (n - 1)) ))
+                echo "::warning title=verify retry::attempt ${n} of 4 of '$1 $2' did not find the signature yet; retrying in ${delay}s" >&2
+                sleep "$delay"
+                n=$((n + 1))
+                continue
+              fi
+              return "$rc"
+            done
+          }
           for image in "${images[@]}"; do
             if [ "$SIGN" = "true" ]; then
-              if ! cosign verify "${image}@${DIGEST}" \
+              if ! verify_retry cosign verify "${image}@${DIGEST}" \
                 --certificate-identity-regexp "$IDENTITY_REGEXP" \
                 --certificate-oidc-issuer "$OIDC_ISSUER" \
                 --certificate-github-workflow-repository "$SOURCE_REPOSITORY" \
@@ -2102,7 +2157,7 @@ jobs:
               echo "signature verified: ${image}@${DIGEST}"
             fi
             if [ "$SBOM" = "true" ]; then
-              if ! cosign verify-attestation --type spdxjson "${image}@${DIGEST}" \
+              if ! verify_retry cosign verify-attestation --type spdxjson "${image}@${DIGEST}" \
                 --certificate-identity-regexp "$IDENTITY_REGEXP" \
                 --certificate-oidc-issuer "$OIDC_ISSUER" \
                 --certificate-github-workflow-repository "$SOURCE_REPOSITORY" \
