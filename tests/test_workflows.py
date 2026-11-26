@@ -499,18 +499,23 @@ def doppler_script(path: Path) -> list[str]:
 
 
 def test_the_inlined_doppler_script_matches_the_composite_action():
-    """Seven bodies, one source: the composite action, and a copy that drifts from it is a bug."""
+    """Every body, one source: the composite action, and a copy that drifts from it is a bug."""
     composite = doppler_script(ACTIONS / "doppler-secrets" / "action.yml")
     assert len(composite) == 1
-    copies = {path.name: doppler_script(path) for path in DOPPLER}
-    assert copies == {
-        "python-ci.yml": [composite[0]],
-        "tofu-ci.yml": [composite[0]],
-        "container-release.yml": [composite[0]],
-        "security.yml": [composite[0]],
-        "project-sync.yml": [composite[0]],
-        "repin.yml": [composite[0]],
-    }, "an inlined Doppler script differs from .github/actions/doppler-secrets/action.yml"
+    # Discover every inlined copy rather than trusting a list, so a new or forgotten one cannot drift.
+    copies = {p.name: doppler_script(p) for p in WORKFLOW_FILES if doppler_script(p)}
+    assert set(copies) >= {
+        "audit.yml",
+        "python-ci.yml",
+        "tofu-ci.yml",
+        "container-release.yml",
+        "security.yml",
+        "project-sync.yml",
+        "repin.yml",
+    }, "an inlined Doppler script was not found; the copy check must not shrink"
+    assert copies == {name: [composite[0]] for name in copies}, (
+        "an inlined Doppler script differs from .github/actions/doppler-secrets/action.yml"
+    )
 
 
 @pytest.mark.parametrize("path", DOPPLER, ids=lambda p: p.name)

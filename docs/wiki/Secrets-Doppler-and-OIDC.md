@@ -96,8 +96,8 @@ This repository's own tags are all that shape. A caller that releases from a
 pre-release tag does not fetch secrets on it; it fetches on the default branch
 or on a release tag.
 
-**A refused tag fails a job that asked for a secret.** When a tag is not a
-`vMAJOR.MINOR.PATCH` release tag, the decide step fetches nothing and reports
+**A refused tag fails a job that asked for a secret.** When the gate refuses a tag (an invalid shape, not an
+ancestor of the default branch, or ancestry that cannot be verified), the decide step fetches nothing and reports
 `untrusted-tag=true`. A job that was asked for a secret-backed feature then fails
 with an error naming the ref (`ref is not a vMAJOR.MINOR.PATCH release tag:
 Doppler secrets are not fetched`) instead of skipping it and staying green:

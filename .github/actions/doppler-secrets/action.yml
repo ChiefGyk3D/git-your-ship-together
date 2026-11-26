@@ -121,7 +121,7 @@ outputs:
     description: Which path was taken - `oidc`, `token`, or `none`.
     value: ${{ steps.mode.outputs.mode }}
   untrusted-tag:
-    description: "`true` when the ref is a tag that is not a vMAJOR.MINOR.PATCH release tag and so was refused secrets; a caller that asked for a secret-backed feature should fail on it."
+    description: "`true` whenever a tag was refused secrets by the trusted-ref gate: an invalid shape (not vMAJOR.MINOR.PATCH), not an ancestor of the default branch, or ancestry unverifiable (for example a shallow or missing checkout); a caller that asked for a secret-backed feature should fail on it."
     value: ${{ steps.mode.outputs.untrusted-tag }}
   secrets:
     description: >-
