@@ -13,4 +13,4 @@ pytest==9.2.0
 # Runs the suite in parallel on the CI runner (ci.yml "Run the tests": pytest -n auto); the tests share no port or path.
 pytest-xdist==3.8.0
 PyYAML==6.0.3
-ruff==0.17.3
+ruff==0.17.5
