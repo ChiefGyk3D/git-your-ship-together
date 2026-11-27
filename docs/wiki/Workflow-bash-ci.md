@@ -44,6 +44,11 @@ page.
 
 <!-- inputs -->
 
+**Skipping the tests on a docs-only pull request.** Set `skip-docs-only: true` (off by default) and a pull request that changes only
+`*.md` or `docs/**/*.md` leaves the `Test` and `Distro` jobs out; lint and the security scans still run, and `CI green` still fails
+on any failed job. A private repository also adds `pull-requests: read` to the caller's `permissions:`, or the classifier fails
+closed and every job runs. See [Docs-only fast path](Docs-only-fast-path.md).
+
 ## Choosing the runner
 
 `runs-on` is a JSON string that every job reads through `fromJSON(inputs.runs-on)`, because `runs-on` takes a string, an

@@ -122,6 +122,38 @@ manifest; `tests/test_action_manifests.py` refuses it.
    upstream failure, a mistyped `if:`, a classifier that failed or said `false`), a failure, a cancellation or a job left out
    of `needs` fails. `required-jobs` makes a job dropped from `needs:` a failure too.
 
+## `skip-docs-only` in python-ci and bash-ci (issue #460)
+
+Wiring the classifier by hand in every caller is the per-repository edit this input removes. `python-ci.yml` and `bash-ci.yml`
+take `skip-docs-only: true` and nothing else: a `classify` job inside the workflow (an inline, byte-identical copy of
+`scripts/classify_changes.py`, since a reusable workflow cannot check out its own commit) reads the pull request's files, and
+the `test` and `distro` jobs leave a markdown-only pull request. The decision rules and threat notes below apply unchanged.
+
+- **Off by default (`false`).** A workflow cannot tell a private repository from a public one: a policy test
+  (`tests/test_runs_on_input.py`) forbids reading `repository.private`. So a caller opts in, and a re-pin changes nothing
+  until it does.
+- **What skips.** Only `test` and `distro`, only when the classifier says `docs-only=true`. Lint, type check, workflow lint, the
+  smoke test, the container build, the changelog and commit checks and every security scan run as before. A skipped job is
+  `skipped`, which `ci-green` already counts as a pass; it still fails on any failed job, and it now waits on `classify` too, so a
+  failed classifier fails the gate.
+- **Fails closed.** The `test` and `distro` conditions are `!cancelled() && needs.classify.outputs.docs-only != 'true'`, so a
+  skipped, failed or empty classifier leaves them running.
+- **Permissions.** The `classify` job holds `contents: read` only: a job may not ask for more than the caller granted, and a new
+  permission would stop every existing caller at startup. The API read of a private repository needs `pull-requests: read`, which
+  the caller adds to its `permissions:`; without it the script answers `false` and every job runs. A public repository reads
+  the file list with the read-only token as it is.
+- **The list.** `docs-only-patterns` defaults to `*.md` and `docs/**/*.md`; `never-skip-patterns` adds files the tests read.
+  `.github/**` never skips.
+- **Egress.** `classify` stays in `block` mode like the other jobs that hand the job token to the GitHub API
+  (`api.github.com:443` is in the default allow-list), and runs the same self-hosted-runner guard as every job.
+- **Not covered here.** `tofu-ci`, `container-release` and `artifact-release` keep their own shape: `container-release` and
+  `artifact-release` build on tags and pushes, where there is no pull request to classify, and `tofu-ci` still takes the
+  caller-side wiring above (a follow-up).
+
+**`pr-python-versions`.** Its default stays `""`. A reduced matrix changes what a pull request proves, and an existing caller
+that re-pins must not get a thinner matrix without choosing it. Set `pr-python-versions: '["3.11", "3.15"]'` (oldest and
+newest) with `skip-docs-only: true` for the two cheapest cuts. Moving the default would be a breaking change for a major release.
+
 ## Threat notes
 
 The fast path is a way to run less, so the question is what an attacker gains by making the check run less. Each row names the

@@ -78,6 +78,7 @@ lock.
 | `tests/test_wiki.py` | **This wiki**: every reusable workflow has a page whose generated table follows its YAML; regenerating is a no-op and a stale tree is caught; links resolve and cited tests exist; and every workflow, script, composite action, audit check, test file and baseline file is mentioned somewhere |
 | `tests/test_wiki_release_facts.py` | **Version facts in the wiki are generated**: the release placeholders render from a temp repository's tags (newest by version, the peeled commit SHA, the date, the merges since), and no hand page types a 40-hex SHA or a `# vX.Y.Z` pin comment |
 | `tests/test_pr_python_versions.py` | The `pr-python-versions` input of python-ci: empty by default so the matrix is unchanged, a reduced matrix on pull requests only, bad values refused, and `ci-green` still failing on a failed leg |
+| `tests/test_skip_docs_only.py` | The `skip-docs-only` input of python-ci and bash-ci: off by default, an inline classifier that is byte-for-byte `scripts/classify_changes.py`, a `contents: read` job, only `test` and `distro` skipped and only on a docs-only verdict, and `CI green` waiting on `classify` |
 
 The pinned digests and the mutation tests (`tests/test_runs_on_input.py`) catch accidental and partial changes to the egress
 policy check and the self-hosted guard. A change that edits a guarded script and its pinned digest together is stopped only by

@@ -57,6 +57,11 @@ caller for a weekly full run. The default is empty, which changes nothing. Each 
 needs `test`, so a failed leg still blocks the merge. Require `ci / CI green`, not individual `Test (Python ...)` checks, since the
 legs a pull request creates differ from the ones main creates.
 
+**Skipping the tests on a docs-only pull request.** Set `skip-docs-only: true` (off by default) and a pull request that changes only
+`*.md` or `docs/**/*.md` leaves the `Test` and `Distro` jobs out; lint and the security scans still run, and `CI green` still fails
+on any failed job. A private repository also adds `pull-requests: read` to the caller's `permissions:`, or the classifier fails
+closed and every job runs. See [Docs-only fast path](Docs-only-fast-path.md).
+
 Point branch protection at `ci / CI green`. A repository with more than one language calls one CI workflow per language
 from one job each and requires each gate (`ci / CI green` and `shell / CI green`, say).
 

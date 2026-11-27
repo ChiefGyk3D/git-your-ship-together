@@ -46,8 +46,8 @@ def test_inputs_exist_and_keep_safe_defaults(name):
     inputs = triggers(doc(name))["workflow_call"]["inputs"]
     skip = inputs.get("skip-docs-only")
     assert skip is not None, "skip-docs-only input missing"
-    assert skip["type"] == "string"
-    assert skip["default"] == "auto", "auto: on for a private repository, off for a public one"
+    assert skip["type"] == "boolean"
+    assert skip["default"] is False, "off by default: a workflow may not read repository visibility, so callers opt in"
     patterns = inputs["docs-only-patterns"]["default"]
     assert "*.md" in patterns.split("\n")
     assert "**" not in patterns.replace("docs/**/*.md", ""), "the default list is markdown only"
@@ -69,8 +69,8 @@ def test_classify_job_is_read_only_pull_request_only_and_off_unless_asked(name):
     assert job["permissions"] == {"contents": "read"}
     cond = job["if"]
     assert "github.event_name == 'pull_request'" in cond
-    assert "inputs.skip-docs-only == 'true'" in cond
-    assert "inputs.skip-docs-only == 'auto'" in cond and "github.event.repository.private" in cond
+    assert cond == "github.event_name == 'pull_request' && inputs.skip-docs-only"
+    assert "repository.private" not in cond
     assert job["outputs"]["docs-only"] == "${{ steps.classify.outputs.docs-only }}"
     first = [s.get("name") for s in steps_of(job)]
     assert "Refuse an untrusted self-hosted runner" in first, "the self-hosted guard runs on every job"

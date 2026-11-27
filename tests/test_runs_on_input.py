@@ -104,7 +104,7 @@ def test_python_ci_egress_follows_the_label_for_non_matrix_jobs(name):
             assert "contains(fromJSON(" in text and "fromJSON(inputs.runs-on)" in text, n
 
 
-ID_TOKEN_JOBS_PYCI = {"coverage"}
+ID_TOKEN_JOBS_PYCI = {"coverage", "classify"}  # classify: the job token reaches the GitHub API, so it stays in block (#460)
 ORIGINAL_EGRESS_POLICY = "${{ inputs.egress-policy == 'audit' && 'audit' || 'block' }}"
 ORIGINAL_DISABLE_TELEMETRY = "${{ (inputs.egress-policy == 'audit' && 'audit' || 'block') == 'block' }}"
 
@@ -175,6 +175,7 @@ CHECK_ACTION = REPO / ".github" / "actions" / "egress-policy-check" / "action.ym
 # Everything that can decide whether a job runs, and the environment it starts with, as the jobs have it today:
 # an allowlist, so a new `if`, `needs`, `strategy` or env key is a change this test makes the author look at.
 PYCI_TEST_NEEDS = [
+    "classify",
     "lint",
     "typecheck",
     "workflow-lint",
@@ -190,12 +191,17 @@ MATRIX_JOBS_PYCI = {"test", "distro"}
 JOB_SCHEDULING = {
     ("bash-ci.yml", "shellcheck"): {},
     ("bash-ci.yml", "shfmt"): {"if": "inputs.shfmt"},
+    ("bash-ci.yml", "classify"): {
+        "if": "github.event_name == 'pull_request' && inputs.skip-docs-only",
+    },
     ("bash-ci.yml", "test"): {
-        "if": "inputs.test-command != ''",
+        "if": "${{ !cancelled() && needs.classify.outputs.docs-only != 'true' && inputs.test-command != '' }}",
+        "needs": "classify",
         "strategy": {"fail-fast": False, "matrix": {"runner": "${{ fromJSON(inputs.runners) }}"}},
     },
     ("bash-ci.yml", "distro"): {
-        "if": "inputs.distros != '[]' && inputs.test-command != ''",
+        "if": "${{ !cancelled() && needs.classify.outputs.docs-only != 'true' && inputs.distros != '[]' && inputs.test-command != '' }}",
+        "needs": "classify",
         "strategy": {
             "fail-fast": False,
             "matrix": {
@@ -215,6 +221,7 @@ JOB_SCHEDULING = {
     ("bash-ci.yml", "ci-green"): {
         "if": "always()",
         "needs": [
+            "classify",
             "shellcheck",
             "shfmt",
             "test",
@@ -260,8 +267,12 @@ JOB_SCHEDULING = {
         "if": "github.event_name == 'pull_request' && inputs.commit-claims-command != ''"
     },
     ("python-ci.yml", "coverage"): {"if": "inputs.codecov && github.event_name != 'pull_request'", "needs": "test"},
+    ("python-ci.yml", "classify"): {
+        "if": "github.event_name == 'pull_request' && inputs.skip-docs-only",
+    },
     ("python-ci.yml", "distro"): {
-        "if": "inputs.distros != '[]'",
+        "if": "${{ !cancelled() && needs.classify.outputs.docs-only != 'true' && inputs.distros != '[]' }}",
+        "needs": "classify",
         "strategy": {
             "fail-fast": False,
             "matrix": {"image": "${{ fromJSON(inputs.distros) }}", "runner": "${{ fromJSON(inputs.distro-runners) }}"},
@@ -274,6 +285,8 @@ JOB_SCHEDULING = {
     ("python-ci.yml", "lint"): {},
     ("python-ci.yml", "smoke"): {"if": "inputs.smoke-command != ''"},
     ("python-ci.yml", "test"): {
+        "if": "${{ !cancelled() && needs.classify.outputs.docs-only != 'true' }}",
+        "needs": "classify",
         "strategy": {
             "fail-fast": False,
             "matrix": {
