@@ -172,6 +172,7 @@ jobs:
     uses: ./.github/workflows/python-ci.yml # zizmor: ignore[self-repository]
     permissions:
       contents: read
+      pull-requests: read  # python-ci's skip-docs-only classify job lists the changed files
       id-token: write  # what a caller grants for Codecov and Doppler; python-ci keeps it off the test job
     with:
       # normal: ~1 min (p50 0.8, p95 2.8; last ~30 green runs)
@@ -223,6 +224,7 @@ jobs:
     uses: ./.github/workflows/bash-ci.yml # zizmor: ignore[self-repository]
     permissions:
       contents: read
+      pull-requests: read  # bash-ci's skip-docs-only classify job lists the changed files
     with:
       # normal: ~1 min (p50 0.5, p95 1.0; last ~30 green runs)
       timeout-minutes: 5
@@ -325,6 +327,7 @@ jobs:
     uses: ./.github/workflows/tofu-ci.yml # zizmor: ignore[self-repository]
     permissions:
       contents: read
+      pull-requests: read  # tofu-ci's skip-docs-only classify job lists the changed files
       id-token: write  # what a caller grants for the plan job's Doppler fetch; skipped here
     with:
       # normal: ~1 min (p50 0.4, p95 0.9; last ~30 green runs)

@@ -7,6 +7,7 @@ matrix needs no change there; a test pins that it still needs `test` and fails o
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -41,12 +42,29 @@ def test_the_full_matrix_is_what_push_and_schedule_get():
     assert "push" not in expr and "schedule" not in expr, "name the pull request side only; everything else is full"
 
 
+GATE_STEP = "Every job passed or was deliberately skipped"
+
+
+def run_gate(results: dict, *, docs_only: str):
+    """The real gate step of ci-green on the given needs results; a skipped test passes only on a verdict."""
+    step = next(s for s in steps_of(jobs(DOC)["ci-green"]) if s.get("name") == GATE_STEP)
+    needs = {k: {"result": v, "outputs": {}} for k, v in results.items()}
+    env = {**os.environ, "RESULTS": json.dumps(needs), "DISTRO_REQUESTED": "false", "DOCS_ONLY": docs_only}
+    return subprocess.run(["bash", "-c", step["run"]], env=env, capture_output=True, text=True, timeout=60)
+
+
 def test_ci_green_still_needs_test_and_fails_on_a_failed_leg():
     green = jobs(DOC)["ci-green"]
     assert "test" in green["needs"]
     assert green["if"] == "always()"
-    run = next(s["run"] for s in steps_of(green) if s.get("name") == "Every job passed or was deliberately skipped")
-    assert 'not in ("success", "skipped")' in run
+    ok = {j: "success" for j in green["needs"]}
+    failed = run_gate({**ok, "test": "failure"}, docs_only="")
+    assert failed.returncode == 1, failed.stdout
+    assert "::error::failed jobs: test" in failed.stdout, "a failed test leg must be named in the failure"
+    skipped = run_gate({**ok, "test": "skipped"}, docs_only="")
+    assert skipped.returncode == 1, "a skipped test with no docs-only verdict must fail"
+    assert "::error::failed jobs: test" in skipped.stdout
+    assert run_gate({**ok, "test": "skipped"}, docs_only="true").returncode == 0, "a docs-only verdict tolerates it"
 
 
 # --- the validation step, run for real ---------------------------------------------------------------------

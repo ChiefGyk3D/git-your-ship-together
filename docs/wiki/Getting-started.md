@@ -39,6 +39,7 @@ jobs:
     uses: ChiefGyk3D/git-your-ship-together/.github/workflows/python-ci.yml@{{latest_pin}} # {{latest_release}}
     permissions:
       contents: read
+      pull-requests: read   # the skip-docs-only classify job lists the changed files
       id-token: write       # the coverage job asks for it; see the note below
     with:
       python-versions: '["3.12", "3.13"]'

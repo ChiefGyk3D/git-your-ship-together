@@ -28,6 +28,7 @@ jobs:
     uses: ChiefGyk3D/git-your-ship-together/.github/workflows/bash-ci.yml@<sha> # vX.Y.Z
     permissions:
       contents: read
+      pull-requests: read
   gate:
     if: always()
     needs: [ci, shell]

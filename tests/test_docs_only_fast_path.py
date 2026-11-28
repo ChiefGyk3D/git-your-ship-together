@@ -413,7 +413,7 @@ def test_tofu_test_job_is_a_matrix_that_never_cancels_its_legs_and_keeps_its_nam
     jobs = tofu()["jobs"]
     test = jobs["test"]
     assert test["strategy"]["fail-fast"] is False
-    assert test["needs"] == "test-dirs"
+    assert test["needs"] == ["classify", "test-dirs"], "the docs-only skip reads the classifier and the leg list"
     assert test["name"] == "${{ matrix.leg.name }}"
     assert test["permissions"] == {"contents": "read"}
     assert jobs["test-dirs"]["permissions"] == {}

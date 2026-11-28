@@ -248,6 +248,7 @@ jobs:
     uses: ChiefGyk3D/git-your-ship-together/.github/workflows/python-ci.yml@<sha> # v1.3.1
     permissions:
       contents: read
+      pull-requests: read   # the skip-docs-only classify job lists the changed files
       id-token: write   # required even with codecov: false; job permissions are static
     secrets:
       DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}   # optional fallback, unset means OIDC only
@@ -296,6 +297,9 @@ Inputs of `python-ci.yml`:
 | `distro-allowed-endpoints` | the measured list | The `distro` job's own allow-list, kept apart from `allowed-endpoints`: Docker Hub's image pull (registry, auth, CDN and the S3 blob host), the Debian, Ubuntu, Kali and Parrot mirrors, and PyPI. `extra-allowed-endpoints` is appended to it |
 | `distro-continue-on-error` | `false` | Let a failing distro run leave the gate green, for a suite that assumes a non-root user or a newer Python than the distribution ships. |
 | `pr-python-versions` | `""` (off) | JSON array of versions the `test` matrix runs on a pull request, e.g. `'["3.11", "3.15"]'` (oldest and newest). Empty runs `python-versions` on every event, so a caller that sets nothing sees no change. Push, schedule and dispatch always run the full `python-versions`; add a `schedule` trigger for a weekly full run. Entries must be in `python-versions`, and with `coverage-threshold` set `coverage-python-version` must be one of them (a bad value fails the job). `CI green` is unchanged |
+| `skip-docs-only` | `false` | Leave `test` and `distro` out of a pull request that changes only markdown, with no wiring in your `ci.yml`. A built-in `classify` job (the same classifier as the `classify-changes` action) reads the changed files from the API. Off by default because a workflow cannot read whether a repository is private. Every caller grants `pull-requests: read` in its `permissions:`, whether or not it sets this input; the classifier reads the changed files with it, and without it the classifier fails closed and every job runs. Lint and the security scans never skip, and `CI green` still fails on any failed job |
+| `docs-only-patterns` | `*.md` and `docs/**/*.md` | Globs for the paths that make the tests unnecessary, used with `skip-docs-only`. Anchored at the root, `*` stops at `/`, `**` crosses it |
+| `never-skip-patterns` | `""` | Globs that always run every job, on top of `.github/**`; list a markdown file your tests read |
 | `coverage-python-version` | `3.13` | The matrix leg that uploads coverage |
 | `install-command` | upgrade pip, `pip install -r requirements.txt` | Run before tests on every leg |
 | `test-command` | `pytest` | The test suite |
@@ -387,6 +391,7 @@ jobs:
     uses: ChiefGyk3D/git-your-ship-together/.github/workflows/bash-ci.yml@<sha> # vX.Y.Z
     permissions:
       contents: read
+      pull-requests: read   # the skip-docs-only classify job lists the changed files
     with:
       shfmt-args: -i 2 -ci
       test-command: ./tests/run.sh
@@ -410,6 +415,9 @@ Inputs of `bash-ci.yml`:
 | Input | Default | Meaning |
 |---|---|---|
 | `paths` | `.` | Space-separated git pathspecs searched for scripts; `:!archive` excludes a directory |
+| `skip-docs-only` | `false` | Leave `test` and `distro` out of a pull request that changes only markdown, with no wiring in your `ci.yml`. A built-in `classify` job (the same classifier as the `classify-changes` action) reads the changed files from the API. Off by default because a workflow cannot read whether a repository is private. Every caller grants `pull-requests: read` in its `permissions:`, whether or not it sets this input; the classifier reads the changed files with it, and without it the classifier fails closed and every job runs. Lint and the security scans never skip, and `CI green` still fails on any failed job |
+| `docs-only-patterns` | `*.md` and `docs/**/*.md` | Globs for the paths that make the tests unnecessary, used with `skip-docs-only`. Anchored at the root, `*` stops at `/`, `**` crosses it |
+| `never-skip-patterns` | `""` | Globs that always run every job, on top of `.github/**`; list a markdown file your tests read |
 | `shellcheck-version`, `shellcheck-sha256` | `0.11.0` and its tarball's hash | The shellcheck release downloaded from koalaman/shellcheck |
 | `shellcheck-severity` | `warning` | Lowest severity that fails: `error`, `warning`, `info`, `style` |
 | `shellcheck-args` | `-x` | Extra arguments; `-x` follows `source`d files |
@@ -873,6 +881,7 @@ jobs:
     uses: ChiefGyk3D/git-your-ship-together/.github/workflows/tofu-ci.yml@<sha> # vX.Y.Z
     permissions:
       contents: read
+      pull-requests: read   # the skip-docs-only classify job lists the changed files
       id-token: write   # the plan job's Doppler fetch, off pull requests only
     secrets:
       DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}

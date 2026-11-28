@@ -400,6 +400,9 @@ KEPT_BLOCK = {
     ("project-sync.yml", "sync"),  # id-token, Doppler, a GitHub App token
     ("repin.yml", "repin"),  # a GitHub App token that can push workflow files and open pull requests
     ("python-ci.yml", "coverage"),  # id-token, Doppler, the Codecov upload
+    ("python-ci.yml", "classify"),  # job token reaches api.github.com to list the PR's files; read-only (#460)
+    ("tofu-ci.yml", "classify"),  # job token reaches api.github.com to list the PR's files; read-only (#460)
+    ("bash-ci.yml", "classify"),  # likewise
     ("python-package-release.yml", "build"),  # builds the distribution that is published
     ("python-package-release.yml", "github-release"),  # contents: write, id-token, attestations
     ("security.yml", "snyk"),  # id-token, Doppler, SNYK_TOKEN
