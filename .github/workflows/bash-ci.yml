@@ -1656,13 +1656,31 @@ jobs:
       - name: Every job passed or was deliberately skipped
         env:
           RESULTS: ${{ toJSON(needs) }}
+          TEST_REQUESTED: ${{ inputs.test-command != '' }}
+          DISTRO_REQUESTED: ${{ inputs.test-command != '' && inputs.distros != '[]' }}
+          DOCS_ONLY: ${{ needs.classify.outputs.docs-only }}
         run: |
           set -euo pipefail
           echo "$RESULTS"
+          # A job switched off by its `if:` is skipped on purpose. `test` (and `distro`, when a
+          # matrix was requested) is the exception: a skipped one is a missing check, not a pass.
+          # The exception lifts only on a docs-only verdict from a classify job that succeeded:
+          # the classifier leaves its output empty on every doubt.
+          # A matrix job is success only when every leg succeeded; one failed leg
+          # makes it failure, a cancelled one cancelled.
           bad=$(echo "$RESULTS" | python3 -c '
-          import json, sys
+          import json, os, sys
           needs = json.load(sys.stdin)
-          print(" ".join(k for k, v in needs.items() if v["result"] not in ("success", "skipped")))
+          docs_only = os.environ.get("DOCS_ONLY", "") == "true"
+          strict = set()
+          if not docs_only:
+              if os.environ["TEST_REQUESTED"] == "true":
+                  strict.add("test")
+              if os.environ["DISTRO_REQUESTED"] == "true":
+                  strict.add("distro")
+          print(" ".join(k for k, v in needs.items()
+                         if v["result"] != "success" and
+                            (v["result"] != "skipped" or k in strict)))
           ')
           if [ -n "$bad" ]; then
             echo "::error::failed jobs: $bad"
