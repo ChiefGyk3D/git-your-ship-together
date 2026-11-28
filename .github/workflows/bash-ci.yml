@@ -265,7 +265,7 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
-      pull-requests: read
+      pull-requests: read  # the classifier reads the changed-file list through the pull requests API; read-only
     outputs:
       docs-only: ${{ steps.classify.outputs.docs-only }}
     steps:
