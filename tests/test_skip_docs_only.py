@@ -4,9 +4,9 @@ The rules this file pins:
 
 * the classifier job is inline (a reusable workflow cannot check out its own commit), a byte-identical copy of
   scripts/classify_changes.py, so it can never drift from the script the tests and the action use;
-* it holds `contents: read` only, because a job may not ask for more than the caller granted and a new
-  permission would stop every existing caller at startup; a private repository that wants the skip adds
-  `pull-requests: read` itself, and without it the classifier fails closed (runs everything);
+* it holds `contents: read` and `pull-requests: read`; reusable-workflow permissions cannot exceed the caller's
+  grant, so every caller grants both scopes, while `skip-docs-only` remains off by default. Without the read
+  a private repository's classifier fails closed (runs everything);
 * only the test and distro jobs skip, and only on `docs-only == 'true'`; a failed or skipped classifier
   leaves them running, and `ci-green` waits on the classifier so its failure is never hidden;
 * security scans are never touched;
@@ -74,7 +74,7 @@ def test_the_drift_guard_bites():
 @pytest.mark.parametrize("name", NAMES)
 def test_classify_job_is_read_only_pull_request_only_and_off_unless_asked(name):
     job = jobs(doc(name))["classify"]
-    assert job["permissions"] == {"contents": "read"}
+    assert job["permissions"] == {"contents": "read", "pull-requests": "read"}
     cond = job["if"]
     assert "github.event_name == 'pull_request'" in cond
     assert cond == "github.event_name == 'pull_request' && inputs.skip-docs-only"
