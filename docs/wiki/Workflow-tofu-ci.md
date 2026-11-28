@@ -63,6 +63,14 @@ self-hosted runner is ephemeral, one job per VM, and isolated from secrets and t
 job fails on any runner that is not GitHub-hosted. With it, a self-hosted runner still takes only `push`, `schedule`,
 `workflow_dispatch`, `release` and same-repository `pull_request` events.
 
+## Skipping the tests on a docs-only pull request
+
+Set `skip-docs-only: true` (off by default) and a pull request that changes only `*.md` or `docs/**/*.md` leaves the `test-dirs`
+and `test` jobs out; format, validate, tflint, Trivy, policy and workflow lint still run, and `CI green` still fails on any
+failed job. The `never-skip-patterns` default (`**/*.tf`, `**/*.tfvars`, `**/*.hcl`, `**/*.lock`) keeps every Terraform and lock
+file on the run list, even when `docs-only-patterns` names it. A private repository also adds `pull-requests: read` to the
+caller's `permissions:`, or the classifier fails closed and every job runs. See [Docs-only fast path](Docs-only-fast-path.md).
+
 ## What it refuses to do
 
 It never applies, never plans on a pull request, and never lets a pull request's code run beside the plan's credentials.

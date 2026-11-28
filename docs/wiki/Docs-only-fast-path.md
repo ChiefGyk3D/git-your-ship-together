@@ -146,9 +146,8 @@ the `test` and `distro` jobs leave a markdown-only pull request. The decision ru
   `.github/**` never skips.
 - **Egress.** `classify` stays in `block` mode like the other jobs that hand the job token to the GitHub API
   (`api.github.com:443` is in the default allow-list), and runs the same self-hosted-runner guard as every job.
-- **Not covered here.** `tofu-ci`, `container-release` and `artifact-release` keep their own shape: `container-release` and
-  `artifact-release` build on tags and pushes, where there is no pull request to classify, and `tofu-ci` still takes the
-  caller-side wiring above (a follow-up).
+- **Not covered here.** `container-release` and `artifact-release` keep their own shape: they build on tags and pushes, where
+  there is no pull request to classify. `tofu-ci` takes the same inputs (see [tofu-ci](Workflow-tofu-ci.md#skipping-the-tests-on-a-docs-only-pull-request)).
 
 **`pr-python-versions`.** Its default stays `""`. A reduced matrix changes what a pull request proves, and an existing caller
 that re-pins must not get a thinner matrix without choosing it. Set `pr-python-versions: '["3.11", "3.15"]'` (oldest and
