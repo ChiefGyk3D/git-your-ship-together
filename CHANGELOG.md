@@ -5,6 +5,16 @@ name what a caller sees after that.
 
 ## Unreleased
 
+### Added: `skip-docs-only` in tofu-ci (issue #460)
+
+`tofu-ci.yml` takes the same `skip-docs-only`, `docs-only-patterns` and `never-skip-patterns` inputs as python-ci and bash-ci, off by default. With `skip-docs-only: true` the `test-dirs` and `test` jobs leave out a docs-only pull request. Its `never-skip-patterns` default keeps every Terraform and lock file (`.tf`, `.tfvars`, `.hcl`, `.lock`) on the run list even when `docs-only-patterns` names them. The `CI green` gate counts a skipped test only on a docs-only verdict from a successful classifier; with `test: true` a skipped test is otherwise still a failure.
+
+### Added: `skip-docs-only` in python-ci and bash-ci, a built-in docs-only skip (issue #460)
+
+`python-ci.yml` and `bash-ci.yml` take `skip-docs-only` (boolean, default `false`), `docs-only-patterns` (default `*.md` and `docs/**/*.md`) and `never-skip-patterns` (default empty). With `skip-docs-only: true` a new `classify` job reads a pull request's changed files from the API, and when every path is on the list the `test` and `distro` jobs are skipped; lint, type check, workflow lint and the security scans still run, and `CI green` still fails on any failed job and now waits on `classify`. Any doubt (a failed or empty classifier, a head that moved, a file outside the list, anything under `.github/`) runs the tests. The `classify` job holds `contents: read` and `pull-requests: read`, and every caller grants both. Nothing changes for a caller that does not set the input: the default is off because a workflow cannot read repository visibility, and the `pr-python-versions` default stays empty. A caller can replace its hand-wired classify, gate and `if:` jobs with the one input; `tofu-ci` now provides the same fast path with Terraform-specific never-skip defaults.
+
+Callers must add `pull-requests: read` to their `permissions:` when they bump, whether or not they set `skip-docs-only`: a reusable job cannot exceed the caller's grant, so a caller that leaves it out fails at startup.
+
 ### Added: a Dependabot template with the 7-day cooldown, and an audit that reads the value (issue #445)
 
 `examples/dependabot-template.yml` is a `dependabot.yml` for a new repository with GitHub Actions, pip, docker, npm and gomod entries, each with `cooldown: default-days: 7`. The weekly audit's `dependabot-config` check used to look for the word `cooldown`; it now parses the file and fails a repository whose update entry has no cooldown, no `default-days`, or a `default-days` or `semver-*-days` under 7 (the failure names the ecosystem and value). A cooldown never delays a Dependabot security update. `examples/dependabot-gyst.yml` moved from a 2-day to a 7-day cooldown to match, so a repository that copied it will now fail the audit until it re-copies the value.

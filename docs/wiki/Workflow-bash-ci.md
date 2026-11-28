@@ -30,6 +30,7 @@ jobs:
     uses: ChiefGyk3D/git-your-ship-together/.github/workflows/bash-ci.yml@<sha> # vX.Y.Z
     permissions:
       contents: read
+      pull-requests: read
     with:
       shfmt-args: -i 2 -ci
       test-command: ./tests/run.sh
@@ -43,6 +44,11 @@ job's egress list, its Kali and Parrot pinning and the Fedora caveat are describ
 page.
 
 <!-- inputs -->
+
+**Skipping the tests on a docs-only pull request.** Set `skip-docs-only: true` (off by default) and a pull request that changes only
+`*.md` or `docs/**/*.md` leaves the `Test` and `Distro` jobs out; lint and the security scans still run, and `CI green` still fails
+on any failed job. Every caller grants `pull-requests: read` in its `permissions:`, whether or not it sets this input, because a
+reusable job cannot exceed the caller's grant. The classifier reads the changed files with it. See [Docs-only fast path](Docs-only-fast-path.md).
 
 ## Choosing the runner
 

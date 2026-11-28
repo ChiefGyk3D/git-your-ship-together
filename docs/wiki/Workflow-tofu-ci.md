@@ -30,6 +30,7 @@ jobs:
     uses: ChiefGyk3D/git-your-ship-together/.github/workflows/tofu-ci.yml@<sha> # vX.Y.Z
     permissions:
       contents: read
+      pull-requests: read
       id-token: write   # the plan job's Doppler fetch, off pull requests only
     secrets:
       DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}   # optional fallback; unset means OIDC only
@@ -62,6 +63,14 @@ Invalid JSON fails the job at expression time. `allow-self-hosted` (default `fal
 self-hosted runner is ephemeral, one job per VM, and isolated from secrets and the network. Without it, a step right after harden-runner in every
 job fails on any runner that is not GitHub-hosted. With it, a self-hosted runner still takes only `push`, `schedule`,
 `workflow_dispatch`, `release` and same-repository `pull_request` events.
+
+## Skipping the tests on a docs-only pull request
+
+Set `skip-docs-only: true` (off by default) and a pull request that changes only `*.md` or `docs/**/*.md` leaves the `test-dirs`
+and `test` jobs out; format, validate, tflint, Trivy, policy and workflow lint still run, and `CI green` still fails on any
+failed job. The `never-skip-patterns` default (`**/*.tf`, `**/*.tfvars`, `**/*.hcl`, `**/*.lock`) keeps every Terraform and lock
+file on the run list, even when `docs-only-patterns` names it. Every caller grants `pull-requests: read` in its `permissions:`, whether or not it sets this input, because a
+reusable job cannot exceed the caller's grant. The classifier reads the changed files with it. See [Docs-only fast path](Docs-only-fast-path.md).
 
 ## What it refuses to do
 
