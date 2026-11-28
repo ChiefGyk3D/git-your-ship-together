@@ -298,7 +298,7 @@ JOB_SCHEDULING = {
                 "inputs.pr-python-versions != '' && inputs.pr-python-versions || inputs.python-versions) }}",
                 "runner": "${{ fromJSON(inputs.runners) }}",
             },
-        }
+        },
     },
     ("python-ci.yml", "typecheck"): {"if": "inputs.typecheck-command != ''"},
     ("python-ci.yml", "workflow-lint"): {"if": "inputs.workflow-lint"},
@@ -341,7 +341,16 @@ JOB_SCHEDULING = {
     ("tofu-ci.yml", "ci-green"): {
         "if": "always()",
         "needs": [
-            "classify", "fmt", "validate", "test-dirs", "test", "tflint", "trivy", "policy", "plan", "workflow-lint",
+            "classify",
+            "fmt",
+            "validate",
+            "test-dirs",
+            "test",
+            "tflint",
+            "trivy",
+            "policy",
+            "plan",
+            "workflow-lint",
         ],
     },
 }

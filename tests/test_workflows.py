@@ -779,6 +779,7 @@ def test_a_workflow_that_fetches_nothing_holds_no_token_at_all(name):
 
 def test_the_fetches_nothing_exemption_refuses_a_wider_or_misplaced_grant():
     """Negative control: the named exemption admits exactly classify's read pair and nowhere else."""
+
     def doc_with(job_name: str, perms: dict) -> dict:
         return {"jobs": {job_name: {"permissions": perms}}, "on": {"workflow_call": {}}}
 

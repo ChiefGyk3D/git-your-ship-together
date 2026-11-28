@@ -143,7 +143,8 @@ def test_python_gate_a_skipped_test_without_a_docs_only_verdict_fails():
     """Negative case for the gate: classify and test skipped and no docs-only verdict must not pass (issue #460)."""
     for docs_only in ("", "false"):
         r = gate_run(
-            "python-ci", gate_results("python-ci", classify="skipped", test="skipped"),
+            "python-ci",
+            gate_results("python-ci", classify="skipped", test="skipped"),
             {**PY_GATE, "DOCS_ONLY": docs_only},
         )
         assert r.returncode == 1, (docs_only, r.stdout, r.stderr)
@@ -174,7 +175,8 @@ def test_bash_gate_a_skipped_test_without_a_docs_only_verdict_fails():
     """Negative case for the gate: a requested test skipped with no docs-only verdict must not pass (issue #460)."""
     for docs_only in ("", "false"):
         r = gate_run(
-            "bash-ci", gate_results("bash-ci", classify="skipped", test="skipped"),
+            "bash-ci",
+            gate_results("bash-ci", classify="skipped", test="skipped"),
             {**BASH_GATE, "DOCS_ONLY": docs_only},
         )
         assert r.returncode == 1, (docs_only, r.stdout, r.stderr)
@@ -187,7 +189,8 @@ def test_bash_gate_a_docs_only_verdict_lets_the_requested_test_be_skipped():
 
 def test_bash_gate_a_test_not_asked_for_may_be_skipped_without_a_verdict():
     r = gate_run(
-        "bash-ci", gate_results("bash-ci", test="skipped", distro="skipped"),
+        "bash-ci",
+        gate_results("bash-ci", test="skipped", distro="skipped"),
         {"TEST_REQUESTED": "false", "DISTRO_REQUESTED": "false", "DOCS_ONLY": ""},
     )
     assert r.returncode == 0, r.stderr
@@ -232,7 +235,7 @@ def test_the_workflows_say_how_a_private_repository_grants_the_read():
     for name in NAMES:
         head = "\n".join((WORKFLOWS / f"{name}.yml").read_text().splitlines()[:80])
         assert re.search(r"pull-requests: read", head), (
-            f"{name}.yml header must tell a caller to grant " "pull-requests: read"
+            f"{name}.yml header must tell a caller to grant pull-requests: read"
         )
 
 
@@ -356,4 +359,3 @@ def test_tofu_gate_a_failed_classifier_fails_even_with_a_docs_only_verdict():
 def test_tofu_gate_a_docs_only_verdict_never_hides_another_failure():
     assert tofu_gate({**TOFU_OK, "fmt": "failure"}, test_requested=True, docs_only="true").returncode == 1
     assert tofu_gate({**TOFU_OK, "test": "failure"}, test_requested=True, docs_only="true").returncode == 1
-
