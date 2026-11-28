@@ -158,7 +158,7 @@ GUARD_ENV = {
     "ALLOW_SELF_HOSTED": "${{ inputs.allow-self-hosted }}",
 }
 VALIDATOR = "Validate the egress policy inputs"
-HARDEN = "step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43"  # v2.22.3
+HARDEN = "step-security/harden-runner@aebdcf6156ab6691adf63218240e476564a1ed4c"  # v2.23.0
 HARDEN_WITH = {"egress-policy", "allowed-endpoints", "disable-telemetry", "disable-sudo"}
 # The POLICY_ variables each workflow's validator declares. A job's validator env must be exactly these.
 VALIDATOR_VARS = {
@@ -495,7 +495,7 @@ def mutations(doc: dict, victim: str):
     steps[1]["uses"] = "attacker/harden-runner-backdoor@main"
     yield "harden-runner replaced", d
     d, job, steps = fresh()
-    steps[1]["uses"] = steps[1]["uses"].replace("@46b0", "@0000")
+    steps[1]["uses"] = steps[1]["uses"].replace("@aebd", "@0000")
     yield "harden-runner repinned", d
     d, job, steps = fresh()
     steps.insert(0, {"name": "extra", "run": "echo before the validator"})
