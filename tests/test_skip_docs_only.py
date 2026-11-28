@@ -108,13 +108,105 @@ def test_only_test_and_distro_skip_and_only_on_a_docs_only_verdict(name):
         assert "!cancelled()" in body["if"], "a skipped classifier must not skip the job"
 
 
+def gate_run(name, results: dict, env_extra: dict):
+    """Run the real `Every job passed` step of the workflow's ci-green job against the given needs results."""
+    step = next(
+        s for s in steps_of(jobs(doc(name))["ci-green"]) if str(s.get("name", "")).startswith("Every job passed")
+    )
+    needs_json = {k: {"result": v, "outputs": {}} for k, v in results.items()}
+    env = {**os.environ, "RESULTS": json.dumps(needs_json), **env_extra}
+    return subprocess.run(["bash", "-c", step["run"]], env=env, capture_output=True, text=True, timeout=60)
+
+
+def gate_results(name, **overrides):
+    """Every needed job succeeded, then the overrides."""
+    base = {j: "success" for j in jobs(doc(name))["ci-green"]["needs"]}
+    base.update(overrides)
+    return base
+
+
+PY_GATE = {"DISTRO_REQUESTED": "true", "DOCS_ONLY": ""}
+BASH_GATE = {"TEST_REQUESTED": "true", "DISTRO_REQUESTED": "true", "DOCS_ONLY": ""}
+
+
 @pytest.mark.parametrize("name", ["python-ci", "bash-ci"])
 def test_the_gate_waits_on_the_classifier_and_still_fails_on_any_failed_job(name):
     green = jobs(doc(name))["ci-green"]
     assert "classify" in green["needs"]
     assert green["if"] == "always()"
-    run = next(s["run"] for s in steps_of(green) if str(s.get("name", "")).startswith("Every job passed"))
-    assert 'not in ("success", "skipped")' in run
+    env = PY_GATE if name == "python-ci" else BASH_GATE
+    assert "workflow-lint" in green["needs"]
+    assert gate_run(name, gate_results(name, **{"workflow-lint": "failure"}), env).returncode == 1
+
+
+def test_python_gate_a_skipped_test_without_a_docs_only_verdict_fails():
+    """Negative case for the gate: classify and test skipped and no docs-only verdict must not pass (issue #460)."""
+    for docs_only in ("", "false"):
+        r = gate_run(
+            "python-ci", gate_results("python-ci", classify="skipped", test="skipped"),
+            {**PY_GATE, "DOCS_ONLY": docs_only},
+        )
+        assert r.returncode == 1, (docs_only, r.stdout, r.stderr)
+
+
+def test_python_gate_a_docs_only_verdict_lets_the_skipped_test_pass():
+    r = gate_run("python-ci", gate_results("python-ci", test="skipped"), {**PY_GATE, "DOCS_ONLY": "true"})
+    assert r.returncode == 0, r.stderr
+
+
+def test_python_gate_a_skipped_distro_with_no_matrix_passes_and_with_a_matrix_needs_the_verdict():
+    ok = gate_results("python-ci", distro="skipped")
+    assert gate_run("python-ci", ok, {"DISTRO_REQUESTED": "false", "DOCS_ONLY": ""}).returncode == 0
+    r = gate_run("python-ci", ok, {"DISTRO_REQUESTED": "true", "DOCS_ONLY": ""})
+    assert r.returncode == 1, r.stderr
+    r = gate_run("python-ci", ok, {"DISTRO_REQUESTED": "true", "DOCS_ONLY": "true"})
+    assert r.returncode == 0, r.stderr
+
+
+def test_python_gate_a_failed_classifier_or_failed_test_fails_even_with_a_docs_only_verdict():
+    r = gate_run("python-ci", gate_results("python-ci", classify="failure"), {**PY_GATE, "DOCS_ONLY": "true"})
+    assert r.returncode == 1, r.stderr
+    r = gate_run("python-ci", gate_results("python-ci", test="failure"), {**PY_GATE, "DOCS_ONLY": "true"})
+    assert r.returncode == 1, r.stderr
+
+
+def test_bash_gate_a_skipped_test_without_a_docs_only_verdict_fails():
+    """Negative case for the gate: a requested test skipped with no docs-only verdict must not pass (issue #460)."""
+    for docs_only in ("", "false"):
+        r = gate_run(
+            "bash-ci", gate_results("bash-ci", classify="skipped", test="skipped"),
+            {**BASH_GATE, "DOCS_ONLY": docs_only},
+        )
+        assert r.returncode == 1, (docs_only, r.stdout, r.stderr)
+
+
+def test_bash_gate_a_docs_only_verdict_lets_the_requested_test_be_skipped():
+    r = gate_run("bash-ci", gate_results("bash-ci", test="skipped"), {**BASH_GATE, "DOCS_ONLY": "true"})
+    assert r.returncode == 0, r.stderr
+
+
+def test_bash_gate_a_test_not_asked_for_may_be_skipped_without_a_verdict():
+    r = gate_run(
+        "bash-ci", gate_results("bash-ci", test="skipped", distro="skipped"),
+        {"TEST_REQUESTED": "false", "DISTRO_REQUESTED": "false", "DOCS_ONLY": ""},
+    )
+    assert r.returncode == 0, r.stderr
+
+
+def test_bash_gate_a_skipped_distro_with_no_matrix_passes_and_with_a_matrix_needs_the_verdict():
+    ok = gate_results("bash-ci", distro="skipped")
+    assert gate_run("bash-ci", ok, {**BASH_GATE, "DISTRO_REQUESTED": "false"}).returncode == 0
+    r = gate_run("bash-ci", ok, {**BASH_GATE, "DISTRO_REQUESTED": "true", "DOCS_ONLY": ""})
+    assert r.returncode == 1, r.stderr
+    r = gate_run("bash-ci", ok, {**BASH_GATE, "DISTRO_REQUESTED": "true", "DOCS_ONLY": "true"})
+    assert r.returncode == 0, r.stderr
+
+
+def test_bash_gate_a_failed_classifier_or_failed_test_fails_even_with_a_docs_only_verdict():
+    r = gate_run("bash-ci", gate_results("bash-ci", classify="failure"), {**BASH_GATE, "DOCS_ONLY": "true"})
+    assert r.returncode == 1, r.stderr
+    r = gate_run("bash-ci", gate_results("bash-ci", test="failure"), {**BASH_GATE, "DOCS_ONLY": "true"})
+    assert r.returncode == 1, r.stderr
 
 
 @pytest.mark.parametrize("name", NAMES)
