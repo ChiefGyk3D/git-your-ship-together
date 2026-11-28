@@ -743,13 +743,51 @@ def test_tofu_test_and_policy_legs_are_opt_in_and_read_only():
         assert command in opa, f"the policy job no longer runs {command!r}"
 
 
+# The one named exception to "a lint holds no token": bash-ci's classify job reads the pull request's changed-file list
+# through the API (the docs-only skip, issue #460), so it holds pull-requests: read as well. The grant is read-only,
+# carries no secret, and is exactly this pair; any other job, another job name, or a wider scope is refused.
+FETCHES_PR_LIST = {("bash-ci.yml", "classify"): {"contents": "read", "pull-requests": "read"}}
+
+
+def grant_violations(name: str, doc: dict) -> list[str]:
+    """Each job of a lint-only workflow that holds more than its rule allows, and each exemption that names no job."""
+    present = set(jobs(doc))
+    found = [
+        f"{name} exempts {job!r}, which is not a job"
+        for (wf, job) in FETCHES_PR_LIST
+        if wf == name and job not in present
+    ]
+    for job_name, job in jobs(doc).items():
+        exempt = FETCHES_PR_LIST.get((name, job_name))
+        perms = job.get("permissions")
+        ok = perms == exempt if exempt is not None else perms in ({}, {"contents": "read"})
+        if not ok:
+            found.append(f"{name} job {job_name!r} widens its permissions to {perms!r}")
+    return found
+
+
 @pytest.mark.parametrize("name", ["bash-ci.yml", "arduino-ci.yml"])
 def test_a_workflow_that_fetches_nothing_holds_no_token_at_all(name):
     """A lint or a compile needs nothing; a job that fetches nothing has nothing to leak."""
     doc = load(WORKFLOWS / name)
-    for job_name, job in jobs(doc).items():
-        assert job["permissions"] in ({}, {"contents": "read"}), f"{name} job {job_name!r} widens its permissions"
+    assert grant_violations(name, doc) == []
     assert "secrets" not in triggers(doc)["workflow_call"]
+
+
+def test_the_fetches_nothing_exemption_refuses_a_wider_or_misplaced_grant():
+    """Negative control: the named exemption admits exactly classify's read pair and nowhere else."""
+    def doc_with(job_name: str, perms: dict) -> dict:
+        return {"jobs": {job_name: {"permissions": perms}}, "on": {"workflow_call": {}}}
+
+    read_pair = {"contents": "read", "pull-requests": "read"}
+    assert grant_violations("bash-ci.yml", doc_with("classify", read_pair)) == []
+    assert grant_violations("bash-ci.yml", doc_with("classify", {"contents": "read", "pull-requests": "write"}))
+    assert grant_violations("bash-ci.yml", doc_with("classify", {**read_pair, "issues": "read"}))
+    assert grant_violations("bash-ci.yml", doc_with("classify", {"contents": "read"}))
+    assert grant_violations("bash-ci.yml", doc_with("shellcheck", read_pair))
+    assert grant_violations("arduino-ci.yml", doc_with("classify", read_pair))
+    assert grant_violations("bash-ci.yml", {"jobs": {"lint": {"permissions": {"contents": "read"}}}})
+    assert FETCHES_PR_LIST and grant_violations("bash-ci.yml", {"jobs": {}})
 
 
 DOWNLOAD = re.compile(r"\bcurl\b")
