@@ -34,6 +34,7 @@ jobs:
     uses: ChiefGyk3D/git-your-ship-together/.github/workflows/python-ci.yml@<sha> # vX.Y.Z
     permissions:
       contents: read
+      pull-requests: read
       id-token: write   # the coverage job declares it; without this the run is a startup_failure with no check
     with:
       python-versions: '["3.12", "3.13"]'   # omit it to test every supported CPython (see below)
@@ -59,8 +60,8 @@ legs a pull request creates differ from the ones main creates.
 
 **Skipping the tests on a docs-only pull request.** Set `skip-docs-only: true` (off by default) and a pull request that changes only
 `*.md` or `docs/**/*.md` leaves the `Test` and `Distro` jobs out; lint and the security scans still run, and `CI green` still fails
-on any failed job. A private repository also adds `pull-requests: read` to the caller's `permissions:`, or the classifier fails
-closed and every job runs. See [Docs-only fast path](Docs-only-fast-path.md).
+on any failed job. Every caller grants `pull-requests: read` in its `permissions:`, whether or not it sets this input, because a
+reusable job cannot exceed the caller's grant. The classifier reads the changed files with it. See [Docs-only fast path](Docs-only-fast-path.md).
 
 Point branch protection at `ci / CI green`. A repository with more than one language calls one CI workflow per language
 from one job each and requires each gate (`ci / CI green` and `shell / CI green`, say).

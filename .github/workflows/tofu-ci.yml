@@ -14,7 +14,7 @@
 #       permissions:
 #         contents: read
 #         id-token: write        # only the plan job uses it, and only off a pull request
-#         pull-requests: read    # only with skip-docs-only: the classify job lists the changed files
+#         pull-requests: read    # the classify job lists the changed files; every caller grants it
 #       secrets:
 #         DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}   # optional fallback
 #       with:
@@ -194,8 +194,9 @@ on:
           `classify` job reads the pull request's changed files from the API (never from the checkout) and says docs-only only when
           every path matches `docs-only-patterns` and none is under `.github/` or `never-skip-patterns`; every doubt runs the tests.
           Format, validate, tflint, Trivy, policy, plan and workflow lint are never skipped, and `CI green` still fails on any failed
-          job. The job holds `contents: read` only, so a private repository must also grant `pull-requests: read` in its caller to let
-          it read the file list; without it the classifier fails closed and every job runs.
+          job. The job holds `contents: read` and `pull-requests: read`; every caller grants both,
+          since a reusable job cannot exceed the caller's grant. The second read lets it read the file list;
+          without it the classifier fails closed and every job runs.
         type: boolean
         default: false
       docs-only-patterns:
@@ -230,7 +231,7 @@ jobs:
   # The docs-only skip (issue #460). A reusable workflow cannot check out its own commit, so the classifier is
   # inline: a byte-identical copy of scripts/classify_changes.py (tests/test_skip_docs_only.py holds the two
   # together). It holds `contents: read` and the job token, so it follows `egress-policy` (block by default), as
-  # python-ci's classify does. The API read of a private repository needs `pull-requests: read` from the caller;
+  # python-ci's classify does. Every caller grants `pull-requests: read`, which the API read of the file list needs;
   # without it the script prints why and answers docs-only=false (every job runs).
   classify:
     name: Classify changes
@@ -239,6 +240,7 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
+      pull-requests: read
     outputs:
       docs-only: ${{ steps.classify.outputs.docs-only }}
     steps:

@@ -77,7 +77,7 @@ jobs:
     needs: classify
     if: needs.classify.outputs.docs-only != 'true'
     uses: ChiefGyk3D/git-your-ship-together/.github/workflows/tofu-ci.yml@<sha> # vX.Y.Z
-    # permissions and with: as before
+    # permissions (grant pull-requests: read too) and with: as before
 
   ci-green:
     name: CI green
@@ -138,10 +138,7 @@ the `test` and `distro` jobs leave a markdown-only pull request. The decision ru
   failed classifier fails the gate.
 - **Fails closed.** The `test` and `distro` conditions are `!cancelled() && needs.classify.outputs.docs-only != 'true'`, so a
   skipped, failed or empty classifier leaves them running.
-- **Permissions.** The `classify` job holds `contents: read` only: a job may not ask for more than the caller granted, and a new
-  permission would stop every existing caller at startup. The API read of a private repository needs `pull-requests: read`, which
-  the caller adds to its `permissions:`; without it the script answers `false` and every job runs. A public repository reads
-  the file list with the read-only token as it is.
+- **Permissions.** The `classify` job holds `contents: read` and `pull-requests: read`. A reusable job cannot exceed the caller's grant, so every caller grants `pull-requests: read` in its `permissions:`, whether or not it sets `skip-docs-only`; a caller that leaves it out fails at startup, as a missing `id-token` grant does. The read lets the classifier list the pull request's files, and a private repository needs it for that API read; without it the script answers `false` and every job runs. The grant is read-only.
 - **The list.** `docs-only-patterns` defaults to `*.md` and `docs/**/*.md`; `never-skip-patterns` adds files the tests read.
   `.github/**` never skips.
 - **Egress.** `classify` stays in `block` mode like the other jobs that hand the job token to the GitHub API

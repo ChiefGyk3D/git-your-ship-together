@@ -114,8 +114,9 @@ on:
           caller opts in. A new `classify` job reads the pull request's changed files from the API (never from the checkout) and says
           docs-only only when every path matches `docs-only-patterns` and none is under `.github/` or `never-skip-patterns`; every doubt
           runs the tests. Lint, workflow lint, type check and the security scans are never skipped, and `CI green` still fails on any
-          failed job. The job holds `contents: read` only, so a private repository must also grant `pull-requests: read` in its caller to
-          let it read the file list; without it the classifier fails closed and every job runs.
+          failed job. The job holds `contents: read` and `pull-requests: read`; every caller grants both,
+          since a reusable job cannot exceed the caller's grant. The second read lets it read the file list;
+          without it the classifier fails closed and every job runs.
         type: boolean
         default: false
       docs-only-patterns:
@@ -253,8 +254,8 @@ permissions:
 jobs:
   # The docs-only skip (issue #460). A reusable workflow cannot check out its own commit, so the classifier is
   # inline: a byte-identical copy of scripts/classify_changes.py (tests/test_skip_docs_only.py holds the two
-  # together). It holds `contents: read` only, since a job may not ask for more than the caller granted; the
-  # API read of a private repository needs `pull-requests: read` from the caller, and without it the script
+  # together). It holds `contents: read` and `pull-requests: read`; every caller grants both, since a job may not
+  # ask for more than the caller granted. Without the second read the script
   # prints why and answers docs-only=false (it fails closed, so every job runs).
   classify:
     name: Classify changes
@@ -263,6 +264,7 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
+      pull-requests: read
     outputs:
       docs-only: ${{ steps.classify.outputs.docs-only }}
     steps:
