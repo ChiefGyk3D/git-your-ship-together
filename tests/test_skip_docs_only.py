@@ -231,7 +231,9 @@ def test_pr_python_versions_default_is_unchanged():
 def test_the_workflows_say_how_a_private_repository_grants_the_read():
     for name in NAMES:
         head = "\n".join((WORKFLOWS / f"{name}.yml").read_text().splitlines()[:80])
-        assert re.search(r"pull-requests: read", head), f"{name}.yml header must tell a caller to grant pull-requests: read"
+        assert re.search(r"pull-requests: read", head), (
+            f"{name}.yml header must tell a caller to grant " "pull-requests: read"
+        )
 
 
 # --- tofu-ci: the same skip, its own never-skip default and a gate that knows about the skip ----------------------

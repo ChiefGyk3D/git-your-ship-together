@@ -104,7 +104,8 @@ def test_python_ci_egress_follows_the_label_for_non_matrix_jobs(name):
             assert "contains(fromJSON(" in text and "fromJSON(inputs.runs-on)" in text, n
 
 
-ID_TOKEN_JOBS_PYCI = {"coverage", "classify"}  # classify: the job token reaches the GitHub API, so it stays in block (#460)
+# classify: the job token reaches the GitHub API, so it stays in block (#460)
+ID_TOKEN_JOBS_PYCI = {"coverage", "classify"}
 ORIGINAL_EGRESS_POLICY = "${{ inputs.egress-policy == 'audit' && 'audit' || 'block' }}"
 ORIGINAL_DISABLE_TELEMETRY = "${{ (inputs.egress-policy == 'audit' && 'audit' || 'block') == 'block' }}"
 
@@ -200,7 +201,10 @@ JOB_SCHEDULING = {
         "strategy": {"fail-fast": False, "matrix": {"runner": "${{ fromJSON(inputs.runners) }}"}},
     },
     ("bash-ci.yml", "distro"): {
-        "if": "${{ !cancelled() && needs.classify.outputs.docs-only != 'true' && inputs.distros != '[]' && inputs.test-command != '' }}",
+        "if": (
+            "${{ !cancelled() && needs.classify.outputs.docs-only != 'true' && inputs.distros != '[]' "
+            "&& inputs.test-command != '' }}"
+        ),
         "needs": "classify",
         "strategy": {
             "fail-fast": False,
@@ -322,7 +326,10 @@ JOB_SCHEDULING = {
         "needs": "classify",
     },
     ("tofu-ci.yml", "test"): {
-        "if": "${{ !cancelled() && needs.classify.outputs.docs-only != 'true' && needs.test-dirs.result == 'success' && inputs.test }}",
+        "if": (
+            "${{ !cancelled() && needs.classify.outputs.docs-only != 'true' "
+            "&& needs.test-dirs.result == 'success' && inputs.test }}"
+        ),
         "needs": ["classify", "test-dirs"],
         "strategy": {"fail-fast": False, "matrix": {"leg": "${{ fromJSON(needs.test-dirs.outputs.legs) }}"}},
     },
@@ -333,7 +340,9 @@ JOB_SCHEDULING = {
     ("tofu-ci.yml", "workflow-lint"): {"if": "inputs.workflow-lint"},
     ("tofu-ci.yml", "ci-green"): {
         "if": "always()",
-        "needs": ["classify", "fmt", "validate", "test-dirs", "test", "tflint", "trivy", "policy", "plan", "workflow-lint"],
+        "needs": [
+            "classify", "fmt", "validate", "test-dirs", "test", "tflint", "trivy", "policy", "plan", "workflow-lint",
+        ],
     },
 }
 # Job keys that may exist at all; a strategy is allowed only at its exact known value. `container`, `services`,

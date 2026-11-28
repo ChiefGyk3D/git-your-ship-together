@@ -732,7 +732,10 @@ def test_tofu_test_and_policy_legs_are_opt_in_and_read_only():
     assert inputs["test"]["default"] is False, "tests may reach a real provider; running them is the caller's choice"
     assert inputs["policy-directories"]["default"] == "", "no policy job unless the caller names its policies"
     test, policy = jobs(doc)["test"], jobs(doc)["policy"]
-    assert test["if"] == "${{ !cancelled() && needs.classify.outputs.docs-only != 'true' && needs.test-dirs.result == 'success' && inputs.test }}", "the test job is opt-in and skips only on a docs-only verdict"
+    assert test["if"] == (
+        "${{ !cancelled() && needs.classify.outputs.docs-only != 'true' && needs.test-dirs.result == 'success' "
+        "&& inputs.test }}"
+    ), "the test job is opt-in and skips only on a docs-only verdict"
     assert "inputs.policy-directories != ''" in policy["if"]
     for job_name, job in (("test", test), ("policy", policy)):
         assert job["permissions"] == {"contents": "read"}, f"tofu-ci.yml job {job_name!r} holds more than it reads"
