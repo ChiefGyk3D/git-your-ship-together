@@ -21,10 +21,11 @@
 # job at the end is the one to name in branch protection: it fails when any job
 # it needs failed, so a job added here can never merge unchecked.
 #
-# Docs-only skip (`skip-docs-only`, issue #460): a pull request that changes only markdown leaves the `test` and
-# `distro` jobs out, with no edit in the caller. `auto` (the default) is on for a private repository and off for a
-# public one. The `classify` job reads the changed files from the API, so a private repository must grant
-# `pull-requests: read` in its caller:
+# Docs-only skip (`skip-docs-only`, issue #460): a pull request that changes only markdown can leave the `test` and
+# `distro` jobs out, with no edit in the caller beyond setting `skip-docs-only: true`. The feature is off by
+# default; a reusable workflow cannot read repository visibility, so every caller opts in explicitly. The
+# `classify` job reads the changed files from the API. Every caller grants both scopes, private or not,
+# because a reusable job cannot exceed the caller's grant:
 #
 #       permissions:
 #         contents: read
