@@ -314,12 +314,16 @@ JOB_SCHEDULING = {
         "if": "inputs.snyk && github.event_name != 'pull_request' && "
         "(inputs.snyk-on == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')"
     },
+    ("tofu-ci.yml", "classify"): {"if": "github.event_name == 'pull_request' && inputs.skip-docs-only"},
     ("tofu-ci.yml", "fmt"): {},
     ("tofu-ci.yml", "validate"): {},
-    ("tofu-ci.yml", "test-dirs"): {"if": "inputs.test"},
+    ("tofu-ci.yml", "test-dirs"): {
+        "if": "${{ !cancelled() && needs.classify.outputs.docs-only != 'true' && inputs.test }}",
+        "needs": "classify",
+    },
     ("tofu-ci.yml", "test"): {
-        "if": "inputs.test",
-        "needs": "test-dirs",
+        "if": "${{ !cancelled() && needs.classify.outputs.docs-only != 'true' && needs.test-dirs.result == 'success' && inputs.test }}",
+        "needs": ["classify", "test-dirs"],
         "strategy": {"fail-fast": False, "matrix": {"leg": "${{ fromJSON(needs.test-dirs.outputs.legs) }}"}},
     },
     ("tofu-ci.yml", "tflint"): {"if": "inputs.tflint"},
@@ -329,7 +333,7 @@ JOB_SCHEDULING = {
     ("tofu-ci.yml", "workflow-lint"): {"if": "inputs.workflow-lint"},
     ("tofu-ci.yml", "ci-green"): {
         "if": "always()",
-        "needs": ["fmt", "validate", "test-dirs", "test", "tflint", "trivy", "policy", "plan", "workflow-lint"],
+        "needs": ["classify", "fmt", "validate", "test-dirs", "test", "tflint", "trivy", "policy", "plan", "workflow-lint"],
     },
 }
 # Job keys that may exist at all; a strategy is allowed only at its exact known value. `container`, `services`,

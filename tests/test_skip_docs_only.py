@@ -31,7 +31,7 @@ SCRIPT = (REPO / "scripts" / "classify_changes.py").read_text()
 NAMES = ["python-ci", "bash-ci", "tofu-ci"]
 GATED = {"python-ci": {"test", "distro"}, "bash-ci": {"test", "distro"}, "tofu-ci": {"test-dirs", "test"}}
 # The never-skip default: python-ci and bash-ci keep none; tofu-ci keeps every Terraform and lock file.
-NEVER_DEFAULT = {"python-ci": "", "bash-ci": "", "tofu-ci": "**/*.tf\n**/*.tfvars\n**/*.hcl\n**/*.lock"}
+NEVER_DEFAULT = {"python-ci": "", "bash-ci": "", "tofu-ci": "**/*.tf\n**/*.tfvars\n**/*.hcl\n**/*.lock\n"}
 RULE = "needs.classify.outputs.docs-only != 'true'"
 
 
@@ -150,7 +150,7 @@ def tofu_inputs():
 
 
 def test_tofu_never_skip_default_is_read_from_the_workflow_not_retyped():
-    assert NEVER_DEFAULT["tofu-ci"] == tofu_inputs()["never-skip-patterns"]["default"].strip()
+    assert NEVER_DEFAULT["tofu-ci"] == tofu_inputs()["never-skip-patterns"]["default"]
 
 
 def classifier():

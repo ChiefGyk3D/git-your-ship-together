@@ -401,6 +401,7 @@ KEPT_BLOCK = {
     ("repin.yml", "repin"),  # a GitHub App token that can push workflow files and open pull requests
     ("python-ci.yml", "coverage"),  # id-token, Doppler, the Codecov upload
     ("python-ci.yml", "classify"),  # the job token goes to api.github.com to list the pull request's files; read-only (#460)
+    ("tofu-ci.yml", "classify"),  # the job token goes to api.github.com to list the pull request's files; read-only (#460)
     ("bash-ci.yml", "classify"),  # likewise
     ("python-package-release.yml", "build"),  # builds the distribution that is published
     ("python-package-release.yml", "github-release"),  # contents: write, id-token, attestations
